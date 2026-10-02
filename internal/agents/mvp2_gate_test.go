@@ -16,6 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -154,7 +155,7 @@ func TestMVP2GateEndToEnd(t *testing.T) {
 			v := verification.NewEngine(wt.Dir())
 			res := v.Verify([]string{"build"})
 			verifyOut = res.Summary
-			if res.Verdict != verification.VerdictPass {
+			if res.Verdict != verdict.VerdictPass {
 				return "", errors.New("build verification failed: " + res.Summary)
 			}
 			return verifyOut, nil

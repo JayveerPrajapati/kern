@@ -143,3 +143,33 @@ func TestRemoveDeletesEntryAndTwin(t *testing.T) {
 		t.Fatal("gzip twin must not survive Remove")
 	}
 }
+func TestLoadSelfHealsCorruptEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_CACHE_DISABLE_ASYNC_GC", "1") // keep Store deterministic
+	key := "selfheal/corrupt"
+	if err := Store(key, map[string]int{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the entry on disk: unparseable JSON.
+	if err := os.WriteFile(Path("data", key+".json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]int
+	if err := Load(key, &got); err != nil {
+		t.Fatalf("corrupt entry must self-heal to a miss, got error: %v", err)
+	}
+	if Exists(key) {
+		t.Fatal("corrupt entry must be deleted by Load self-heal")
+	}
+	// A subsequent Store/Get round-trip works.
+	want := map[string]int{"n": 2}
+	if err := Store(key, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["n"] != 2 {
+		t.Fatalf("round-trip after self-heal failed: got %v", got)
+	}
+}

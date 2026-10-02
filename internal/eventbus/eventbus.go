@@ -424,9 +424,13 @@ func (b *Bus) Publish(ev Event) {
 	b.mu.Unlock()
 
 	// P4.5: persist the event before delivery so a crash after dispatch can be
-	// replayed from the last durable point.
+	// replayed from the last durable point. Persistence is best-effort: a
+	// failure must not block delivery, but it is surfaced — the durability
+	// contract stays visible even when the disk leg fails.
 	if persistPath != "" {
-		_ = b.appendPersist(ev)
+		if err := b.appendPersist(ev); err != nil {
+			log.Printf("eventbus: persist failed for event %s (path %s): %v", ev.ID, persistPath, err)
+		}
 	}
 
 	// Deliver after releasing the lock so handlers may safely re-enter the

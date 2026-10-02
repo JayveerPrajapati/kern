@@ -1,7 +1,7 @@
 ---
 name: kern-incident-triage
 description: >-
-Use when investigating any crash, panic, error log, stack trace, or failing test. Compress the raw log with kern_optimize_log, run kern ops triage to map stack frames to AST symbols, auto-synthesize a minimal failing reproduction test in an ephemeral worktree, and auto-repair the defect.
+Use when investigating any crash, panic, error log, stack trace, or failing test. Compress the raw log with kern_optimize (action=log), run kern ops triage to map stack frames to AST symbols, auto-synthesize a minimal failing reproduction test in an ephemeral worktree, and auto-repair the defect.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-incident-triage/SKILL.md; copies must stay identical — run kern setup to sync -->
@@ -16,14 +16,14 @@ Use this skill when investigating production incidents, analyzing stack traces, 
 
 ```
 [Compress Log] ➔ [Correlate to AST] ➔ [Synthesize Test] ➔ [Isolated Worktree Fix]
- (kern_optimize_log)   (symbol mapping)     (sandbox test)         (kern ops triage)
+ (kern_optimize log)   (symbol mapping)     (sandbox test)         (kern ops triage)
 ```
 
 ---
 
 ## Step 1: Compress Raw Logs
 
-Never paste uncompressed, noisy logs into context. Compress them first using `kern_optimize_log`:
+Never paste uncompressed, noisy logs into context. Compress them first using `kern_optimize` (action=log):
 ```json
 {"request": "compress this log: <paste log text>"}
 ```

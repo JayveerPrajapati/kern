@@ -48,7 +48,7 @@ func Plan(ix *index.Index, sym string) (*rename.Report, error) {
 	if !check.Defined {
 		return nil, fmt.Errorf("remove: %s", check.Reason)
 	}
-	// Resolve qualified input ("app.TaskService.Deploy") to the canonical
+	// Resolve qualified input ("tasklife.TaskService.Deploy") to the canonical
 	// name, exactly like the gate does.
 	if resolved, ok := intel.Resolve(ix, sym); ok && resolved != sym {
 		sym = resolved

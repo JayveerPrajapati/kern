@@ -152,6 +152,74 @@ func TestCompressLogClusterFuzzyMerge(t *testing.T) {
 	}
 }
 
+// TestCompressLogClusterIdempotent pins the D2 fix: re-compressing
+// already-compressed output must be byte-identical (no "(repeated Nx)"
+// stacking), for both a doctor-shaped fixture and a stack-trace fixture.
+func TestCompressLogClusterIdempotent(t *testing.T) {
+	doctor := strings.Join([]string{
+		"[ok] claude (detected)",
+		"[ok] codex hooks",
+		"[ok] continue hooks",
+		"[ok] cursor hooks",
+		"[ok] kern entry present",
+		"[ok] guard script hash matches",
+		"[warn] ollama down (fall back to local agent CLIs)",
+		"[warn] index shadow (nested repo)",
+	}, "\n")
+	once := CompressLog(doctor, Options{MaxLines: 200, Cluster: true})
+	twice := CompressLog(once, Options{MaxLines: 200, Cluster: true})
+	if once != twice {
+		t.Fatalf("doctor-shaped output not idempotent:\n--- once ---\n%s\n--- twice ---\n%s", once, twice)
+	}
+
+	var sb strings.Builder
+	for i := 1; i <= 8; i++ {
+		fmt.Fprintf(&sb, "2024-01-01 10:00:%02d ERROR ConnTimeout: database unreachable at address 0x%X (goroutine %d)\n", i%60, 0x7fA1B2+i, i)
+	}
+	trace := sb.String()
+	once = CompressLog(trace, Options{MaxLines: 1000, Cluster: true})
+	twice = CompressLog(once, Options{MaxLines: 1000, Cluster: true})
+	if once != twice {
+		t.Fatalf("stack-trace output not idempotent:\n--- once ---\n%s\n--- twice ---\n%s", once, twice)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(once), "(repeated 8x)") {
+		t.Fatalf("expected stack-trace cluster '(repeated 8x)', got:\n%s", once)
+	}
+}
+
+// TestCompressLogClusterLeavesStructuredRows pins the D2 fix: semantically
+// distinct structured/table rows sharing a first token or differing only in
+// numbers must survive verbatim — never folded into one representative line
+// or mis-annotated "(repeated Nx)".
+func TestCompressLogClusterLeavesStructuredRows(t *testing.T) {
+	log := strings.Join([]string{
+		"[ok] built: 17640 symbols",
+		"[ok] built: 17641 symbols",
+		"[ok] built: 17642 symbols",
+		"[warn] 2 checks degraded",
+		"[warn] 3 checks degraded",
+		"[ok] claude (detected)",
+		"[ok] codex (detected)",
+	}, "\n")
+	got := CompressLog(log, Options{MaxLines: 200, Cluster: true})
+	if strings.Contains(got, "repeated") {
+		t.Fatalf("structured rows must not carry '(repeated Nx)' annotations, got:\n%s", got)
+	}
+	for _, want := range []string{
+		"[ok] built: 17640 symbols",
+		"[ok] built: 17641 symbols",
+		"[ok] built: 17642 symbols",
+		"[warn] 2 checks degraded",
+		"[warn] 3 checks degraded",
+		"[ok] claude (detected)",
+		"[ok] codex (detected)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected distinct row %q preserved, got:\n%s", want, got)
+		}
+	}
+}
+
 func TestCompressLogClusterRespectsMaxLines(t *testing.T) {
 	msgs := []string{
 		"connection refused", "timeout", "permission denied", "disk full",

@@ -402,9 +402,9 @@ func TestSummarizeByTool(t *testing.T) {
 	// Two dispatch entries for kern_search (After only, no savings).
 	_ = r.Record(Entry{Operation: OpToolCall, Tool: "kern_search", AfterTokens: 100})
 	_ = r.Record(Entry{Operation: OpToolCall, Tool: "kern_search", AfterTokens: 50})
-	// Two optimization entries for kern_optimize_prompt (real savings).
-	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize_prompt", Model: "gpt-4o", BeforeTokens: 1000, AfterTokens: 400})
-	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize_prompt", Model: "gpt-4o", BeforeTokens: 100, AfterTokens: 50})
+	// Two optimization entries for kern_optimize (real savings).
+	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize", Model: "gpt-4o", BeforeTokens: 1000, AfterTokens: 400})
+	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize", Model: "gpt-4o", BeforeTokens: 100, AfterTokens: 50})
 	// A big returned payload for kern_graph.
 	_ = r.Record(Entry{Operation: OpToolCall, Tool: "kern_graph", AfterTokens: 3000})
 	// An optimization entry WITHOUT a tool must be ignored by by-tool.
@@ -417,9 +417,9 @@ func TestSummarizeByTool(t *testing.T) {
 	if len(tools) != 3 {
 		t.Fatalf("expected 3 tools, got %d: %+v", len(tools), tools)
 	}
-	// Sorted by saved desc: kern_optimize_prompt (650) first, then the two
+	// Sorted by saved desc: kern_optimize (650) first, then the two
 	// zero-savings tools by returned desc (kern_graph 3000 > kern_search 150).
-	if tools[0].Tool != "kern_optimize_prompt" || tools[1].Tool != "kern_graph" || tools[2].Tool != "kern_search" {
+	if tools[0].Tool != "kern_optimize" || tools[1].Tool != "kern_graph" || tools[2].Tool != "kern_search" {
 		t.Fatalf("sort order wrong: %+v", tools)
 	}
 	opt := tools[0]
@@ -454,7 +454,7 @@ func TestSummarizeByAgent(t *testing.T) {
 	_ = r.Record(Entry{Operation: OpToolCall, Tool: "kern_search", Agent: "planner", AfterTokens: 100})
 	_ = r.Record(Entry{Operation: OpToolCall, Tool: "kern_graph", Agent: "planner", AfterTokens: 3000})
 	// One optimization entry for agent "coder" (real savings).
-	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize_prompt", Agent: "coder", Model: "gpt-4o", BeforeTokens: 1000, AfterTokens: 400})
+	_ = r.Record(Entry{Operation: OpOptimizePrompt, Tool: "kern_optimize", Agent: "coder", Model: "gpt-4o", BeforeTokens: 1000, AfterTokens: 400})
 	// Entries without an Agent fall into the (unattributed) bucket.
 	_ = r.Record(Entry{Operation: OpOptimizePrompt, Model: "gpt-4o", BeforeTokens: 100, AfterTokens: 50})
 

@@ -38,7 +38,7 @@ const (
 func ToolForOperation(op Operation) string {
 	switch op {
 	case OpOptimizePrompt:
-		return "kern_optimize_prompt"
+		return "kern_optimize"
 	case OpCompactFile:
 		return "kern_compact_file"
 	case OpProjectMap:
@@ -46,7 +46,7 @@ func ToolForOperation(op Operation) string {
 	case OpRunBuild:
 		return "kern_run_build"
 	case OpOptimizeLog:
-		return "kern_optimize_log"
+		return "kern_optimize"
 	}
 	return ""
 }

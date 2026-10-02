@@ -24,7 +24,7 @@ import (
 	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ func NewVulnCheck() *VulnCheck { return &VulnCheck{} }
 // Name is the stable check identifier.
 func (VulnCheck) Name() string { return "vulnerability:sec" }
 
-// Run scans each changed file on disk with sec.ScanFile and maps the findings.
+// Run scans each changed file on disk with secscan.ScanFile and maps the findings.
 // Test files are excluded, mirroring sec's own root-walk semantics (the
 // scanner skips _test/_spec files), so a change to a test file — whose
 // fixtures routinely contain flagged-looking strings — never trips the gate.
@@ -210,7 +210,7 @@ func (c *VulnCheck) Run(ctx context.Context, req domain.ChangeRequest) (domain.C
 		if err != nil {
 			continue // not on disk (e.g. rename destination not yet written)
 		}
-		for _, sf := range sec.ScanFile(rel, src) {
+		for _, sf := range secscan.ScanFile(rel, src) {
 			findings = append(findings, vulnFinding(sf))
 		}
 	}
@@ -228,7 +228,7 @@ func (c *VulnCheck) Run(ctx context.Context, req domain.ChangeRequest) (domain.C
 }
 
 // vulnFinding maps one sec finding to a Blueprint finding.
-func vulnFinding(sf sec.Finding) domain.Finding {
+func vulnFinding(sf secscan.Finding) domain.Finding {
 	return domain.Finding{
 		RuleID:       "vulnerability:" + sf.Rule,
 		Severity:     vulnSeverity(sf.Severity),

@@ -129,7 +129,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 	}
 
 	// AST Symbol Correlation
-	ix, _ := index.Build(cfg.RepoRoot)
+	ix, _ := index.LoadOrBuild(cfg.RepoRoot)
 	symbolSet := make(map[string]bool)
 	if ix != nil {
 		for _, frame := range frames {

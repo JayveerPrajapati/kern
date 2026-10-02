@@ -13,17 +13,18 @@ import (
 )
 
 var (
-	timestampRe  = regexp.MustCompile(`(?i)(^\s*\[?(([\d]{2,4}[-/:][\d]{2}[-/:][\d]{2,4}[ T])?[\d]{2}:[\d]{2}(:[\d]{2}([\.,]\d+)?)?(Z|[+-][\d:]{2,5})?)\]?\s*)`)
-	infoLevelRe  = regexp.MustCompile(`(?i)(^\s*(INFO|DEBUG|TRACE|VERBOSE|NOTICE)\s*[:=#]?\s*)`)
-	warnLevelRe  = regexp.MustCompile(`(?i)(^\s*(WARN|WARNING|ERROR|ERR|FAIL|FATAL|CRITICAL|SEVERE|PANIC|EXCEPTION|EXCEPTION\b)\s*[:=#]?\s*)`)
-	stackFrameRe = regexp.MustCompile(`^\s*(at |\t|from |\.go:\d+|\.py:\d+|\.java:\d+|\d+\) )`)
-	buildErrRe   = regexp.MustCompile(`(?i)(error|failed|failure|undefined|unresolved|exception|cannot find|no such)`)
-	separatorRe  = regexp.MustCompile(`(?m)^\s*([-=_#*]{3,}|\.{3,}|[<>]{3,})\s*$`)
-	hexRe        = regexp.MustCompile(`0x[0-9a-fA-F]+`)
-	uuidRe       = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	goroutineRe  = regexp.MustCompile(`goroutine [0-9]+`)
-	numRe        = regexp.MustCompile(`\b[0-9]+\b`)
-	ipRe         = regexp.MustCompile(`[0-9]{1,3}(\.[0-9]{1,3}){3}`)
+	timestampRe    = regexp.MustCompile(`(?i)(^\s*\[?(([\d]{2,4}[-/:][\d]{2}[-/:][\d]{2,4}[ T])?[\d]{2}:[\d]{2}(:[\d]{2}([\.,]\d+)?)?(Z|[+-][\d:]{2,5})?)\]?\s*)`)
+	infoLevelRe    = regexp.MustCompile(`(?i)(^\s*(INFO|DEBUG|TRACE|VERBOSE|NOTICE)\s*[:=#]?\s*)`)
+	warnLevelRe    = regexp.MustCompile(`(?i)(^\s*(WARN|WARNING|ERROR|ERR|FAIL|FATAL|CRITICAL|SEVERE|PANIC|EXCEPTION|EXCEPTION\b)\s*[:=#]?\s*)`)
+	stackFrameRe   = regexp.MustCompile(`^\s*(at |\t|from |\.go:\d+|\.py:\d+|\.java:\d+|\d+\) )`)
+	buildErrRe     = regexp.MustCompile(`(?i)(error|failed|failure|undefined|unresolved|exception|cannot find|no such)`)
+	separatorRe    = regexp.MustCompile(`(?m)^\s*([-=_#*]{3,}|\.{3,}|[<>]{3,})\s*$`)
+	hexRe          = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+	uuidRe         = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	goroutineRe    = regexp.MustCompile(`goroutine [0-9]+`)
+	numRe          = regexp.MustCompile(`\b[0-9]+\b`)
+	ipRe           = regexp.MustCompile(`[0-9]{1,3}(\.[0-9]{1,3}){3}`)
+	repeatedAnnoRe = regexp.MustCompile(`\s*\(repeated \d+x\)\s*$`)
 )
 
 const (
@@ -419,8 +420,11 @@ func foldStackFrames(lines []string) []string {
 
 // normalizeForCluster rewrites volatile tokens (timestamps, goroutine IDs,
 // UUIDs, hex addresses, IPs and standalone numbers) to fixed placeholders so
-// near-identical lines share a cluster key.
+// near-identical lines share a cluster key. A trailing "(repeated Nx)"
+// annotation from a previous compression pass is stripped first so
+// re-compressing already-compressed output clusters identically (idempotency).
 func normalizeForCluster(s string) string {
+	s = repeatedAnnoRe.ReplaceAllString(s, "")
 	n := timestampRe.ReplaceAllString(s, "")
 	n = goroutineRe.ReplaceAllString(n, "goroutine N")
 	n = uuidRe.ReplaceAllString(n, "UUID")
@@ -477,21 +481,54 @@ func firstToken(s string) string {
 	return s
 }
 
+// isClusterableLine reports whether a line belongs to the near-duplicate
+// clustering domain: severity-prefixed error/warning lines, stack-frame-shaped
+// lines, and lines carrying volatile tokens (hex addresses, UUIDs, goroutine
+// IDs, IPs) that clustering exists to fold. Everything else — structured
+// output, table rows, `[ok]`/`[warn]` check rows — falls back to the legacy
+// exact-dedup behaviour so semantically distinct rows are never folded into
+// one representative line or mis-annotated "(repeated Nx)".
+func isClusterableLine(l string) bool {
+	if warnLevelRe.MatchString(l) || stackFrameRe.MatchString(l) {
+		return true
+	}
+	return hexRe.MatchString(l) || uuidRe.MatchString(l) || goroutineRe.MatchString(l) || ipRe.MatchString(l)
+}
+
 // clusterLines deterministically collapses near-duplicate lines into clusters.
 // Lines sharing a normalized form form one cluster; singleton lines are then
 // fuzzy-merged into the first eligible cluster (Levenshtein ratio above the
 // threshold, identical first token, similar length). Each cluster contributes
 // its first original line, annotated with "(repeated Nx)" when it holds two or
-// more members, in first-occurrence order.
+// more members, in first-occurrence order. Non-clusterable lines (structured
+// output, table rows) are exact-deduplicated and emitted verbatim in place, so
+// the result preserves first-occurrence order across both classes.
 func clusterLines(lines []string) []string {
 	type cluster struct {
 		norm   string
 		orig   []string
 		merged bool
 	}
+	type slot struct {
+		isPlain bool   // true → a legacy-exact-deduped line emitted verbatim
+		plain   string // the verbatim line when isPlain
+		cluster *cluster
+	}
 	order := make([]*cluster, 0, len(lines))
 	byNorm := make(map[string]*cluster, len(lines))
+	seen := make(map[string]bool)
+	slots := make([]slot, 0, len(lines))
+
 	for _, l := range lines {
+		if !isClusterableLine(l) {
+			trimmed := strings.TrimSpace(l)
+			if seen[trimmed] {
+				continue
+			}
+			seen[trimmed] = true
+			slots = append(slots, slot{isPlain: true, plain: strings.TrimRight(l, " \t")})
+			continue
+		}
 		n := normalizeForCluster(l)
 		if c, ok := byNorm[n]; ok {
 			c.orig = append(c.orig, l)
@@ -500,6 +537,7 @@ func clusterLines(lines []string) []string {
 		c := &cluster{norm: n, orig: []string{l}}
 		byNorm[n] = c
 		order = append(order, c)
+		slots = append(slots, slot{cluster: c})
 	}
 
 	// Fuzzy merge pass: each singleton folds into the first eligible cluster.
@@ -564,8 +602,13 @@ func clusterLines(lines []string) []string {
 		}
 	}
 
-	out := make([]string, 0, len(order))
-	for _, c := range order {
+	out := make([]string, 0, len(slots))
+	for _, s := range slots {
+		if s.isPlain {
+			out = append(out, s.plain)
+			continue
+		}
+		c := s.cluster
 		if c.merged {
 			continue
 		}

@@ -58,8 +58,10 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 	// before the first poll or event is still diffed against the start state
 	// and reported as "modified", not swallowed into an "added" event.
 	prev := map[string]string{}
+	var prevIx *index.Index // incremental Update base: the persisted index when one exists
 	if ix, err := index.Load(root); err == nil && ix != nil {
 		prev = ix.FileHashes
+		prevIx = ix
 	}
 
 	var (
@@ -84,12 +86,23 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 		if len(changes) == 0 {
 			return
 		}
-		ix, err := index.Build(root)
-		if err != nil {
-			if onError != nil {
-				onError(err)
+		// Incremental path (mirrors mcp/watcher rebuildFresh): Update over the
+		// previous index re-parses only changed files; a full Build is the
+		// fallback when no previous index exists or Update fails.
+		var ix *index.Index
+		if prevIx != nil {
+			if uix, uerr := index.Update(root, prevIx); uerr == nil && uix != nil {
+				ix = uix
 			}
-			return
+		}
+		if ix == nil {
+			ix, err = index.Build(root)
+			if err != nil {
+				if onError != nil {
+					onError(err)
+				}
+				return
+			}
 		}
 		if err := ix.Save(); err != nil {
 			if onError != nil {
@@ -97,6 +110,7 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 			}
 			return
 		}
+		prevIx = ix
 		prev = cur
 		if onChange != nil {
 			onChange(changes, ix)

@@ -180,6 +180,13 @@ func (w *inotifyWatcher) loop(root string) {
 		fired := false
 		var paths []string
 		for off := 0; off+syscall.SizeofInotifyEvent <= n; {
+			// The inotify buffer is a sequence of kernel-packed records —
+			// an InotifyEvent header followed by a variable-length name —
+			// so there is no fixed stride to decode with. Reinterpreting
+			// the header in place is the canonical idiom (identical to
+			// fsnotify's inotify backend): the loop guard bounds the cast
+			// to the n bytes actually read, and buf is goroutine-local
+			// with no concurrent access.
 			ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
 			eventLen := int(ev.Len)
 			if eventLen < 0 {

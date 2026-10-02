@@ -300,7 +300,7 @@ func TestMergeFetchedSearchableAndReplaceable(t *testing.T) {
 }
 
 // TestIndexDirPreservesFetchedDocs: a full re-index (what `kern docs index`
-// and kern_doc_index do) must not silently drop documents previously merged
+// and kern_doc do) must not silently drop documents previously merged
 // via MergeFetched — indexing must not undo fetching.
 func TestIndexDirPreservesFetchedDocs(t *testing.T) {
 	dir := t.TempDir()
@@ -311,7 +311,7 @@ func TestIndexDirPreservesFetchedDocs(t *testing.T) {
 	if _, err := MergeFetched(dir, "react", text); err != nil {
 		t.Fatal(err)
 	}
-	// Full re-index (what kern doc index / kern_doc_index does).
+	// Full re-index (what kern doc index / kern_doc does).
 	ix, err := IndexDir(dir)
 	if err != nil {
 		t.Fatal(err)

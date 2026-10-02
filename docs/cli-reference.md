@@ -76,7 +76,7 @@ kern lsp [root]                                     LSP over stdio: hover/defini
 kern guard init [root]                              scaffold .kern/boundaries.json
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
                                 reject boundary violations (exit 2 when count > N)
-kern check [--staged|--repo R] [--format F]          run change-firewall gates (secrets, boundaries, duplication)
+kern check [--all|--staged|--repo R] [--format F]    run change-firewall gates (secrets, boundaries, duplication)
 kern fix [--file F] [--content C] [--repo R]         validate fix in isolated git worktree; auto-repair loop
 kern ci --base <sha> --head <sha> [--repo R]         pre-merge CI gate; emits tamper-evident receipt
 kern verify-receipt <id> [--sarif] [--in-toto] [--check-diff]   verify receipt signature, export SARIF/in-toto, detect git tamper

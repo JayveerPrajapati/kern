@@ -269,7 +269,7 @@ func (s *Server) UserAudit(id string) []UserAuditEntry {
 }
 
 // UserRole returns the user's role and whether the user exists. The RBAC
-// lookups (kern_org_user handlers, web approvals) use this; an unknown user
+// lookups (kern_org entity=user handlers, web approvals) use this; an unknown user
 // yields ("", false).
 func (s *Server) UserRole(id string) (string, bool) {
 	if !s.orgFeatures().UserRegistry {

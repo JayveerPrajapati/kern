@@ -51,7 +51,7 @@ var roleDefinitions = map[string]RoleDefinition{
 	"junior_dev": {
 		Role:         "junior_dev",
 		Description:  "Guided development with restricted execution and safe edits",
-		AllowedTools: []string{"kern_compact_file", "kern_project_map", "kern_search", "kern_pre_edit", "kern_semantic_diff", "kern_prompt_fill", "kern_explain", "kern_validate"},
+		AllowedTools: []string{"kern_compact_file", "kern_project_map", "kern_search", "kern_pre_edit", "kern_prompt_fill", "kern_explain", "kern_validate"},
 		DeniedTools:  []string{"kern_exec", "kern_fix", "kern_safe_delete", "kern_sandbox", "kern_lock"},
 		CanExecute:   false,
 		CanWrite:     false,
@@ -67,7 +67,7 @@ var roleDefinitions = map[string]RoleDefinition{
 	"auditor": {
 		Role:         "auditor",
 		Description:  "Security & governance compliance verification, audit receipts inspection",
-		AllowedTools: []string{"kern_audit", "kern_security", "kern_policy_dsl", "kern_evidence_anchor", "kern_health", "kern_explain"},
+		AllowedTools: []string{"kern_audit", "kern_security", "kern_policy_dsl", "kern_health", "kern_explain"},
 		DeniedTools:  []string{"kern_exec", "kern_fix", "kern_validate", "kern_safe_delete"},
 		CanExecute:   false,
 		CanWrite:     false,

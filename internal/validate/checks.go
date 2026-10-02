@@ -79,9 +79,16 @@ var extLang = map[string]string{
 // command (flags appended with the file). Languages without an entry have no
 // syntax-only checker available and validate as "unable to validate" unless a
 // full build command exists for the project.
+//
+// Typescript deliberately has NO entry: `node --check` parses the file as
+// CommonJS JavaScript (the --check path bypasses type stripping), so it
+// false-fails every file that uses actual TypeScript syntax — which made the
+// loop's verify/heal stages report failing syntax checks on healthy TS code
+// (verified live: a plain `function f(x: number): number` fails node --check).
+// .ts/.tsx files therefore validate as "unable to validate" until a real TS
+// syntax checker is wired in (e.g. tsc when present).
 var langSyntaxCmd = map[string][]string{
 	"javascript": {"node", "--check"},
-	"typescript": {"node", "--check"},
 	"ruby":       {"ruby", "-c"},
 	"php":        {"php", "-l"},
 	"shell":      {"bash", "-n"},

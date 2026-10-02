@@ -5,6 +5,7 @@ Use for ANY code change in a kern-managed repo - edit, refactor, rename, add a f
 ---
 
 <!-- canonical source: internal/skills/assets/kern-safe-change/SKILL.md; copies must stay identical — run kern setup to sync -->
+<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-22 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
 
 # Kern Safe Change & Refactor Runbook
 
@@ -36,7 +37,7 @@ Before modifying any file or symbol, assess the blast radius and risk score:
 
 Perform the necessary code modifications:
 - For surgical structural changes or renames, prefer `kern_ast_transform` or `kern_rename` over naive regex search/replace.
-- For semantic merges, verify with `kern_semantic_diff`.
+- For semantic merges, verify with `kern_semantic` (action=diff).
 
 ---
 

@@ -10,8 +10,8 @@ there's nothing to wire per language. What exists:
   model); `kern guard` (or `kern_guard_check`) rejects a diff before it
   touches the filesystem. `kern guard init` writes a starter file.
 - **Doc search index** (optional) — `kern docs index` (or
-  `kern_doc_index(semantic=true)`) embeds project docs with a local Ollama
-  model for real-meaning `kern_doc_search`, stored in user cache.
+  `kern_doc action=index, semantic=true`) embeds project docs with a local Ollama
+  model for real-meaning search (`kern_doc action=search`), stored in user cache.
 - **`.kern/agents.json`** (optional) — custom agent wiring. Declare
   forked/private agents as JSON (`name`, config `path` with `~`/`$VAR`
   expansion, servers `key`, `entry` shape `stdio`|`cmd`, `scope`
@@ -34,7 +34,10 @@ live when one is. The socket is local-user-only; a second
   own relay. Deep workspace paths that exceed the OS socket-path limit
   transparently bind under a hashed name in the temp dir.
 - **Environment variables** — `OLLAMA_HOST` (default `http://localhost:11434`,
-  used only when you opt in), `KERN_EMBED_MODEL` (default
+  used only when you opt in), `KERN_LLM_PROVIDER` (`ollama` default;
+  `openai`/`anthropic`/`google` for remote providers; `none`/`off`/`disabled`
+  disables LLM use entirely — offline and deterministic, no probe attempts),
+  `KERN_EMBED_MODEL` (default
   `nomic-embed-text`), `KERN_VERSION`/`KERN_CHANNEL`/`KERN_INSTALL_DIR`
   (installer: `KERN_VERSION` pins a release tag, `KERN_CHANNEL` selects the
   channel `latest` resolves to — `latest` (default), `stable` (newest

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
 
+- **[Unreleased]** — 2026-10-02: `kern verify` build check now SKIPs cleanly (exit 0, reason surfaced) on directories with no supported project type and surfaces the first output line as the reason on genuine build failures; `kern optimize --kind log` is idempotent and lossless on structured output (no more silent row folding or `(repeated Nx)` stacking); `--types arch` alias accepted; `verify --json` reports `CI: {"ok": true, "status": "not run"}` when CI was not requested; plugin `defaultTools` comments corrected to the real 22-tool surface; root confinement and ADR-0012 ETag protocol alignment.
+
+- **[0.9.10.2]** — 2026-10-01: MCP surface economy (catalog 139→117 via the `kern_memory` + 8-family action-arg consolidations, default advertised surface 11→22), `kern_do` autonomous preset, and release-hardening fixes found by full-sweep verification (kern-server version footgun, meta `memories` routing, worktree-safe loop verify, typescript checker false-fails, `staleSnapshot` data race).
+
 - **[0.9.10.1]** — 2026-09-30: Default tree-sitter indexer (14 languages), agent-adoption campaign (kern-first enforcement, meta-router coverage), compiled-intent task typing, global skill sync parity, session-aware LLM chain, and the 2026-09-29 blind-audit / dogfooding fixes.
 - **[0.9.10]** — 2026-09-26: Semver release channel (Stages A–C), org governance P13 stages 1–3, SDK passthrough, governance hardening (RBAC default-deny + persistence), semcache compounding, `kern bench` + docs site, per-tool token attribution, and the audit campaigns' security fixes.
 - **[0.9.9.1]** — 2026-09-19: Adaptive context windowing (`-A`/`-B`), configurable compaction profiles via `.kern/kern.yaml`, MCP server modularized into 44 subpackages, skill-playbook CI parity, and subprocess/hook security hardening.
@@ -13,6 +17,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.10.2] - 2026-10-01
+
+### Changed
+- **MCP family consolidation (BREAKING)**: 26 narrow tools merged into 8 action-arg tools — `kern_optimize` (action: prompt|log|output), `kern_doc` (search|fetch|index), `kern_agent` (message|interrupt|fingerprint|coordination|rbac), `kern_org` (entity: projects|agents|teams|memory|tasks|search|audit|user), `kern_lock` (acquire|release|status — absorbs `kern_unlock`/`kern_lock_status`), `kern_evidence` (+anchor action), `kern_repair` (guidance|diagnostics), `kern_semantic` (diff|merge). Catalog 137→117; default surface stays 22 (`kern_optimize_prompt`→`kern_optimize`, `kern_repair_diagnostics`→`kern_repair` renames). `KERN_TOOLS` allowlists naming removed tools must migrate. Deliberate hard removal following the `kern_memory` precedent; breaking changes documented in `docs/mcp/versioning.md`.
+- **MCP memory tools consolidated (BREAKING)**: `kern_memory_add` / `kern_memory_list` / `kern_memory_recall` / `kern_memory_ranked` are removed and replaced by a single `kern_memory` tool taking an `action` argument (`add|list|recall|ranked|remove|clear`), mirroring the CLI's `kern memory` subcommands. Catalog 139→137 tools. `KERN_TOOLS` allowlists naming the old tools must migrate to `kern_memory` with `action`. Deliberate hard removal documented in `docs/mcp/versioning.md`; generated docs (tool-catalog, tool-contracts, tool-schemas.json baseline) regenerated.
+- **Default MCP advertised surface 11→22**: the default `tools/list` now includes the evidence-backed top savers and the previously missing edit-phase tools — `kern_compact_file`, `kern_project_map`, `kern_probe`, `kern_memory`, `kern_buddy`, `kern_heal`, `kern_repair`, `kern_commitmsg`, `kern_synthesize_test`, `kern_retrieve`, `kern_fit_context` join the 11 incumbents. Unchanged: `KERN_MCP_FULL=1` (all 117), `KERN_MCP_PHASE`, `KERN_TOOLS` resizing.
+- **RBAC**: the consolidated `kern_memory` is excluded from the reviewer role's allow-list (it can write via `add`/`remove`/`clear`); the architect glob `kern_memory*` covers the new name unchanged.
+- **Closed-loop verify scoped to changed packages**: the loop's test leg now runs only the Go packages its own diff touched (derived from the worktree diff) — a one-file task pays seconds instead of the whole-module suite (~10 min on this repo). Read-only loops keep the full informational advisory; dependent-package regressions remain CI's full tier's job. `verification.Engine.WithTestPackages` is the new scoping API; the `KERN_VERIFY_TEST` override still wins verbatim.
+- **`kern mutate` never touches the real tree**: mutants are evaluated inside a worktree copy (both the CLI and `kern_mutation_test`); the real tree is no longer transiently modified during each mutant's test run. Falls back to the journaled in-place mode with a loud warning if the snapshot cannot be built. `internal/mutation` gained its first internal dep (`internal/execution`) — ledger updated.
+
+### Added
+- **`kern_do` MCP tool**: the autonomous closed-loop preset (`kern do`'s contract) is back on the MCP surface — a thin delegate over `kern_loop` with mode fixed to `autonomous` (L2 default, level overridable), risk high, Slow-flagged so it emits progress notifications.
+- **`kern_memory` remove/clear actions**: targeted lesson deletion by 1-based list index or text prefix, plus whole-store clear — previously CLI-only (`kern memory remove` / `--clear`).
+- **Stage-aware MCP progress for loop-family tools**: `kern_loop`/`kern_do` now report each stage as it starts ("stage: verify", with cumulative pct across the 9-stage chain) on top of the generic 5s keep-alive — a 10-minute run no longer looks identical to a hung one. The reporter travels on the request context, so no intermediate signature changed.
+
+### Fixed
+- **`kern-server version` footgun**: `kern-server version` (positional) and `-v` now print the version and exit 0 instead of silently starting the HTTP server — parity with the kern-mcp fix (76031df).
+- **kern_meta classifier**: plural `memories` phrasings ("what memories do we have about X") now route to `kern_memory` recall — previously fell through to `kern_search`.
+- **Closed-loop verify was worktree-unsafe**: the loop's verify stage runs `go test` in sandbox worktrees that exclude `.git` by design; `TestCheckParityReleaseTagAccepted` (internal/doctor) hard-assumed a git checkout, making every L2+ loop run report `test: FAIL` (and burning heal repair rounds) on healthy repos. The test now skips outside git checkouts (verified: full short suite passes in a git-less worktree).
+- **Typescript syntax checker false-fail**: `node --check` parses `.ts` as CommonJS JavaScript (the `--check` path bypasses type stripping), so every file using real TypeScript syntax failed validation — feeding false failures to `kern validate`, heal, and the loop's verify. `.ts`/`.tsx` now validate as "unable to validate" per the checker-less convention instead of false-failing healthy code.
+- **`staleSnapshot` data race (internal/index)**: `web.freshGraph` deliberately runs staleness walks off the app lock, so concurrent requests could race `retainStaleSnapshot`'s pointer write — caught by the CI race tier (`TestFreshGraphSingleFlight`). The retained observation is now guarded by a dedicated mutex (retain/clear/read); published snapshots stay immutable.
+- **kern_meta router keyword audit**: 17 routing gaps of the `memories` bug class (plurals/synonyms/phrase variants) closed and pinned by a 33-case table test — including two DEFAULT-SURFACE tools that had no keyword arm at all (`kern_heal`, `kern_synthesize_test` — reachable only by literal name before), the `compile`/`compilation`/`build error` variants the repair arm missed, and intent-before-generic ordering so "repair the build" no longer routes to the plain validate re-check.
 
 ## [0.9.10.1] - 2026-09-30
 

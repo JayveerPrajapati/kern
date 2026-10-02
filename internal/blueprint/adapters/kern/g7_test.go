@@ -115,7 +115,10 @@ func TestG7_SecretRepairLoop(t *testing.T) {
 	runGit(t, dir, "commit", "-qm", "init")
 
 	// --- Iteration 1: bad patch with hardcoded secret ---
-	writeGoFile(t, dir, "config.go", "package main\n\nconst AWSAccessKey = \"AKIAIOSFODNN7EXAMPLE\"\n")
+	// Non-canonical key: AKIAIOSFODNN7EXAMPLE is allowlisted by value in
+	// internal/sec (knownExampleSecrets), so a detection-asserting fixture
+	// must use a real-looking key.
+	writeGoFile(t, dir, "config.go", "package main\n\nconst AWSAccessKey = \"AKIA9X2KQ7W3ZP4RT6NB\"\n")
 	runGit(t, dir, "add", "config.go")
 
 	req1 := domain.ChangeRequest{

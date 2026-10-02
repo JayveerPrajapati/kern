@@ -151,7 +151,15 @@ func Load(key string, v any) error {
 			return err
 		}
 	}
-	return json.Unmarshal(data, v)
+	if err := json.Unmarshal(data, v); err != nil {
+		// Self-heal: an unparseable entry would error on every Load
+		// forever (Maintain/GC is age-based only). The cache is derived
+		// data — drop the corrupt entry (best-effort, plain and .gz twin)
+		// and report a miss so callers rebuild it.
+		_ = Remove(key)
+		return nil
+	}
+	return nil
 }
 
 // gunzipFile reads and decompresses a .gz file. Used to serve archived

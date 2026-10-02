@@ -1,6 +1,6 @@
 // Package fetch retrieves a web document and converts it to plain text so it
 // can be indexed locally. It is the only network-touching package in kern, and
-// every call is user-invoked (CLI `kern docs fetch` or MCP `kern_doc_fetch`):
+// every call is user-invoked (CLI `kern docs fetch` or MCP `kern_doc`):
 // nothing in the runtime fetches on its own. Retrieved text is cached on disk
 // under the kern cache dir, so a fetched page stays searchable offline.
 package fetch

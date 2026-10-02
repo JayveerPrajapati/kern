@@ -8,7 +8,7 @@ import (
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // This file contains adapter functions that convert v1 types into their 2.0
@@ -61,7 +61,7 @@ func digest(content string) string {
 // FromSecFinding wraps a security finding as a FACT claim with a policy-type
 // evidence entry. Security scans are deterministic static-analysis checks, so
 // the claim confidence is 1.0.
-func FromSecFinding(f sec.Finding) Claim {
+func FromSecFinding(f secscan.Finding) Claim {
 	now := time.Now()
 	evidence := Evidence{
 		Type:      EvidencePolicy,

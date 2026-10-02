@@ -40,11 +40,14 @@ func SecretsClean(t *testing.T) SecretFixtureResult {
 }
 
 // SecretsAPIKey materializes a directory containing a hardcoded AWS access
-// key; kern sec must flag it with a message containing "AWS".
+// key; kern sec must flag it with a message containing "AWS". The value is
+// deliberately NON-canonical: AKIAIOSFODNN7EXAMPLE is allowlisted by
+// internal/sec's knownExampleSecrets (fake by construction), so a
+// detection-asserting fixture must use a real-looking key.
 func SecretsAPIKey(t *testing.T) SecretFixtureResult {
 	t.Helper()
 	dir := newSecretDir(t)
-	writeSecretFile(t, dir, "aws.go", "package main\n\nconst AWSAccessKey = \"AKIAIOSFODNN7EXAMPLE\"\n")
+	writeSecretFile(t, dir, "aws.go", "package main\n\nconst AWSAccessKey = \"AKIA9X2KQ7W3ZP4RT6NB\"\n")
 	return SecretFixtureResult{Dir: dir}
 }
 
@@ -95,19 +98,33 @@ func SecretsTokenYAML(t *testing.T) SecretFixtureResult {
 	return SecretFixtureResult{Dir: dir}
 }
 
-// SecretsFalsePositive materializes a directory containing a known-fake AWS
-// key inside a testdata/ directory (a non-test .go file). kern sec DOES flag
-// this file (it only skips *_test.go files natively, not testdata/ dirs), so
-// the G3 test can verify that Blueprint's DefaultAllowlist suppresses the
-// finding for testdata/ paths.
+// SecretsCanonicalExample materializes a directory containing the canonical
+// AWS documentation example key. internal/sec allowlists this value
+// (knownExampleSecrets: fake by construction, not a finding) regardless of
+// location, so kern sec must NOT flag it — pinned by
+// TestG3_CanonicalExampleSecretSuppressed.
+func SecretsCanonicalExample(t *testing.T) SecretFixtureResult {
+	t.Helper()
+	dir := newSecretDir(t)
+	writeSecretFile(t, dir, "aws.go", "package main\n\nconst AWSAccessKey = \"AKIAIOSFODNN7EXAMPLE\"\n")
+	return SecretFixtureResult{Dir: dir}
+}
+
+// SecretsFalsePositive materializes a directory containing a non-canonical
+// fake AWS key inside a testdata/ directory (a non-test .go file). kern sec
+// DOES flag this file (it only skips *_test.go files natively, not testdata/
+// dirs), so the G3 test can verify that Blueprint's DefaultAllowlist
+// suppresses the finding for testdata/ paths. The value must NOT be the
+// canonical AKIAIOSFODNN7EXAMPLE: that one is suppressed by value in
+// internal/sec (knownExampleSecrets), which would make this fixture
+// undetectable regardless of the location allowlist.
 func SecretsFalsePositive(t *testing.T) SecretFixtureResult {
 	t.Helper()
 	dir := newSecretDir(t)
 	writeSecretFile(t, dir, "testdata/fixture.go", `package testdata
-
-// Test fixture: this is a known-fake key used only in tests.
+// Test fixture: this is a non-canonical fake key used only in tests.
 // DO NOT use this key in production.
-const TestKey = "AKIAIOSFODNN7EXAMPLE"
+const TestKey = "AKIA9X2KQ7W3ZP4RT6NB"
 `)
 	return SecretFixtureResult{Dir: dir}
 }

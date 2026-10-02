@@ -207,7 +207,34 @@ func TestPersistAndVerifyChain(t *testing.T) {
 		}
 	}
 }
-
+func TestRecordParallelPersistsToStore(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	l := NewAuditLog().WithStore(store)
+	// RecordParallel must persist exactly like Record: entries appended
+	// through the lock-free path are crash-durable, not memory-only.
+	for i := 0; i < 5; i++ {
+		if root := l.RecordParallel(entry("", fmt.Sprintf("p%d", i))); root == "" {
+			t.Fatal("expected non-empty Merkle root")
+		}
+	}
+	entries, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("store has %d entries, want 5", len(entries))
+	}
+	for _, e := range entries {
+		var loaded AuditEntry
+		if err := json.Unmarshal(e.Value, &loaded); err != nil {
+			t.Fatalf("unmarshal %q: %v", e.Key, err)
+		}
+		if loaded.Hash == "" {
+			t.Errorf("persisted entry %q has empty hash", e.Key)
+		}
+	}
+}
 func TestTamperBreaksChain(t *testing.T) {
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)

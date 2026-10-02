@@ -13,7 +13,11 @@
 #   * Adds the install dir to the user PATH (persisted via User environment).
 #   * Verifies `kern.exe version` and performs an MCP JSON-RPC initialize handshake.
 #   * Auto-wires kern into detected agents (`kern setup --detect --global`).
-#   * Supports actions: install (default), status, uninstall.
+#   * Supports actions: install (default), upgrade, status, uninstall.
+#   * upgrade re-runs the install path; a running kern.exe/kern-mcp.exe
+#     is moved aside (unique .old name) before the copy — Windows cannot
+#     overwrite a running binary, but it can rename it. If the copy fails,
+#     the aside is restored so the previous binary stays in place.
 #
 # Distribution note: replace JayveerPrajapati below with your GitHub username
 # (or run scripts/retarget.sh which rewrites this file for you).
@@ -187,7 +191,31 @@ function Uninstall-Kern {
     Write-Host "kern: uninstalled successfully." -ForegroundColor Green
 }
 
-# Command dispatch:
+function Copy-Binary {
+    param([string]$Source, [string]$Dest)
+    # A running .exe cannot be overwritten on Windows, but it CAN be
+    # renamed: move the current binary aside so `kern update` (which runs
+    # this installer while kern.exe is still running) works. The aside
+    # name is unique per invocation, so a stale .old locked by an old
+    # process can never block the move. If the copy then fails, the aside
+    # is moved back so the previous binary stays in place (no bricked
+    # install). An aside left locked by the still-running old process is
+    # cleaned up by the next install.
+    if (Test-Path $Dest) {
+        $aside = "$Dest.$([guid]::NewGuid().ToString('N')).old"
+        Move-Item -Force $Dest $aside -ErrorAction Stop
+    }
+    try {
+        Copy-Item $Source $Dest -Force
+    } catch {
+        if (Test-Path $aside) { Move-Item -Force $aside $Dest -ErrorAction Stop }
+        throw
+    }
+}
+
+# Command dispatch: install and upgrade both run the install path below
+# (only status/uninstall are special-cased), so `kern update` can pass
+# -Action upgrade and land here.
 if ($Action -eq "status" -or ($args.Count -gt 0 -and $args[0] -eq "status")) {
     Show-Status
     exit 0
@@ -270,13 +298,24 @@ try {
     # search recursively so older layouts (a wrapper dir) also work.
     $extract = Get-ChildItem -Path $tmp -Recurse -Filter "kern.exe" | Select-Object -First 1
     if (-not $extract) { throw "kern.exe not found in archive" }
-    Copy-Item $extract.FullName (Join-Path $Prefix "kern.exe") -Force
+    Copy-Binary -Source $extract.FullName -Dest (Join-Path $Prefix "kern.exe")
 
     # kern-mcp.exe and kern-server.exe are co-located; copy if present.
+    # Copy-Binary renames a running binary aside (kern update path).
     $mcp = Get-ChildItem -Path $tmp -Recurse -Filter "kern-mcp.exe" | Select-Object -First 1
-    if ($mcp) { Copy-Item $mcp.FullName (Join-Path $Prefix "kern-mcp.exe") -Force }
+    if ($mcp) { Copy-Binary -Source $mcp.FullName -Dest (Join-Path $Prefix "kern-mcp.exe") }
     $server = Get-ChildItem -Path $tmp -Recurse -Filter "kern-server.exe" | Select-Object -First 1
-    if ($server) { Copy-Item $server.FullName (Join-Path $Prefix "kern-server.exe") -Force }
+    if ($server) { Copy-Binary -Source $server.FullName -Dest (Join-Path $Prefix "kern-server.exe") }
+
+    # Best-effort cleanup of binaries renamed aside by a previous update.
+    # (A .old moved aside by THIS update may still be locked by the old
+    # running process until it exits; the next install removes it.)
+    # Only kern-owned aside files are removed (legacy <name>.exe.old and
+    # the unique <name>.exe.<guid>.old form); other tools sharing $Prefix
+    # are never touched.
+    Get-ChildItem -Path $Prefix -Filter "kern*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^kern(\.exe|\.exe\.[0-9a-f]{32})\.old$' } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 
     Write-Host "installed: $(Join-Path $Prefix 'kern.exe') ($tag)"
     Verify-Kern -PrefixDir $Prefix
