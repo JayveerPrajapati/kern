@@ -21,6 +21,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/planner"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -311,7 +312,7 @@ func (l *Loop) RunContext(ctx context.Context, intent string, step StepFunc) (*R
 		return res, nil
 	}
 
-	for _, st := range []string{stageIntent, stageRemember, stagePlan, stageCode, stageVerify, stageProtect, stageDeploy, stageObserve, stageLearn} {
+	for i, st := range []string{stageIntent, stageRemember, stagePlan, stageCode, stageVerify, stageProtect, stageDeploy, stageObserve, stageLearn} {
 		if err := ctx.Err(); err != nil {
 			res.Stages = append(res.Stages, StageResult{Stage: st, Status: "cancelled", Output: err.Error()})
 			return res, err
@@ -319,6 +320,12 @@ func (l *Loop) RunContext(ctx context.Context, intent string, step StepFunc) (*R
 		if !l.cfg.Level.AllowsStageWithProofs(st, l.cfg.Proofs) {
 			res.Stages = append(res.Stages, StageResult{Stage: st, Status: "skipped:below-autonomy"})
 			continue
+		}
+		// Stage-aware progress: report each stage that will actually run
+		// (post-gate), so a transport holding a progress token (MCP) can
+		// surface "stage: verify" instead of only a generic keep-alive.
+		if fn := StageReporterFromContext(ctx); fn != nil {
+			fn(st, (i+1)*100/9)
 		}
 
 		out, err := l.runStage(ctx, st, intent, step, wt, res)
@@ -494,9 +501,15 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 		if l.cfg.Firewall != nil {
 			out, err = l.cfg.Firewall.Verify(ctx, intent, wt)
 		} else {
-			v := verification.NewEngine(wt.Dir()).Verify([]string{"build", "test", "security", "architecture", "dependency"})
+			// Scope the test leg to the packages the loop's own change
+			// touched (res.Diff from stageCode): a one-file task pays
+			// seconds, not the whole-module suite. Read-only loops have
+			// no diff, so they keep the full informational advisory.
+			// Dependent-package regressions remain CI's full tier's job.
+			eng := verification.NewEngine(wt.Dir()).WithTestPackages(changedGoPackages(res.Diff))
+			v := eng.Verify([]string{"build", "test", "security", "architecture", "dependency"})
 			out = v.Summary
-			if v.Verdict != verification.VerdictPass {
+			if v.Verdict != verdict.VerdictPass {
 				// L0/L1 are read-only (autonomy.go): the loop makes no code
 				// changes, so a FAIL can only reflect the repository's own
 				// pre-existing state — hardcoded-secret findings, stale

@@ -203,10 +203,7 @@ func ms(d time.Duration) float64 {
 }
 
 // fmtLatency renders a millisecond sample honestly instead of collapsing fast
-// queries to a misleading zero (dogfooding B-LOW: the one-hop-callers query —
-// a precomputed map read — returns 3830 callers in tens of nanoseconds, which
-// the old %7.2f rendering displayed as "0.00 ms" and read as "returned
-// nothing"). Three tiers: ms, µs, ns — so a sub-µs query is never shown as 0.
+// queries to a misleading zero. Three tiers: ms, µs, ns — so a sub-µs query is never shown as 0.
 func fmtLatency(msf float64) string {
 	if msf >= 1 {
 		return fmt.Sprintf("%7.2f ms", msf)

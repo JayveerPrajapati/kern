@@ -8,6 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // artifactFixture seeds a project root with one artifact and returns the root.
@@ -21,7 +22,7 @@ func artifactFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	a := domain.NewArtifact(domain.ArtifactPlan, "t1", "file:///tmp/plan.md")
 	a.CreatedBy = "test-agent"
 	a.Scope = "scope-x"

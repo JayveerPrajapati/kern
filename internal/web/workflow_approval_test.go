@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // TestWorkflowApprovalThroughUI is the exit gate: a human can inspect
@@ -27,7 +28,7 @@ func TestWorkflowApprovalThroughUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.RunWorkflowDefault("helper")
 	if err == nil {
 		t.Fatal("workflow should park at the approval gate")
@@ -96,7 +97,7 @@ func TestWorkflowRejectionThroughUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.RunWorkflowDefault("helper")
 	if err == nil {
 		t.Fatal("workflow should park at the approval gate")
@@ -116,7 +117,7 @@ func TestWorkflowRejectionThroughUI(t *testing.T) {
 		t.Fatalf("POST /api/approvals/reject = %d (%s), want 200", rec.Code, rec.Body.String())
 	}
 
-	fresh := app.NewTaskService(p, nil)
+	fresh := tasklife.NewTaskService(p, nil)
 	got, ok := fresh.Get(task.ID)
 	if !ok {
 		t.Fatalf("task %s not found in the persisted store", task.ID)
@@ -146,7 +147,7 @@ func TestWebApprovalAdvancesGatedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.RunWorkflowDefault("helper")
 	if err == nil {
 		t.Fatal("workflow should park at the approval gate")
@@ -174,7 +175,7 @@ func TestWebApprovalAdvancesGatedTask(t *testing.T) {
 
 	// The gated task must have advanced IMMEDIATELY (no resume needed): a
 	// fresh service (simulating `kern task`) sees APPROVED.
-	fresh := app.NewTaskService(p, nil)
+	fresh := tasklife.NewTaskService(p, nil)
 	got, ok := fresh.Get(task.ID)
 	if !ok {
 		t.Fatalf("task %s not found in the persisted store", task.ID)

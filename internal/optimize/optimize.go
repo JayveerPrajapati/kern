@@ -157,7 +157,7 @@ func maskEnabled(opts Options) bool {
 	if opts.Mask {
 		return true
 	}
-	// Delegate to the canonical provider-locality decision (dogfooding G-MED):
+	// Delegate to the canonical provider-locality decision:
 	// the LLM stage now DEFAULTS to the auto chain even when opts.LLM is
 	// empty, so the old `opts.LLM == "" → no mask` shortcut would let raw PII
 	// reach a remote provider selected via KERN_LLM_PROVIDER. llm.MaskRequired
@@ -302,9 +302,7 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		// No explicit --llm: DEFAULT the LLM stage to the auto chain
 		// (host session → agent CLIs → ollama) so prompt compression uses the
 		// current agent / a local CLI instead of echoing the input unchanged
-		// (dogfooding G-MED — the LLM stage used to be gated on --llm/KERN_MODEL
-		// and silently ignored the auto chain; a KERN_MODEL-only setup was a
-		// silent no-op). The chain honors KERN_MODEL/llm.model as the default
+		//. The chain honors KERN_MODEL/llm.model as the default
 		// model, fails fast when nothing is reachable, and only then falls back
 		// to the deterministic path with an honest message.
 		p, perr := llm.NewProvider()

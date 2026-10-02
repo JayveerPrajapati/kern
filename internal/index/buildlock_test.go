@@ -34,7 +34,7 @@ func TestDebouncedRebuildRebuildsWhenStillStale(t *testing.T) {
 		checkCalls++
 		return nil, false // still stale
 	}
-	rebuild := func() (*Index, error) {
+	rebuild := func(prev *Index) (*Index, error) {
 		rebuildCalls++
 		return &Index{Root: root}, nil
 	}
@@ -81,7 +81,7 @@ func TestDebouncedRebuildReusesAfterHolderFinishes(t *testing.T) {
 		// Fresh as soon as we can acquire: the holder's rebuild landed.
 		return &Index{Root: root}, true
 	}
-	rebuild := func() (*Index, error) {
+	rebuild := func(prev *Index) (*Index, error) {
 		rebuildCalls++
 		return nil, os.ErrInvalid // must never run
 	}
@@ -124,7 +124,7 @@ func TestDebouncedRebuildFallsBackAfterTimeout(t *testing.T) {
 	check := func() (*Index, bool) {
 		return nil, false // never fresh while the holder is wedged
 	}
-	rebuild := func() (*Index, error) {
+	rebuild := func(prev *Index) (*Index, error) {
 		rebuildCalls++
 		return &Index{Root: root}, nil
 	}

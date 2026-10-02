@@ -55,13 +55,24 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// wantsVersion reports whether the parsed flags or leftover positionals
+// request the version print-and-exit path. Mirrors the kern-mcp fix
+// (commit 76031df): -v/--version/version all work.
+func wantsVersion(show, short bool, args []string) bool {
+	if show || short {
+		return true
+	}
+	return len(args) > 0 && args[0] == "version"
+}
+
 func main() {
 	root := flag.String("root", ".", "project root to serve (single-project mode)")
 	addr := flag.String("addr", "127.0.0.1:8090", "listen address")
 	enterprise := flag.Bool("enterprise", false, "enable multi-project enterprise mode")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	shortVer := flag.Bool("v", false, "shorthand for -version")
 	flag.Parse()
-	if *showVersion {
+	if wantsVersion(*showVersion, *shortVer, flag.Args()) {
 		fmt.Printf("kern-server %s\n", version)
 		os.Exit(0)
 	}

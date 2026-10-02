@@ -8,6 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // fix3Fixture creates a temp Go repo with a built index (symbols: FindUser,
@@ -61,7 +62,7 @@ func recoverExitCode(fn func()) (code int) {
 func TestTasksListsTasks(t *testing.T) {
 	dir := fix3Fixture(t)
 	// Seed a task through the same TaskService the CLI uses.
-	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	task, err := ts.Create("add pagination to the service layer")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -86,7 +87,7 @@ func TestTasksListsTasks(t *testing.T) {
 
 func TestTaskListSubcommand(t *testing.T) {
 	dir := fix3Fixture(t)
-	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	task, err := ts.Create("fix the query layer")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -158,7 +159,7 @@ func TestPlanSymbolDegradeHints(t *testing.T) {
 // read).
 func storeRecordCount(t *testing.T, dir string) int {
 	t.Helper()
-	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	if ts.Store() == nil {
 		t.Fatal("task service has no persisted store")
 	}
@@ -208,7 +209,7 @@ func TestAnalyzeTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	}
 	// A fresh service (a new process) must resolve the task via the store —
 	// the same store `kern task <id>` reads.
-	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	if got, ok := ts.Get(id); !ok {
 		t.Fatalf("task %q not queryable from a fresh service after --task analyze", id)
 	} else if got.State == "" {
@@ -238,7 +239,7 @@ func TestAnalyzeTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	if !strings.HasPrefix(ephID, "a-") {
 		t.Fatalf("lens-only task id = %q, want ephemeral a-<n> prefix", ephID)
 	}
-	ts2 := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts2 := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	if _, ok := ts2.Get(ephID); ok {
 		t.Fatalf("lens-only task %q must NOT be persisted (F9: no store pollution without --task)", ephID)
 	}
@@ -266,7 +267,7 @@ func TestWhatIfImpactTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	if !strings.HasPrefix(id, "t-") {
 		t.Fatalf("what-if task_id = %q, want t-<n> with --task", id)
 	}
-	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts := tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	if _, ok := ts.Get(id); !ok {
 		t.Fatalf("what-if task %q not queryable from a fresh service", id)
 	}
@@ -282,7 +283,7 @@ func TestWhatIfImpactTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	if !strings.HasPrefix(id2, "t-") {
 		t.Fatalf("impact task_id = %q, want t-<n> with --task", id2)
 	}
-	ts = app.NewTaskService(mustApp(t, dir), eventbus.New())
+	ts = tasklife.NewTaskService(mustApp(t, dir), eventbus.New())
 	if _, ok := ts.Get(id2); !ok {
 		t.Fatalf("impact task %q not queryable from a fresh service", id2)
 	}

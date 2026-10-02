@@ -10,12 +10,13 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // runAgentMessage implements `kern agent-message`: sends a message to an
-// agent's coordination inbox. CLI mirror of kern_agent_message — writes the
-// same handoff record the MCP handler persists, so
-// kern_agent_coordination action=inbox sees it.
+// agent's coordination inbox. CLI mirror of kern_agent action=message — writes
+// the same handoff record the MCP handler persists, so
+// kern_agent action=coordination (inbox) sees it.
 func runAgentMessage(rest []string) {
 	var to, from, taskID, msg, root string
 	taskExplicit := false // true only when the caller passed --task (an auto-generated id must not be validated)
@@ -96,7 +97,7 @@ func runAgentMessage(rest []string) {
 		if err != nil {
 			fatal("agent-message: %v", err)
 		}
-		ts := app.NewTaskService(p, nil)
+		ts := tasklife.NewTaskService(p, nil)
 		if _, ok := ts.Get(taskID); !ok {
 			fatal("agent-message: task %q not found", taskID)
 		}
@@ -126,7 +127,7 @@ func runAgentMessage(rest []string) {
 }
 
 // runAgentInterrupt implements `kern agent-interrupt`: cancels a running
-// task through the TaskService. CLI mirror of kern_agent_interrupt.
+// task through the TaskService. CLI mirror of kern_agent action=interrupt.
 func runAgentInterrupt(rest []string) {
 	var taskID, root string
 	var words []string
@@ -156,7 +157,7 @@ func runAgentInterrupt(rest []string) {
 	if err != nil {
 		fatal("agent-interrupt: %v", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	if err := ts.Cancel(taskID, reason); err != nil {
 		fatal("agent-interrupt: %v", err)
 	}

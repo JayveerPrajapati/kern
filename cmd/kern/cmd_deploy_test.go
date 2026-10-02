@@ -7,6 +7,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // deployableTaskFixture creates a task walked to PR_CREATED — the only state
@@ -20,7 +21,7 @@ func deployableTaskFixture(t *testing.T) (root, taskID string) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.Create("deploy the release")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -71,7 +72,7 @@ func TestDeployInvalidState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	task, err := ts.Create("deploy the release")
 	if err != nil {
 		t.Fatalf("Create: %v", err)

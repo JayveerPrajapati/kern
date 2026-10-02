@@ -87,6 +87,7 @@ type flags struct {
 	sarif                bool
 	threshold            int
 	severity             string
+	engine               string // --engine (sec: internal|gosec|all|none; default all = internal + gosec when available)
 	semantic             bool
 	lang                 string
 	stdin                string
@@ -156,6 +157,7 @@ type flags struct {
 	contextBefore        int    // --context-before (optimize log adaptive windowing)
 	contextAfter         int    // --context-after  (optimize log adaptive windowing)
 	kind                 string // --kind (optimize: prompt|log)
+	etag                 string // --etag (context/compact/retrieve/explore: conditional-fetch etag from a previous response)
 	oneLine              bool   // --one-line (graph: single-line call-graph neighbourhood)
 	entities             bool   // --entities (graph: render the digital-twin entity nodes connected to the symbol, or the repo entity inventory without a symbol)
 	risk                 bool   // --risk (impact: render the governance risk assessment)
@@ -292,7 +294,7 @@ func parseFlags(args []string) (flags, []string, error) {
 	f.commits = 60
 	f.thresholds = "2.0,4.0,6.0,8.0"
 	// --cache defaults ON for optimize/preview, aligning with the MCP
-	// kern_optimize_prompt tool (cacheOn=true): results compound in the
+	// kern_optimize tool (cacheOn=true): results compound in the
 	// local exact + semantic caches unless the operator opts out with
 	// --cache=false.
 	f.cache = true
@@ -592,6 +594,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.withSkill, inline, hasInline)
 		case "--kind":
 			setStr(&i, &f.kind, inline, hasInline)
+		case "--etag":
+			setStr(&i, &f.etag, inline, hasInline)
 		case "--one-line":
 			setBool(&f.oneLine, "--one-line", inline, hasInline)
 		case "--entities":
@@ -662,6 +666,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.to, inline, hasInline)
 		case "--severity":
 			setStr(&i, &f.severity, inline, hasInline)
+		case "--engine":
+			setStr(&i, &f.engine, inline, hasInline)
 		case "--lang":
 			setStr(&i, &f.lang, inline, hasInline)
 		case "--stdin":

@@ -18,6 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"io"
 	"os"
 	"os/exec"
@@ -99,7 +100,7 @@ func renderTeamText(root string) (string, error) {
 	// runTaskList: the registry holds this-process submissions while the store
 	// holds every cross-session record — a fresh StandardTeam() always has an
 	// empty in-memory map, so reading only the registry rendered a permanent
-	// "tasks: 0" no matter how many tasks were persisted (dogfooding E-LOW).
+	// "tasks: 0" no matter how many tasks were persisted.
 	seen := map[string]*agent.Task{}
 	var tasks []*agent.Task
 	for _, t := range reg.ListTasks() {
@@ -212,7 +213,7 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not load project: %w — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	_, res, err := ts.RunLoop(intent, level)
 	var b strings.Builder
 	fmt.Fprintf(&b, "intent: %s\n", res.Intent)
@@ -273,14 +274,14 @@ func runDo(root, levelStr, intent string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("no reachable LLM provider: %w — start ollama (or set KERN_LLM_PROVIDER to a reachable provider) before using kern do", err)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	_, res, err := ts.RunDo(intent, level)
 	var b strings.Builder
 	fmt.Fprintf(&b, "intent: %s\n", res.Intent)
 	fmt.Fprintf(&b, "level: %s\n", res.Level)
 	// Name the provider that actually answers — with Ollama down the chain
 	// falls back to a local agent CLI (claude/opencode/codex), and the run
-	// output should say which one served it (dogfooding E-obs).
+	// output should say which one served it.
 	fmt.Fprintf(&b, "provider: %s\n", providerName)
 	for _, st := range res.Stages {
 		fmt.Fprintf(&b, "%s: %s", st.Stage, st.Status)
@@ -310,10 +311,9 @@ func runDo(root, levelStr, intent string) (string, error) {
 // so the CLI and the MCP server's kern_loop probe cannot drift. The auto
 // chain falls back across providers, so this only fails when no provider in
 // the chain answers — exactly the silent-hang condition `kern do` used to
-// exhibit (dogfooding G-HIGH: the old flat 8s budget was a coin-flip against
-// CLI cold-starts of 6-40s). It returns the name of the provider that
+// exhibit. It returns the name of the provider that
 // answered so the caller can report which fallback actually served the run
-// (dogfooding E-obs: `kern do` previously never named it).
+//.
 func probeLLMProvider() (string, error) {
 	return llm.ProbeReachableName()
 }
@@ -346,7 +346,7 @@ func runWorkflowCLI(root, intent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	task, err := ts.RunWorkflowDefault(intent)
 	if err != nil && task == nil {
 		return "", err
@@ -367,7 +367,7 @@ func runWorkflowResumeCLI(root, taskID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	task, err := ts.RunWorkflowResume(taskID)
 	if err != nil && task == nil {
 		return "", err
@@ -440,7 +440,7 @@ func runStatsPerformance(reset, jsonOut bool) (string, error) {
 // PASS verdict (audit H4).
 var verifyTypeKeywords = []string{
 	"build", "test", "unit", "integration",
-	"security", "sec", "architecture", "archi",
+	"security", "sec", "architecture", "archi", "arch",
 	"dependency", "dep",
 	"cve", "license", "licen", "secrets", "secret",
 	"e2e", "end-to-end", "static", "analysis", "vet", "lint",
@@ -651,8 +651,7 @@ func clipJSONValue(rv reflect.Value) reflect.Value {
 	// Values with a custom JSON marshaler (time.Time, uuid, ...) are safe:
 	// they never exceed maxJSONFieldLen, and recursing into their internal
 	// struct fields would copy only CanInterface() fields — zeroing types
-	// like time.Time whose fields are all unexported (dogfooding B-LOW: every
-	// built_at/checked_at in --json payloads was being reset to epoch).
+	// like time.Time whose fields are all unexported.
 	if rv.CanInterface() {
 		if _, ok := rv.Interface().(json.Marshaler); ok {
 			return rv

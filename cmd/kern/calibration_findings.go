@@ -17,6 +17,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 func calibrationFindings(root string) []doctor.Finding {
@@ -28,7 +29,7 @@ func calibrationFindings(root string) []doctor.Finding {
 			Detail: fmt.Sprintf("calibration health unavailable: %v", err),
 		}}
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	health, err := ts.CalibrationHealth()
 	if err != nil {
 		return []doctor.Finding{{

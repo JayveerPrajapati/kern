@@ -34,6 +34,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/relay"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"os"
 	"strings"
@@ -106,7 +107,7 @@ type App struct {
 	// pending/approve/reject surfaces read and write the SAME store a human
 	// uses to unblock a parked workflow (or a `kern approve` does).
 	fileApprovals *governance.FileStore
-	taskSvc       *app.TaskService // task-native analyze/plan/what-if
+	taskSvc       *tasklife.TaskService // task-native analyze/plan/what-if
 	// tools is the in-process tool dispatch behind the single REST passthrough
 	// route POST /v1/tools/{name}: it fronts the full catalog through the same
 	// governed dispatch path MCP clients hit (allowlist, root confinement,
@@ -295,7 +296,7 @@ func New(root string) (*App, error) {
 		firewall:      platform.Firewall(),
 		approvals:     governance.NewPersistedApprovalWorkflow(root),
 		fileApprovals: governance.NewFileStore(root),
-		taskSvc:       app.NewTaskService(platform, bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true),
+		taskSvc:       tasklife.NewTaskService(platform, bus).WithAgentID("web").WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true),
 		tools:         toolServerFactory(root),
 		tasks:         agent.NewRegistry(),
 		bus:           bus,
@@ -466,6 +467,12 @@ func (a *App) registerRoutes() {
 	mux.HandleFunc("/api/approvals/approve", a.handleApprovalApprove)
 	mux.HandleFunc("/api/approvals/reject", a.handleApprovalReject)
 	mux.HandleFunc("/api/health", a.handleHealth)
+	// Health aliases: load balancers and orchestrators probe conventional
+	// paths (/health, /healthz) before they ever read docs — they must not
+	// 404 against the same liveness probe.
+	mux.HandleFunc("/health", a.handleHealth)
+	mux.HandleFunc("/healthz", a.handleHealth)
+	mux.HandleFunc("/api/version", a.handleVersion)
 	mux.HandleFunc("/v1/analyze", a.handleV1Analyze)
 	mux.HandleFunc("/v1/plan", a.handleV1Plan)
 	mux.HandleFunc("/v1/what-if", a.handleV1WhatIf)
@@ -665,7 +672,7 @@ func (a *App) freshGraph() (*intel.Graph, *index.Index) {
 	// here too so the swap under the lock stays pure pointer assignment.
 	nix, err := a.rebuildIndex()
 	var newPlat *app.Platform
-	var newSvc *app.TaskService
+	var newSvc *tasklife.TaskService
 	if err == nil && nix != nil {
 		newPlat, newSvc = a.rebuildPlatform(nix)
 	}
@@ -710,7 +717,7 @@ func (a *App) freshGraph() (*intel.Graph, *index.Index) {
 // generation's graph forever. Its in-memory task state (workflow runs,
 // ephemeral analysis tasks) is generation-scoped and does not survive a
 // rebuild; persisted task records do, via the file-backed store.
-func (a *App) rebuildPlatform(nix *index.Index) (*app.Platform, *app.TaskService) {
+func (a *App) rebuildPlatform(nix *index.Index) (*app.Platform, *tasklife.TaskService) {
 	plat, err := app.NewWithIndex(a.root, nix)
 	if err != nil || plat == nil {
 		log.Printf("web: platform rebuild failed: %v", err)
@@ -726,7 +733,7 @@ func (a *App) rebuildPlatform(nix *index.Index) (*app.Platform, *app.TaskService
 	if len(policies) > 0 {
 		plat.Firewall().WithPolicies(policies)
 	}
-	svc := app.NewTaskService(plat, a.bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	svc := tasklife.NewTaskService(plat, a.bus).WithAgentID("web").WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
 	return plat, svc
 }
 

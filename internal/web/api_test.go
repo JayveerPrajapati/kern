@@ -10,9 +10,9 @@ import (
 
 	// Alias the internal/app import: the web test package already names its
 	// App instances `app`, so the package-level identifier would collide.
-	kernapp "github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // firstSymbolNodeID returns the ID of the first symbol node in the app's
@@ -152,7 +152,7 @@ func TestV1AnalyzePersistsTaskRecord(t *testing.T) {
 		t.Fatalf("task_id = %q, want store-assigned t-<n> (authoritative record)", resp.TaskID)
 	}
 	// A fresh service reads the same persisted store `kern task <id>` reads.
-	fresh := kernapp.NewTaskService(app.platform, eventbus.New())
+	fresh := tasklife.NewTaskService(app.platform, eventbus.New())
 	if got, ok := fresh.Get(resp.TaskID); !ok {
 		t.Fatalf("task %q not queryable from a fresh TaskService after POST /v1/analyze", resp.TaskID)
 	} else if got.State == "" {

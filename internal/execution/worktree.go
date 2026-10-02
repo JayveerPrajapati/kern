@@ -135,8 +135,7 @@ func (w *Worktree) Diff() (string, error) {
 		// srcRoot ("." — the normal `kern execute` invocation from inside the
 		// repo), filepath.Dir(".") is "." itself, which would drop the aside
 		// INTO the tree git diff --no-index compares — leaking every .git
-		// internal into the printed diff (dogfooding A1-N2: ~1100 spurious
-		// "a/.kern-git-aside-<pid>-.../..." sections incl. binary object dumps).
+		// internal into the printed diff.
 		// Resolve srcRoot to an absolute path first so Dir() names the real
 		// parent directory.
 		absSrc, aerr := filepath.Abs(w.srcRoot)

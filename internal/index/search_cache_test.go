@@ -90,7 +90,7 @@ const helper = () => 1;
 `,
 	}
 	ix := buildTestIndex(t, files)
-	if ix.kindIdx == nil {
+	if ix.getCache().kindIdx == nil {
 		t.Fatal("expected kind index to be built by Build")
 	}
 	for _, pattern := range searchBattery {
@@ -100,8 +100,8 @@ const helper = () => 1;
 	}
 }
 
-// TestSearchKindIndexFallbackHandBuilt pins the nil-kindIdx fallback: an
-// Index struct built by hand (never through Build/Load/reindexByFile) must
+// TestSearchKindIndexFallbackHandBuilt pins the nil-cache fallback: an
+// Index struct built by hand (never through Build/Load/initMaps) must
 // behave exactly like the linear scan.
 func TestSearchKindIndexFallbackHandBuilt(t *testing.T) {
 	ix := &Index{
@@ -116,8 +116,8 @@ func TestSearchKindIndexFallbackHandBuilt(t *testing.T) {
 			{Kind: "var", Name: "counter", File: "b.go", Line: 3},
 		},
 	}
-	if ix.kindIdx != nil {
-		t.Fatal("hand-built index must start without a kind index")
+	if ix.cache != nil {
+		t.Fatal("hand-built index must start without a lookup cache")
 	}
 	for _, pattern := range searchBattery {
 		for _, limit := range []int{1, 5, 50} {

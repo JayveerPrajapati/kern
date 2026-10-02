@@ -55,6 +55,52 @@ type FreshnessProof struct {
 // must not be trusted.
 func (p FreshnessProof) Stale() bool { return p.Verdict != FreshnessFresh }
 
+// FreshnessSnapshot is the per-file content observation captured during a
+// staleness check's content walk: every indexable file's content hash plus
+// the mtime observed in the SAME walk (indexableHashesObserved). A
+// subsequent incremental Update can reuse these hashes instead of re-reading
+// and re-hashing the whole tree — each file's hash is trusted only after the
+// current stat re-validates that its mtime is unchanged since the walk, so a
+// file edited between the staleness check and the update is re-read like any
+// other changed file. The zero value (nil maps) means "no usable
+// observation".
+type FreshnessSnapshot struct {
+	Hashes map[string]string `json:"-"`
+	Mtimes map[string]int64  `json:"-"`
+}
+
+// retainStaleSnapshot stores a completed content-walk observation on ix for a
+// following UpdateWithSnapshot; a nil hashes map clears any previous
+// observation. Retention is bounded: every subsequent staleness check either
+// replaces it (content walk) or clears it (no walk ran).
+func (ix *Index) retainStaleSnapshot(hashes map[string]string, mtimes map[string]int64) {
+	ix.staleMu.Lock()
+	defer ix.staleMu.Unlock()
+	if hashes == nil {
+		ix.staleSnapshot = nil
+		return
+	}
+	ix.staleSnapshot = &FreshnessSnapshot{Hashes: hashes, Mtimes: mtimes}
+}
+
+// clearStaleSnapshot drops any retained observation. Called whenever a
+// staleness check decides WITHOUT a content walk, so a snapshot is never
+// reused across decisions it did not come from.
+func (ix *Index) clearStaleSnapshot() {
+	ix.staleMu.Lock()
+	defer ix.staleMu.Unlock()
+	ix.staleSnapshot = nil
+}
+
+// retainedSnapshot returns the current observation under staleMu, so
+// UpdateWithSnapshot's read cannot race a concurrent staleness check's
+// retention (staleness checks fan out off any app-level lock by design).
+func (ix *Index) retainedSnapshot() *FreshnessSnapshot {
+	ix.staleMu.Lock()
+	defer ix.staleMu.Unlock()
+	return ix.staleSnapshot
+}
+
 // identityGit holds the walk-independent git observations of an index
 // identity (tree OID, commit). StartIdentityGit launches them on a
 // background goroutine so Build/Update can overlap the (slow) git staging
@@ -283,12 +329,17 @@ func runGit(root string, args ...string) (string, error) {
 func (ix *Index) FreshnessProof(root string) FreshnessProof {
 	proof, ok := ix.freshnessBaseline(root)
 	if !ok {
+		// No baseline: no content walk ran, so no observation is retained.
+		ix.clearStaleSnapshot()
 		return proof // unknown
 	}
 	// Fast path: git's working-tree OID is unchanged, so no indexed file
 	// changed — done without a content re-walk. This catches mtime-preserving
 	// edits (git apply) that the stat gate cannot.
 	if proof.Recorded.TreeOID != "" && proof.Recorded.TreeOID == proof.Current.TreeOID {
+		// Fresh without a content walk: drop any earlier observation so the
+		// retained snapshot always matches the walk the last verdict came from.
+		ix.clearStaleSnapshot()
 		proof.Verdict = FreshnessFresh
 		return proof
 	}
@@ -406,13 +457,19 @@ func (ix *Index) freshnessBaseline(root string) (FreshnessProof, bool) {
 // finishFreshness resolves the verdict by recomputing the content root from
 // the live tree. On recompute failure it trusts git when git vouches for the
 // tree, and returns "unknown" when neither check can decide.
+//
+// The content walk's per-file observation (hashes + mtimes) is retained on ix
+// (retainStaleSnapshot) for a following UpdateWithSnapshot: this is the walk
+// the staleness verdict is based on, and its hashes are the ones the update
+// must reuse. On failure no observation is retained.
 func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessProof {
-	cur, err := indexableHashes(root, ignore.Load(root))
+	cur, mtimes, err := indexableHashesObserved(root, ignore.Load(root))
 	if err != nil {
 		// The walk failed and freshnessBaseline left Current.TreeOID lazy
 		// (empty on dirty/unavailable trees): only now is the expensive
 		// full staging form of the OID worth computing, because git is the
 		// only remaining witness.
+		ix.clearStaleSnapshot()
 		if proof.Current.TreeOID == "" {
 			proof.Current.TreeOID = treeOID(root)
 		}
@@ -423,6 +480,7 @@ func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessPro
 		proof.Verdict = FreshnessUnknown
 		return proof
 	}
+	ix.retainStaleSnapshot(cur, mtimes)
 	proof.Current.ContentRoot = aggregateHash(cur)
 	if proof.Current.ContentRoot == proof.Recorded.ContentRoot {
 		proof.Verdict = FreshnessFresh

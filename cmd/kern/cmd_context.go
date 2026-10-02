@@ -18,6 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/doctor"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
@@ -314,7 +315,7 @@ func doctorExitCode(findings []doctor.Finding) int {
 func runContext(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
-		fatalUsage("usage: kern context <symbol> [root] [--lines N]")
+		fatalUsage("usage: kern context <symbol> [root] [--lines N] [--etag H]")
 	}
 	symbol := args[0]
 	root := projectRoot(f)
@@ -388,6 +389,12 @@ func runContext(rest []string) {
 		}
 		ctxText = profiles.ApplyProfile(p, ctxText)
 	}
+	// Conditional fetch (B1, ADR-0012): --etag matches the fresh etag →
+	// print `unchanged (etag <E>)` and exit 0; otherwise print the full
+	// context and an `etag: <hash>` footer on stderr.
+	if cliEtagResponse("kern_context", f.etag, ctxText) {
+		return
+	}
 	fmt.Println(ctxText)
 	if def, ok := ix.ResolveName(symbol); ok && def.File != "" {
 		filePath := def.File
@@ -403,7 +410,7 @@ func runContext(rest []string) {
 }
 
 // resolveContextSymbol resolves the `kern context` symbol argument with the
-// same policy as `kern what-if` (dogfooding F12): an exact index hit wins; a
+// same policy as `kern what-if`: an exact index hit wins; a
 // single strong fuzzy match (ranked-search score >= 150, the what-if
 // threshold) auto-resolves to the matched symbol; multiple distinct strong
 // candidates are ambiguous and return false so the caller's did-you-mean
@@ -590,7 +597,7 @@ func runGuard(rest []string) {
 	}
 	switch sub {
 	case "init":
-		path := intel.DefaultBoundariesPath(root)
+		path := guard.DefaultBoundariesPath(root)
 		if _, serr := os.Stat(path); serr == nil && !f.force {
 			// guard init previously OVERWROTE an existing boundaries file
 			// without warning (destroying custom rules). Refuse unless
@@ -598,7 +605,7 @@ func runGuard(rest []string) {
 			fmt.Printf("guard: %s already exists — leaving untouched (pass --force to overwrite)\n", path)
 			return
 		}
-		if err := intel.InitBoundaries(root); err != nil {
+		if err := guard.InitBoundaries(root); err != nil {
 			fatal("Guard: %v", err)
 		}
 		fmt.Printf("wrote %s (edit it to declare boundary rules)\n", path)
@@ -612,13 +619,13 @@ func runGuard(rest []string) {
 		if err != nil {
 			fatal("Guard: %v", err)
 		}
-		b, err := intel.LoadBoundaries(root)
+		b, err := guard.LoadBoundaries(root)
 		if err != nil {
 			fatal("Guard: %v", err)
 		}
 		unconfigured := b == nil
 		if b == nil {
-			b = intel.InferBoundaries(ix)
+			b = guard.InferBoundaries(ix)
 		}
 		var files []string
 		if f.file != "" {
@@ -661,7 +668,7 @@ func runGuard(rest []string) {
 			if f.json {
 				printJSON(map[string]any{
 					"schema_version":  kernJSONContractVersion,
-					"violations":      []intel.Violation{}, // boundary check skipped
+					"violations":      []guard.Violation{}, // boundary check skipped
 					"freshness_proof": freshness,
 					"authz_verdict":   authzVerdict,
 				})
@@ -670,7 +677,7 @@ func runGuard(rest []string) {
 		}
 
 		strict := f.precision == "strict"
-		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
+		violations, skipped := guard.CheckBoundariesPrecise(ix, b, files, strict)
 		// Guard gate: a changed file whose package participates in an
 		// import cycle is a WARN (never a violation — the exit code stays
 		// driven by boundary violations alone), surfaced in both output modes.
@@ -705,7 +712,7 @@ func runGuard(rest []string) {
 			}
 			printJSON(out)
 		default:
-			fmt.Println(intel.RenderViolations(violations))
+			fmt.Println(guard.RenderViolations(violations))
 			for _, w := range cycleWarnings {
 				fmt.Printf("WARN: %s (touched by this diff)\n", w)
 			}
@@ -755,8 +762,8 @@ func runGuard(rest []string) {
 // subscribers see guard results immediately instead of at the next replay.
 // Publishing is best-effort and deterministic (event order = violation order);
 // it never fails the guard or alters its output or exit behavior.
-func publishGuardEvents(root string, violations []intel.Violation, warnNotConfigured bool) {
-	relay.PublishPersisted(root, intel.GuardEvents(violations, warnNotConfigured))
+func publishGuardEvents(root string, violations []guard.Violation, warnNotConfigured bool) {
+	relay.PublishPersisted(root, guard.GuardEvents(violations, warnNotConfigured))
 }
 
 // The CLI guard's default agent identity and the KERN_MCP_PERMISSIVE escape

@@ -65,7 +65,7 @@ var commandTable = map[string]commandEntry{
 	"--version": {category: "meta", run: func(cmd string, rest []string) int {
 		runVersion(rest)
 		return 0
-	}, help: "", usage: "usage: kern --version [flags]  (alias of version)"},
+	}, help: "", usage: "usage: kern `--version` [flags]  (alias of version)"},
 	"-v": {category: "meta", run: func(cmd string, rest []string) int {
 		runVersion(rest)
 		return 0
@@ -94,7 +94,7 @@ var commandTable = map[string]commandEntry{
 	"compact": {category: "compression", run: func(cmd string, rest []string) int {
 		runCompact(rest)
 		return 0
-	}, help: "symbolic file summary", usage: "usage: kern compact [--root ROOT] <file>\n  options:\n    --root             project root (default: .)\n    --tier             summary|folded|full"},
+	}, help: "symbolic file summary", usage: "usage: kern compact [--root ROOT] <file>\n  options:\n    --root             project root (default: .)\n    --tier             summary|folded|full\n    --etag             conditional-fetch etag from a previous response"},
 	"project": {category: "graph", run: func(cmd string, rest []string) int {
 		runProject(rest)
 		return 0
@@ -157,11 +157,11 @@ var commandTable = map[string]commandEntry{
 	"explain-finding": {category: "analysis", run: func(cmd string, rest []string) int {
 		runExplainFinding(rest)
 		return 0
-	}, help: "plain-language explanation of a blueprint gate finding", usage: "usage: kern explain-finding --finding <json> [--root ROOT]"},
+	}, help: "plain-language explanation of a blueprint gate finding", usage: "usage: kern explain-finding --finding <json> [--root ROOT]\n  options:\n    --finding          blueprint gate finding JSON (required)\n    --root             repository root (default: .)"},
 	"repair-guidance": {category: "analysis", run: func(cmd string, rest []string) int {
 		runRepairGuidance(rest)
 		return 0
-	}, help: "repair guidance for a blueprint gate finding", usage: "usage: kern repair-guidance --finding <json> [--root ROOT]"},
+	}, help: "repair guidance for a blueprint gate finding", usage: "usage: kern repair-guidance --finding <json> [--root ROOT]\n  options:\n    --finding          blueprint gate finding JSON (required)\n    --root             repository root (default: .)"},
 	"heal": {category: "verification", run: func(cmd string, rest []string) int {
 		runHeal(rest)
 		return 0
@@ -362,7 +362,7 @@ var commandTable = map[string]commandEntry{
 	"verify": {category: "verification", run: func(cmd string, rest []string) int {
 		runVerify(rest)
 		return 0
-	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; wins over --short)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over --short/--full)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
+	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; overrides the --short run)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over both --short and --full runs)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
 	"check-draft": {category: "verification", run: func(cmd string, rest []string) int {
 		return runCheckDraft(rest)
 	}, help: "validate draft code against the index", usage: "usage: kern check-draft <file|-> [root] [--lang LANG] [--file F]\n  options:\n    --file             draft source file (default: positional arg or stdin)\n    --lang             language\n    --root             project root (default: .)"},
@@ -392,7 +392,7 @@ var commandTable = map[string]commandEntry{
 	}, help: "search local docs (alias of doc-search)", usage: "usage: kern doc_search <query> [--root ROOT] [--limit N]  (alias of doc-search)"},
 	"check": {category: "governance", run: func(cmd string, rest []string) int {
 		return runCheckDogfood(rest)
-	}, help: "validate staged changes against policy (boundaries, secrets, tests)", usage: "usage: kern check [flags]\n  options:\n    --ci               CI mode: machine-readable JSON verdict on stdout, exit 0/1\n    --fast             fast mode: skip the jscpd two-pass duplication scan\n    --format           output format: json|terminal (default: terminal)\n    --json             shorthand for --format=json\n    --repo             repository root (default: current directory)\n    --require-kern     fail (exit 2) when the kern binary is missing\n    --source           change source: agent|ide|human|refactor|dep-bot|ci\n    --staged           check staged changes (git diff --cached; default)"},
+	}, help: "validate staged changes against policy (boundaries, secrets, tests)", usage: "usage: kern check [flags]\n  options:\n    --all              repo-wide scan: diff the whole tree against the empty tree (nightly debt report) instead of staged changes\n    --ci               CI mode: machine-readable JSON verdict on stdout, exit 0/1\n    --fast             fast mode: skip the jscpd two-pass duplication scan\n    --format           output format: json|terminal (default: terminal)\n    --json             shorthand for --format json\n    --repo             repository root (default: current directory)\n    --require-kern     fail (exit 2) when the kern binary is missing\n    --source           change source: agent|ide|human|refactor|dep-bot|ci\n    --staged           check staged changes (diffs the index by default)"},
 	"diff-gate": {category: "governance", run: func(cmd string, rest []string) int {
 		return bpcli.RunDiffGate(rest)
 	}, help: "deterministic diff gate: advisory local checks on the working-tree diff (gofmt, vulnerabilities, schema drift, unsafe exec, changelog, MCP catalog) — --blocking for CI", usage: "usage: kern diff-gate [flags]"},
@@ -454,7 +454,7 @@ var commandTable = map[string]commandEntry{
 	"commitmsg": {category: "git", run: func(cmd string, rest []string) int {
 		runCommitmsg(rest)
 		return 0
-	}, help: "conventional commit message", usage: "usage: kern commitmsg [flags]\n  options:\n    --range            line range a..b\n    --root             project root (default: .)\n    --staged           operate on staged changes (git diff --cached)\n    --subject          subject line only"},
+	}, help: "conventional commit message", usage: "usage: kern commitmsg [flags]\n  options:\n    --range            line range a..b\n    --root             project root (default: .)\n    --staged           operate on staged changes (diffs the index)\n    --subject          subject line only"},
 	"commit": {category: "git", run: func(cmd string, rest []string) int {
 		runCommit(rest)
 		return 0
@@ -505,22 +505,22 @@ var commandTable = map[string]commandEntry{
 	"sec": {category: "security", run: func(cmd string, rest []string) int {
 		runSec(rest)
 		return 0
-	}, help: "security scan", usage: "usage: kern sec [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
+	}, help: "security scan (regex + optional gosec)", usage: "usage: kern sec [flags]\n  options:\n    --engine           scan engines: internal|gosec|all|none (default all: internal + gosec when installed)\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
 	"security": {category: "security", run: func(cmd string, rest []string) int {
 		// QA: `kern security` used to be an unknown command (generic banner,
 		// rc=2). It is the user-visible name of the security tool whose
 		// canonical spelling is `kern sec`; alias it so both work identically.
 		runSec(rest)
 		return 0
-	}, help: "security scan (alias of sec)", usage: "usage: kern security [flags]  (alias of sec)\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
+	}, help: "security scan (alias of sec)", usage: "usage: kern security [flags]  (alias of sec)\n  options:\n    --engine           scan engines: internal|gosec|all|none (default all: internal + gosec when installed)\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
 	"delete": {category: "security", run: func(cmd string, rest []string) int {
 		runDelete(rest)
 		return 0
-	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate ONLY — structural refusals (e.g. a symbol with production callers) are never bypassed\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks unless --force is set)\n    --force            override the HIGH-risk mutation gate ONLY — structural refusals (e.g. a symbol with production callers) are never bypassed\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"rename": {category: "security", run: func(cmd string, rest []string) int {
 		runRename(rest)
 		return 0
-	}, help: "structural rename", usage: "usage: kern rename <old> <new> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "structural rename", usage: "usage: kern rename <old> <new> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks unless --force is set)\n    --force            override the HIGH-risk mutation gate\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"watch": {category: "search", run: func(cmd string, rest []string) int {
 		runWatch(rest)
 		return 0
@@ -551,7 +551,7 @@ var commandTable = map[string]commandEntry{
 	"context": {category: "context", run: func(cmd string, rest []string) int {
 		runContext(rest)
 		return 0
-	}, help: "symbol context slice", usage: "usage: kern context <symbol> [root] [--lines N]\n  options:\n    --lens             analysis lens\n    --lines            context line count\n    --profile          profile name\n    --root             project root (default: .)"},
+	}, help: "symbol context slice", usage: "usage: kern context <symbol> [root] [--lines N]\n  options:\n    --lens             analysis lens\n    --lines            context line count\n    --profile          profile name\n    --root             project root (default: .)\n    --etag             conditional-fetch etag from a previous response"},
 	"why": {category: "graph", run: func(cmd string, rest []string) int {
 		runWhy(rest)
 		return 0
@@ -637,7 +637,7 @@ var commandTable = map[string]commandEntry{
 	"explore": {category: "graph", run: func(cmd string, rest []string) int {
 		runExplore(rest)
 		return 0
-	}, help: "symbol source + blast radius", usage: "usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]\n  options:\n    --depth            traversal depth (default 2, 0 = uncapped)\n    --explain          append the why-rationale section (what it is, who depends on it and why)\n    --json             emit JSON output\n    --max              maximum count/threshold (default 30)\n    --min-confidence   minimum confidence\n    --root             project root (default: .)"},
+	}, help: "symbol source + blast radius", usage: "usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]\n  options:\n    --depth            traversal depth (default 2, 0 = uncapped)\n    --explain          append the why-rationale section (what it is, who depends on it and why)\n    --json             emit JSON output\n    --max              maximum count/threshold (default 30)\n    --min-confidence   minimum confidence\n    --root             project root (default: .)\n    --etag             conditional-fetch etag from a previous response"},
 	"fts": {category: "search", run: func(cmd string, rest []string) int {
 		runFts(rest)
 		return 0
@@ -657,7 +657,7 @@ var commandTable = map[string]commandEntry{
 	"retrieve": {category: "context", run: func(cmd string, rest []string) int {
 		runRetrieve(rest)
 		return 0
-	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: retrieveUsage + "\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type"},
+	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: retrieveUsage + "\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type\n    --etag             conditional-fetch etag from a previous response"},
 	"resolve": {category: "context", run: func(cmd string, rest []string) int {
 		runResolve(rest)
 		return 0
@@ -790,7 +790,7 @@ var commandTable = map[string]commandEntry{
 			runMeta(append([]string{"--pipeline"}, rest...))
 		}
 		return 0
-	}, help: "multi-tool pipeline runner", usage: "usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"Index.Search\"}}]'  (alias of meta --pipeline)\n  options:\n    --pipeline JSON  deterministic multi-tool pipeline spec with variable interpolation"},
+	}, help: "multi-tool pipeline runner", usage: "usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"Index.Search\"}}]'  alias of meta --pipeline\n  options:\n    --pipeline JSON  deterministic multi-tool pipeline spec with variable interpolation"},
 	"pre-edit": {category: "mcp-mirror", run: func(cmd string, rest []string) int {
 		runPreEdit(rest)
 		return 0
@@ -898,7 +898,7 @@ var commandTable = map[string]commandEntry{
 	"semantic-merge": {category: "mcp-mirror", run: func(cmd string, rest []string) int {
 		runSemanticMerge(rest)
 		return 0
-	}, help: semanticMergeHelp, usage: "usage: kern semantic-merge [--file FILE] [--base CODE] [--local CODE] [--remote CODE] [--apply] [--json] [--root ROOT]\n  options:\n    --base CODE    base version: code string, or a path to a file containing it\n    --local CODE   local version: code string or file path\n    --remote CODE  remote version: code string or file path\n    --file FILE    target file path (required with --apply)\n    --apply        write a clean 3-way merge into the target file\n    --json         emit the merge/conflict result as JSON\n    --root ROOT     project root for AST context (default: .)"},
+	}, help: semanticMergeHelp, usage: "usage: kern semantic-merge [--file FILE] [--base CODE] [--local CODE] [--remote CODE] [--apply] [--json] [--root ROOT]\n  options:\n    --base CODE    base version: code string, or a path to a file containing it\n    --local CODE   local version: code string or file path\n    --remote CODE  remote version: code string or file path\n    --file FILE    target file path (required when --apply is set)\n    --apply        write a clean 3-way merge into the target file\n    --json         emit the merge/conflict result as JSON\n    --root ROOT     project root for AST context (default: .)"},
 	"semantic_merge": {category: "mcp-mirror", alias: true, run: func(cmd string, rest []string) int {
 		runSemanticMerge(rest)
 		return 0
@@ -928,7 +928,7 @@ var commandTable = map[string]commandEntry{
 	"refactor-transaction": {category: "refactor", run: func(cmd string, rest []string) int {
 		runRefactorTransaction(rest)
 		return 0
-	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor-transaction [flags]\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command (verification needs go.mod or --cmd; otherwise it is skipped with a warning)\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor-transaction [flags]\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command (verification needs go.mod or a --cmd value; otherwise it is skipped with a warning)\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
 	"refactor": {category: "refactor", run: func(cmd string, rest []string) int {
 		runRefactorTransaction(rest)
 		return 0
@@ -1019,7 +1019,7 @@ func runBlueprint(rest []string) int {
 
 // packDefaultMaxTokens is the default token budget for `kern pack` when the
 // caller passes no --max-tokens. An uncapped pack of a large repo can dump
-// millions of tokens / tens of MB to stdout (dogfooding F10); the default
+// millions of tokens / tens of MB to stdout; the default
 // budget keeps the paste-ready bundle usable. An explicit --max-tokens (any
 // value, including 0 for unlimited) always bypasses the default.
 const packDefaultMaxTokens = 250_000

@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"strings"
 )
@@ -217,7 +218,7 @@ func runIncident(rest []string) {
 		}
 		p.WithRuntimeSource(store)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 
 	// --correlate: run the incident→twin→code correlation engine and render
 	// the correlation report (Feature Batch D) instead of the full pipeline.

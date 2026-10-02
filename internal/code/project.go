@@ -114,6 +114,8 @@ func summarizeCached(abs, rel string, maxSymbols int) (Summary, bool) {
 	sum := Summarize(abs, content, maxSymbols)
 	sum.Path = rel
 	// Cache under the content hash so the path-specific copy stays current.
+	// Best-effort by design: a failed Store costs the next build a
+	// re-summarize (a cache miss), never an error for this one.
 	_ = cache.Store("code/"+h, sum)
 	return sum, false
 }

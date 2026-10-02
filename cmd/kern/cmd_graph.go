@@ -773,7 +773,7 @@ func runCochange(rest []string) {
 func runExplore(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
-		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]")
+		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain] [--etag H]")
 	}
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 1 {
@@ -838,6 +838,12 @@ func runExplore(rest []string) {
 	// "nothing uses this var".
 	if rep.Definition.Kind == "var" && len(rep.Callers) == 0 {
 		out += "\nnote: read-references to package-level vars are not indexed\n"
+	}
+	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
+	// <E>)` and exit 0; otherwise the full report plus an `etag: <hash>`
+	// footer on stderr.
+	if cliEtagResponse("kern_explore", f.etag, out) {
+		return
 	}
 	fmt.Println(out)
 	if rep.Stats != nil {

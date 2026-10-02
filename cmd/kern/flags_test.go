@@ -20,7 +20,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 		t.Errorf("thresholds default = %q", f.thresholds)
 	}
 	if !f.cache {
-		t.Error("cache default = false, want true (optimize/preview caching on by default, matching kern_optimize_prompt)")
+		t.Error("cache default = false, want true (optimize/preview caching on by default, matching kern_optimize)")
 	}
 	if len(rest) != 0 {
 		t.Errorf("rest = %v, want empty", rest)

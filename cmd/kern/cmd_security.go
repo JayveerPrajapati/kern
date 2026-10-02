@@ -9,6 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/remove"
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,27 +100,80 @@ func runSec(rest []string) {
 			allow = strings.Split(f.severity, ",")
 		}
 	}
-	findings, serr := sec.Scan(root)
+	// --engine selects the scan engines: internal|gosec|all|none. The
+	// default (all) runs the internal regex scanner plus gosec when a binary
+	// resolves — gosec is advisory (Model C): a missing binary or timeout
+	// degrades to SKIPPED, never a hard failure, and its findings flow
+	// through the same severity lens as internal ones. "none" and "internal"
+	// are internal-only; "gosec" forces the external engine (which reports
+	// SKIPPED when unavailable).
+	wantGosec := false
+	switch f.engine {
+	case "gosec":
+		wantGosec = true
+	case "all", "":
+		wantGosec = sec.GosecAvailable()
+	}
+	findings, serr := secscan.Scan(root)
 	if serr != nil {
 		fatal("kern sec: %v", serr)
 	}
-	findings = sec.FilterBySeverity(findings, allow)
-	counts := sec.Counts(findings)
+	// gosec findings append BEFORE the severity lens so the default
+	// error-only gate governs them too (the safety: an external engine can
+	// never widen a gate that was closed).
+	var gres sec.GosecResult
+	if wantGosec {
+		gres = sec.RunGosec(root)
+		findings = append(findings, gres.Findings...)
+	}
+	findings = secscan.FilterBySeverity(findings, allow)
+	counts := secscan.Counts(findings)
 	if f.json {
-		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
+		out := map[string]any{
 			"schema_version": kernJSONContractVersion,
 			"findings":       findings,
-		}); err != nil {
+		}
+		if wantGosec {
+			out["engines"] = map[string]any{
+				"gosec": map[string]any{
+					"status": gres.Status,
+					"detail": gres.Detail,
+					"count":  len(gres.Findings),
+				},
+			}
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 			fatal("sec: %v", err)
 		}
 	} else {
-		fmt.Print(sec.Render(findings, maxN))
+		fmt.Print(secscan.Render(findings, maxN))
 		if f.severity == "" {
 			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info) [use --severity error,warning,info to view all]\n",
 				len(findings), counts["error"], counts["warning"], counts["info"])
 		} else {
 			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)\n",
 				len(findings), counts["error"], counts["warning"], counts["info"])
+		}
+		if wantGosec {
+			switch gres.Status {
+			case sec.EngineStatusSkipped:
+				fmt.Fprintf(os.Stderr, "kern sec: gosec skipped: %s\n", gres.Detail)
+			case sec.EngineStatusRan:
+				// Only the default error-only lens can hide gosec findings
+				// silently; surface the filtered count with the same hint
+				// pattern the summary line uses.
+				if f.severity == "" {
+					kept := 0
+					for _, fd := range findings {
+						if strings.HasPrefix(fd.Rule, "gosec:") {
+							kept++
+						}
+					}
+					if kept < len(gres.Findings) {
+						fmt.Fprintf(os.Stderr, "kern sec: gosec: %d finding(s) filtered by the default error-only lens [use --severity error,warning,info to view all]\n", len(gres.Findings)-kept)
+					}
+				}
+			}
 		}
 	}
 	// The exit code must be the same in --json and text mode: error-severity
@@ -162,7 +216,7 @@ func runTaint(rest []string) {
 			fatal("kern taint: no such directory: %s", args[0])
 		}
 	}
-	findings, serr := sec.Scan(root)
+	findings, serr := secscan.Scan(root)
 	if serr != nil {
 		fatal("kern taint: %v", serr)
 	}
@@ -203,7 +257,7 @@ func runTaint(rest []string) {
 			scope = "worktree"
 		}
 		fmt.Printf("scope: %d file(s) changed in %s\n", len(files), scope)
-		findings = sec.FilterByFiles(findings, files)
+		findings = secscan.FilterByFiles(findings, files)
 	}
 	ix, ierr := loadOrBuild(root)
 	if ierr != nil {

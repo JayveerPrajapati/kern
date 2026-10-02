@@ -13,7 +13,7 @@ import (
 // by the dispatch table help text and every error path (QA: the error paths
 // used to print three divergent variants that contradicted the documented
 // usage — single source of truth now).
-const retrieveUsage = "usage: kern retrieve (--query <q> | --symbol <name>) [--level l1|l2|l3] [--task-type <type>] [root] [--max-tokens N]"
+const retrieveUsage = "usage: kern retrieve (--query <q> | --symbol <name>) [--level l1|l2|l3] [--task-type <type>] [root] [--max-tokens N] [--etag H]"
 
 // parseRetrieveLevelCLI maps the string form of a disclosure level to the
 // retrieval.Level constants, mirroring the MCP handler's parsing. Empty
@@ -127,7 +127,14 @@ func runRetrieve(rest []string) {
 		printJSON(res)
 		return
 	}
-	fmt.Println(retrieval.Render(res))
+	rendered := retrieval.Render(res)
+	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
+	// <E>)` and exit 0; otherwise the render plus an `etag: <hash>` footer
+	// on stderr.
+	if cliEtagResponse("kern_retrieve", f.etag, rendered) {
+		return
+	}
+	fmt.Println(rendered)
 }
 
 // runResolve implements `kern resolve <handle-id>`: resolves a previously

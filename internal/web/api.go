@@ -16,7 +16,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
-	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -25,6 +24,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/modernization"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -545,7 +545,7 @@ func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID,
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		arts, err := app.NewArtifactStore(a.root).GetByTask(taskID)
+		arts, err := tasklife.NewArtifactStore(a.root).GetByTask(taskID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -961,7 +961,7 @@ func (a *App) handleV1ArtifactsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	store := app.NewArtifactStore(a.root)
+	store := tasklife.NewArtifactStore(a.root)
 	taskID := r.URL.Query().Get("task")
 	if taskID != "" {
 		arts, err := store.GetByTask(taskID)
@@ -992,7 +992,7 @@ func (a *App) handleV1ArtifactGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid artifact id")
 		return
 	}
-	store := app.NewArtifactStore(a.root)
+	store := tasklife.NewArtifactStore(a.root)
 	art, err := store.Get(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "artifact not found: "+id)
@@ -1094,7 +1094,7 @@ func (a *App) handleV1Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	t, diff, err := a.taskSvc.Execute(req.Patch)
 	if err != nil {
-		if errors.Is(err, app.ErrInvalidPatch) {
+		if errors.Is(err, tasklife.ErrInvalidPatch) {
 			// A malformed / non-applicable patch is a CLIENT error: the caller
 			// sent a patch that cannot be applied, so it must not surface as a
 			// 500 "internal error". Keep the message (it names the git apply

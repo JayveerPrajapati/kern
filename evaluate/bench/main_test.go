@@ -125,7 +125,7 @@ func TestMeasureClassExercisesOutcomePaths(t *testing.T) {
 
 // TestMain pins an UNREACHABLE default provider for the whole package so
 // every bare Prompt() call (no explicit --llm) deterministically falls back
-// to the deterministic path (dogfooding G-MED hermeticity). Before the fix,
+// to the deterministic path. Before the fix,
 // the LLM stage never ran without --llm, so tests were immune to the host
 // machine; now the stage DEFAULTS to the auto chain, and on a machine with
 // agent CLIs installed (claude/opencode/...) the chain would actually answer

@@ -75,7 +75,7 @@ func BuildPersisted(root string) (*Index, error) {
 			}
 			return ix, !ix.Stale()
 		},
-		func() (*Index, error) {
+		func(prev *Index) (*Index, error) {
 			ix, err := Build(root)
 			if err != nil {
 				return nil, err
@@ -241,7 +241,7 @@ func EnsureFresh(root string) (*EnsureFreshResult, error) {
 
 	// Stale (or unprovable): rebuild under the exclusive cross-process build
 	// lock, debounced so concurrent invocations share one rebuild.
-	return debouncedRebuild(root, freshProbe, func() (*EnsureFreshResult, error) {
+	return debouncedRebuild(root, freshProbe, func(prev *EnsureFreshResult) (*EnsureFreshResult, error) {
 		// 3. Stale (or unprovable): run the incremental update over the
 		// previous index — the same update-over-build pattern `kern index
 		// --update` uses — falling back to a full build (which persists)

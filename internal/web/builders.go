@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/architecture"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
@@ -227,7 +228,7 @@ func (a *App) ArchitectureReport() (*architecture.Report, error) {
 	}
 	for _, v := range dto.Violations {
 		rep.Violations = append(rep.Violations, architecture.Violation{
-			Violation: intel.Violation{
+			Violation: guard.Violation{
 				CallerFile: v.CallerFile,
 				CalleeFile: v.CalleeFile,
 				Symbol:     v.Symbol,

@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // handleIndex serves the HTML dashboard at "/" and a 404 JSON object for any
@@ -82,13 +84,21 @@ func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
 // submitted task with a compact per-task efficiency report and a link to its
 // detail page. It is read-only.
 func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
+	a.renderTasksPage(w, a.tasksT)
+}
+
+// renderTasksPage is the shared body of handleTasks and handleEfficiency:
+// build the tasks dataset once and render it through the given template
+// (the two pages differ only in presentation). A build failure is a 500
+// with the error; template execution errors are logged by html/template.
+func (a *App) renderTasksPage(w http.ResponseWriter, t *template.Template) {
 	data, err := a.buildTasks()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = a.tasksT.Execute(w, data)
+	_ = t.Execute(w, data)
 }
 
 // handleOverview serves the aggregate project overview.
@@ -152,6 +162,16 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// graph rebuild is in flight) so the console pages can poll it for their
 	// pending-state line; see indexStatus. Additive field — "ok" is unchanged.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": a.indexStatus()})
+}
+
+// handleVersion serves the build version of the server binary. GET/HEAD only,
+// mirroring handleHealth's method guard.
+func (a *App) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": "kern-server", "version": version.Version})
 }
 
 // handleApprovalsPending serves the current pending approvals.

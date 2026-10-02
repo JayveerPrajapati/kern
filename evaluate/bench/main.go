@@ -953,6 +953,16 @@ func sessionTakeawayLine() string {
 }
 
 func main() {
+	// Determinism contract: this harness measures the DETERMINISTIC
+	// compression surfaces only. Pin the LLM stage off so optimize.Prompt's
+	// default auto chain (host sampler → agent CLIs → Ollama) can never leak
+	// a live model into the numbers. Observed 2026-10-02 without the pin:
+	// with the chain active and Ollama down, every row burned ~7.5s probing
+	// dead legs (48-row matrix ≈ 6-7 minutes, indistinguishable from hung),
+	// and rows answered by a locally-installed CLI agent VARIED between runs
+	// (212 ↔ 225 after-tokens on the same fixture) — breaking both the
+	// offline and the reproducibility halves of this harness's contract.
+	os.Setenv("KERN_LLM_PROVIDER", "none")
 	root := flag.String("root", ".", "project root whose docs the recall test indexes")
 	flag.Parse()
 

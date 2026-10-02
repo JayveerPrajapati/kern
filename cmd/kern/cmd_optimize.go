@@ -170,6 +170,12 @@ func runCompact(rest []string) {
 		content = kernctx.PruneCode(file, content, true)
 	}
 	rendered := code.RenderTier(file, content, tier)
+	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
+	// <E>)` and exit 0; otherwise the full render plus an `etag: <hash>`
+	// footer on stderr.
+	if cliEtagResponse("kern_compact_file", f.etag, rendered) {
+		return
+	}
 	fmt.Println(rendered)
 	before := tokenize.Count(string(content))
 	after := tokenize.Count(rendered)

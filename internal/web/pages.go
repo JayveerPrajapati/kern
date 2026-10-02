@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ type artifactItem struct {
 
 // buildArtifacts lists every persisted artifact via the shared ArtifactStore.
 func (a *App) buildArtifacts() []artifactItem {
-	arts, err := app.NewArtifactStore(a.root).List()
+	arts, err := tasklife.NewArtifactStore(a.root).List()
 	if err != nil {
 		return []artifactItem{}
 	}
@@ -270,13 +270,7 @@ func (a *App) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (a *App) handleEfficiency(w http.ResponseWriter, r *http.Request) {
-	data, err := a.buildTasks()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = a.efficiencyT.Execute(w, data)
+	a.renderTasksPage(w, a.efficiencyT)
 }
 
 func (a *App) handleEfficiencyJSON(w http.ResponseWriter, r *http.Request) {

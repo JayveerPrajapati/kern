@@ -279,6 +279,7 @@ func runMutationTest(rest []string) int {
 		MaxMutants:  maxMuts,
 		DryRun:      f.dryRun,
 		TestCommand: f.cmd,
+		Isolate:     true, // mutants are evaluated in a worktree copy; the real tree is never touched
 	})
 	if err != nil {
 		fatal("mutate: %v", err)
