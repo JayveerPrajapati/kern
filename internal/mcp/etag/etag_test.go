@@ -28,8 +28,9 @@ func TestHashStability(t *testing.T) {
 	if Hash(text, "1.0.1") == e1 {
 		t.Fatal("changed tool schema version must mint a different etag")
 	}
-	if Hash(text, "1.0.0") == Hash(text, "1.0.0") && Hash(text, "2.0.0") == Hash(text, "2.0.0") {
-		// both remain stable under repeated calls (cheap sanity)
+	e1Repeat := Hash(text, "1.0.0")
+	if e1Repeat != e1 {
+		t.Fatal("etag must remain stable under repeated calls")
 	}
 	// The tool schema version and the scheme version both participate.
 	if strings.Contains(e1, "\x00") {
@@ -76,7 +77,9 @@ func TestHashViewFoldsServeView(t *testing.T) {
 	if eDefault == HashView(text, "1.0.0", "100") {
 		t.Fatal("a different serve view must mint a different etag")
 	}
-	if HashView(text, "1.0.0", "100") != HashView(text, "1.0.0", "100") {
+	eView1 := HashView(text, "1.0.0", "100")
+	eView2 := HashView(text, "1.0.0", "100")
+	if eView1 != eView2 {
 		t.Fatal("identical text + view must stay stable")
 	}
 	if Hash(text, "1.0.0") != HashView(text, "1.0.0", "") {

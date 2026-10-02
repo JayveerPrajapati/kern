@@ -301,8 +301,8 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 	} else {
 		// No explicit --llm: DEFAULT the LLM stage to the auto chain
 		// (host session → agent CLIs → ollama) so prompt compression uses the
-		// current agent / a local CLI instead of echoing the input unchanged
-		//. The chain honors KERN_MODEL/llm.model as the default
+		// current agent / a local CLI instead of echoing the input unchanged.
+		// The chain honors KERN_MODEL/llm.model as the default
 		// model, fails fast when nothing is reachable, and only then falls back
 		// to the deterministic path with an honest message.
 		p, perr := llm.NewProvider()

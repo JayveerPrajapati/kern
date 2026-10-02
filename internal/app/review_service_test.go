@@ -30,8 +30,7 @@ func TestRenderStatelessPlanNetNewFeature(t *testing.T) {
 
 // TestRenderStatelessPlanCLICommand: a net-new plan for a `kern <name>`
 // command must name the concrete new file, the registration point, the test
-// file, and the verification commands — not the old generic one-liner
-//.
+// file, and the verification commands — not the old generic one-liner.
 func TestRenderStatelessPlanCLICommand(t *testing.T) {
 	rendered := RenderStatelessPlan("Add a `kern dogfood` CLI command that runs a self-check battery and prints a report", domain.ContextPacket{}, "../..")
 	for _, want := range []string{

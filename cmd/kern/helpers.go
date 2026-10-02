@@ -4,6 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"reflect"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
@@ -19,15 +29,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
-	"io"
-	"os"
-	"os/exec"
-	"os/signal"
-	"reflect"
-	"sort"
-	"strings"
-	"syscall"
-	"time"
 )
 
 // maxStdinBytes caps piped input so an uncooperative pipe cannot exhaust
@@ -312,8 +313,7 @@ func runDo(root, levelStr, intent string) (string, error) {
 // chain falls back across providers, so this only fails when no provider in
 // the chain answers — exactly the silent-hang condition `kern do` used to
 // exhibit. It returns the name of the provider that
-// answered so the caller can report which fallback actually served the run
-//.
+// answered so the caller can report which fallback actually served the run.
 func probeLLMProvider() (string, error) {
 	return llm.ProbeReachableName()
 }

@@ -47,8 +47,8 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 	}
 }
 
-// TestAutoChainOrderCLIsBeforeOllama pins the auto-chain ordering change
-//: with no host session, every locally-installed agent
+// TestAutoChainOrderCLIsBeforeOllama pins the auto-chain ordering change:
+// with no host session, every locally-installed agent
 // CLI must precede Ollama in the chain, and Ollama must be last. On machines
 // with no agent CLI installed the chain degrades to [ollama] — the invariant
 // (all CLIs before ollama) still holds vacuously.

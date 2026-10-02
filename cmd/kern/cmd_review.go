@@ -3,6 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/config"
@@ -20,10 +25,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
-	"os"
-	"sort"
-	"strings"
-	"time"
 )
 
 func runAnalyze(cmd string, rest []string) {
@@ -436,8 +437,8 @@ func runImpact(rest []string) {
 	fmt.Printf("\n[task: %s — state: %s — risk=%s]\n", t.ID, t.State, rep.Risk)
 }
 
-// verifyExitCode maps a verification verdict to its process exit code
-//: FAIL is the only hard failure (1); WARN and SKIPPED
+// verifyExitCode maps a verification verdict to its process exit code:
+// FAIL is the only hard failure (1); WARN and SKIPPED
 // are reported outcomes and exit 0; PASS/PASS_WITH_WARNING exit 0. The --json
 // and text paths share this single mapping so they can never drift.
 func verifyExitCode(v verdict.Verdict) int {

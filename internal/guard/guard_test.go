@@ -312,8 +312,7 @@ func TestInferBoundariesJavaApiModulesNotL1(t *testing.T) {
 			"x-service/src/main/java/com/x/Service.java":  "h1",
 			"x-api/src/main/java/com/x/api/Contract.java": "h2",
 			// JAX-RS interfaces inside the contract module must also not be
-			// L1 — the "rest" keyword alone would re-flag them (the second
-			
+			// L1 — the "rest" keyword alone would re-flag them.
 			"x-api/src/main/java/com/x/api/rest/ContractResource.java": "h3",
 		},
 	}

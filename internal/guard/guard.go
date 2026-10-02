@@ -85,9 +85,8 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	// Maven-style "*-api" modules are contract/interface modules that the
 	// *-service modules IMPLEMENT — the correct dependency direction is
 	// service -> api. Treating "api" as a presentation layer (L1) for Java
-	// projects fabricates mass false positives on every Maven monorepo
-	//. For Go/Python/JS, an "api" dir is usually the HTTP
-	// surface, so it stays L1 there.
+	// projects fabricates mass false positives on every Maven monorepo.
+	// For Go/Python/JS, an "api" dir is usually the HTTP surface, so it stays L1 there.
 	javaProject := false
 	for f := range ix.FileHashes {
 		if strings.HasSuffix(f, ".java") {
@@ -107,8 +106,7 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	// ancestor segments: a package "com/x/service/dao" is a DAO layer, not a
 	// service layer, even though an ancestor module is named *-service.
 	// Full-path keyword matching made every subpackage of a *-service module
-	// also an L2 dir, which fabricated intra-module dao->service violations
-	//.
+	// also an L2 dir, which fabricated intra-module dao->service violations.
 	baseName := func(name string) string {
 		name = filepath.ToSlash(name)
 		if i := strings.LastIndexByte(name, '/'); i >= 0 {
