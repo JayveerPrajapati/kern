@@ -37,16 +37,15 @@ func TestAuthzVerdict_Allowed(t *testing.T) {
 }
 
 func TestAuthzVerdict_Denied(t *testing.T) {
-	// kern exits 2 on a denied verdict: that is a RESULT, not an error.
+	// kern exits 3 on a denied verdict: that is a RESULT, not an error.
 	const out = `{"schema_version":2,"violations":[],"authz_verdict":{
-		"schema_version":1,"agent_id":"default","task":"test","decision":"denied",
-		"policy_source":"default-scoped","denied_files":["web/web.go","db/db.go"],
-		"fingerprint":"sha256:def","decided_at":"2026-08-31T10:00:00Z"}}`
-	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 2, nil)}
-
+"schema_version":1,"agent_id":"default","task":"test","decision":"denied",
+"policy_source":"default-scoped","denied_files":["web/web.go","db/db.go"],
+"fingerprint":"sha256:def","decided_at":"2026-08-31T10:00:00Z"}}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 3, nil)}
 	verdict, err := client.AuthzVerdict(context.Background(), t.TempDir(), "default", "test", []string{"web/web.go"})
 	if err != nil {
-		t.Fatalf("AuthzVerdict returned error for exit 2 (denied is a result): %v", err)
+		t.Fatalf("AuthzVerdict returned error for exit 3 (denied is a result): %v", err)
 	}
 	if verdict == nil {
 		t.Fatal("AuthzVerdict = nil, want parsed denied verdict")
@@ -127,11 +126,11 @@ func TestAuthzVerdict_EmptyAgentID_NoVerdict(t *testing.T) {
 	}
 }
 
-func TestAuthzVerdict_Exit3_IsError(t *testing.T) {
-	// Any exit code other than 0/2 is a tool failure, never a verdict.
-	client := &KernClient{binaryPath: "kern", runner: fakeRunner("", "boom", 3, nil)}
+func TestAuthzVerdict_Exit4_IsError(t *testing.T) {
+	// Exit codes 0/2/3 are results; any other code is a tool failure, never a verdict.
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner("", "boom", 4, nil)}
 	if _, err := client.AuthzVerdict(context.Background(), t.TempDir(), "default", "test", []string{"a.go"}); err == nil {
-		t.Fatal("AuthzVerdict returned no error for exit 3, want tool failure error")
+		t.Fatal("AuthzVerdict returned no error for exit 4, want tool failure error")
 	}
 }
 

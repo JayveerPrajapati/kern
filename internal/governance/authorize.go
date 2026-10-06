@@ -296,7 +296,7 @@ func buildProof(req Request, ix *index.Index, agent *AgentIdentity, decision dom
 		Agent:          summary,
 		TaskScope:      scope,
 		Fingerprint:    fingerprint(ix, decision, policySource, symbols),
-		IndexFreshness: freshness(ix),
+		IndexFreshness: freshness(ix, req.Root),
 		IndexVersion:   ix.UpdatedAt.UTC().Format(time.RFC3339),
 		DecidedAt:      time.Now().UTC(),
 	}
@@ -326,12 +326,25 @@ func fingerprint(ix *index.Index, decision domain.GatewayResult, policySource st
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// freshness reports whether the index is recent enough to be trusted as-is.
-func freshness(ix *index.Index) string {
-	if time.Since(ix.UpdatedAt) < 5*time.Minute {
-		return "fresh"
+// freshness reports whether the index still matches the tree it was built
+// from, using the SAME freshness machinery every other tool trusts
+// (FreshnessProof: git tree-OID compare with content-hash fallback). The A3
+// defect (deep-dive 2026-10-03) was a 5-minute wall-clock heuristic: an
+// unchanged tree read an hour after a build reported "stale" here while
+// every other tool reported "fresh" — two freshness verdicts for one index.
+func freshness(ix *index.Index, root string) string {
+	if root == "" {
+		root = ix.Root
 	}
-	return "stale"
+	proof := ix.FreshnessProof(root)
+	switch {
+	case proof.Verdict == index.FreshnessFresh:
+		return "fresh"
+	case proof.Stale():
+		return "stale"
+	default:
+		return "unknown"
+	}
 }
 
 // denyUnknownAgent builds the fail-closed response for an agent that does not

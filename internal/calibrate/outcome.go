@@ -203,7 +203,9 @@ func Health(root string) (string, error) {
 }
 
 // ConfidenceLine renders the per-subsystem confidence line for kern impact /
-// what-if text. Best-effort: read errors omit the line; no samples → insufficient.
+// what-if text. Best-effort: read errors omit the line; no samples (or an
+// unknown subsystem) → "" so callers suppress the footer entirely instead of
+// printing an "insufficient data" line.
 func ConfidenceLine(root, subsystem string) string {
 	model, err := Model(root)
 	if err != nil {
@@ -212,16 +214,18 @@ func ConfidenceLine(root, subsystem string) string {
 	for _, c := range model {
 		if c.Subsystem == subsystem {
 			if c.Samples == 0 {
-				return fmt.Sprintf("confidence: %s insufficient data", subsystem)
+				return ""
 			}
 			return fmt.Sprintf("confidence: %s %.1f%% (%d samples)", subsystem, c.Confidence*100, c.Samples)
 		}
 	}
-	return fmt.Sprintf("confidence: %s insufficient data", subsystem)
+	return ""
 }
 
 // AggregateConfidenceLine renders the overall confidence line for kern verify
-// text (total hits/misses); insufficient data below 5 total samples.
+// text (total hits/misses); insufficient data below 5 total samples → "" so
+// callers suppress the footer entirely instead of printing an
+// "insufficient data" line.
 func AggregateConfidenceLine(root string) string {
 	model, err := Model(root)
 	if err != nil {
@@ -233,7 +237,7 @@ func AggregateConfidenceLine(root string) string {
 		misses += c.Misses
 	}
 	if hits+misses < 5 {
-		return "confidence: insufficient data"
+		return ""
 	}
 	return fmt.Sprintf("confidence: %.1f%% (%d samples)", float64(hits)/float64(hits+misses)*100, hits+misses)
 }

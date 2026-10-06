@@ -5,12 +5,14 @@
 package heal
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,6 +54,10 @@ type Result struct {
 	// (RunWithPlaybook/RunFileWithPlaybook): recorded replacements were
 	// applied and verified with no LLM round spent.
 	UsedPlaybook bool
+	// PlaybookSig is the playbook signature consulted for this run; set when
+	// UsedPlaybook is true so an operator can correlate the replayed entry
+	// in <root>/.kern/playbooks.json (and remove it by hand if unwanted).
+	PlaybookSig string
 	// Reps are the replacements applied on success (final round or the
 	// replayed playbook); used to record fixes into the playbook store.
 	Reps []Replacement
@@ -96,6 +102,42 @@ func EncodeReplacements(root string, reps []Replacement) []string {
 		steps = append(steps, r.Path+"|"+base64.StdEncoding.EncodeToString([]byte(old))+"|"+base64.StdEncoding.EncodeToString([]byte(r.Content)))
 	}
 	return steps
+}
+
+// StepsApplyToCurrent reports whether every recorded step's OLD content
+// still matches the file's current content under root — the poison-scope
+// limiter for playbook replay (deep-dive C4, 2026-10-03): a recorded fix may
+// replay only against the exact content state it was recorded from, because
+// Apply overwrites files wholesale. Any drift (the file legitimately changed
+// since recording, or is now unreadable) makes the caller treat the entry as
+// a MISS and escalate to the full LLM loop instead of blindly replacing
+// current content. Malformed lines are skipped (they decode to no
+// replacement); a step recorded against a missing file (empty old) matches
+// only while the file is still missing.
+func StepsApplyToCurrent(root string, steps []string) bool {
+	any := false
+	for _, line := range steps {
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		old, err := base64.StdEncoding.DecodeString(parts[1])
+		if err != nil {
+			continue
+		}
+		any = true
+		cur, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(parts[0])))
+		if rerr != nil {
+			if errors.Is(rerr, fs.ErrNotExist) && len(old) == 0 {
+				continue // recorded as missing, still missing
+			}
+			return false // gone or unreadable: treat as drift
+		}
+		if !bytes.Equal(cur, old) {
+			return false
+		}
+	}
+	return any
 }
 
 // DecodeReplacements is the inverse of EncodeReplacements; malformed or
@@ -483,6 +525,7 @@ func RunFileWithPlaybook(ctx context.Context, root, task, model, file string, ma
 				if res.Validated && len(res.Changes) > 0 {
 					res.UsedPlaybook = true
 					res.Reps = reps
+					res.PlaybookSig = sig
 				}
 				res.Duration = time.Since(start)
 				if res.Validated && len(res.Changes) > 0 {

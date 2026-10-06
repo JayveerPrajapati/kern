@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/flock"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -1413,4 +1416,106 @@ func TestIntegrityMode(t *testing.T) {
 			t.Errorf("IntegrityMode() = %q, want plain", got)
 		}
 	})
+}
+
+// --- In-process lock serialization (rapid sequential calls) ---
+
+// TestSequentialPersistedAppendsNoLockWarning pins the same-process lock
+// contention fix: N sequential appends to a lock-protected store within ONE
+// process must never emit the "could not be acquired" warning — sequential
+// calls must not contend with themselves. The in-process writer mutex
+// serializes the flock lifecycle so the bounded retries and the warning are
+// reserved for genuine cross-process contention or lock unavailability.
+func TestSequentialPersistedAppendsNoLockWarning(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, ".lock")
+	l := NewAuditLog().WithStore(store).WithLockPath(lock)
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	auditLockWarnOnce = sync.Once{}
+
+	for i := 0; i < 10; i++ {
+		l.Record(entry("", "agent-seq"))
+	}
+	if got := buf.String(); strings.Contains(got, "could not be acquired") {
+		t.Fatalf("sequential same-process appends emitted the lock warning:\n%s", got)
+	}
+	brk, verified := l.VerifyChainReport()
+	if brk != -1 || verified != 10 {
+		t.Fatalf("VerifyChainReport() = (%d, %d) after sequential appends, want (-1, 10)", brk, verified)
+	}
+}
+
+// TestLockWarningFiresOnlyWhenLockUnavailable pins that the warning is
+// reserved for genuine unavailability: when the lock file cannot be opened
+// at all (missing parent directory), the warning fires (once) after the
+// bounded retries — and the entry is still recorded (liveness wins).
+func TestLockWarningFiresOnlyWhenLockUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, "missing-dir", ".lock") // parent dir does not exist
+	l := NewAuditLog().WithStore(store).WithLockPath(lock)
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	auditLockWarnOnce = sync.Once{}
+
+	l.Record(entry("", "agent-unlocked"))
+	if got := buf.String(); !strings.Contains(got, "could not be acquired") {
+		t.Fatalf("expected the lock warning when the lock file is unavailable, got:\n%s", got)
+	}
+	if len(l.All()) != 1 {
+		t.Fatalf("entry lost when the lock is unavailable: %d entries", len(l.All()))
+	}
+}
+
+// TestAppendExternalFailsBoundedWhenLockHeld locks the bounded-lock contract:
+// when another holder owns the audit flock, AppendExternal must return an
+// error within the bounded retry budget instead of blocking indefinitely on
+// the lock. The decision being recorded is already durable elsewhere (the
+// approval is in .kern/approvals.json before this append runs), so failing
+// loudly is correct — the skipped chain link is repairable via
+// `kern audit repair`, and an indefinite block is never acceptable.
+func TestAppendExternalFailsBoundedWhenLockHeld(t *testing.T) {
+	root := t.TempDir()
+	auditDir := filepath.Join(root, ".kern", "audit")
+	if err := os.MkdirAll(auditDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	lockPath := filepath.Join(auditDir, ".lock")
+
+	// Hold the audit lock externally (a second open description in this
+	// process contends exactly like another process — see flock.TryLock).
+	holder, err := flock.TryLock(lockPath)
+	if err != nil {
+		t.Fatalf("hold audit lock: %v", err)
+	}
+	defer func() { _ = flock.Release(holder) }()
+
+	l := NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(lockPath)
+
+	start := time.Now()
+	err = l.AppendExternal(AuditEntry{AgentID: "test", Action: "append", Resource: "x", Result: "blocked"})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("AppendExternal must fail when the audit lock is held, got nil")
+	}
+	if !strings.Contains(err.Error(), "audit lock") {
+		t.Errorf("error should name the audit lock, got: %v", err)
+	}
+	// The in-memory log must be untouched: the failure precedes any append.
+	if l.Len() != 0 {
+		t.Errorf("AppendExternal mutated the in-memory log on lock failure: %d entries", l.Len())
+	}
+	// The bounded budget (auditLockRetries × auditLockRetrySleep ≈ 150ms)
+	// resolves far faster; a generous 5s ceiling proves FAILED-not-hung.
+	if elapsed > 5*time.Second {
+		t.Fatalf("AppendExternal blocked for %s — the lock retry must be bounded", elapsed)
+	}
 }

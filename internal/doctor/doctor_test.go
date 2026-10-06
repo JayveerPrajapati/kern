@@ -815,3 +815,34 @@ func TestParentIndexDir(t *testing.T) {
 		t.Fatalf("ParentIndexDir of the indexed root itself = %q, want \"\"", got)
 	}
 }
+
+// TestWiringFindingsNoCursorWarnAfterFreshSetup pins F10: after a fresh
+// successful `kern setup`, doctor must not warn about a missing cursor
+// policy. The live repro: bare setup wrote .cursor/rules/ (making cursor
+// "detected" ever after) but — via a stale pre-run detection snapshot —
+// never the kern-first policy file doctor probes, so the warning was
+// permanent. Setup now writes the policy (to .cursor/rules/kern.mdc) in
+// the same run that creates the marker, and accepts legacy
+// .cursor/instructions/kern.mdc installs.
+func TestWiringFindingsNoCursorWarnAfterFreshSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("PATH", "/nonexistent")
+	root := t.TempDir()
+
+	setup.Wire(root, nil, false, false)
+	for _, f := range wiringFindings(setup.Check(root), setup.DetectAgents(root)) {
+		if f.Level != "warn" {
+			continue
+		}
+		// Scope to the F10 policy checks (the "(detected)" instruction
+		// statuses and the cursor rule). Home-scoped adapter/hook checks
+		// legitimately warn without --global — not this defect.
+		if strings.Contains(f.Check, "cursor (detected)") ||
+			strings.Contains(f.Check, "copilot (detected)") ||
+			f.Check == "cursor rule" {
+			t.Errorf("%s: unexpected warn after fresh setup: %s", f.Check, f.Detail)
+		}
+	}
+}

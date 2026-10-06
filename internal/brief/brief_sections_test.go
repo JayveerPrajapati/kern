@@ -65,6 +65,56 @@ func TestIndexSectionHubsAndEntries(t *testing.T) {
 	}
 }
 
+// TestIndexSectionExcludesTestAndFixtureHubs pins Phase 5: the digest's
+// "Most-called (hubs)" must show only production-defined symbols. External
+// call targets (T.Fatalf — called from every _test.go file but defined
+// nowhere in the repo) must not appear, and neither may symbols defined in
+// _test.go files or testdata/ fixtures.
+func TestIndexSectionExcludesTestAndFixtureHubs(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "shared", File: "a.go", Line: 1},
+			{Kind: "func", Name: "f1", File: "a.go", Line: 2},
+			{Kind: "func", Name: "f2", File: "a.go", Line: 3},
+			{Kind: "func", Name: "TestShared", File: "a_test.go", Line: 1},
+			{Kind: "func", Name: "FixtureShared", File: "testdata/fix.go", Line: 1},
+		},
+		Callers: map[string][]string{
+			"shared":        {"f1", "f2"},
+			"TestShared":    {"f1", "f2"},
+			"FixtureShared": {"f1", "f2"},
+			"T.Fatalf":      {"f1", "f2", "TestShared"},
+		},
+		FileHashes: map[string]string{"a.go": "h", "a_test.go": "h", "testdata/fix.go": "h"},
+	}
+	out := indexSection(ix)
+	if !strings.Contains(out, "shared") {
+		t.Fatalf("expected production hub shared, got %q", out)
+	}
+	for _, bad := range []string{"TestShared", "FixtureShared", "T.Fatalf"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("hub section must exclude %s, got %q", bad, out)
+		}
+	}
+}
+
+// TestIndexSectionAllTestOmitsHubHeader: when every symbol is test/fixture,
+// the digest must not render a "Most-called (hubs):" section at all.
+func TestIndexSectionAllTestOmitsHubHeader(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "TestA", File: "a_test.go", Line: 1},
+			{Kind: "func", Name: "TestB", File: "b_test.go", Line: 1},
+		},
+		Callers:    map[string][]string{"TestA": {"TestB", "TestB2"}},
+		FileHashes: map[string]string{"a_test.go": "h", "b_test.go": "h"},
+	}
+	out := indexSection(ix)
+	if strings.Contains(out, "Most-called (hubs):") {
+		t.Errorf("all-test index must omit the hub section, got %q", out)
+	}
+}
+
 func TestArchitectureSectionNonEmpty(t *testing.T) {
 	// Build a real multi-package project whose call graph yields communities.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -93,7 +143,9 @@ func TestArchitectureSectionEmptyNoCalls(t *testing.T) {
 
 func TestArchitectureSectionGatedLargeGraph(t *testing.T) {
 	// A graph above the gate must skip community detection (minutes on big
-	// repos) and render the skip note instead.
+	// repos) and render the CHEAP compact fallback — package count + top
+	// packages + the interactive-explorer pointer — instead of the old
+	// "(skipped …)" marker (the digest's most useful newcomer section).
 	ix := &index.Index{Calls: map[string][]index.CallEdge{"main": {index.CallEdge{Target: "helper", Confidence: index.ConfidenceHigh}}}}
 	for i := 0; i < archGateSymbols+1; i++ {
 		ix.Symbols = append(ix.Symbols, index.Symbol{
@@ -101,8 +153,14 @@ func TestArchitectureSectionGatedLargeGraph(t *testing.T) {
 		})
 	}
 	out := architectureSection(ix)
-	if !strings.Contains(out, "skipped") || strings.Contains(out, "communities + coupling") {
-		t.Fatalf("expected gate note, got %q", out)
+	if strings.Contains(out, "(skipped") {
+		t.Fatalf("gated digest must render the compact fallback, not the skipped marker: %q", out)
+	}
+	if !strings.Contains(out, "packages/subsystems") || !strings.Contains(out, "kern graph --html") {
+		t.Fatalf("expected compact fallback with package count and graph pointer, got %q", out)
+	}
+	if !strings.Contains(out, "## Architecture") {
+		t.Fatalf("compact fallback must keep the Architecture section, got %q", out)
 	}
 }
 

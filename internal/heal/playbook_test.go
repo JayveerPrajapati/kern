@@ -183,6 +183,9 @@ func TestRunFileWithPlaybookLookupHitSkipsLLM(t *testing.T) {
 	if !reflect.DeepEqual(res.Reps, fix) {
 		t.Fatalf("Reps = %+v, want the replayed fix %+v", res.Reps, fix)
 	}
+	if res.PlaybookSig != SignatureFor("fix the syntax errors", "app.go") {
+		t.Fatalf("PlaybookSig = %q, want the signature the fix replayed under", res.PlaybookSig)
+	}
 }
 
 // TestRunWithPlaybookFailedFixEscalates: a recorded fix that fails
@@ -221,5 +224,71 @@ func TestRunWithPlaybookFailedFixEscalates(t *testing.T) {
 	}
 	if len(recorded) != 1 || !reflect.DeepEqual(recorded[0].Content, "package main\n\nfunc main() {}") {
 		t.Fatalf("re-recorded fix = %+v, want the working fix", recorded)
+	}
+}
+
+// TestStepsApplyToCurrent pins the poison-scope limiter (deep-dive C4): a
+// recorded fix's steps match the current tree ONLY while every touched file
+// still holds the exact content the fix was recorded from. Drift (file
+// changed), a step recorded against a missing file that now exists, and a
+// step recorded against existing content whose file is now gone all report
+// false — the replay path must treat the entry as a MISS and escalate to
+// the full LLM loop instead of overwriting current content blindly.
+func TestStepsApplyToCurrent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	steps := EncodeReplacements(root, []Replacement{
+		{Path: "app.go", Content: "package main\n\nfunc main() {}\n"},
+	})
+
+	if !StepsApplyToCurrent(root, steps) {
+		t.Fatal("steps recorded from this exact state must apply")
+	}
+
+	// Same content re-encoded matches (deterministic format).
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !StepsApplyToCurrent(root, steps) {
+		t.Fatal("unchanged content must still apply")
+	}
+
+	// Drift: the file changed since recording.
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n\n// drifted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if StepsApplyToCurrent(root, steps) {
+		t.Fatal("drifted content must NOT apply (blind overwrite hazard)")
+	}
+
+	// File deleted after recording against existing content.
+	if err := os.Remove(filepath.Join(root, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+	if StepsApplyToCurrent(root, steps) {
+		t.Fatal("deleted file must NOT apply against a step recorded from content")
+	}
+
+	// A step recorded against a MISSING file matches while it stays missing,
+	// and stops matching once the file exists with other content.
+	missing := EncodeReplacements(root, []Replacement{{Path: "new.go", Content: "package new\n"}})
+	if !StepsApplyToCurrent(root, missing) {
+		t.Fatal("step recorded against a missing file must apply while still missing")
+	}
+	if err := os.WriteFile(filepath.Join(root, "new.go"), []byte("package other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if StepsApplyToCurrent(root, missing) {
+		t.Fatal("step recorded against missing content must NOT apply once the file exists")
+	}
+
+	// Malformed/garbage steps contain no applicable replacement.
+	if StepsApplyToCurrent(root, []string{"garbage", "a|not-base64|b"}) {
+		t.Fatal("unparseable steps must not report applicable")
 	}
 }

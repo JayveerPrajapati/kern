@@ -437,20 +437,22 @@ type Plan struct {
 // directly from the knowledge graph — no LLM is the authoritative source.
 // The LLM may explain the results, but the data is deterministic.
 type ImpactReport struct {
-	Target             string   `json:"target"`                // the symbol the change targets
-	WhoCalls           []string `json:"who_calls"`             // what calls this
-	WhatItCalls        []string `json:"what_it_calls"`         // what does it call
-	ServicesDepend     []string `json:"services_depend"`       // what services depend on it
-	APIsAffected       []string `json:"apis_affected"`         // which APIs are affected
-	DataStoresAffected []string `json:"data_stores_affected"`  // which data stores are affected
-	EventsAffected     []string `json:"events_affected"`       // which events are affected
-	TestsCover         []string `json:"tests_cover"`           // which tests cover it
-	DeploymentsRelated []string `json:"deployments_related"`   // which deployments are related
-	IncidentsRelated   []string `json:"incidents_related"`     // which incidents are related
-	ArchitectureRules  []string `json:"architecture_rules"`    // which architecture rules apply
-	Risk               string   `json:"risk"`                  // low | medium | high (from criticality)
-	RiskDetail         string   `json:"risk_detail,omitempty"` // what drove the risk tier, e.g. "134 transitive dependents" (P2: differentiates a saturated "high" hub from a leaf)
-	Evidence           string   `json:"evidence"`              // P2 anchor for the target (file:line + certificate)
+	Target                string   `json:"target"`                             // the symbol the change targets
+	WhoCalls              []string `json:"who_calls"`                          // what calls this
+	WhatItCalls           []string `json:"what_it_calls"`                      // what does it call
+	ServicesDepend        []string `json:"services_depend"`                    // what services depend on it
+	APIsAffected          []string `json:"apis_affected"`                      // which APIs are affected
+	DataStoresAffected    []string `json:"data_stores_affected"`               // which data stores are affected
+	EventsAffected        []string `json:"events_affected"`                    // which events are affected
+	TestsCover            []string `json:"tests_cover"`                        // which tests cover it (file-paired + name-matched + direct callers only)
+	TestsCoverSamePackage int      `json:"tests_cover_same_package,omitempty"` // same-package tests omitted from TestsCover (count-only render line)
+	Files                 []string `json:"files"`                              // distinct files containing the affected symbols (blast radius)
+	DeploymentsRelated    []string `json:"deployments_related"`                // which deployments are related
+	IncidentsRelated      []string `json:"incidents_related"`                  // which incidents are related
+	ArchitectureRules     []string `json:"architecture_rules"`                 // which architecture rules apply
+	Risk                  string   `json:"risk"`                               // low | medium | high (from criticality)
+	RiskDetail            string   `json:"risk_detail,omitempty"`              // what drove the risk tier, e.g. "134 transitive dependents" (P2: differentiates a saturated "high" hub from a leaf)
+	Evidence              string   `json:"evidence"`                           // P2 anchor for the target (file:line + certificate)
 	// Entities are the twin entity nodes (API / DB table / service /
 	// deployment) implicated by the change's blast radius. Populated by the
 	// app layer which owns the twin graph; empty when no twin entities

@@ -1,0 +1,12 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "command": ["opencode", "run", "--pure", "--format", "json", "{prompt}"]
+    },
+    {
+      "name": "kern",
+      "command": ["opencode", "run", "--format", "json", "{prompt}"]
+    }
+  ]
+}

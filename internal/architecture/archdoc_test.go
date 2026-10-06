@@ -49,8 +49,8 @@ func TestArchitectureDocParity(t *testing.T) {
 			continue
 		}
 		if f.LOC > f.Cap {
-			t.Errorf("%s: LOC %d exceeds cap %d — split the package or raise the cap in ARCHITECTURE.md (suggested cap %d)",
-				f.Subsystem, f.LOC, f.Cap, int(float64(f.LOC)*1.5/100)*100+100)
+			t.Errorf("%s: LOC %d exceeds cap %d — resolve by extraction (move code out of the subsystem; see ARCHITECTURE.md header), never by raising the cap",
+				f.Subsystem, f.LOC, f.Cap)
 		}
 		if len(f.Violations) > 0 {
 			t.Errorf("%s: new internal imports outside documented allowed deps: %v — update docs/architecture/ledger-details.md before adding them",

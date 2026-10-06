@@ -35,6 +35,35 @@ main.main()
 	}
 }
 
+// TestSqueezedLogsLineOnlyOnRealSavings pins F11: the "Squeezed logs"
+// accounting line prints only on a genuine token reduction; equal or
+// inflated results are silent.
+func TestSqueezedLogsLineOnlyOnRealSavings(t *testing.T) {
+	cases := []struct {
+		name                 string
+		original, compressed int
+		wantLine             bool
+	}{
+		{"reduced prints", 10000, 4000, true},
+		{"equal silent", 10000, 10000, false},
+		{"inflated silent", 10000, 10500, false},
+	}
+	for _, c := range cases {
+		rep := TriageReport{
+			OriginalTokens:   c.original,
+			CompressedTokens: c.compressed,
+			TokensSavedPct:   100.0 * float64(c.original-c.compressed) / float64(c.original),
+		}
+		got := squeezedLogsLine(&rep)
+		if c.wantLine && !strings.Contains(got, "Squeezed logs") {
+			t.Errorf("%s: expected the squeezed-logs line, got %q", c.name, got)
+		}
+		if !c.wantLine && got != "" {
+			t.Errorf("%s: expected silence, got %q", c.name, got)
+		}
+	}
+}
+
 func TestRunTriageEndToEnd(t *testing.T) {
 	tempRepo := t.TempDir()
 

@@ -54,9 +54,10 @@ func TestG0_ExitCodeContract(t *testing.T) {
 	}
 	binPath := kernTestBinary(t)
 
-	// No args → usage (exit 2).
-	if code := runCommandExit(t, binPath); code != 2 {
-		t.Errorf("no args: exit = %d, want 2 (usage)", code)
+	// No args → usage dump, exit 0: a help print is not an error (F4, pinned by
+	// TestDispatchCommandBareKernExits0). Unknown commands below still exit 2.
+	if code := runCommandExit(t, binPath); code != 0 {
+		t.Errorf("no args: exit = %d, want 0 (bare kern prints usage)", code)
 	}
 
 	// Unknown command → usage error (kern's dispatch returns 2, not the

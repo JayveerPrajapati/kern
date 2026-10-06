@@ -414,3 +414,20 @@ func TestIndexSkipsIndexIgnoredDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyRootRejected pins the F11 scoping guard: a doc index must be
+// scoped to an explicit project root. Resolving "" via filepath.Abs falls
+// back to the process working directory, which silently indexed every
+// project under a container cwd into one cross-project index (kern_doc
+// returned hits from other repos).
+func TestEmptyRootRejected(t *testing.T) {
+	if ix := Load(""); ix != nil {
+		t.Fatal("Load(\"\") must return nil (empty root is not a project)")
+	}
+	if _, err := IndexDir(""); err == nil {
+		t.Fatal("IndexDir(\"\") must error (empty root is not a project)")
+	}
+	if _, err := MergeFetched("", "page", "text"); err == nil {
+		t.Fatal("MergeFetched(\"\") must error (empty root is not a project)")
+	}
+}

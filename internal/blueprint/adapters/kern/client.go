@@ -267,10 +267,11 @@ func execCommand(ctx context.Context, name string, args []string, workdir string
 // GuardCheck runs `kern guard check --json` in workdir and returns the parsed
 // violations, the raw stdout, and the process exit code.
 //
-// Exit codes 0 (clean) and 2 (violations found) are results, not errors: both
-// parse their JSON output and return it. Any other exit code is a tool
-// failure and is returned as an error. workdir must be the repository root so
-// kern finds .kern/boundaries.json.
+// Exit codes 0 (clean), 2 (legacy violations, pre-L5 kern), and 3 (denied /
+// violations found, current kern) are results, not errors: all three parse
+// their JSON output and return it. Any other exit code is a tool failure and
+// is returned as an error. workdir must be the repository root so kern finds
+// .kern/boundaries.json.
 //
 // With no files argument, kern uses ChangedFiles(root) which includes both
 // staged and unstaged git changes. Use GuardCheckFiles to scope to specific
@@ -280,7 +281,7 @@ func (c *KernClient) GuardCheck(ctx context.Context, workdir string) (violations
 	if runErr != nil {
 		return nil, out, code, fmt.Errorf("kern guard check: %w", runErr)
 	}
-	if code != 0 && code != 2 {
+	if code != 0 && code != 2 && code != 3 {
 		return nil, out, code, fmt.Errorf("kern guard check failed (exit %d): %s", code, strings.TrimSpace(errOut))
 	}
 	var payload struct {
@@ -335,7 +336,7 @@ func (c *KernClient) GuardCheckFiles(ctx context.Context, workdir string, files 
 		if runErr != nil {
 			return allViolations, strings.Join(stdoutParts, "\n"), exitCode, fmt.Errorf("kern guard check (batch %d-%d): %w", i+1, end, runErr)
 		}
-		if code != 0 && code != 2 {
+		if code != 0 && code != 2 && code != 3 {
 			return allViolations, strings.Join(stdoutParts, "\n"), exitCode, fmt.Errorf("kern guard check failed (exit %d, batch %d-%d): %s", code, i+1, end, strings.TrimSpace(errOut))
 		}
 		var payload struct {
@@ -364,11 +365,11 @@ func (c *KernClient) GuardCheckFiles(ctx context.Context, workdir string, files 
 // without authz (backward compat with older kern builds and non-agent
 // flows).
 //
-// Exit code 2 is a RESULT, not an error: kern exits 2 both for boundary
-// violations and for a "denied" authz verdict. Only a launch failure, a
-// non-zero-non-2 exit, or a JSON/contract parse error is an error. The
-// contract is fail-closed: a missing or wrong schema_version errors rather
-// than silently misparsing.
+// Exit codes 2 (legacy, pre-L5 kern) and 3 (denied, current kern) are RESULTS,
+// not errors: kern exits 2/3 both for boundary violations and for a "denied"
+// authz verdict. Only a launch failure, a non-zero-non-2-non-3 exit, or a
+// JSON/contract parse error is an error. The contract is fail-closed: a
+// missing or wrong schema_version errors rather than silently misparsing.
 func (c *KernClient) AuthzVerdict(ctx context.Context, workdir, agentID, task string, files []string) (*AuthzVerdict, error) {
 	if agentID == "" || task == "" || len(files) == 0 {
 		// No agent identity, no task scope, or no files to authorize: kern's
@@ -383,7 +384,7 @@ func (c *KernClient) AuthzVerdict(ctx context.Context, workdir, agentID, task st
 	if runErr != nil {
 		return nil, fmt.Errorf("kern guard check authz: %w", runErr)
 	}
-	if code != 0 && code != 2 {
+	if code != 0 && code != 2 && code != 3 {
 		return nil, fmt.Errorf("kern guard check authz failed (exit %d): %s", code, strings.TrimSpace(errOut))
 	}
 	var payload struct {
@@ -549,8 +550,8 @@ func (c *KernClient) SecScan(ctx context.Context, workdir, path string) (finding
 	if runErr != nil {
 		return nil, out, code, fmt.Errorf("kern sec: %w", runErr)
 	}
-	// Exit contract: 0 = clean, 1 = findings, 3 = findings under the policy
-	// family (fatalPolicy — same drift the plugin shadows hit, F-RV1 class).
+	// Exit contract: 0 = clean, 1 = findings (fatalFindings — the findings
+	// tier; same drift the plugin shadows hit, F-RV1 class).
 	// Both carry the findings JSON on stdout; only other codes are errors.
 	if code != 0 && code != 1 && code != 3 {
 		return nil, out, code, fmt.Errorf("kern sec failed (exit %d): %s", code, strings.TrimSpace(errOut))

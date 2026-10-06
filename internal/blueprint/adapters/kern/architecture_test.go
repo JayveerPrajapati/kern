@@ -173,10 +173,10 @@ func TestArchitectureCheckClean(t *testing.T) {
 
 func TestArchitectureCheckViolations(t *testing.T) {
 	const out = `{"schema_version":2,"violations": [
-		{"caller_file": "web/web.go", "callee_file": "db/db.go", "symbol": "Query", "line": 2, "rule_from": "web", "rule_to": "db"},
-		{"caller_file": "api/handler.go", "callee_file": "infra/redis.go", "symbol": "NewClient", "line": 41, "rule_from": "api", "rule_to": "infra"}
-	]}`
-	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 2, nil)}
+{"caller_file": "web/web.go", "callee_file": "db/db.go", "symbol": "Query", "line": 2, "rule_from": "web", "rule_to": "db"},
+{"caller_file": "api/handler.go", "callee_file": "infra/redis.go", "symbol": "NewClient", "line": 41, "rule_from": "api", "rule_to": "infra"}
+]}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 3, nil)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: repoRoot(t),
@@ -613,9 +613,9 @@ func TestArchitectureCheckBlockBeatsWarning(t *testing.T) {
 	writeBoundariesJSON(t, root)
 	writeIndexJSON(t, root, false)
 	const out = `{"schema_version":2,"violations": [
-		{"caller_file": "src/main/java/com/example/config/AppConfig.java", "callee_file": "src/main/java/com/example/commons/vault/", "symbol": "", "line": 0, "rule_from": "config", "rule_to": "vault"}
-	]}`
-	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 2, nil)}
+{"caller_file": "src/main/java/com/example/config/AppConfig.java", "callee_file": "src/main/java/com/example/commons/vault/", "symbol": "", "line": 0, "rule_from": "config", "rule_to": "vault"}
+]}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 3, nil)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: root,
@@ -767,7 +767,7 @@ func TestGuardCheckFilesChunksLargeSets(t *testing.T) {
 					}
 				}
 			}
-			return oneViolation, "", 2, nil
+			return oneViolation, "", 3, nil
 		},
 	}
 
@@ -790,8 +790,8 @@ func TestGuardCheckFilesChunksLargeSets(t *testing.T) {
 	if len(violations) != guardCalls {
 		t.Errorf("merged violations = %d, want %d (one per batch)", len(violations), guardCalls)
 	}
-	if code != 2 {
-		t.Errorf("exitCode = %d, want 2 (last batch reported violations)", code)
+	if code != 3 {
+		t.Errorf("exitCode = %d, want 3 (last batch reported violations)", code)
 	}
 	if !strings.Contains(stdout, `"violations"`) {
 		t.Errorf("stdout should contain the joined batch output, got: %q", stdout)
@@ -826,14 +826,14 @@ func TestGuardCheckFilesBatchErrorIsContextual(t *testing.T) {
 	client2 := &KernClient{
 		binaryPath: "kern",
 		runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-			return "", "kern: boom", 3, nil
+			return "", "kern: boom", 4, nil
 		},
 	}
 	_, _, _, err := client2.GuardCheckFiles(context.Background(), repoRoot(t), files)
 	if err == nil {
 		t.Fatal("expected error from failing batch")
 	}
-	if !strings.Contains(err.Error(), "exit 3") || !strings.Contains(err.Error(), "batch") {
+	if !strings.Contains(err.Error(), "exit 4") || !strings.Contains(err.Error(), "batch") {
 		t.Errorf("error = %q, want exit code and batch context", err)
 	}
 }
@@ -846,9 +846,9 @@ func TestGuardCheckFilesBatchErrorIsContextual(t *testing.T) {
 // the canned status probe reports verdict "fresh").
 func TestArchitectureCheckRuleVersionConfidenceFreshness(t *testing.T) {
 	const out = `{"schema_version":2,"violations": [
-		{"caller_file": "web/web.go", "callee_file": "db/db.go", "symbol": "Query", "line": 2, "rule_from": "web", "rule_to": "db"}
-	]}`
-	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 2, nil)}
+{"caller_file": "web/web.go", "callee_file": "db/db.go", "symbol": "Query", "line": 2, "rule_from": "web", "rule_to": "db"}
+]}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 3, nil)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: repoRoot(t),
@@ -1386,10 +1386,10 @@ func TestArchitectureCheck_AuthzNil_Proceeds(t *testing.T) {
 }
 
 func TestArchitectureCheck_AuthzError_Warns(t *testing.T) {
-	// A failing authz probe (exit 3 = tool failure) degrades to a visible
+	// A failing authz probe (exit 4 = tool failure) degrades to a visible
 	// WARN; the boundary check still runs.
 	guardCalls := 0
-	client := &KernClient{binaryPath: "kern", runner: authzRunner("", cleanGuardOut, 3, &guardCalls)}
+	client := &KernClient{binaryPath: "kern", runner: authzRunner("", cleanGuardOut, 4, &guardCalls)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: repoRoot(t),

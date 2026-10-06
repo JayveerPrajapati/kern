@@ -188,8 +188,8 @@ func TestHealthRenders(t *testing.T) {
 
 func TestConfidenceLine(t *testing.T) {
 	root := t.TempDir()
-	if got := ConfidenceLine(root, "web"); got != "confidence: web insufficient data" {
-		t.Errorf("empty model line = %q", got)
+	if got := ConfidenceLine(root, "web"); got != "" {
+		t.Errorf("empty model line = %q, want \"\" (suppressed)", got)
 	}
 	t0 := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
 	seedPrediction(t, root, "impact", "A", "web", []string{"web/server.go"}, t0.Add(-time.Hour))
@@ -202,15 +202,15 @@ func TestConfidenceLine(t *testing.T) {
 	if got := ConfidenceLine(root, "web"); got != "confidence: web 50.0% (2 samples)" {
 		t.Errorf("line = %q", got)
 	}
-	if got := ConfidenceLine(root, "cmd"); got != "confidence: cmd insufficient data" {
-		t.Errorf("unknown subsystem line = %q", got)
+	if got := ConfidenceLine(root, "cmd"); got != "" {
+		t.Errorf("unknown subsystem line = %q, want \"\" (suppressed)", got)
 	}
 }
 
 func TestAggregateConfidenceLine(t *testing.T) {
 	root := t.TempDir()
-	if got := AggregateConfidenceLine(root); got != "confidence: insufficient data" {
-		t.Errorf("empty aggregate = %q", got)
+	if got := AggregateConfidenceLine(root); got != "" {
+		t.Errorf("empty aggregate = %q, want \"\" (suppressed)", got)
 	}
 	t0 := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
