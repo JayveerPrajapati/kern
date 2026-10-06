@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
 
-- **[Unreleased]** — 2026-10-02: `kern verify` build check now SKIPs cleanly (exit 0, reason surfaced) on directories with no supported project type and surfaces the first output line as the reason on genuine build failures; `kern optimize --kind log` is idempotent and lossless on structured output (no more silent row folding or `(repeated Nx)` stacking); `--types arch` alias accepted; `verify --json` reports `CI: {"ok": true, "status": "not run"}` when CI was not requested; plugin `defaultTools` comments corrected to the real 22-tool surface; root confinement and ADR-0012 ETag protocol alignment.
+- **[0.9.10.3]** — 2026-10-07: Streamlined default advertised MCP tool surface 22→6 (`kern_meta`, `kern_explore`, `kern_impact`, `kern_search`, `kern_verify`, `kern_buddy`) with full dynamic routing via `kern_meta` or `KERN_MCP_FULL=1`; fast/full tiers in `kern_verify`; test fixture demotion in fuzzy symbol search; nested sandbox execution and sandbox isolation hardening; single-sourced agent rules generation from `assets/AGENTS.md`; `kern debt` report; strict per-command flag validation; ETag conditional fetch protocol support.
 
 - **[0.9.10.2]** — 2026-10-01: MCP surface economy (catalog 139→117 via the `kern_memory` + 8-family action-arg consolidations, default advertised surface 11→22), `kern_do` autonomous preset, and release-hardening fixes found by full-sweep verification (kern-server version footgun, meta `memories` routing, worktree-safe loop verify, typescript checker false-fails, `staleSnapshot` data race).
 
@@ -17,6 +17,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.10.3] - 2026-10-07
+
+### Changed
+- **Default MCP Advertised Surface 22→6**: Reduced default tool list to 6 high-leverage entry points (`kern_meta`, `kern_explore`, `kern_impact`, `kern_search`, `kern_verify`, `kern_buddy`), routing all 117 tools dynamically through `kern_meta` or opt-in via `KERN_MCP_FULL=1` / `HIGH_LEVEL_ONLY=36`.
+- **Single-Source Agent Rules**: Agent rules and setup blocks are single-sourced from `assets/AGENTS.md` and derived dynamically, ensuring byte-level parity across agent installations.
+- **Strict CLI Flag Validation**: Unknown flags now exit with code 2 across all subcommands, providing actionable help and did-you-mean suggestions.
+
+### Added
+- **Fast / Full Verification Tiers**: `kern_verify` supports changed-scope fast tier (running only affected packages) or complete-suite opt-in, sharing `verification.ChangedTestPackages` with the CLI.
+- **`kern debt` Command**: Unified technical debt reporting composed across lint, test coverage, dead code, and duplication metrics.
+- **ETag Conditional Fetch**: `kern_explore`, `kern_context`, `kern_compact_file`, and `kern_retrieve` support conditional fetch via ETags (`unchanged (etag ...)`).
+- **Opt-in `kern-minimal-change` Skill**: Procedural minimal-change ladder and restraint overlay for changes.
+
+### Fixed
+- **Symbol Resolution Precision**: `ResolveFuzzy` and ranked search demote test/testdata fixtures as fallback, preventing test symbols from hijacking bare-name lookups.
+- **Caller Attribution Parity**: Fixed 9 impact-to-explore caller attribution gaps via raw-edge graph traversal.
+- **Interface Dispatch Detection**: `kern whatif` surfaces interface dispatch blind spots on method targets.
+- **Nested Sandbox Inheritance**: Inherited runs inside sandboxes skip duplicate isolation wraps, ensuring deterministic test execution.
+- **Governance Audit Lock**: Added bounded timeout on governance audit locks, preventing hung approval waits.
 
 ## [0.9.10.2] - 2026-10-01
 

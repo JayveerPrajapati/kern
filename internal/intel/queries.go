@@ -1059,7 +1059,6 @@ func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
 			// in an importing package.
 			if g.endpointNamesNode(e.From, target) {
 				fromID = target
-				ok = true
 			} else {
 				calleeID, cok := g.ResolveEdgeEndpoint(e.To, e.From)
 				if !cok {

@@ -387,9 +387,16 @@ try {
     # asset (mirrors install.sh's verify): a missing asset/entry or a
     # mismatch aborts the install — never an unverified binary.
     $sumsUrl = "https://github.com/$Repo/releases/download/$tag/SHA256SUMS"
+    $sumsFile = Join-Path $tmp "SHA256SUMS"
     try {
-        $sums = Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing
-        $expected = ($sums.Content -split "`n" | Where-Object { $_ -cmatch [regex]::Escape($file) }) -split "\s+" | Select-Object -First 1
+        Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsFile -UseBasicParsing
+        $expected = $null
+        foreach ($line in (Get-Content -Path $sumsFile)) {
+            if ($line -match [regex]::Escape($file)) {
+                $expected = ($line.Trim() -split '\s+')[0]
+                break
+            }
+        }
         if (-not (Confirm-Sha256 -Path $zip -Expected $expected)) { exit 1 }
     } catch {
         Write-Host "kern: no SHA256SUMS asset for $tag — refusing to install an unverified binary (build from source with 'go install github.com/$Repo/cmd/kern@$tag', or pick a release that ships checksums)" -ForegroundColor Red

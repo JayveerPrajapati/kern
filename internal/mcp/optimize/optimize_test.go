@@ -11,6 +11,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 )
 
+func init() {
+	_ = os.Setenv("KERN_CACHE_DISABLE_ASYNC_GC", "1")
+}
+
 func TestPromptEmpty(t *testing.T) {
 	ctx := context.Background()
 	_, err := Prompt(ctx, map[string]any{

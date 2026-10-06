@@ -22,6 +22,7 @@ func TestDefaultSurfaceAcceptanceGate(t *testing.T) {
 	}
 
 	root := fixtureRoot(t) // real fixture repo: symbols NewServer, UserService, ...
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 
 	// 1. tools/list advertises exactly the default surface (no env set →
 	// filteredTools() falls back to defaultTools; KERN_MCP_FULL etc. are

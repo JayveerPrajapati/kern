@@ -126,8 +126,7 @@ func isGitWorktree(root string) bool {
 		return false
 	}
 	for {
-		gitPath := filepath.Join(dir, ".git")
-		if _, err := os.Stat(gitPath); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return true
 		}
 		parent := filepath.Dir(dir)
@@ -146,6 +145,7 @@ func startIdentityGit(root string) *identityGit {
 	if !isGitWorktree(root) {
 		return g
 	}
+	ensureGitExclude(root)
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
@@ -181,10 +181,7 @@ func aggregateHash(fileHashes map[string]string) string {
 	sort.Strings(paths)
 	h := sha256.New()
 	for _, p := range paths {
-		h.Write([]byte(p))
-		h.Write([]byte("="))
-		h.Write([]byte(fileHashes[p]))
-		h.Write([]byte("\n"))
+		h.Write([]byte(p + "=" + fileHashes[p] + "\n"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -255,6 +252,7 @@ func treeOID(root string) string {
 	if !isGitWorktree(root) {
 		return ""
 	}
+	ensureGitExclude(root)
 	// Fast path: porcelain-clean outside the excluded dirs means staging the
 	// working tree (slow path) would produce exactly HEAD's tree object.
 	if oid := treeOIDFast(root); oid != "" {
