@@ -11,7 +11,9 @@ import (
 func (s *Server) memoryHooks() mcpmemory.Hooks {
 	return mcpmemory.Hooks{
 		Add: func(ctx context.Context, root, lesson string) error {
-			return memory.Add(root, lesson)
+			// Explicit user lessons dual-write (typed store + v1) so they
+			// surface in buddy's "Project memory" (P2-14 follow-up).
+			return memory.AddExplicit(root, lesson)
 		},
 		List: func(ctx context.Context, root string) ([]memory.Entry, error) {
 			return memory.List(root), nil

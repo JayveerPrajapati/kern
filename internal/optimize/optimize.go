@@ -500,6 +500,21 @@ func RunBuild(ctx context.Context, command string, dir string, opts Options) (Re
 	if runtime.GOOS == "windows" {
 		shell, flag = "cmd", "/c"
 	}
+	// A missing workdir makes the shell's fork fail with an error that names
+	// neither the directory nor the cause ("fork/exec /bin/sh: no such file
+	// or directory" — the chdir failure surfaces as the shell being missing,
+	// observed live). Stat it up front and say exactly what is wrong; the
+	// message is folded into res.Output so every caller (CLI and MCP) prints
+	// it instead of a bare error.
+	if dir != "" {
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			msg := fmt.Sprintf("workdir does not exist: %s — create it first", dir)
+			raw := "cmd: " + command + "\n" + msg
+			res := finish(raw, raw, tokenize.KindLog)
+			record(stats.OpRunBuild, opts, res)
+			return res, errors.New(msg)
+		}
+	}
 	cmd := exec.CommandContext(ctx, shell, flag, command)
 	cmd.Dir = dir
 	// The shell wraps the real command, so cancelling the context kills only

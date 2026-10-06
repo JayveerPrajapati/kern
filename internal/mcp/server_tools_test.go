@@ -993,24 +993,71 @@ func TestOutputSandboxUnit(t *testing.T) {
 	if got := mcpserve.SandboxOutput(big, 0, "kern_x"); got != big {
 		t.Fatalf("budget 0 should disable the sandbox")
 	}
+	// R7 "more" cursor: SandboxOutputRetained with an anchor advertises the
+	// slice grammar alongside the existing max_output advice.
+	gotR := mcpserve.SandboxOutputRetained(big, 200, "kern_project_map", "anchor-0123456789ab")
+	for _, frag := range []string{"MCP output sandbox", "Pass max_output=N", "slice=anchor-0123456789ab:lines:A-B|tail:N"} {
+		if !strings.Contains(gotR, frag) {
+			t.Fatalf("retained marker missing %q: %q", frag, gotR)
+		}
+	}
+	// Without an anchor (or under budget) the marker carries no cursor.
+	if got := mcpserve.SandboxOutputRetained(big, 200, "kern_project_map", ""); strings.Contains(got, "slice=") {
+		t.Fatalf("empty anchor must not advertise a cursor: %q", got)
+	}
+	if got := mcpserve.SandboxOutputRetained(big, 1<<20, "kern_project_map", "anchor-0123456789ab"); got != big {
+		t.Fatalf("under-budget retained output was modified")
+	}
 }
 
 func TestOutputBudgetResolution(t *testing.T) {
-	// Per-call max_output wins over the global cap.
-	if b, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "500"}); err != nil || b != 500 {
+	// Per-call max_output wins over everything (the per-tool table and the
+	// global cap).
+	if b, err := mcpserve.CallOutputBudget("kern_buddy", map[string]any{"max_output": "500"}); err != nil || b != 500 {
 		t.Fatalf("max_output override = %d, err=%v", b, err)
 	}
-	if b, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "0"}); err != nil || b != 0 {
+	if b, err := mcpserve.CallOutputBudget("kern_buddy", map[string]any{"max_output": "0"}); err != nil || b != 0 {
 		t.Fatalf("max_output=0 should disable, got %d, err=%v", b, err)
 	}
 	// A malformed max_output is an error, not a silent fallback.
-	if _, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "junk"}); err == nil {
+	if _, err := mcpserve.CallOutputBudget("kern_buddy", map[string]any{"max_output": "junk"}); err == nil {
 		t.Fatalf("malformed max_output should error")
 	}
-	// Global env cap applies when no per-call override.
+	// R7 per-tool table: a listed tool gets its per-tool default, which beats
+	// the global cap (per-call max_output > per-tool table > global default).
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 8<<10 {
+		t.Fatalf("kern_search per-tool cap = %d, err=%v; want %d", b, err, 8<<10)
+	}
+	if b, err := mcpserve.CallOutputBudget("kern_explore", map[string]any{}); err != nil || b != 48<<10 {
+		t.Fatalf("kern_explore per-tool cap = %d, err=%v; want %d", b, err, 48<<10)
+	}
+	// Per-call max_output beats the per-tool table.
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{"max_output": "100"}); err != nil || b != 100 {
+		t.Fatalf("max_output must beat the per-tool table, got %d, err=%v", b, err)
+	}
+	// Global env cap applies when there is no per-call override and the tool
+	// has no per-tool entry.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "999")
-	if b, err := mcpserve.CallOutputBudget(map[string]any{}); err != nil || b != 999 {
+	if b, err := mcpserve.CallOutputBudget("kern_buddy", map[string]any{}); err != nil || b != 999 {
 		t.Fatalf("env cap = %d, err=%v", b, err)
+	}
+	// A4/ADV-2: an EXPLICIT env cap is a HARD CEILING — table tools resolve
+	// to min(table, env); a per-call max_output ABOVE the env cap clamps to
+	// it (min), a value at/below the cap still wins, and 0 stays disabled.
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 999 {
+		t.Fatalf("explicit env cap must cap table tools (min), got %d, err=%v", b, err)
+	}
+	if b, err := mcpserve.CallOutputBudget("kern_explore", map[string]any{}); err != nil || b != 999 {
+		t.Fatalf("explicit env cap must cap table tools (min), got %d, err=%v", b, err)
+	}
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{"max_output": "5000"}); err != nil || b != 999 {
+		t.Fatalf("per-call max_output above the env cap must clamp to it, got %d, err=%v", b, err)
+	}
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{"max_output": "500"}); err != nil || b != 500 {
+		t.Fatalf("per-call max_output at/below the env cap must win, got %d, err=%v", b, err)
+	}
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{"max_output": "0"}); err != nil || b != 0 {
+		t.Fatalf("max_output=0 must stay disabled under the env cap, got %d, err=%v", b, err)
 	}
 }
 
@@ -1058,6 +1105,71 @@ func TestOutputSandboxThroughMCPChokepoint(t *testing.T) {
 	})
 	if strings.Contains(out, "MCP output sandbox") {
 		t.Fatalf("max_output=0 should bypass the sandbox, got %q", out)
+	}
+
+	// R7 "more" cursor: the marker carries a slice=anchor cursor, and a
+	// slice= re-call serves the ELIDED part WITHOUT re-executing the tool.
+	// The re-call passes no code=/lang= — executing kern_exec would fail on
+	// the missing required code argument — so a successful slice response
+	// proves the intercept served the retained text instead of running it.
+	t.Setenv("KERN_MCP_MAX_OUTPUT", "128")
+	out = mcpAssertOK(t, "kern_exec", map[string]any{
+		"code": "print('x'*400)",
+		"lang": "python3",
+	})
+	const marker = "slice="
+	idx := strings.Index(out, marker)
+	if idx < 0 {
+		t.Fatalf("expected a slice= cursor in the marker, got %q", out)
+	}
+	rest := out[idx+len(marker):]
+	colon := strings.Index(rest, ":")
+	if colon < 0 {
+		t.Fatalf("malformed slice cursor: %q", out)
+	}
+	anchor := rest[:colon]
+	if !strings.HasPrefix(anchor, "anchor-") {
+		t.Fatalf("malformed anchor %q", anchor)
+	}
+	// tail slice: the 400 'x' print as a single retained line, served from
+	// the cursor store WITHOUT re-executing kern_exec (no code=/lang= args
+	// were passed). A3: a slice response is still bounded by the output
+	// budget (128 here) — an over-budget slice is truncated and mints a
+	// FRESH chained anchor for the elided remainder, so a wide
+	// slice=lines:1-999999 cannot pull the whole retained output into
+	// context uncapped.
+	sliced := mcpAssertOK(t, "kern_exec", map[string]any{"slice": anchor + ":tail:2"})
+	if !strings.Contains(sliced, "xxx") {
+		t.Fatalf("slice=tail must return retained lines, got %q", sliced)
+	}
+	if !strings.Contains(sliced, "MCP output sandbox") {
+		t.Fatalf("an over-budget slice must be truncated at the output budget (A3), got %q", sliced)
+	}
+	// The chained cursor advertises a FRESH anchor for the remainder; slicing
+	// it continues the recovery path (itself bounded, so the chain never
+	// floods context).
+	idx = strings.Index(sliced, marker)
+	if idx < 0 {
+		t.Fatalf("truncated slice must carry a chained slice= cursor, got %q", sliced)
+	}
+	rest = sliced[idx+len(marker):]
+	colon = strings.Index(rest, ":")
+	if colon < 0 || !strings.HasPrefix(rest[:colon], "anchor-") {
+		t.Fatalf("truncated slice must advertise a chained anchor, got %q", sliced)
+	}
+	chained := mcpAssertOK(t, "kern_exec", map[string]any{"slice": rest[:colon] + ":tail:1"})
+	if !strings.Contains(chained, "xxx") {
+		t.Fatalf("chained cursor must serve the elided remainder, got %q", chained)
+	}
+	// lines slice with an out-of-range start is a clear error.
+	errText := mcpToolError(t, "kern_exec", map[string]any{"slice": anchor + ":lines:999-1000"})
+	if !strings.Contains(errText, "slice:") || !strings.Contains(errText, "past the end") {
+		t.Fatalf("expected a slice range error, got %q", errText)
+	}
+	// A bogus anchor errors clearly, naming the anchor and the expiry.
+	errText = mcpToolError(t, "kern_exec", map[string]any{"slice": "anchor-deadbeefcafe:lines:1-5"})
+	if !strings.Contains(errText, "anchor-deadbeefcafe") || !strings.Contains(errText, "not found or expired") {
+		t.Fatalf("expected an anchor error naming the anchor, got %q", errText)
 	}
 }
 

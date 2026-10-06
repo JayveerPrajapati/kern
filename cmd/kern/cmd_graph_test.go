@@ -155,3 +155,47 @@ func TestGraphDefaultUnchanged(t *testing.T) {
 		t.Errorf("default graph output should mention the symbol:\n%s", out)
 	}
 }
+
+// TestGraphDeadAlias locks `kern graph dead <dir>`: the first positional
+// "dead" is the dead-code report subcommand (top-level `kern dead`), not a
+// symbol to resolve — so it must render dead-code output and exit 0 instead
+// of failing symbol lookup with "no symbol found: dead".
+func TestGraphDeadAlias(t *testing.T) {
+	dir := graphEntitiesFixture(t)
+	out := captureStdout(t, func() {
+		if code := dispatchCommand("graph", []string{"dead", dir}); code != 0 {
+			t.Fatalf("graph dead exit = %d, want 0", code)
+		}
+	})
+	if strings.Contains(out, "no symbol found") {
+		t.Fatalf("graph dead must not attempt a symbol lookup:\n%s", out)
+	}
+	if !strings.Contains(out, "dead code (no production callers):") {
+		t.Fatalf("expected dead-code report output, got:\n%s", out)
+	}
+}
+
+// TestGraphDeadAliasSymbolLookupUnchanged locks that the alias is exact and
+// lowercase-only: a capital "Dead" still resolves through the graph symbol
+// path exactly as before (failed lookup, exit 1, did-you-mean), and a real
+// symbol still renders the code graph (not the dead-code report).
+func TestGraphDeadAliasSymbolLookupUnchanged(t *testing.T) {
+	dir := graphEntitiesFixture(t)
+	recovered := catchExit(t, func() {
+		dispatchCommand("graph", []string{"Dead", dir})
+	})
+	if ee, ok := recovered.(exitError); !ok || ee.code == 0 {
+		t.Fatalf("graph Dead (capital) must stay a symbol lookup — no fixture symbol 'Dead' exists, so exit must be non-zero, got %v", recovered)
+	}
+	out := captureStdout(t, func() {
+		if code := dispatchCommand("graph", []string{"GetUsers", dir}); code != 0 {
+			t.Fatalf("graph GetUsers exit = %d, want 0", code)
+		}
+	})
+	if strings.Contains(out, "dead code (no production callers):") {
+		t.Errorf("graph <realsymbol> must render the code graph, not the dead-code report:\n%s", out)
+	}
+	if !strings.Contains(out, "GetUsers") {
+		t.Errorf("graph <realsymbol> output should mention the symbol:\n%s", out)
+	}
+}

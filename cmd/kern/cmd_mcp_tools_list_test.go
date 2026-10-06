@@ -9,8 +9,8 @@ import (
 )
 
 // `kern mcp tools` is the discoverability front door for the MCP catalog:
-// the default 22-tool advertisement hides the long tail behind kern_meta,
-// so the listing must show every tool grouped by category.
+// the default surface hides the long tail behind kern_meta, so the listing
+// must show every tool grouped by category.
 func TestMCPToolsListsCatalog(t *testing.T) {
 	out := captureStdout(t, func() { runMCPToolsList(nil) })
 	if !strings.Contains(out, "kern MCP catalog:") {

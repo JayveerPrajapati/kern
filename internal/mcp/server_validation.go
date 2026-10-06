@@ -108,12 +108,33 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		return s.runTool(ctx, key, token, p.Name, p.Arguments)
 	}()
 	// Cap every tool response at the output budget so a large result cannot
-	// flood the agent's context. Overridable per call with max_output=N.
+	// flood the agent's context. Overridable per call with max_output=N and
+	// per tool by the R7 per-tool table (mcpserve.CallOutputBudget). A
+	// truncated response retains its FULL pre-sandbox text under an anchor
+	// (retainOutput) and the marker advertises slice=<anchor>:lines:A-B|tail:N
+	// to read the elided part without re-running the tool (R7 "more" cursor,
+	// see retain.go). A slice re-read (scope.sliced) is bounded by the SAME
+	// budget (A3): an over-budget slice is truncated and mints a FRESH anchor
+	// for the ELIDED REMAINDER of the slice itself, so a wide
+	// slice=lines:1-999999 can never pull the whole retained output into
+	// context uncapped — the recovery path chains (each truncated slice
+	// points at the next) instead of flooding, and never re-executes the tool.
 	if err == nil {
 		var budget int
-		budget, err = mcpserve.CallOutputBudget(p.Arguments)
-		if err == nil {
-			text = mcpserve.SandboxOutput(text, budget, p.Name)
+		budget, err = mcpserve.CallOutputBudget(p.Name, p.Arguments)
+		if err == nil && budget > 0 && len(text) > budget {
+			if scope.sliced {
+				// Chained cursor: retain only the elided remainder (text[cut:])
+				// of this slice under a fresh anchor, so the marker's slice=
+				// advice reads the part the caller has NOT seen yet — never the
+				// whole retained entry.
+				cut := mcpserve.OutputCut(text, budget)
+				anchor := retainOutput(text[cut:])
+				text = mcpserve.SandboxOutputRetained(text, budget, p.Name, anchor)
+			} else {
+				anchor := retainOutput(text)
+				text = mcpserve.SandboxOutputRetained(text, budget, p.Name, anchor)
+			}
 		}
 	}
 	result := map[string]any{

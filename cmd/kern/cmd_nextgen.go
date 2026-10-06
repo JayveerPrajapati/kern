@@ -406,15 +406,7 @@ func runFragility(rest []string) {
 	}
 
 	for i, h := range report.Hotspots {
-		riskBadge := "🟢 LOW"
-		switch h.RiskLevel {
-		case "CRITICAL":
-			riskBadge = "🔥 CRITICAL RISK"
-		case "HIGH":
-			riskBadge = "🚨 HIGH RISK"
-		case "MEDIUM":
-			riskBadge = "⚠️ MEDIUM RISK"
-		}
+		riskBadge := fragilityRiskBadge(h.RiskLevel)
 
 		fmt.Printf("[%d] %s (%s) — %s\n", i+1, h.Target, h.Kind, riskBadge)
 		fmt.Printf("    Fragility Score: %.2f (Defect Fixes: %d / %d commits, Callers: %d)\n",

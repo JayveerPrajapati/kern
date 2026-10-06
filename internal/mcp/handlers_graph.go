@@ -19,6 +19,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/gov"
 	"github.com/JayveerPrajapati/kern/internal/mcp/graph"
+	"github.com/JayveerPrajapati/kern/internal/verifycmd"
 )
 
 // graphCall delegates an index-based graph call: it loads the index (the
@@ -111,6 +112,9 @@ func (s *Server) handleGraph(ctx context.Context, args map[string]any) (string, 
 	return s.graphGoverned(ctx, args, graph.Graph)
 }
 func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string, error) {
+	if path, ok := verifycmd.ExploreFilePath(s.roots, args); ok {
+		return verifycmd.ExploreFile(ctx, s.handleCompact, path, args)
+	}
 	return s.graphGoverned(ctx, args, graph.Explore)
 }
 func (s *Server) handleProbe(ctx context.Context, args map[string]any) (string, error) {

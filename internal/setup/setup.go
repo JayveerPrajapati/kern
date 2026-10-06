@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/gitblocks"
 )
 
 // mcpName / cliName return the platform-appropriate binary file names. On
@@ -201,18 +203,26 @@ func Check(root string) []Status {
 	detected := DetectAgents(root)
 	for _, agent := range detected {
 		file, ok := instructionFiles[agent]
-		if ok {
-			path := filepath.Join(root, file)
-			installed := false
-			if b, err := os.ReadFile(path); err == nil && (strings.Contains(string(b), "kern usage rules") || strings.Contains(string(b), "kern-instruction:")) {
+		if !ok {
+			continue
+		}
+		path := filepath.Join(root, file)
+		installed := instructionPolicyPresent(path)
+		if !installed {
+			// F10: older kern releases wrote other paths (Cursor's
+			// .cursor/instructions/kern.mdc). A legacy install still
+			// carries the kern-first policy — accept it instead of
+			// warning about a file this setup never wrote.
+			if legacy, ok := legacyInstructionFiles[agent]; ok && instructionPolicyPresent(filepath.Join(root, legacy)) {
+				path = filepath.Join(root, legacy)
 				installed = true
 			}
-			mark := "not present"
-			if installed {
-				mark = "kern-first policy present"
-			}
-			out = append(out, Status{Agent: agent + " (detected)", Installed: installed, Path: path, Note: mark})
 		}
+		mark := "not present"
+		if installed {
+			mark = "kern-first policy present"
+		}
+		out = append(out, Status{Agent: agent + " (detected)", Installed: installed, Path: path, Note: mark})
 	}
 
 	out = append(out, checkSkills(root)...)
@@ -251,6 +261,11 @@ type WireOptions struct {
 	// rules, "" uses the persisted .kern/config.json value (default "full").
 	// An explicit non-empty value is persisted so subsequent runs remember it.
 	AgentsMD string
+	// DryRun suppresses every write and returns preview statuses whose
+	// notes describe what a real run would do ("[dry-run] would …"), so
+	// `kern setup --dry-run` never mutates the project. No status may
+	// claim a write happened.
+	DryRun bool
 }
 
 // WireWith configures the requested agents like Wire, with per-run options.
@@ -294,8 +309,6 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		return true
 	}
 	var out []Status
-	// .mcp.json is the universal auto-discovered MCP file — always written.
-	out = append(out, wireMCPJSON(root, bin))
 	// AGENTS.md is the universal instruction file — every detected agent
 	// reads it natively (Claude, Codex, Gemini, Continue, Windsurf, Zed,
 	// Qwen, Qoder, Kiro, opencode). Write it unconditionally so the
@@ -305,8 +318,12 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	// --agents-md choice is persisted in .kern/config.json so subsequent
 	// runs remember it.
 	mode := opts.AgentsMD
+	explicitThin := opts.AgentsMD == "thin"
 	if mode == "" {
 		mode = agentsMDMode(root)
+		// A persisted agents_md choice is a user decision; the absent-key
+		// default is not, and must not downgrade a full rules file.
+		explicitThin = agentsMDPersisted(root) && mode == "thin"
 	}
 	wired := "all"
 	if len(explicit) > 0 {
@@ -318,7 +335,85 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			wired = strings.Join(detected, ", ")
 		}
 	}
-	out = append(out, wireAgentRules(root, mode, wired))
+
+	if opts.DryRun {
+		// F10: --dry-run must not write anything. Mirror the wiring
+		// sequence below — same gates, same target paths — and report
+		// each step as a would-write preview. Keep this step list in
+		// sync with the real sequence below.
+		would := func(agent, path, action string) Status {
+			note := "[dry-run] would " + action
+			if _, err := os.Stat(path); err == nil {
+				note += " (already present — would refresh if stale)"
+			}
+			return Status{Agent: agent, Installed: true, Path: path, Note: note}
+		}
+		seenPath := map[string]bool{}
+		wouldOnce := func(agent, path, action string) {
+			if seenPath[path] {
+				return
+			}
+			seenPath[path] = true
+			out = append(out, would(agent, path, action))
+		}
+		out = append(out, would("mcp", filepath.Join(root, ".mcp.json"), "write .mcp.json (universal MCP config)"))
+		out = append(out, would("AGENTS.md", filepath.Join(root, "AGENTS.md"), "write AGENTS.md ("+mode+" rules)"))
+		if repoEnabled("opencode") {
+			out = append(out, would("opencode", filepath.Join(root, "opencode.json"), "merge the kern MCP entry into opencode.json"))
+			out = append(out, would("opencode-plugin", filepath.Join(root, ".opencode", "plugins", "kern.ts"), "install/refresh the opencode plugin"))
+		}
+		if global {
+			// User-global targets (home MCP adapters, hooks, global git
+			// ignore/skills) are enumerated by a dozen writer functions
+			// with internal paths; rather than duplicating them here
+			// (drift risk), report one honest summary line.
+			out = append(out, Status{Agent: "global", Installed: true, Note: "[dry-run] would wire user-global configs (home MCP adapters, hooks, global git ignore + skills) — no home files changed"})
+		} else {
+			previewAdapters, _ := effectiveAdapters(root)
+			for _, a := range previewAdapters {
+				if a.scope != "repo" || !repoEnabled(a.name) {
+					continue
+				}
+				wouldOnce(a.name, a.path(root), "merge the kern "+a.key+" entry into the "+a.name+" config")
+			}
+			for _, a := range previewAdapters {
+				if a.scope != "repo" || !repoEnabled(a.name) {
+					continue
+				}
+				switch a.name {
+				case "continue":
+					out = append(out, would("continue-rules", filepath.Join(root, ".continue", "rules", "kern.md"), "write the continue kern-first rule"))
+				case "windsurf":
+					out = append(out, would("windsurf-rules", filepath.Join(root, ".windsurf", "rules", "kern-first.md"), "write the windsurf kern-first rule"))
+				case "kiro":
+					out = append(out, would("kiro-steering", filepath.Join(root, ".kiro", "steering", "kern-first.md"), "write the kiro kern-first steering"))
+				}
+			}
+			if repoEnabled("cursor") {
+				out = append(out, would("cursor-rules", filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "write the cursor rule"))
+			}
+			if repoEnabled("antigravity") {
+				out = append(out, would("antigravity-project-hooks", filepath.Join(root, ".agents", "hooks.json"), "write the antigravity project hooks"))
+			}
+		}
+		out = append(out, would("gitignore", filepath.Join(root, ".gitignore"), "write/refresh the kern-generated .gitignore block"))
+		out = append(out, would("local-gitexclude", filepath.Join(root, ".git", "info", "exclude"), "add .kern/ to the local git exclude"))
+		out = append(out, would("skills (project universal)", filepath.Join(root, ".agents", "skills"), "install/refresh kern skills in .agents/skills"))
+		if _, err := os.Stat(filepath.Join(root, ".cursor")); err == nil {
+			out = append(out, would("skills-cursor (project)", filepath.Join(root, ".cursor", "rules"), "install/refresh cursor skill rules in .cursor/rules"))
+		}
+		out = append(out, would("kern config", filepath.Join(root, ".kern", "profiles.json"), "scaffold .kern/profiles.json if missing"))
+		for _, agent := range detected {
+			if file, ok := instructionFiles[agent]; ok {
+				out = append(out, would(agent+"-instruction", filepath.Join(root, file), "write the "+agent+" kern-first policy"))
+			}
+		}
+		return out
+	}
+
+	// .mcp.json is the universal auto-discovered MCP file — always written.
+	out = append(out, wireMCPJSON(root, bin))
+	out = append(out, wireAgentRules(root, mode, wired, explicitThin))
 	if opts.AgentsMD != "" {
 		if err := setAgentsMD(root, opts.AgentsMD); err != nil {
 			out = append(out, Status{Agent: "kern config", Path: agentsMDConfigPath(root), Note: "persist agents_md: " + err.Error()})
@@ -405,11 +500,11 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			out = append(out, wireKiroHooks())
 		}
 	}
-	out = append(out, gitignoreGenerated(root))
-	out = append(out, wireLocalGitExclude(root))
+	out = append(out, gitStatus(gitblocks.GitignoreGenerated(root)))
+	out = append(out, gitStatus(gitblocks.WireLocalGitExclude(root)))
 	if global {
 		out = append(out, wireGlobalGitHooks())
-		out = append(out, wireGlobalGitignore())
+		out = append(out, gitStatus(gitblocks.WireGlobalGitignore()))
 		out = append(out, wireEditorExclusions()...)
 		out = append(out, wireGlobalSkills()...)
 	}
@@ -417,11 +512,27 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	out = append(out, wireProjectSkills(root)...)
 	out = append(out, ensureKernConfig(root))
 
-	// Wire kern-first instruction files for every detected platform that
+	// Wire kern-first instruction files for every present platform that
 	// has an instruction file. This is independent of the explicit agents
 	// list — it ensures the kern-first policy reaches all present agents.
-	// detected is computed before any wiring so it reflects what existed
-	// before this run, not the configs this run just created.
+	// F10: wiring itself can create the very marker DetectAgents keys on
+	// (bare setup writes .cursor/rules/ and .vscode/mcp.json; the universal
+	// skills pass creates .agents/), and `detected` above is a pre-run
+	// snapshot. doctor detects post-setup state, so an agent whose marker
+	// this run created would end up half-wired — config present, policy
+	// missing — a permanent doctor warning caused by setup itself. Extend
+	// (never shrink) the snapshot with post-wiring detection so the policy
+	// files land in the SAME run that creates the marker.
+	seenDetected := make(map[string]bool, len(detected))
+	for _, a := range detected {
+		seenDetected[a] = true
+	}
+	for _, a := range DetectAgents(root) {
+		if !seenDetected[a] {
+			seenDetected[a] = true
+			detected = append(detected, a)
+		}
+	}
 	out = append(out, wireInstructions(root, detected)...)
 
 	return out
@@ -454,4 +565,12 @@ func wireAdapter(a adapter, root, bin string) Status {
 		return Status{Agent: a.name, Path: path, Note: err.Error()}
 	}
 	return Status{Agent: a.name, Installed: true, Path: path, Note: a.name + " config updated"}
+}
+
+// gitStatus adapts a gitblocks result into the Status shape every other
+// wiring step reports, preserving the agent label, flags and note so the
+// observable setup output is unchanged by the gitblocks extraction (the leaf
+// cannot return setup.Status directly — that would cycle the import).
+func gitStatus(r gitblocks.Result) Status {
+	return Status{Agent: r.Agent, Installed: r.Installed, Skipped: r.Skipped, Path: r.Path, Note: r.Note}
 }

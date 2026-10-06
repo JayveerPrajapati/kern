@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/verification"
@@ -24,13 +25,31 @@ const instructions = "kern is a fully local-first code context engine. It makes 
 // serverVersion is stamped at build time via -ldflags "-X main.version=...";
 // the binary entry points forward it through SetServerVersion. Defaults to
 // "dev" when built without ldflags so initialize still reports something sane.
-var serverVersion = "dev"
+// It is stored in an atomic pointer because SetServerVersion is called from
+// main while the initialize/health/security handlers read it concurrently
+// from request goroutines (F1: plain-global read/write was a data race).
+var serverVersion atomic.Pointer[string]
+
+func init() {
+	serverVersion.Store(&devServerVersion)
+}
+
+var devServerVersion = "dev"
+
+// currentServerVersion returns the version reported in the initialize
+// response, defaulting to "dev" before any stamping.
+func currentServerVersion() string {
+	if v := serverVersion.Load(); v != nil {
+		return *v
+	}
+	return devServerVersion
+}
 
 // SetServerVersion overrides the version reported in the initialize response.
 // The CLI entry points call it with their ldflags-stamped main.version.
 func SetServerVersion(v string) {
 	if v != "" {
-		serverVersion = v
+		serverVersion.Store(&v)
 	}
 }
 

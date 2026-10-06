@@ -19,6 +19,36 @@
 // additionally confines Linux writes to the workspace, temp and cache dirs.
 // Where Landlock is unavailable the Linux behavior is unchanged
 // (degrade-safe).
+//
+// Platform matrix — enforcement differs per OS (see runGuarded,
+// netIsolationPrefix and internal/sandbox/landlock; internal/script mirrors
+// it for `kern exec`):
+//
+//	Linux     mechanism: Landlock FS allowlist (kernel >= 5.13; ABI v2 >= 5.19
+//	          +REFER, v3 >= 6.2 +TRUNCATE) via a re-exec trampoline, plus
+//	          unshare user+net namespace for network egress.
+//	          blocks: reads of sensitive paths (~/.ssh, ~/.aws, ~/.gnupg,
+//	          ~/.kube, ~/.netrc); writes confined to workspace/temp/cache when
+//	          KERN_SANDBOX_WRITE_CONFINEMENT is on (default); network egress
+//	          denied (loopback only). Overrides: KERN_SANDBOX_FS_CONFINEMENT=0,
+//	          KERN_SANDBOX_WRITE_CONFINEMENT=0, or the escape hatch
+//	          KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1 (skips the whole wrap).
+//	          Not seccomp: Landlock relies on PR_SET_NO_NEW_PRIVS, and a
+//	          seccomp-filtered runner can break the trampoline. Landlock
+//	          unavailable -> unchanged behavior (degrade-safe).
+//	macOS     mechanism: Apple Seatbelt (sandbox-exec) — deny-list on top of
+//	          (allow default). Blocks: network egress except loopback (loopback
+//	          bind requires RunOptions.AllowLoopbackBind), plus reads of the
+//	          sensitive-path blocklist (~/.ssh, ~/.aws, ~/.gnupg,
+//	          ~/.config/gcloud, ~/.kube, ~/.docker/config.json,
+//	          ~/Library/Cookies, ~/.netrc). Overrides: KERN_SANDBOX_FS_CONFINEMENT=0
+//	          or KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1. Nested runs
+//	          (KERN_SANDBOX_ACTIVE=1) inherit the OUTER profile — a second
+//	          sandbox-exec cannot apply.
+//	Windows/  mechanism: none (no CLONE_NEWNET, no sandbox-exec). FAIL-CLOSED:
+//	other     the run is refused with a clear platform-naming error unless the
+//	          operator set the override (KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1;
+//	          MCP kern_exec --no_isolate additionally needs KERN_ALLOW_NO_ISOLATE=1).
 package sandbox
 
 import (
@@ -700,6 +730,15 @@ func sandboxChildEnv() []string {
 	return append(governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter()), "KERN_SANDBOX_ACTIVE=1")
 }
 
+// inheritIsolationNote is prepended to a guarded run's output when the run
+// inherits the outer kern sandbox's network isolation instead of applying its
+// own wrap (KERN_SANDBOX_ACTIVE=1; a nested sandbox-exec cannot apply a second
+// Seatbelt profile on macOS). Surfaced in the output so the inheritance is
+// never silent, and so the verification engine's isolation-skip matcher —
+// which keys on the "refusing to run unisolated" refusal text — can never
+// mistake an inherited run for a refused one.
+const inheritIsolationNote = "note: already inside an active kern sandbox (KERN_SANDBOX_ACTIVE=1); inheriting outer network isolation — not re-isolating\n"
+
 func runGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool, opts RunOptions) *Result {
 	if parent == nil {
 		parent = context.Background()
@@ -716,13 +755,36 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	// default egress gate; internal consumers (execution worktrees, the
 	// verification engine, MCP kern_sandbox) surface res.Err verbatim, so
 	// they fail closed with the same clear error instead of degrading.
-	if !networkIsolationAvailable() && !netEscapeHatchSet() {
-		res.Network = &NetworkPolicy{Isolated: false, NetnsAvail: false, AllowNetEnv: false}
-		res.Err = fmt.Errorf("network isolation not available on this platform (%s); refusing to run unisolated (fail-closed)\n"+
-			"  to override and run without network isolation, set: export KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1)\n"+
-			"  to enable network isolation on Linux, run: sysctl -w kernel.unprivileged_userns_clone=1 (or use a Linux VM/container)", goruntime.GOOS)
-		res.Duration = time.Since(start)
-		return res
+	// Nested-sandbox inheritance (F-S1): when this process is ALREADY inside
+	// an active kern sandbox — the `kern verify` dogfood path — a nested
+	// sandbox-exec cannot apply a second Seatbelt profile (macOS), so the
+	// availability probe above legitimately reports unavailable. The child is
+	// however ALREADY isolated by the OUTER profile, so refusing would fail
+	// closed against a threat that does not exist. When KERN_SANDBOX_ACTIVE=1
+	// (injected into every guarded child by sandboxChildEnv; read here from
+	// the current process env) the run INHERITS the outer isolation: it
+	// proceeds WITHOUT a second wrap and says so in its output.
+	//
+	// SECURITY: the marker is child-visible env, trivially spoofable, and
+	// identical in power to the existing KERN_ALLOW_UNISOLATED=1 env gate —
+	// an attacker who can set it could equally set that gate, so inheriting
+	// adds no privilege: it only converts refuse-and-skip into inherit-and-run
+	// for contexts that are already under a kern sandbox profile. (Optional
+	// darwin hardening: verify the parent really is seatbelted via
+	// sandbox_check(2) before trusting the marker — deliberately not
+	// implemented.)
+	inheritedIsolation := false
+	if !isolationProbe() && !netEscapeHatchSet() {
+		if os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+			inheritedIsolation = true
+		} else {
+			res.Network = &NetworkPolicy{Isolated: false, NetnsAvail: false, AllowNetEnv: false}
+			res.Err = fmt.Errorf("network isolation not available on this platform (%s); refusing to run unisolated (fail-closed)\n"+
+				"  to override and run without network isolation, set: export KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1)\n"+
+				"  to enable network isolation on Linux, run: sysctl -w kernel.unprivileged_userns_clone=1 (or use a Linux VM/container)", goruntime.GOOS)
+			res.Duration = time.Since(start)
+			return res
+		}
 	}
 	snap, err := Snapshot(root)
 	if err != nil {
@@ -758,7 +820,14 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	netIsolated := false
 	fsConfined := false
 	c := exec.CommandContext(ctx, cmdName, args...)
-	if !netEscapeHatchSet() {
+	// An inherited run (KERN_SANDBOX_ACTIVE) already sits under the OUTER
+	// sandbox's profile: applying our own wrap is impossible nested — a
+	// second sandbox-exec cannot apply another Seatbelt profile and dies
+	// with "sandbox_apply: Operation not permitted" — and redundant, since
+	// egress is already blocked by the outer profile. Skip the wrap; the
+	// inherit note and the Inherited+Isolated stamp record the inherited
+	// posture instead.
+	if !netEscapeHatchSet() && !inheritedIsolation {
 		if prefix, ok := netIsolationPrefix(opts.AllowLoopbackBind); ok {
 			// Linux Stage-1 FS confinement (M3): when Landlock is available,
 			// re-exec this binary as a trampoline that applies the allowlist
@@ -815,6 +884,15 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	res.Network.Isolated = netIsolated
 	res.Network.FSConfined = fsConfined
 	res.Network.LoopbackBindAllowed = opts.AllowLoopbackBind
+	if inheritedIsolation {
+		// The child ran under the OUTER kern sandbox profile (Seatbelt on
+		// darwin / Landlock+netns on Linux) — egress was blocked by
+		// inheritance, not by our own wrap. Record it on the policy and
+		// surface the note in the output (never silent).
+		res.Network.Isolated = true
+		res.Network.Inherited = true
+		res.Output = inheritIsolationNote + res.Output
+	}
 	res.Duration = time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || ctx.Err() == context.Canceled {
 		// The context kill only reaches the direct child; kill the process
@@ -903,34 +981,6 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	return res
 }
 
-// evalSymlinksNearest resolves p to its canonical absolute path, walking up to
-// the nearest EXISTING ancestor when EvalSymlinks fails on the full path (the
-// restore target may not exist yet — rollback writes files that the failed run
-// may have deleted). Re-appending the unresolved remainder preserves the
-// not-yet-existing suffix while still resolving every symlink that DOES exist,
-// so a symlink created during a sandboxed run is resolved before Escape's
-// prefix check even when the final path component is absent. On total failure
-// (nothing resolves) the cleaned lexical path is returned and Escape's
-// lexical prefix check still applies.
-func evalSymlinksNearest(p string) string {
-	cur := filepath.Clean(p)
-	var tail []string
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			if len(tail) == 0 {
-				return resolved
-			}
-			return filepath.Join(resolved, filepath.Join(tail...))
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur { // reached the filesystem root
-			return filepath.Join(cur, filepath.Join(tail...))
-		}
-		tail = append([]string{filepath.Base(cur)}, tail...)
-		cur = parent
-	}
-}
-
 // Escape checks a path stays within root (defense against traversal).
 // root is resolved to an absolute path first, so the check is correct whether
 // the caller passed "." (the runSandbox default), a relative path, or an
@@ -949,7 +999,7 @@ func Escape(root, p string) bool {
 	if err != nil {
 		absRoot = filepath.Clean(root)
 	}
-	rootResolved := evalSymlinksNearest(absRoot)
-	clean := evalSymlinksNearest(filepath.Join(absRoot, p))
+	rootResolved := fsutil.EvalSymlinksNearest(absRoot)
+	clean := fsutil.EvalSymlinksNearest(filepath.Join(absRoot, p))
 	return !strings.HasPrefix(clean, rootResolved+string(filepath.Separator))
 }

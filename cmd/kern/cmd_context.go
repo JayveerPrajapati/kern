@@ -155,6 +155,15 @@ func runPrompt(rest []string) {
 		}
 		return
 	}
+	// L2: "show" is a subcommand, not a template name — `kern prompt show X`
+	// renders template X, and `kern prompt show` (no name) is a usage error
+	// instead of a misleading "unknown template show" runtime failure.
+	if args[0] == "show" {
+		if len(args) < 2 {
+			fatalUsage("usage: kern prompt show <template>\n  renders one template; 'kern prompt list' lists the available names")
+		}
+		args = args[1:]
+	}
 	vars := map[string]string{
 		"ROOT":    ".",
 		"LANG":    "",
@@ -263,7 +272,16 @@ func runSwap(rest []string) {
 		if len(swapped) > 0 {
 			fmt.Fprintf(os.Stderr, "kern: swapped %d fenced block(s) to fit budget %d: %s\n", len(swapped), budget, strings.Join(swapped, ", "))
 		} else {
-			fmt.Fprintf(os.Stderr, "kern: no fenced blocks swapped (none present or all within budget %d)\n", budget)
+			// L13: the no-swap message must name ALL three real reasons a
+			// swap can be a no-op: (1) no tagged fences in the document,
+			// (2) the document already fits the budget, (3) tagged fences
+			// exist but their path does not resolve under root (missing
+			// file, escapes root, oversized) or their summary renders empty.
+			if n, first := swap.UnswappableFences(text, root); n > 0 {
+				fmt.Fprintf(os.Stderr, "kern: no fenced blocks swapped: %d tagged fence(s) could not be resolved (e.g. %q — path must reference a real file under %s) and none of the remaining fences were swapped\n", n, first, root)
+			} else {
+				fmt.Fprintf(os.Stderr, "kern: no fenced blocks swapped (none present or all within budget %d)\n", budget)
+			}
 		}
 		if !fits {
 			fmt.Fprintf(os.Stderr, "kern: warning: still over budget after summarization\n")
@@ -404,7 +422,7 @@ func runContext(rest []string) {
 		if fileContent, rerr := code.ReadFile(filePath); rerr == nil {
 			before := tokenize.Count(string(fileContent))
 			after := tokenize.Count(ctxText)
-			printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+			printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", def.File))
 		}
 	}
 }
@@ -657,7 +675,7 @@ func runGuard(rest []string) {
 
 		// Authz gate: when both --agent-id and --task are present, run
 		// AuthorizeContext BEFORE the boundary check and surface the verdict in
-		// the JSON output. A denied verdict is a blocking gate: exit 2 without
+		// the JSON output. A denied verdict is a blocking gate: exit 3 without
 		// proceeding to the boundary check.
 		var authzVerdict map[string]any
 		authzDenied := false
@@ -673,7 +691,7 @@ func runGuard(rest []string) {
 					"authz_verdict":   authzVerdict,
 				})
 			}
-			fatalUsage("guard: authz denied for agent %q task %q", f.agentID, f.task)
+			fatalPolicy("guard: authz denied for agent %q task %q — exit 3 (denied)", f.agentID, f.task)
 		}
 
 		strict := f.precision == "strict"
@@ -747,7 +765,7 @@ func runGuard(rest []string) {
 		// are persisted even when the check REJECTs below.
 		publishGuardEvents(root, violations, unconfigured || skipped["boundaries-not-configured"] > 0)
 		if f.threshold >= 0 && len(violations) > f.threshold {
-			fatalUsage("guard: %d violation(s) exceed threshold %d — see output above", len(violations), f.threshold)
+			fatalPolicy("guard: %d violation(s) exceed threshold %d — exit 3 (denied); see output above", len(violations), f.threshold)
 		}
 	default:
 		fatalUsage("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]")

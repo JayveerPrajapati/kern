@@ -27,8 +27,8 @@ func TestSecurityHooksWiring(t *testing.T) {
 	if h.SecuritySvc == nil {
 		t.Error("securityHooks.SecuritySvc must be non-nil")
 	}
-	if h.ServerVersion != serverVersion {
-		t.Errorf("securityHooks.ServerVersion = %q, want %q", h.ServerVersion, serverVersion)
+	if h.ServerVersion != currentServerVersion() {
+		t.Errorf("securityHooks.ServerVersion = %q, want %q", h.ServerVersion, currentServerVersion())
 	}
 }
 

@@ -211,7 +211,7 @@ func TestRunSandboxSeparatorSplitsBeforeFlags(t *testing.T) {
 
 func TestRunWhatIfJSON(t *testing.T) {
 	root := jsonCliFixture(t)
-	out := captureStdout(t, func() { runWhatIf("what-if", []string{"helper", "--root", root, "--json"}) })
+	out := captureStdout(t, func() { runImpact([]string{"helper", "--root", root, "--json"}) })
 	m := assertValidJSON(t, out)
 	if _, ok := m["impact"]; !ok {
 		t.Fatalf("expected impact object: %v", m)

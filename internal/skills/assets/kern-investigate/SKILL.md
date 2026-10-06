@@ -5,7 +5,7 @@ Use for any 'how does X work', 'where is X', 'who calls X', 'what depends on X',
 ---
 
 <!-- canonical source: internal/skills/assets/kern-investigate/SKILL.md; copies must stay identical — run kern setup to sync -->
-<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-22 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
+<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-6 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
 
 # Kern Codebase Investigation Runbook
 
@@ -57,6 +57,8 @@ Only read verbatim code if you need to inspect exact logic. Instead of reading t
 {"request": "get context for HandleRequest within 400 tokens"}
 ```
 Or call `kern_context(symbol="HandleRequest", budget=400)`.
+
+To read a whole file or a line window, call `kern_explore` with the file path as `symbol`: a symbolic summary by default, `tier=full` for the verbatim file, `start_line`/`end_line` for a numbered window.
 
 ---
 

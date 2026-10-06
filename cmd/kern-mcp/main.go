@@ -88,6 +88,12 @@ func main() {
 		fmt.Println("kern-mcp " + version)
 		return
 	}
+	// Fail loudly at startup on a misspelled KERN_MCP_CATEGORY: a no-op
+	// filter is a silent capability loss (I8). Same gate as `kern mcp`.
+	if err := mcp.ValidateMCPSurfaceEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, "kern-mcp:", err)
+		os.Exit(2)
+	}
 	mcp.SetServerVersion(version)
 	_ = optimize.EnsureRecorder()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

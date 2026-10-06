@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // flags holds the parsed command-line flags shared across subcommands.
@@ -73,6 +74,7 @@ type flags struct {
 	cmd                  string
 	timeout              int
 	timeoutSet           bool
+	timeoutDur           string // --timeout duration-string form (30m, 500ms); integer-seconds values stay in .timeout
 	wait                 int
 	fewshot              bool
 	mode                 string
@@ -143,10 +145,13 @@ type flags struct {
 	verifyTokenReduction bool
 	scanPath             string
 	types                string
-	cve                  bool // --cve (verify: govulncheck vulnerability check)
-	license              bool // --license (verify: deterministic license classifier)
-	secrets              bool // --secrets (verify: committed-secret history scan)
-	short                bool // --short (verify: run the test step with `go test -short`; the default)
+	cve                  bool   // --cve (verify: govulncheck vulnerability check)
+	license              bool   // --license (verify: deterministic license classifier)
+	secrets              bool   // --secrets (verify: committed-secret history scan)
+	short                bool   // --short (verify: run the test step with `go test -short`; the default)
+	changed              bool   // --changed (verify: scope the test step to packages with changes vs HEAD)
+	changedSince         string // --changed-since (verify: scope the test step to packages changed since a git ref)
+	fast                 bool   // --fast (verify: pre-commit tier — build + changed-package tests only, keeps -short)
 	action               string
 	column               int
 	compilerOutput       string
@@ -355,6 +360,28 @@ func parseFlags(args []string) (flags, []string, error) {
 			setInt(dst, v, name)
 		}
 	}
+	// setTimeout consumes the --timeout value in its dual form: an integer is
+	// seconds (the historical contract read by toolTimeout), a Go duration
+	// string (30m, 500ms) is kept verbatim in timeoutDur for commands that
+	// need sub-second or minute-scale bounds (kern approval wait). Either
+	// form sets timeoutSet so commands can distinguish "given" from default;
+	// a value that is neither is a sticky parse error.
+	setTimeout := func(i *int, val, name string) {
+		if parseErr != nil {
+			return
+		}
+		if _, derr := time.ParseDuration(val); derr == nil {
+			f.timeoutDur = val
+			f.timeoutSet = true
+			return
+		}
+		if _, ierr := strconv.Atoi(val); ierr == nil {
+			setInt(&f.timeout, val, name)
+			f.timeoutSet = true
+			return
+		}
+		parseErr = fmt.Errorf("%s: invalid timeout %q (want integer seconds or a duration like 30m)", name, val)
+	}
 	// setBool sets a bool flag: --flag, --flag=true or --flag=false (the
 	// stdlib flag package's bool forms, migrated verbatim).
 	setBool := func(dst *bool, name, inline string, hasInline bool) {
@@ -508,6 +535,12 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.types, inline, hasInline)
 		case "--short":
 			setBool(&f.short, "--short", inline, hasInline)
+		case "--changed":
+			setBool(&f.changed, "--changed", inline, hasInline)
+		case "--changed-since":
+			setStr(&i, &f.changedSince, inline, hasInline)
+		case "--fast":
+			setBool(&f.fast, "--fast", inline, hasInline)
 		case "--cve":
 			setBool(&f.cve, "--cve", inline, hasInline)
 		case "--license":
@@ -567,12 +600,13 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--cmd":
 			setStr(&i, &f.cmd, inline, hasInline)
 		case "--timeout":
+			// Dual-form: an integer is seconds (historical), a Go duration
+			// string (30m, 500ms) is captured verbatim for commands that need
+			// sub-second or minute-scale bounds (kern approval wait).
 			if hasInline {
-				setInt(&f.timeout, inline, "--timeout")
-				f.timeoutSet = true
+				setTimeout(&i, inline, "--timeout")
 			} else if v, ok := take(&i); ok {
-				setInt(&f.timeout, v, "--timeout")
-				f.timeoutSet = true
+				setTimeout(&i, v, "--timeout")
 			}
 		case "--wait":
 			if hasInline {

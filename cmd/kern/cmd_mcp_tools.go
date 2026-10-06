@@ -143,6 +143,13 @@ func runPreEdit(rest []string) {
 	if file == "" && len(pos) > 0 {
 		file = pos[0]
 	}
+	// L1: a bare `kern pre-edit` (no file, no symbol, no positionals) is a
+	// usage error (exit 2), not a runtime failure (exit 1): there is nothing
+	// to assess. The documented usage requires at least one of --file or
+	// --symbol.
+	if file == "" && f.symbol == "" && len(pos) == 0 {
+		fatalUsage("usage: kern pre-edit [--file <file>] [--lines N] [--symbol NAME] [--root ROOT] [--json]\n  at least one of --file or --symbol is required")
+	}
 	// Never bless a path that does not exist: a nonexistent -file must fail
 	// loudly (rc=1) instead of producing a LOW-risk "Safe to proceed" report.
 	if file != "" {

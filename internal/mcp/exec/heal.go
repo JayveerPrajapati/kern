@@ -58,7 +58,7 @@ func Heal(ctx context.Context, args map[string]any) (string, error) {
 	var b strings.Builder
 	if res.Validated {
 		if res.UsedPlaybook {
-			fmt.Fprintf(&b, "status: healed OK via recorded playbook (no LLM rounds)\n")
+			fmt.Fprintf(&b, "status: healed OK via recorded playbook sig=%s (no LLM rounds)\n", res.PlaybookSig)
 		} else {
 			fmt.Fprintf(&b, "status: healed OK after %d round(s)\n", res.Iterations)
 		}
@@ -108,6 +108,13 @@ func (h *mcpHealPlaybookStore) Lookup(signature string) ([]heal.Replacement, boo
 	}
 	reps := heal.DecodeReplacements(pb.Steps)
 	if len(reps) == 0 {
+		return nil, false
+	}
+	// Poison-scope limiter (deep-dive C4): a recorded fix may replay only
+	// against the exact content it was recorded from — Apply overwrites files
+	// wholesale. Any drift is reported as a MISS so the heal loop escalates
+	// to the full LLM round instead of replacing current content blindly.
+	if !heal.StepsApplyToCurrent(h.root, pb.Steps) {
 		return nil, false
 	}
 	return reps, true

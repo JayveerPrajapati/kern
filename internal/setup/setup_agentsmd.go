@@ -36,6 +36,27 @@ func agentsMDMode(root string) string {
 	return "thin"
 }
 
+// agentsMDPersisted reports whether the project has an explicit recorded
+// agents_md choice in .kern/config.json. The thin default comes from an
+// ABSENT key; a persisted value (either variant) is a user decision.
+func agentsMDPersisted(root string) bool {
+	b, err := os.ReadFile(agentsMDConfigPath(root))
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return false
+	}
+	_, ok := m["agents_md"]
+	return ok
+}
+
+// fullRulesHeader is the first line of the full AGENTS.md variant. Its
+// presence in an existing file means the full usage rules are installed —
+// replacing them with the thin stub is a destructive downgrade.
+const fullRulesHeader = "# kern usage rules for agents — READ FIRST"
+
 // setAgentsMD persists the chosen AGENTS.md variant so subsequent runs
 // remember it (e.g. {"agents_md":"thin"}). It merges into any existing
 // .kern/config.json — other keys are never touched — and skips the write
@@ -60,35 +81,48 @@ func setAgentsMD(root, mode string) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
-// thinAGENTSmd returns the thin repo AGENTS.md content: wiring-only facts in
-// ~6 lines — kern is installed, kern_meta is the single entry point, the
-// opencode plugin shadows route built-ins to kern, and the env vars that
-// widen the tool surface. The full kern usage rules live in the host's
-// GLOBAL instructions slot (managed by `kern setup --global-rules`), so a thin
-// repo file avoids loading the same rules twice in one session on hosts that
-// merge global + project rules.
+// thinAGENTSmd returns the thin repo AGENTS.md content: the critical
+// kern-first routing facts in a few lines — kern_meta as the single entry
+// point, the decision-table essentials (read→kern_explore, grep→kern_search,
+// build/test→kern_verify, unsure→kern_meta), the session-start kern_buddy
+// call, the default 6-tool surface, and the env vars that widen it. The full
+// kern usage rules live in the host's GLOBAL instructions slot (managed by
+// `kern setup --global-rules`), so a thin repo file avoids loading the same
+// rules twice in one session on hosts that merge global + project rules.
 func thinAGENTSmd(wired string) string {
 	return strings.Join([]string{
 		"# kern usage rules — thin (repo)",
 		"",
 		"Wired agents: " + wired,
 		"kern is installed for this repo — call `kern_meta` FIRST for everything; it routes to the right kern_* tool.",
+		"Kern-first routing: read → kern_explore · grep → kern_search · build/test → kern_verify · unsure → kern_meta.",
+		"Session start: call `kern_buddy` FIRST — the onboarding digest (conventions, layout, entry points).",
+		"Default surface: 6 tools (kern_meta, kern_explore, kern_impact, kern_search, kern_verify, kern_buddy); set KERN_MCP_FULL=1 for all 117 (KERN_MCP_PHASE for a phase subset).",
 		"On opencode, built-in read/glob/grep/bash route to kern via the plugin shadows.",
-		"Set KERN_MCP_FULL=1 for the full 117-tool catalog (KERN_MCP_PHASE for a phase subset).",
 	}, "\n") + "\n"
 }
 
 // wireThinRulesFile writes the thin variant to a single rule file, replacing
-// any existing kern-managed section (thin or full) while preserving user
-// content outside it. Idempotent: an unchanged thin block skips the write.
-func wireThinRulesFile(root, name, wired string) Status {
+// an existing kern-managed THIN section (or writing fresh) while preserving
+// user content outside it. A present FULL rules file is never downgraded
+// unless the run carries an explicit thin choice (the --agents-md flag or a
+// persisted .kern/config.json preference) — the default (absent key) must not
+// silently delete the full usage rules. Idempotent: an unchanged thin block
+// skips the write.
+func wireThinRulesFile(root, name, wired string, explicitThin bool) Status {
 	path := filepath.Join(root, name)
 	content := ""
 	if b, err := os.ReadFile(path); err == nil {
 		content = string(b)
 	}
+	if !explicitThin && strings.Contains(content, fullRulesHeader) {
+		return Status{Agent: name, Installed: true, Path: path, Note: "kept existing full rules (pass --agents-md thin to switch)"}
+	}
 	cleaned := strutil.RemoveMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
-	final := mergeAppend(cleaned, thinAGENTSmd(wired))
+	final, err := mergeAppend(cleaned, thinAGENTSmd(wired))
+	if err != nil {
+		return Status{Agent: name, Path: path, Note: err.Error()}
+	}
 	if content != "" && final == content {
 		return Status{Agent: name, Installed: true, Path: path, Note: "thin rules already current"}
 	}
@@ -99,6 +133,7 @@ func wireThinRulesFile(root, name, wired string) Status {
 }
 
 // wireThinAgentRules writes the thin AGENTS.md variant to the repo AGENTS.md.
-func wireThinAgentRules(root, wired string) Status {
-	return wireThinRulesFile(root, "AGENTS.md", wired)
+// explicitThin gates the destructive full→thin downgrade.
+func wireThinAgentRules(root, wired string, explicitThin bool) Status {
+	return wireThinRulesFile(root, "AGENTS.md", wired, explicitThin)
 }

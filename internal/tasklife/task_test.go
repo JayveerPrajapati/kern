@@ -3,6 +3,7 @@ package tasklife
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
@@ -56,6 +57,79 @@ func TestVerifyFailureDoesNotCompleteTask(t *testing.T) {
 	}
 }
 
+// cannedVerdictPlatform wraps testPlatform and overrides Verify to return a
+// fixed result, so the task-lifecycle gate can be pinned without depending on
+// the real engine's verdict math (producing a WARN verdict through the engine
+// would require a fixture with security findings plus a suppression file).
+type cannedVerdictPlatform struct {
+	*testPlatform
+	res verdict.VerificationResult
+}
+
+func (p *cannedVerdictPlatform) Verify(types []string, opts ...verification.Option) verdict.VerificationResult {
+	return p.res
+}
+
+// TestVerifyWarnCompletesTask pins the exit-code contract on the task gate: a
+// WARN verdict is a REPORTED outcome (CLI exit 0), not a failure, so
+// TaskService.Verify must COMPLETE the task without error — the task state
+// must never contradict the exit code. Regression for the security-suppression
+// case: all findings triaged → VerifySecurity returns WARN + "security: OK".
+func TestVerifyWarnCompletesTask(t *testing.T) {
+	root := t.TempDir()
+	p := &cannedVerdictPlatform{
+		testPlatform: &testPlatform{root: root, ver: verification.NewEngine(root)},
+		res: verdict.VerificationResult{
+			Verdict: verdict.VerdictWarn,
+			Summary: "security: 8 findings, 8 suppressed (all triaged)",
+		},
+	}
+	ts := NewTaskService(p, nil)
+
+	task, res, err := ts.Verify([]string{"security"})
+	if err != nil {
+		t.Fatalf("Verify: WARN verdict must not fail the task: %v", err)
+	}
+	if res.Verdict != verdict.VerdictWarn {
+		t.Fatalf("verdict = %q, want WARN", res.Verdict)
+	}
+	if task.State != domain.TaskCompleted {
+		t.Fatalf("task state = %q, want COMPLETED (WARN is a reported outcome, not a failure)", task.State)
+	}
+	// The warning summary must surface in the completed task's output, not be
+	// swallowed by the gate.
+	if !strings.Contains(task.Output, "8 suppressed") {
+		t.Errorf("task output %q missing warning summary %q", task.Output, res.Summary)
+	}
+}
+
+// TestVerifySkippedCompletesTask pins the same contract for SKIPPED: a skipped
+// check counts as neither passing nor failing in the verdict math, so the task
+// completes with the skip reason visible instead of failing (regression for
+// the "govulncheck not installed" CVE path).
+func TestVerifySkippedCompletesTask(t *testing.T) {
+	root := t.TempDir()
+	p := &cannedVerdictPlatform{
+		testPlatform: &testPlatform{root: root, ver: verification.NewEngine(root)},
+		res: verdict.VerificationResult{
+			Verdict: verdict.VerdictSkipped,
+			Summary: "cve: govulncheck not installed — check skipped",
+		},
+	}
+	ts := NewTaskService(p, nil)
+
+	task, _, err := ts.Verify([]string{"cve"})
+	if err != nil {
+		t.Fatalf("Verify: SKIPPED verdict must not fail the task: %v", err)
+	}
+	if task.State != domain.TaskCompleted {
+		t.Fatalf("task state = %q, want COMPLETED (SKIPPED is a reported outcome, not a failure)", task.State)
+	}
+	if !strings.Contains(task.Output, "govulncheck") {
+		t.Errorf("task output %q missing skip reason %q", task.Output, "govulncheck")
+	}
+}
+
 // TestRunWorkflowClassifiesTask verifies that RunWorkflow routes the task
 // through the specialist pipeline: the intent is classified into a task kind
 // and the kind-selected workflow (which preserves the human approval gate) is
@@ -70,7 +144,7 @@ func TestRunWorkflowClassifiesTask(t *testing.T) {
 	intent := "write documentation for the public API"
 	kind := agents.ClassifyTask(intent, "")
 	if kind != agents.TaskKindDocumentation {
-		t.Fatalf("ClassifyTask kind = %q, want documentation", kind)
+		t.Fatalf("ClassifyTask kind = %d, want documentation", kind)
 	}
 	wf := agents.SelectWorkflow(kind)
 	if wf.ID != "documentation" {

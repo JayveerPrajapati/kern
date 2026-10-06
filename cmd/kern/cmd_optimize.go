@@ -10,7 +10,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
-	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"maps"
@@ -87,7 +86,7 @@ func runOptimize(cmd string, rest []string) {
 	if res.FromCache {
 		fmt.Fprintf(os.Stderr, "kern: served from cache\n")
 	}
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
+	printTokenSavings(os.Stderr, res.BeforeTokens, res.AfterTokens, "", "")
 	if res.SavedTokens == 0 && res.BeforeTokens > 0 && res.LLMSkipped == "" {
 		fmt.Fprintln(os.Stderr, "kern: nothing to compress — try --mask, --attach, or a longer input")
 	}
@@ -179,7 +178,7 @@ func runCompact(rest []string) {
 	fmt.Println(rendered)
 	before := tokenize.Count(string(content))
 	after := tokenize.Count(rendered)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", filepath.Base(file)))
 	// Record to the savings ledger like every other compression surface
 	// (QA Pick #1, finding F-B): without this, `kern compact` under-reports
 	// lifetime savings in `kern stats` / `kern diff`.
@@ -251,18 +250,15 @@ func runLog(rest []string) {
 		fatal("log: %v", err)
 	}
 	fmt.Println(res.Output)
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)%s\n",
-		res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent,
-		func() string {
-			if f.contextBefore > 0 || f.contextAfter > 0 {
-				return fmt.Sprintf(" [window -%d/+%d]", f.contextBefore, f.contextAfter)
-			}
-			return ""
-		}())
+	window := ""
+	if f.contextBefore > 0 || f.contextAfter > 0 {
+		window = fmt.Sprintf(" [window -%d/+%d]", f.contextBefore, f.contextAfter)
+	}
+	printTokenSavings(os.Stderr, res.BeforeTokens, res.AfterTokens, "", window)
 	if res.LLMSkipped != "" {
 		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
 	}
-	printSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken())
+	printSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runTokens(rest []string) {
@@ -322,10 +318,16 @@ func runBudget(rest []string) {
 	before := tokenize.Count(text)
 	after := tokenize.Count(out)
 	// Always state the applied budget so a silent default (4000 when --max is
-	// omitted) can never be mistaken for a requested cap.
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, budget %d)\n", before, after, before-after, strutil.Pct(before, after), maxTokens)
+	// omitted) can never be mistaken for a requested cap. The savings claim
+	// prints only on a genuine reduction (F11); without one the budget is
+	// still stated, honestly, but no "saved" is reported.
+	if after < before {
+		printTokenSavings(os.Stderr, before, after, fmt.Sprintf(", budget %d", maxTokens), "")
+	} else {
+		fmt.Fprintf(os.Stderr, "kern: %d tokens (budget %d applied, no reduction)\n", after, maxTokens)
+	}
 	fmt.Println(out)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runTerse(rest []string) {
@@ -373,23 +375,22 @@ func runTerseCore(rest []string) {
 	// until the budget is met and the over-budget tail is reported as dropped.
 	out, st := terse.Tersify(text, f.max)
 	before, after := st.BeforeTokens, st.AfterTokens
-	msg := fmt.Sprintf("kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped", before, after, before-after, strutil.Pct(before, after), st.DroppedFiller)
+	extra := fmt.Sprintf(", %d filler lines dropped", st.DroppedFiller)
 	if st.DroppedBlank > 0 || st.DroppedComment > 0 {
-		msg += fmt.Sprintf(", %d blank + %d comment lines stripped", st.DroppedBlank, st.DroppedComment)
+		extra += fmt.Sprintf(", %d blank + %d comment lines stripped", st.DroppedBlank, st.DroppedComment)
 	}
 	if st.DroppedIssue > 0 {
-		msg += fmt.Sprintf(", %d TODO/FIXME/XXX/HACK comment lines stripped", st.DroppedIssue)
+		extra += fmt.Sprintf(", %d TODO/FIXME/XXX/HACK comment lines stripped", st.DroppedIssue)
 	}
 	if f.max > 0 {
-		msg += fmt.Sprintf(", budget %d", f.max)
+		extra += fmt.Sprintf(", budget %d", f.max)
 		if st.DroppedBudget > 0 {
-			msg += fmt.Sprintf(" (%d lines dropped)", st.DroppedBudget)
+			extra += fmt.Sprintf(" (%d lines dropped)", st.DroppedBudget)
 		}
 	}
-	msg += ")"
-	fmt.Fprintln(os.Stderr, msg)
+	printTokenSavings(os.Stderr, before, after, extra, "")
 	fmt.Println(out)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runSemcache(rest []string) {

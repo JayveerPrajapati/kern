@@ -227,9 +227,13 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 	s.recordModelOutcome(t, vres.Verdict == verdict.VerdictPass || vres.Verdict == verdict.VerdictPassWithWarning)
 
 	// Gate completion on the verification verdict: a failed verification must
-	// never yield a COMPLETED task. Only a PASS verdict (or the non-blocking
-	// PASS_WITH_WARNING) may complete; anything else fails the task.
-	if vres.Verdict == verdict.VerdictPass || vres.Verdict == verdict.VerdictPassWithWarning {
+	// never yield a COMPLETED task. The gate mirrors the CLI exit-code
+	// contract (cmd/kern verifyExitCode): FAIL is the ONLY hard failure; WARN,
+	// SKIPPED, BLOCKED and NOT_RUN are reported outcomes (exit 0), not
+	// failures, so they complete the task with the verdict/summary visible on
+	// the task instead of failing it and contradicting the exit code.
+	blocking := vres.Verdict == verdict.VerdictFail
+	if !blocking {
 		if err := t.Complete(t.Output); err != nil {
 			s.fail(t, err.Error())
 			return t, diff, vres, err

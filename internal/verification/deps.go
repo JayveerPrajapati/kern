@@ -65,15 +65,20 @@ func modulePath(data []byte) string {
 // parseRequires returns the ordered list of module paths declared in go.mod,
 // handling both the single-line and block `require` forms.
 func parseRequires(gomod string) []string {
-	f, err := os.Open(gomod)
+	data, err := os.ReadFile(gomod)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = f.Close() }()
+	return parseRequiresFromData(data)
+}
 
+// parseRequiresFromData is the content-based dep-path-set extraction for
+// go.mod, shared by checkModuleDeps (file-based) and diffManifestDeps
+// (working-tree vs HEAD comparison). Behavior is identical to parseRequires.
+func parseRequiresFromData(data []byte) []string {
 	var mods []string
 	inBlock := false
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		switch {
@@ -124,6 +129,11 @@ func collectImports(root, modPath string) []string {
 			name := d.Name()
 			if name == "vendor" || name == "testdata" || name == ".git" {
 				return filepath.SkipDir
+			}
+			if path != root {
+				if _, serr := os.Stat(filepath.Join(path, "go.mod")); serr == nil {
+					return filepath.SkipDir // a nested module has its own go.mod
+				}
 			}
 			return nil
 		}

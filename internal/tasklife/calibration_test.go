@@ -113,8 +113,8 @@ func TestImpactRenderAppendsConfidenceLine(t *testing.T) {
 	ts := NewTaskService(p, nil)
 	if _, _, text1, err := ts.Impact("NewServer"); err != nil {
 		t.Fatalf("Impact: %v", err)
-	} else if !strings.HasSuffix(strings.TrimSpace(text1), "confidence: web insufficient data") {
-		t.Errorf("fresh render must end with insufficient-data line; got:\n%s", text1)
+	} else if strings.HasSuffix(strings.TrimSpace(text1), "confidence: web insufficient data") {
+		t.Errorf("fresh render must NOT append an insufficient-data footer; got:\n%s", text1)
 	}
 	// Seed an observed outcome AFTER the recorded prediction (file hit).
 	future := time.Now().Add(24 * time.Hour)
@@ -185,8 +185,8 @@ func TestCalibrationHealthMatchesIncidents(t *testing.T) {
 // the app accessor used by the CLI and MCP verify render paths.
 func TestVerifyConfidenceLineAccessor(t *testing.T) {
 	root := t.TempDir()
-	if got := VerifyConfidenceLine(root); got != "confidence: insufficient data" {
-		t.Errorf("empty root = %q", got)
+	if got := VerifyConfidenceLine(root); got != "" {
+		t.Errorf("empty root = %q, want \"\" (suppressed)", got)
 	}
 	t0 := time.Now().Add(-time.Hour)
 	for i := 0; i < 5; i++ {

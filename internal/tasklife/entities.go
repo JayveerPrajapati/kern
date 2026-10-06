@@ -41,7 +41,7 @@ func collectEntityHits(g *intel.Graph, symbols []string) []entityAgg {
 	// blast radius (thousands of symbols) costs one graph scan plus
 	// per-symbol connection lookups instead of one full graph scan per
 	// symbol (which made kern impact take tens of seconds).
-	entsList := twin.EntitiesMany(g, symbols)
+	entsList := twin.EntitiesManyStrict(g, symbols)
 	byKey := map[string]*entityAgg{}
 	for i, sym := range symbols {
 		for _, e := range entsList[i] {

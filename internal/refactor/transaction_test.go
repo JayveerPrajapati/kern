@@ -170,3 +170,33 @@ func TestTransactionalRefactorRollbackOnCompileError(t *testing.T) {
 		t.Errorf("expected live a.go preserved, got: %s", string(aContent))
 	}
 }
+
+// TestExecuteTransactionScrubsOperatorEnv pins the env allowlist at the
+// engine boundary: a sentinel operator var must never reach the compile
+// child, while PATH (the allowlist's core) still does. The compile command
+// `env` exits 0, so a leaked sentinel would appear in CompilerOutput.
+func TestExecuteTransactionScrubsOperatorEnv(t *testing.T) {
+	const sentinel = "KERN_TEST_SECRET_1a2b3c4d_value"
+	t.Setenv("KERN_TEST_SECRET", sentinel)
+
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n\nfunc A() int { return 1 }\n"), 0o644)
+
+	res, err := ExecuteTransaction(context.Background(), TransactionRequest{
+		Root:           dir,
+		Edits:          []FileEdit{{Path: "a.go", Content: "package main\n\nfunc A() int { return 2 }\n"}},
+		CompileCommand: "env",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTransaction error: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success (env exits 0), got success=%v rolled_back=%v err=%s", res.Success, res.RolledBack, res.Error)
+	}
+	if !strings.Contains(res.CompilerOutput, "PATH=") {
+		t.Errorf("expected the allowlisted PATH in compiler output, got: %.400s", res.CompilerOutput)
+	}
+	if strings.Contains(res.CompilerOutput, sentinel) {
+		t.Errorf("compile child received the operator env: KERN_TEST_SECRET leaked into %q", res.CompilerOutput)
+	}
+}

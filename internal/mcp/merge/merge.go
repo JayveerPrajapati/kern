@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
@@ -20,64 +21,6 @@ import (
 // Hooks provides dependencies from the owning MCP server.
 type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
-}
-
-// confinePath resolves p against root (nearest-existing-ancestor symlink
-// resolution, re-appending the remaining components) and rejects any path
-// that escapes root — "..", absolute paths outside the root, and symlinked
-// parents (root/link -> /etc) that would smuggle a read or write outside the
-// workspace. It returns the absolute cleaned path on success.
-func confinePath(root, p string) (string, error) {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = filepath.Clean(cwd)
-		} else {
-			root = "."
-		}
-	}
-	var abs string
-	if filepath.IsAbs(p) {
-		abs = filepath.Clean(p)
-	} else {
-		abs = filepath.Join(root, p)
-	}
-	real, err := nearestExisting(abs)
-	if err != nil {
-		return "", err
-	}
-	rr, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		rr = root
-	}
-	rel, err := filepath.Rel(rr, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("kern_semantic: file %q escapes workspace root", p)
-	}
-	return abs, nil
-}
-
-// nearestExisting resolves the real location of the nearest existing ancestor
-// of abs (walking up until EvalSymlinks succeeds) and re-appends the
-// remaining components, so a not-yet-existing file under a symlinked
-// directory is judged by its real location.
-func nearestExisting(abs string) (string, error) {
-	var rem []string
-	probe := abs
-	for {
-		real, err := filepath.EvalSymlinks(probe)
-		if err == nil {
-			if len(rem) == 0 {
-				return real, nil
-			}
-			return filepath.Join(append([]string{real}, rem...)...), nil
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return "", fmt.Errorf("kern_semantic: cannot resolve %q", abs)
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
 }
 
 // Tool is the consolidated kern_semantic dispatcher: the action argument
@@ -119,7 +62,7 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 				p = filepath.Join(root, p)
 			}
 			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-				if _, cerr := confinePath(root, p); cerr != nil {
+				if _, cerr := fsutil.ConfinePath(root, p, "kern_semantic"); cerr != nil {
 					return nil, cerr
 				}
 				return os.ReadFile(p)
@@ -131,7 +74,7 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 			if !filepath.IsAbs(p) && root != "" {
 				p = filepath.Join(root, p)
 			}
-			if _, cerr := confinePath(root, p); cerr != nil {
+			if _, cerr := fsutil.ConfinePath(root, p, "kern_semantic"); cerr != nil {
 				return nil, cerr
 			}
 			return os.ReadFile(p)
@@ -171,7 +114,7 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 		if !filepath.IsAbs(p) && root != "" {
 			p = filepath.Join(root, p)
 		}
-		if _, cerr := confinePath(root, p); cerr != nil {
+		if _, cerr := fsutil.ConfinePath(root, p, "kern_semantic"); cerr != nil {
 			return "", cerr
 		}
 		if werr := os.WriteFile(p, []byte(res.MergedCode), 0o644); werr != nil {

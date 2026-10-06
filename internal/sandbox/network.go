@@ -46,6 +46,15 @@ type NetworkPolicy struct {
 	// Set by runGuarded after the run, mirroring Isolated/FSConfined, and
 	// surfaced in Summary so the relaxation is never silent.
 	LoopbackBindAllowed bool
+	// Inherited reports that the run did not apply its own network-isolation
+	// wrap because this process was already inside an active kern sandbox
+	// (KERN_SANDBOX_ACTIVE=1 — the `kern verify` dogfood path): a nested
+	// sandbox-exec cannot apply a second Seatbelt profile on macOS, so the
+	// child inherits the OUTER Seatbelt/Landlock profile instead. Isolated
+	// stays true — egress is still blocked, just by the outer sandbox rather
+	// than by this run's own wrap. Set by runGuarded after the run, mirroring
+	// Isolated/FSConfined.
+	Inherited bool
 	// Hits lists the network-error signatures matched in the run's output
 	// (deduplicated, capped). Presence hints at network activity — or at
 	// least attempts — during the run.
@@ -245,6 +254,12 @@ func netIsolationPrefix(allowLoopbackBind bool) (prefix []string, ok bool) {
 	script := `ip link set lo up 2>/dev/null || true; exec "$@"`
 	return []string{bin, "--user", "--map-root-user", "--net", "sh", "-c", script, "kern-cmd"}, true
 }
+
+// isolationProbe is the fail-closed gate's view of the availability probe,
+// indirected through a var so tests can exercise the unavailable/nested
+// (KERN_SANDBOX_ACTIVE inherit) branch deterministically on hosts where
+// network isolation IS available.
+var isolationProbe = networkIsolationAvailable
 
 // networkIsolationAvailable reports whether this host can provide network
 // isolation for a sandboxed run (Linux unprivileged user+network namespaces via

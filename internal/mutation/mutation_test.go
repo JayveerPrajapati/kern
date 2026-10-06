@@ -139,6 +139,42 @@ func TestGreater(t *testing.T) {
 	}
 }
 
+// TestRunScrubsOperatorEnv pins the env allowlist at the engine boundary: a
+// sentinel operator var must never reach the per-mutant test child, while
+// PATH (the allowlist's core) still does. The test command `env` exits 0, so
+// every evaluated mutant is recorded as survived with the child env captured
+// in TestOutput — a leaked sentinel would appear there.
+func TestRunScrubsOperatorEnv(t *testing.T) {
+	const sentinel = "KERN_TEST_SECRET_1a2b3c4d_value"
+	t.Setenv("KERN_TEST_SECRET", sentinel)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "calc.go"), []byte("package calc\n\nfunc Greater(a, b int) bool {\n\tif a > b {\n\t\treturn true\n\t}\n\treturn false\n}\n"), 0o644); err != nil {
+		t.Fatalf("write calc.go: %v", err)
+	}
+
+	report, err := Run(context.Background(), Options{
+		Root:        dir,
+		Files:       []string{"calc.go"},
+		MaxMutants:  10,
+		TestCommand: "env",
+	})
+	if err != nil {
+		t.Fatalf("Run mutation testing failed: %v", err)
+	}
+	if report.SurvivedCount == 0 {
+		t.Fatalf("expected at least one evaluated (survived) mutant, got report: %+v", report)
+	}
+	for _, m := range report.Mutants {
+		if strings.Contains(m.TestOutput, sentinel) {
+			t.Errorf("mutant %s child received the operator env: KERN_TEST_SECRET leaked into %q", m.ID, m.TestOutput)
+		}
+		if m.Status == "survived" && !strings.Contains(m.TestOutput, "PATH=") {
+			t.Errorf("mutant %s child env lacks the allowlisted PATH: %q", m.ID, m.TestOutput)
+		}
+	}
+}
+
 // TestRunSurfacesRestoreFailure exercises the M3 branch: when the post-test
 // restore write of the original source fails, Run must surface the error
 // instead of dropping it with `_ = os.WriteFile(...)` — otherwise the mutant

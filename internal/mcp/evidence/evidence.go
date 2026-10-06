@@ -16,6 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
@@ -29,34 +30,6 @@ type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
 }
 
-// evalSymlinksNearest resolves p to its canonical absolute path, walking up to
-// the nearest EXISTING ancestor when EvalSymlinks fails on the full path (the
-// file itself may not exist yet — evidence verifies a file+line, and a missing
-// target is a normal outcome). Re-appending the unresolved remainder preserves
-// the not-yet-existing suffix while still resolving every symlink that DOES
-// exist, so a symlink escape is caught by confinePath's Rel check even when
-// the final path component is absent. On total failure (nothing resolves) the
-// cleaned lexical path is returned and the caller's escape check still
-// applies lexically.
-func evalSymlinksNearest(p string) string {
-	cur := filepath.Clean(p)
-	var tail []string
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			if len(tail) == 0 {
-				return resolved
-			}
-			return filepath.Join(resolved, filepath.Join(tail...))
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur { // reached the filesystem root
-			return filepath.Join(cur, filepath.Join(tail...))
-		}
-		tail = append([]string{filepath.Base(cur)}, tail...)
-		cur = parent
-	}
-}
-
 // confinePath resolves candidate against root (a relative candidate is joined
 // to root first) and rejects any path that escapes root — via ".." segments
 // OR via a symlink whose target lies outside root. The returned path is the
@@ -68,8 +41,8 @@ func confinePath(root, candidate string) (string, error) {
 	if !filepath.IsAbs(cand) {
 		cand = filepath.Join(root, cand)
 	}
-	rootResolved := evalSymlinksNearest(root)
-	candResolved := evalSymlinksNearest(cand)
+	rootResolved := fsutil.EvalSymlinksNearest(root)
+	candResolved := fsutil.EvalSymlinksNearest(cand)
 	rel, err := filepath.Rel(rootResolved, candResolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes project root %s", candidate, root)

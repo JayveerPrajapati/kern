@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -411,6 +412,9 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	// no matter how many queries touch it.
 	dependents := g.WhatDependsOnPrecise(target, o.strict)
 	rep := s.collectGraphImpact(g, target, o.strict)
+	// The blast radius must say WHICH files it touches (Fix 2): the distinct
+	// defining files of the target plus its transitive dependents.
+	rep.Files = impactedFiles(g, target, dependents)
 	// Entity overlay (Feature 3): surface the twin entity nodes implicated by
 	// the change's blast radius (the target plus the report's affected
 	// symbols). Zero-cost when the twin graph carries no entities for them.
@@ -427,7 +431,22 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
 		// the mapping so the substitution is never silent.
-		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, target, text)
+		head := fmt.Sprintf("resolved %q -> %s (fuzzy match)", change, target)
+		// Entry parity (P2): when the final resolution still has same-named
+		// production definitions, list them the way explore's render does, so
+		// the picked target is never presented as the only candidate. The
+		// picked definition is re-derived from the SAME shared entry resolver
+		// resolveSymbol used (intel.ResolveEntry), so the note and the
+		// resolved target can never disagree.
+		if ix := s.platform.Index(); ix != nil {
+			if _, d, ok := intel.ResolveEntry(ix, change); ok && d != nil {
+				if alts := intel.AmbiguousAlternatives(ix, change, *d); len(alts) > 0 {
+					head += fmt.Sprintf("\nnote: %q is ambiguous — showing %s; other definitions: %s. Pass a qualified name (Type.Method or dir/pkg.Symbol) to choose.",
+						change, target, strings.Join(alts, ", "))
+				}
+			}
+		}
+		text = head + "\n" + text
 	}
 	// Calibration (Feature Batch C): record the impact analysis as an
 	// impact-kind prediction (predicted files = the file set the impact path
@@ -441,10 +460,15 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 // and returns the ImpactReport fields they populate.
 func (s *TaskService) collectGraphImpact(g *intel.Graph, target string, strict bool) domain.ImpactReport {
 	rep := domain.ImpactReport{Target: target}
-	// 1. What calls this?
-	for _, n := range g.WhoCallsPrecise(target, strict) {
-		rep.WhoCalls = append(rep.WhoCalls, nodeName(n))
-	}
+	// 1. What calls this? Names, not nodes, via the raw-edge collector:
+	// WhoCallsPrecise drops callers whose qualified/ambiguous edge endpoint
+	// does not canonicalize to the target's node ID, or whose caller node is
+	// absent from the node map, so `kern impact` reported fewer callers than
+	// `kern explore` for the same symbol. DirectCallersNames walks the raw
+	// "calls" edges, resolving callee endpoints via ResolveEdgeEndpoint
+	// (skipping foreign/unresolvable ones) and keeping unresolvable caller
+	// endpoints verbatim — the collector already returns renderable names.
+	rep.WhoCalls = append(rep.WhoCalls, g.DirectCallersNames(target, strict)...)
 	// 2. What does it call? Names, not nodes, so callees that do not resolve
 	// to indexed nodes (e.g. "fmt.Println") survive instead of emptying the
 	// section - methods that only call external code reported "What it
@@ -487,15 +511,20 @@ func (s *TaskService) collectGraphImpact(g *intel.Graph, target string, strict b
 	for _, n := range g.WhatEventsAffectedPrecise(target, strict) {
 		rep.EventsAffected = append(rep.EventsAffected, nodeName(n))
 	}
-	// 6. Which tests cover it?
+	// 6. Which tests cover it? The ranked view: file-paired, name-matched
+	// and direct-caller tests are the covering list; the same-package
+	// remainder becomes a count-only render line (Fix 1 — a same-package
+	// bucket must not read as coverage).
 	seenTests := make(map[string]bool)
-	for _, n := range g.WhatTestsCoverPrecise(target, strict) {
+	rankedCover, samePkgCover := g.WhatTestsCoverRanked(target, strict)
+	for _, n := range rankedCover {
 		name := nodeName(n)
 		if name != "" && !seenTests[name] {
 			seenTests[name] = true
 			rep.TestsCover = append(rep.TestsCover, name)
 		}
 	}
+	rep.TestsCoverSamePackage = len(samePkgCover)
 	return rep
 }
 
@@ -586,6 +615,27 @@ func impactSymbols(rep domain.ImpactReport) []string {
 	return out
 }
 
+// impactedFiles returns the distinct defining files of the blast radius — the
+// change target plus its transitive dependents — sorted for determinism. It
+// feeds the impact render's "Affected files" section (Fix 2: impact promised
+// blast radius but never listed the files the way explore does).
+func impactedFiles(g *intel.Graph, target string, dependents []domain.Node) []string {
+	seen := map[string]bool{}
+	var files []string
+	add := func(ref string) {
+		if f := graphNodeFile(g, ref); f != "" && !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	add(target)
+	for _, d := range dependents {
+		add(d.ID)
+	}
+	sort.Strings(files)
+	return files
+}
+
 // impactCitedFiles returns the files the impact report cites: the target's
 // defining file, the defining file of every symbol named in the report, and
 // the context packet's files. StalenessBanner spot-checks exactly these so
@@ -613,12 +663,39 @@ func (s *TaskService) impactCitedFiles(t *agent.Task, rep *domain.ImpactReport) 
 	return files
 }
 
+// lastSegment returns the part of ref after the last '.' (or the whole ref
+// when unqualified) — the simple symbol name.
+func lastSegment(ref string) string {
+	if i := strings.LastIndexByte(ref, '.'); i >= 0 {
+		return ref[i+1:]
+	}
+	return ref
+}
+
 // finalizeImpact stamps the completed ImpactReport onto the Task, records the
 // report artifact, and completes the Task lifecycle (ANALYZING → COMPLETED).
 func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*agent.Task, domain.ImpactReport, string, error) {
 	t.Impact = rep
 	rep.Evidence = intel.AnchorLine(s.platform.Index(), rep.Target)
 	out := renderImpactText(*rep)
+	// Bare-name target over multiple definitions: call buckets are
+	// recorded by simple name, so a bare reference cannot say WHICH
+	// same-named definition it means — the report is the union or (with
+	// ambiguous endpoints kept opaque) the attributable subset. Say so and
+	// suggest a qualified reference, mirroring the what-if warning.
+	if bare := lastSegment(rep.Target); bare == rep.Target {
+		if defs := s.platform.Graph().DefsWithSimpleName(bare); len(defs) > 1 {
+			out += fmt.Sprintf("\nNOTE: target simple name %q matches %d definitions (%s) — call edges are recorded by bare name, so counts may under-count. Use a qualified 'pkg.Symbol' reference for an exact blast radius.\n",
+				bare, len(defs), strings.Join(defs, ", "))
+		}
+	}
+	// Fix 3: a target that could only resolve to testdata fixture code must
+	// say so — "resolve but annotate". Resolution prefers non-testdata
+	// definitions; when only fixtures exist, the answer is a fixture and the
+	// render must not present it as production code.
+	if note := testdataFixtureNote(s.platform.Graph(), rep.Target); note != "" {
+		out += fmt.Sprintf("\nNOTE: target %q resolves to a %s — it is fixture/test-double code under testdata/, not production; if you meant a production symbol, qualify it (e.g. 'pkg.Symbol').\n", rep.Target, note)
+	}
 	if banner := s.platform.Index().StalenessBanner(s.impactCitedFiles(t, rep)); banner != "" {
 		out = banner + "\n\n" + out
 	}
@@ -877,7 +954,13 @@ func (s *TaskService) Verify(types []string, opts ...verification.Option) (*agen
 	// via memory only and never blocks verify (same style as
 	// recordCalibrationClaims).
 	s.recordModelOutcome(t, res.Verdict == verdict.VerdictPass || res.Verdict == verdict.VerdictPassWithWarning)
-	t.Output = fmt.Sprintf("verdict: %s", res.Verdict)
+	// Carry the full verdict AND summary on the task output so a reported
+	// outcome (WARN/SKIPPED) is visible on the completed task — the user must
+	// still see "8 suppressed" etc., not just the verdict word.
+	t.Output = fmt.Sprintf("verdict: %s\nsummary: %s", res.Verdict, res.Summary)
+	if res.Verdict != verdict.VerdictPass {
+		t.Output = verdict.RenderCompact(res)
+	}
 	t.AddStep(agent.Step{
 		Action:     "verify",
 		AgentID:    "verification-engine",
@@ -918,9 +1001,13 @@ func (s *TaskService) Verify(types []string, opts ...verification.Option) (*agen
 
 	// Gate completion on the verification verdict: a failed verification must
 	// never yield a COMPLETED task (reliability: verification failure → task
-	// cannot become successful). Only a PASS verdict (or the non-blocking
-	// PASS_WITH_WARNING) may complete; anything else fails the task.
-	if res.Verdict == verdict.VerdictPass || res.Verdict == verdict.VerdictPassWithWarning {
+	// cannot become successful). The gate mirrors the CLI exit-code contract
+	// (cmd/kern verifyExitCode): FAIL is the ONLY hard failure; WARN, SKIPPED,
+	// BLOCKED and NOT_RUN are reported outcomes (exit 0), not failures, so
+	// they complete the task with the verdict/summary visible in its output
+	// instead of failing it and contradicting the exit code.
+	blocking := res.Verdict == verdict.VerdictFail
+	if !blocking {
 		if err := t.Complete(t.Output); err != nil {
 			s.fail(t, err.Error())
 			return t, res, err

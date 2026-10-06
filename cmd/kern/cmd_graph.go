@@ -19,6 +19,25 @@ import (
 
 func runGraph(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	if len(args) >= 1 && args[0] == "dead" {
+		// `kern graph dead [scope...]` is the dead-code report (top-level
+		// `kern dead`); "dead" is a graph-family subcommand name, not a
+		// symbol to resolve. Strip the subcommand token and delegate with
+		// the same remaining arguments (flags + scope) so the report is
+		// reachable from the graph path. Exact lowercase match only —
+		// `kern graph Dead` stays a symbol lookup.
+		remaining := make([]string, 0, len(rest))
+		dropped := false
+		for _, a := range rest {
+			if !dropped && a == "dead" {
+				dropped = true
+				continue
+			}
+			remaining = append(remaining, a)
+		}
+		runDead(remaining)
+		return
+	}
 	if len(args) < 1 && !f.html && !f.entities {
 		fatalUsage("usage: kern graph <symbol> [root] [--mermaid] [--one-line] [--entities] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--max-tokens N] [--limit N]")
 	}
@@ -630,15 +649,19 @@ func runDead(rest []string) {
 	if err != nil {
 		fatal("Dead: %v", err)
 	}
-	dead := intel.DeadCode(ix)
-	if f.limit > 0 && len(dead) > f.limit {
-		dead = dead[:f.limit]
+	scope := args
+	if f.root == "" {
+		scope = args[min(1, len(args)):]
 	}
+	dead := intel.FilterDeadByPath(intel.DeadCode(ix), scope...)
 	if f.json {
+		if f.limit > 0 && len(dead) > f.limit {
+			dead = dead[:f.limit]
+		}
 		printJSON(map[string]any{"dead": dead})
 		return
 	}
-	fmt.Println(intel.RenderDead(dead))
+	fmt.Println(intel.RenderDeadLimited(dead, f.limit))
 
 }
 
@@ -847,7 +870,14 @@ func runExplore(rest []string) {
 	}
 	fmt.Println(out)
 	if rep.Stats != nil {
-		printSavingsFooter(os.Stderr, rep.Stats.FullContext, rep.Stats.CompactTokens, kernctx.CostPerToken())
+		// The explore savings denominator is the verbatim definition source
+		// (fitBudget labels it); fall back defensively so the footer never
+		// prints a bare "%" without saying what it is relative to.
+		baseline := rep.Stats.Baseline
+		if baseline == "" {
+			baseline = "verbatim source"
+		}
+		printSavingsFooter(os.Stderr, rep.Stats.FullContext, rep.Stats.CompactTokens, kernctx.CostPerToken(), baseline)
 	}
 }
 

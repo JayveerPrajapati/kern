@@ -260,3 +260,35 @@ func TestRunHealthRootEqualsForm(t *testing.T) {
 		t.Fatalf("index block = %v, want built=false (empty dir)", idx)
 	}
 }
+
+// TestParseFlagsFast pins the --fast verify flag contract: the shared parser
+// accepts it (bool form, --flag and --flag=false), and it composes with
+// --full (both parse; --full wins at the mode layer, runVerify). The parser
+// knowing "fast" is the prerequisite for the F10 strict gate once
+// commandFlags["verify"] declares it (dispatch_table.go central edit).
+func TestParseFlagsFast(t *testing.T) {
+	f, rest, err := parseFlags([]string{"--fast"})
+	if err != nil {
+		t.Fatalf("parseFlags(--fast): %v", err)
+	}
+	if !f.fast {
+		t.Error("--fast: fast = false, want true")
+	}
+	if len(rest) != 0 {
+		t.Errorf("--fast: rest = %v, want empty (bool flag consumes no positional)", rest)
+	}
+	f, _, err = parseFlags([]string{"--fast", "--full"})
+	if err != nil {
+		t.Fatalf("parseFlags(--fast --full): %v", err)
+	}
+	if !f.fast || !f.full {
+		t.Errorf("--fast --full: fast=%v full=%v, want both true", f.fast, f.full)
+	}
+	f, _, err = parseFlags([]string{"--fast=false"})
+	if err != nil {
+		t.Fatalf("parseFlags(--fast=false): %v", err)
+	}
+	if f.fast {
+		t.Error("--fast=false: fast = true, want false")
+	}
+}

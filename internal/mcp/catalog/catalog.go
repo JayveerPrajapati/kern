@@ -12,7 +12,10 @@
 // (diff-gate cannot import mcp).
 package catalog
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 // Tool is an MCP tool definition.
 type Tool struct {
@@ -116,6 +119,24 @@ func ValidCategory(c string) bool {
 	return false
 }
 
+// Categories returns the registered tool categories in sorted order — the
+// valid KERN_MCP_CATEGORY values. Single source of truth for the surface
+// filter and for startup validation error messages (I8): a value like
+// "search" is NOT a category (kern_search carries CategoryGraph), and the
+// error an operator sees must say what the valid set actually is.
+func Categories() []string {
+	all := []string{
+		CategoryAnalyze, CategoryAgent, CategoryArch, CategoryAST,
+		CategoryContext, CategoryDoc, CategoryEdit, CategoryEvidence,
+		CategoryExec, CategoryFramework, CategoryGraph, CategoryGovernance,
+		CategoryIncident, CategoryLock, CategoryMemory, CategoryMeta,
+		CategoryMCPBridge, CategoryOptimize, CategoryOrg, CategoryProject,
+		CategoryReview, CategoryTask, CategoryVerify,
+	}
+	sort.Strings(all)
+	return all
+}
+
 // Tool risk levels for risk-aware tool metadata (P0-004). RiskLevel tags each
 // registered tool with the blast radius of calling it: RiskLow for read-only
 // tools, RiskMedium for contained state mutation or analysis, RiskHigh for
@@ -211,6 +232,34 @@ func strProp(desc string) map[string]any {
 // registry-extensible names, language overrides) must stay strProp.
 func enumProp(desc string, values ...string) map[string]any {
 	return map[string]any{"type": "string", "description": desc, "enum": values}
+}
+
+// outputProps merges the shared output-sandbox control properties into a
+// tool's property map: slice (the R7 retained-output cursor:
+// slice=<anchor>:lines:A-B|tail:N re-reads a sandbox-truncated response's
+// elided part WITHOUT re-executing the tool) and max_output (the per-call
+// output budget in bytes; 0 disables the sandbox for that call). Every tool
+// response passes through the output sandbox (internal/mcpserve), and the
+// sandbox marker advertises slice= on any truncated tool — so the tools that
+// own non-default budgets (perToolOutputBudgets) and the default advertised
+// surface declare both, letting strict structured-output hosts emit them
+// exactly where truncation hurts most. max_output is only injected where the
+// tool does not already declare it (kern_buddy's pre-existing declaration
+// wins). Property additions change no tool name/description (the plugin
+// mirrors the name-set only), and the schemas set no additionalProperties:
+// false, so permissive hosts keep working untouched.
+func outputProps(props map[string]any) map[string]any {
+	out := make(map[string]any, len(props)+2)
+	for k, v := range props {
+		out[k] = v
+	}
+	if _, ok := out["slice"]; !ok {
+		out["slice"] = strProp("re-read a truncated result: '<anchor>:lines:A-B' or '<anchor>:tail:N'")
+	}
+	if _, ok := out["max_output"]; !ok {
+		out["max_output"] = strProp("output budget in bytes for this call (0 disables)")
+	}
+	return out
 }
 
 // ToolsForPhase returns the focused shortlist of tools active for phase.

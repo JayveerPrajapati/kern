@@ -36,9 +36,14 @@ func wireOpencode(root string) Status {
 		"type":    "local",
 		"command": []string{cmd},
 		"enabled": true,
-		"environment": map[string]string{
-			"KERN_ALLOW_EXEC": "1",
-		},
+		// No KERN_ALLOW_EXEC default (C1): exec is opt-in per host, matching
+		// wireMCPJSON's contract — `kern setup` must not silently enable
+		// arbitrary command execution for every agent session in the repo.
+		// governance.CheckExec fails closed without it, and hosts that want
+		// exec set KERN_ALLOW_EXEC=1 themselves. mergeJSON replaces the kern
+		// entry wholesale, so re-running setup also removes a stale
+		// KERN_ALLOW_EXEC=1 written by an older kern.
+		"environment": map[string]string{},
 		// No cwd field: opencode resolves opencode.json from the project root
 		// and launches MCP servers with cwd = project root by default. Writing
 		// an absolute cwd here would leak a machine-specific path into a
@@ -57,9 +62,10 @@ func wireGlobal(bin string) Status {
 		"type":    "local",
 		"command": []string{bin},
 		"enabled": true,
-		"environment": map[string]string{
-			"KERN_ALLOW_EXEC": "1",
-		},
+		// No KERN_ALLOW_EXEC default (C1): same opt-in contract as the
+		// project-level wiring — the global config is machine-wide, so
+		// silently enabling exec there would be even broader.
+		"environment": map[string]string{},
 	})
 	if err != nil {
 		return Status{Agent: "opencode-global", Path: path, Note: err.Error()}
@@ -177,10 +183,12 @@ var hostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
 // "thin" (default) writes the thin wiring-only file (full rules live in the
 // host's global instructions, managed by `kern setup --global-rules`);
 // anything else writes the full rules. wired names the agents this run wired,
-// used only by the thin variant's wiring-facts line.
-func wireAgentRules(root, mode, wired string) Status {
+// used only by the thin variant's wiring-facts line. explicitThin marks a
+// deliberate thin choice (--agents-md thin or a persisted preference); the
+// default never downgrades an existing full rules file to thin.
+func wireAgentRules(root, mode, wired string, explicitThin bool) Status {
 	if mode == "thin" {
-		status := wireThinAgentRules(root, wired)
+		status := wireThinAgentRules(root, wired, explicitThin)
 		// Same thin content, per host. Errors here are informational: the
 		// universal AGENTS.md is the primary delivery mechanism.
 		for _, name := range hostRuleFiles {
@@ -188,7 +196,7 @@ func wireAgentRules(root, mode, wired string) Status {
 			if _, err := os.Stat(path); err != nil {
 				continue
 			}
-			wireThinRulesFile(root, name, wired)
+			wireThinRulesFile(root, name, wired, explicitThin)
 		}
 		return status
 	}

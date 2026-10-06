@@ -11,6 +11,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/hook"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"io"
 	"io/fs"
@@ -27,13 +29,20 @@ func runSetup(rest []string) {
 	f, _ := parseFlagsOrDie(rest)
 	root := projectRoot(f)
 	if f.check {
-		for _, s := range setup.Check(root) {
+		results := setup.Check(root)
+		for _, s := range results {
 			mark := "-"
 			if s.Installed {
 				mark = "x"
 			}
 			fmt.Printf("[%s] %-22s %s\n", mark, s.Agent, s.Note)
 		}
+		// L12: the raw table is not mappable to any documented number; the
+		// summary derives its counts from the adapter registry + the table
+		// itself at runtime, never from literals.
+		fmt.Println(CheckSummary(root, results))
+		// F4: one honest discoverability hint for the wired surface.
+		fmt.Println(mcpSurfaceTip())
 		return
 	}
 	if f.verify {
@@ -58,7 +67,7 @@ func runSetup(rest []string) {
 	// The --global flag gates ALL user-global writes (home-scoped hooks,
 	// home/global MCP adapters, global git ignore): without it, Wire touches
 	// only project-scope files.
-	opts := setup.WireOptions{AgentsMD: f.agentsMD}
+	opts := setup.WireOptions{AgentsMD: f.agentsMD, DryRun: f.dryRun}
 	for _, s := range setup.WireWith(root, agents, f.detect, f.global, opts) {
 		mark := "ok"
 		if s.Skipped {
@@ -70,48 +79,77 @@ func runSetup(rest []string) {
 		fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 	}
 	if f.globalRules {
-		// --global-rules manages the kern agent-usage policy in each host's
-		// GLOBAL instructions slot (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
-		// ~/.config/opencode/AGENTS.md): replace the marker-delimited block,
-		// preserve user content outside it, create missing files.
-		for _, s := range setup.WireGlobalRules() {
-			mark := "ok"
-			if s.Skipped {
-				mark = "--"
-			} else if !s.Installed {
-				mark = "!!"
-				failed++
+		if f.dryRun {
+			// F10: a dry-run must not touch user-global files either.
+			fmt.Println("[dry-run] --global-rules: would manage the kern block in each host's global instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md, ~/.cursor/rules/kern.mdc, …) — nothing written")
+		} else {
+			// --global-rules manages the kern agent-usage policy in each host's
+			// GLOBAL instructions slot (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
+			// ~/.config/opencode/AGENTS.md): replace the marker-delimited block,
+			// preserve user content outside it, create missing files.
+			for _, s := range setup.WireGlobalRules() {
+				mark := "ok"
+				if s.Skipped {
+					mark = "--"
+				} else if !s.Installed {
+					mark = "!!"
+					failed++
+				}
+				fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 			}
-			fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 		}
 	}
 	if f.global {
-		// Global pre-wiring targets ALL agents (or the explicit --agents
-		// list), never just the detected subset: an agent installed later is
-		// already wired with no re-run. WireGlobal adds the global
-		// instruction files (AGENTS.md, CLAUDE.md) and the opencode plugin.
-		for _, s := range setup.WireGlobal(agents) {
-			mark := "ok"
-			if s.Skipped {
-				mark = "--"
-			} else if !s.Installed {
-				mark = "!!"
-				failed++
+		if f.dryRun {
+			fmt.Println("[dry-run] --global: would write user-global instruction files (AGENTS.md, CLAUDE.md) and the global opencode plugin — nothing written")
+		} else {
+			// Global pre-wiring targets ALL agents (or the explicit --agents
+			// list), never just the detected subset: an agent installed later
+			// is already wired with no re-run. WireGlobal adds the global
+			// instruction files (AGENTS.md, CLAUDE.md) and the opencode plugin.
+			for _, s := range setup.WireGlobal(agents) {
+				mark := "ok"
+				if s.Skipped {
+					mark = "--"
+				} else if !s.Installed {
+					mark = "!!"
+					failed++
+				}
+				fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 			}
-			fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 		}
 	}
 	if len(f.agents) == 0 && !f.detect {
-		fmt.Println("\nWired all agents. Use --detect to wire only detected agents, or --agents to target specific ones.")
+		if f.dryRun {
+			fmt.Println("\nDry-run preview only — nothing was written. Re-run without --dry-run to wire.")
+		} else {
+			fmt.Println("\nWired all agents. Use --detect to wire only detected agents, or --agents to target specific ones.")
+		}
 	} else if f.detect && len(f.agents) == 0 {
 		fmt.Printf("\nDetected agents: %v\n", detected)
 	}
-	fmt.Println("Restart your agent (opencode reload / claude) to pick up the MCP servers and kern-first instructions.")
+	if !f.dryRun {
+		// F4: after a successful wire, one honest hint about the delivered
+		// surface — the default stays 6 tools (deliberate), full is opt-in.
+		fmt.Println(mcpSurfaceTip())
+		fmt.Println("Restart your agent (opencode reload / claude) to pick up the MCP servers and kern-first instructions.")
+	}
 	// Fail closed: a partial wiring (some agents errored) must not look like a
 	// clean success. Exit non-zero so install scripts and CI can detect it.
 	if failed > 0 {
 		fatal("setup: %d agent(s) failed to wire — fix the errors above and rerun", failed)
 	}
+}
+
+// mcpSurfaceTip is the ONE discoverability hint printed after a successful
+// wire run and in setup --check (F4): wired agents see the default MCP
+// surface, and the full catalog is opt-in via KERN_MCP_FULL. The counts are
+// derived from the toolsurface registry and the tool catalog — never
+// literals — so the tip tracks the code instead of drifting like the old
+// "22-tool" banner did.
+func mcpSurfaceTip() string {
+	return fmt.Sprintf("tip: wired agents see the %d-tool default MCP surface; set KERN_MCP_FULL=1 to advertise all %d (see docs/mcp/protocol.md)",
+		len(toolsurface.Default), len(catalog.ToolNames()))
 }
 
 // verifyMCP spawns the kern-mcp command configured in .mcp.json and checks it
@@ -299,7 +337,7 @@ func runOnboard(rest []string) {
 
 	fmt.Printf("root:       %s\n", abs)
 	fmt.Printf("registered: %s\n", registered)
-	fmt.Printf("wired:      %s\n", wiredList(wiredFiles, f.indexOnly))
+	fmt.Printf("wired:      %s\n", wiredDisplay(abs, wiredFiles, f.indexOnly))
 	fmt.Printf("indexed:    %s\n", indexed)
 	if timing != "" {
 		fmt.Printf("timing:     %s\n", timing)
@@ -317,15 +355,18 @@ func runOnboard(rest []string) {
 	}
 }
 
-// wiredList renders the "wired:" surface: every project file kern wrote or
-// modified during this onboard run (paths are deduped and sorted for a
-// stable, readable list). --index-only reports "none".
-func wiredList(paths []string, indexOnly bool) string {
+// wiredDisplay renders the "wired:" surface. When this onboard run wrote
+// files, every project file kern wrote is listed (paths deduped and sorted
+// for a stable, readable list). When nothing was written — the project was
+// already wired, e.g. by `kern setup` — the ACTUAL wiring state from setup's
+// own registry (setup.WiredState) is shown instead of "none", which would be
+// a lie about an already-wired fixture (L8). --index-only reports "none".
+func wiredDisplay(root string, paths []string, indexOnly bool) string {
 	if indexOnly {
 		return "none (--index-only: agent wiring skipped)"
 	}
 	if len(paths) == 0 {
-		return "none"
+		return WiredState(root)
 	}
 	seen := map[string]bool{}
 	var uniq []string

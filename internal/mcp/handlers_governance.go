@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	mcpgovernance "github.com/JayveerPrajapati/kern/internal/mcp/governance"
+	"github.com/JayveerPrajapati/kern/internal/mcpguide"
 )
 
 // The governance-family handler bodies (kern_lock action=acquire|release|
@@ -18,7 +19,7 @@ func (s *Server) governanceHooks() mcpgovernance.Hooks {
 		Mu:        &s.mu,
 		Locks:     s.locks,
 		LoadIndex: s.loadIndex,
-		Guide:     Guide,
+		Guide:     mcpguide.Guide,
 		StampGoverned: func(ctx context.Context, ix *index.Index, policySource string, proof governance.AuthorizationProof, syms []SymbolProvenance) {
 			s.stampProvenance(ctx, s.governedProvenance(ix, policySource, proof, syms))
 		},

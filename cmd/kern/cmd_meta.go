@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
+	"github.com/JayveerPrajapati/kern/internal/mcpguide"
 )
 
 func runVersion(rest []string) {
@@ -64,7 +65,7 @@ func runGuide(rest []string) {
 			fatalUsage("unknown flag %q", a)
 		}
 	}
-	fmt.Println(mcp.Guide())
+	fmt.Println(mcpguide.Guide())
 }
 
 // runMeta implements the `kern meta` CLI subcommand — the CLI mirror of the

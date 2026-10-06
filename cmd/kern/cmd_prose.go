@@ -26,6 +26,20 @@ func runProse(rest []string) int {
 	if len(args) > 1 {
 		root = args[1]
 	}
+	// F13: `kern prose func run` (unquoted) used to split into words="func"
+	// root="run" and then silently "succeed" (exit 0) on the nonexistent junk
+	// root (0 matches, no hint that the words were misparsed). Reject excess
+	// positionals and unresolvable root paths as usage errors (exit 2) — the
+	// multi-word phrase must stay a single quoted argument
+	// (`kern prose "save user"`).
+	if len(args) > 2 {
+		fatalUsage("usage: kern prose \"<words>\" [root] [--limit N]\n  too many arguments (words and optional root only); quote the phrase: kern prose \"save user\"")
+	}
+	if root != "" {
+		if st, serr := os.Stat(root); serr != nil || !st.IsDir() {
+			fatalUsage("usage: kern prose \"<words>\" [root] [--limit N]\n  root %q does not exist or is not a directory (multi-word phrases must be quoted: kern prose \"save user\")", root)
+		}
+	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Prose: %v", err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -50,8 +51,14 @@ func RenderWhatIfText(kind whatif.ChangeKind, change, target string, imp whatif.
 	}
 	fmt.Fprintf(&b, "affected: %d\n", len(imp.Affected))
 	fmt.Fprintf(&b, "files: %d\n", len(imp.Files))
+	// The what-if report must say WHICH files the change touches, not just
+	// how many (Fix 2 — same blast-radius promise as the impact render).
+	renderImpactList(&b, imp.Files)
 	fmt.Fprintf(&b, "services: %d\n", len(imp.Services))
 	fmt.Fprintf(&b, "tests: %d\n", len(imp.Tests))
+	if imp.TestsSamePackage > 0 {
+		fmt.Fprintf(&b, "same-package tests not shown (low relevance): %d\n", imp.TestsSamePackage)
+	}
 	if len(imp.BrokenCallSites) > 0 {
 		fmt.Fprintf(&b, "Broken call sites: %s\n", strings.Join(imp.BrokenCallSites, ", "))
 	}
@@ -239,6 +246,13 @@ func nodeName(n domain.Node) string {
 // Full data is preserved in ImpactReport for --json / MCP / REST.
 const maxImpactListItems = 20
 
+// maxCoveringTests caps the "Tests that cover it" section separately from the
+// other impact lists: test coverage is the most repetitive section (every
+// same-package test names every symbol it touches), so it renders lower than
+// the 20-item cap the other lists use. Counts stay exact; overflow collapses
+// to the same "+N more (use --json for full list)" line.
+const maxCoveringTests = 10
+
 // stdlibPkgs is the Go standard-library top-level package set used to collapse
 // transitive stdlib fan-out in "What it calls" (loadOrBuild fanned to
 // 1274 entries incl. strings.*/os.*/fmt.*). Only these exact first-segment
@@ -282,9 +296,17 @@ func stdlibPkgOf(name string) (string, bool) {
 // renderImpactList prints at most maxImpactListItems entries, then a "+N more"
 // overflow line. Counts in the section header stay exact.
 func renderImpactList(b *strings.Builder, items []string) {
+	renderImpactListCapped(b, items, maxImpactListItems)
+}
+
+// renderImpactListCapped prints at most cap entries, then a "+N more" overflow
+// line. Counts in the section header stay exact. It is the shared core for
+// renderImpactList (20-item cap) and the "Tests that cover it" section
+// (maxCoveringTests).
+func renderImpactListCapped(b *strings.Builder, items []string, cap int) {
 	shown := items
-	if len(items) > maxImpactListItems {
-		shown = items[:maxImpactListItems]
+	if len(items) > cap {
+		shown = items[:cap]
 	}
 	for _, c := range shown {
 		fmt.Fprintf(b, "  - %s\n", c)
@@ -292,6 +314,24 @@ func renderImpactList(b *strings.Builder, items []string) {
 	if len(items) > len(shown) {
 		fmt.Fprintf(b, "  ... +%d more (use --json for full list)\n", len(items)-len(shown))
 	}
+}
+
+// transitiveDependentsFromRiskDetail extracts the transitive-dependents count
+// from RiskDetail ("N transitive dependents") when that is what drove the risk
+// tier, so the "What calls this" line can show the direct→transitive
+// relationship. It returns ok=false for the fallback details ("N direct
+// callers", "N services depend on it"), which carry a different meaning and
+// must not be re-read as a transitive count.
+func transitiveDependentsFromRiskDetail(detail string) (int, bool) {
+	const suffix = " transitive dependents"
+	if !strings.HasSuffix(detail, suffix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(detail, suffix))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // renderWhatItCalls prints project calls first (already direct-first ordered
@@ -367,7 +407,15 @@ func renderImpactText(r domain.ImpactReport) string {
 	// WhoCalls counts graph nodes with a direct "calls" edge into the target
 	// (Graph.WhoCallsPrecise) — a different universe from explore's caller
 	// count (unique simple names), so the label says which one this is (P2).
-	fmt.Fprintf(&b, "What calls this: %d (graph nodes)\n", len(r.WhoCalls))
+	// When the risk tier was driven by the transitive caller closure (P2's
+	// "N transitive dependents"), surface that count here too so "What calls
+	// this: 1" next to "Risk: medium (3 transitive dependents)" reads as the
+	// direct→transitive relationship it is, not a contradiction (V4).
+	whatCallsLine := fmt.Sprintf("What calls this: %d (graph nodes)", len(r.WhoCalls))
+	if trans, ok := transitiveDependentsFromRiskDetail(r.RiskDetail); ok && trans > len(r.WhoCalls) {
+		whatCallsLine = fmt.Sprintf("What calls this: %d (graph nodes; %d transitive dependents)", len(r.WhoCalls), trans)
+	}
+	fmt.Fprintln(&b, whatCallsLine)
 	renderImpactList(&b, r.WhoCalls)
 	fmt.Fprintf(&b, "What it calls: %d\n", len(r.WhatItCalls))
 	renderWhatItCalls(&b, r.WhatItCalls)
@@ -379,8 +427,27 @@ func renderImpactText(r domain.ImpactReport) string {
 	renderImpactList(&b, r.DataStoresAffected)
 	fmt.Fprintf(&b, "Events affected: %d\n", len(r.EventsAffected))
 	renderImpactList(&b, r.EventsAffected)
-	fmt.Fprintf(&b, "Tests that cover it (direct callers + same-package): %d\n", len(r.TestsCover))
-	renderImpactList(&b, r.TestsCover)
+	// The blast radius must say WHICH files it touches, not just how many
+	// symbols (bug-hunter finding: impact promised blast radius but never
+	// listed the files the way explore does).
+	fmt.Fprintf(&b, "Affected files: %d\n", len(r.Files))
+	renderImpactList(&b, r.Files)
+	// The header shows the number DISPLAYED when the list is capped, with the
+	// real total alongside, so it never contradicts the "+N more (use --json
+	// for full list)" overflow line below (V3). Uncapped reports keep the
+	// plain exact count. TestsCover holds the ranked covering tests only
+	// (file-paired + name-matched + direct callers); the same-package
+	// remainder is a separate count-only line so the section never implies
+	// the whole package covers the symbol (Fix 1).
+	if len(r.TestsCover) > maxCoveringTests {
+		fmt.Fprintf(&b, "Tests that cover it (file-paired + name-matched + direct callers): %d shown of %d\n", maxCoveringTests, len(r.TestsCover))
+	} else {
+		fmt.Fprintf(&b, "Tests that cover it (file-paired + name-matched + direct callers): %d\n", len(r.TestsCover))
+	}
+	renderImpactListCapped(&b, r.TestsCover, maxCoveringTests)
+	if r.TestsCoverSamePackage > 0 {
+		fmt.Fprintf(&b, "same-package tests not shown (low relevance): %d\n", r.TestsCoverSamePackage)
+	}
 	if len(r.IncidentsRelated) > 0 {
 		fmt.Fprintf(&b, "Incidents related: %d\n", len(r.IncidentsRelated))
 		renderImpactList(&b, r.IncidentsRelated)
@@ -396,7 +463,7 @@ func renderImpactText(r domain.ImpactReport) string {
 	// A change target that resolved to nothing (no callers, no callees, no
 	// tests) is almost always an ambiguous or unindexed symbol, not a truly
 	// isolated leaf. Warn instead of silently reporting "low risk" (F-2).
-	if len(r.WhoCalls) == 0 && len(r.WhatItCalls) == 0 && len(r.TestsCover) == 0 {
+	if len(r.WhoCalls) == 0 && len(r.WhatItCalls) == 0 && len(r.TestsCover) == 0 && r.TestsCoverSamePackage == 0 {
 		fmt.Fprintf(&b, "\nWARN: no callers, callees, or tests resolved for %q — the change target may be ambiguous or not indexed.\n", r.Target)
 		fmt.Fprintf(&b, "      Qualify the symbol (e.g. Server.dispatch) or run kern_search to confirm the exact name, then re-run.\n")
 	}

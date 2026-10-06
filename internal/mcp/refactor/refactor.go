@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/refactor"
@@ -71,6 +72,19 @@ func Transaction(ctx context.Context, h Hooks, args map[string]any) (string, err
 
 	compileCmd := mcpargs.ArgString(args, "compile_command")
 	apply := mcpargs.ArgBool(args, "apply")
+
+	// Security: compile_command is a client-supplied exec surface — parts[0]
+	// is attacker-picked and runs arbitrary host code with the operator's
+	// permissions — so it must pass the governance exec firewall, the same
+	// KERN_ALLOW_EXEC / KERN_TOOLS gate as kern_exec/kern_sandbox. The
+	// engine's derived default (go build ./... when go.mod is present) is a
+	// fixed constant inherent to the refactor feature and is not gated; only
+	// a client-supplied command is.
+	if strings.TrimSpace(compileCmd) != "" {
+		if err := governance.CheckExecCommand(compileCmd, root, "kern_refactor_transaction"); err != nil {
+			return "", err
+		}
+	}
 
 	res, err := refactor.ExecuteTransaction(ctx, refactor.TransactionRequest{
 		Root:           root,

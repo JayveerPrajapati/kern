@@ -31,6 +31,16 @@ func TestMemoryListTextAutoLabel(t *testing.T) {
 	}
 }
 
+// TestMemoryBarePrintsHelp pins F4: bare `kern memory` prints the memory
+// help instead of silently falling through to an (often empty) list print.
+func TestMemoryBarePrintsHelp(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	out := captureStdout(t, func() { runMemory([]string{"--root", t.TempDir()}) })
+	if !strings.Contains(out, "kern memory") || !strings.Contains(out, "add <lesson>") {
+		t.Fatalf("expected the memory help, got %q", out)
+	}
+}
+
 func TestMemoryRecallTextNoMatchHint(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()

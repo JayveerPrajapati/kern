@@ -44,7 +44,7 @@ func runReject(rest []string) {
 
 	// Shared with runApprove: same store order (governance via the app layer,
 	// then blueprint), same decided-state guard (rc=3), same audit chaining.
-	a, req := decideApproval(root, "reject", id, approver, false, f.reason)
+	a, req, mem := decideApproval(root, "reject", id, approver, false, f.reason)
 	if req != nil {
 		printBlueprintDecision(req, approver, true)
 		return
@@ -52,5 +52,10 @@ func runReject(rest []string) {
 	fmt.Printf("rejected: %s (by %s)\n", a.ID, approver)
 	if a.TaskID != "" {
 		fmt.Printf("  task: %s marked REJECTED\n", a.TaskID)
+	}
+	// Same bounded, post-confirmation learning pass as runApprove: the
+	// decision is printed first; learning never holds up the exit.
+	if mem != nil {
+		recordPolicySignalsBounded(root, mem)
 	}
 }

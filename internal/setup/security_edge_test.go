@@ -276,3 +276,65 @@ func TestWireDuplicateAgentIdempotent(t *testing.T) {
 		t.Fatalf("opencode plugin missing: %v", err)
 	}
 }
+
+// --- F. opencode wiring must not enable exec (deep-dive C1, 2026-10-03) ---
+
+// TestWireOpencodeDoesNotEnableExec pins the C1 contract: `kern setup` must
+// not silently write KERN_ALLOW_EXEC=1 into the project opencode.json. Exec
+// is opt-in per host (docs/security/threat-model.md "Opt-in power"), matching
+// wireMCPJSON's documented empty env. The repair pass also verifies that a
+// kern entry written by an older kern WITH the env var is repaired away,
+// because mergeJSON replaces the whole kern entry.
+func TestWireOpencodeDoesNotEnableExec(t *testing.T) {
+	dir := t.TempDir()
+	if st := wireOpencode(dir); !st.Installed {
+		t.Fatalf("wireOpencode not installed: %+v", st)
+	}
+	assertNoExecEnv := func(stage string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, "opencode.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			MCP map[string]struct {
+				Environment map[string]string `json:"environment"`
+			} `json:"mcp"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("%s: opencode.json not valid JSON: %v", stage, err)
+		}
+		entry, ok := cfg.MCP["kern"]
+		if !ok {
+			t.Fatalf("%s: no kern entry in opencode.json: %s", stage, data)
+		}
+		if v, present := entry.Environment["KERN_ALLOW_EXEC"]; present {
+			t.Fatalf("%s: KERN_ALLOW_EXEC=%q present; exec must be opt-in per host", stage, v)
+		}
+	}
+	assertNoExecEnv("fresh wiring")
+
+	// Stale repair: an older kern wrote KERN_ALLOW_EXEC=1; re-running setup
+	// must remove it (and must not clobber sibling mcp entries).
+	old := `{"mcp":{"kern":{"type":"local","command":["kern-mcp"],"enabled":true,"environment":{"KERN_ALLOW_EXEC":"1"}},"other":{"enabled":true}}}`
+	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := wireOpencode(dir); !st.Installed {
+		t.Fatalf("wireOpencode (repair pass) not installed: %+v", st)
+	}
+	assertNoExecEnv("repair pass")
+	data, err := os.ReadFile(filepath.Join(dir, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		MCP map[string]json.RawMessage `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.MCP["other"]; !ok {
+		t.Fatalf("repair clobbered a sibling mcp entry: %s", data)
+	}
+}

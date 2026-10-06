@@ -55,7 +55,7 @@ func annotate(result *VerificationResult) []domain.Claim {
 		appendFact("build", fmt.Sprintf("build verification %s", OkWord(b.OK)))
 	}
 	if t := result.UnitTests; t != nil {
-		if t.Status == StatusSkipped {
+		if t.Status == StatusSkipped || t.Status == StatusNoRunner {
 			appendFact("test", "unit tests SKIPPED ("+FirstLine(t.Output)+")")
 		} else {
 			appendFact("test", fmt.Sprintf("unit tests %s (%d passed, %d failed, %d skipped)",
@@ -182,9 +182,15 @@ func DeriveVerdict(result *VerificationResult) Verdict {
 		fail = true
 	}
 	if t := result.UnitTests; t != nil {
-		if t.Status == StatusSkipped {
+		switch {
+		case t.Status == StatusSkipped:
 			skipped = true
-		} else if !t.OK {
+		case t.Status == StatusNoRunner, t.Status == StatusWarn:
+			// F3: an unmeasured suite (no runner detected) or a
+			// diagnostic-only run (zero failed tests) is a warning —
+			// never a plain PASS and never a FAIL.
+			warn = true
+		case !t.OK:
 			fail = true
 		}
 	}
@@ -206,8 +212,21 @@ func DeriveVerdict(result *VerificationResult) Verdict {
 	if a := result.Architecture; a != nil && !a.OK {
 		fail = true
 	}
-	if d := result.Dependency; d != nil && !d.OK {
-		fail = true
+	if d := result.Dependency; d != nil {
+		if !d.OK {
+			fail = true
+		}
+		if len(d.Warnings) > 0 {
+			warn = true
+		}
+	}
+	// Reuse is advisory (never fails): findings surface as warnings, and a
+	// skipped reuse check is INFORMATIONAL ONLY — it must NOT downgrade a PASS
+	// to VerdictSkipped (a clean tree is the normal state, unlike the
+	// compliance checks where a skipped check counts as neither passing nor
+	// failing).
+	if r := result.Reuse; r != nil && len(r.Findings) > 0 {
+		warn = true
 	}
 	// E2E and static-analysis are hard failures when they report a problem.
 	if e := result.E2ETests; e != nil {
@@ -217,8 +236,16 @@ func DeriveVerdict(result *VerificationResult) Verdict {
 			fail = true
 		}
 	}
-	if s := result.StaticAnalysis; s != nil && !s.OK {
-		fail = true
+	if s := result.StaticAnalysis; s != nil {
+		if s.Status == StatusSkipped {
+			// The tool could not be executed at all (sandbox execution
+			// failure / missing binary): an unmeasured run counts as
+			// neither passing nor failing — never a plain PASS, never a
+			// false FAIL.
+			skipped = true
+		} else if !s.OK {
+			fail = true
+		}
 	}
 	// The compliance checks (cve/license/secrets) are advisory: findings and
 	// copyleft/unknown licenses surface as warnings, never failures. A check

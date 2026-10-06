@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/mcpgate"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 )
 
@@ -153,7 +154,7 @@ func TestTokenMetadataOnGateDenial(t *testing.T) {
 	t.Parallel()
 	s := newTestServer()
 	s.roots = []string{"/"}
-	s.gate = &Gate{roots: []string{"/definitely-not-a-real-root-xyz"}, enabled: true}
+	s.gate = mcpgate.NewGateForRoots([]string{"/definitely-not-a-real-root-xyz"})
 	req := rpcRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(`1`),
 		Method: "tools/call",

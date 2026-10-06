@@ -225,3 +225,31 @@ func TestTaintLiteEmptyFindings(t *testing.T) {
 		t.Fatalf("expected empty result for empty findings, got %d", len(got))
 	}
 }
+
+// TestTaintLiteEnvVarSource pins the F6 source extension: os.Getenv is
+// user-controlled input, so a sink finding in a file that reads an env var
+// is tainted even without an entry-point path (the realistic
+// os.Getenv→http.Get / token→exec.Command flows).
+func TestTaintLiteEnvVarSource(t *testing.T) {
+	root := t.TempDir()
+	writeTaintFile(t, root, "app.go", "package main\n\nfunc sink() {\n\turl := os.Getenv(\"TARGET_URL\")\n\tresp, _ := http.Get(url)\n\t_ = resp\n}\n")
+	ix := &index.Index{
+		Root:    root,
+		Symbols: []index.Symbol{{Kind: "func", Name: "sink", File: "app.go", Line: 3, End: 7}},
+		Callers: map[string][]string{},
+	}
+	findings := []secscan.Finding{{
+		File: "app.go", Line: 5, Rule: "unsafe-http",
+		Severity: "warning", Message: "HTTP request to a variable URL (env, param, or config value)",
+	}}
+	got := TaintLite(ix, findings)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 taint finding, got %d", len(got))
+	}
+	if !got[0].Tainted {
+		t.Fatal("expected tainted via os.Getenv source file")
+	}
+	if got[0].Func != "sink" {
+		t.Errorf("Func = %q, want sink", got[0].Func)
+	}
+}

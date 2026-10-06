@@ -102,3 +102,40 @@ func TestRenderOptimizeNoSavingsHonest(t *testing.T) {
 		t.Errorf("must not claim a savings percentage, got: %q", out)
 	}
 }
+
+// TestPercentAlwaysShowsDenominator is the render-level guard extending the
+// honesty pattern (L2/finding V1): whenever a savings percentage is printed,
+// its denominator — the before-token count — must be stated on the same line.
+// A "%" may never float free of the "before -> after" pair it is relative to.
+func TestPercentAlwaysShowsDenominator(t *testing.T) {
+	res := optimize.Result{BeforeTokens: 500, AfterTokens: 200, SavedTokens: 300, SavedPercent: 60.0, Output: "out"}
+	out := RenderOptimize("optimized prompt", res)
+	if !strings.Contains(out, "500 -> 200") {
+		t.Errorf("savings line must state the before count (the denominator), got: %q", out)
+	}
+	pct := strings.Index(out, "60.0%")
+	pair := strings.Index(out, "500 -> 200")
+	if pct < 0 || pair < 0 || pct < pair {
+		t.Errorf("the percentage must appear AFTER its denominator on the same line: %q", out)
+	}
+
+	// ContextBudget success path: same invariant — a % (when printed) is
+	// always preceded by its "before -> after" denominator pair. The text is
+	// well above the token floor and the budget tight, so FitCode shrinks it.
+	text := strings.Repeat("func alpha() { return 1 }\n", 200)
+	if tokenize.Count(text) < compactFloorTokens {
+		t.Fatalf("precondition failed: fixture must exceed the %d-token floor", compactFloorTokens)
+	}
+	cb, err := ContextBudget(context.Background(), map[string]any{"text": text, "max_tokens": "100"})
+	if err != nil {
+		t.Fatalf("ContextBudget: %v", err)
+	}
+	if i := strings.Index(cb, "%"); i >= 0 {
+		if !strings.Contains(cb[:i], " -> ") {
+			t.Errorf("ContextBudget percentage without its before -> after denominator: %q", cb[:120])
+		}
+	} else {
+		// The guard must never see a silent skip for a shrinkable input.
+		t.Errorf("ContextBudget success path must report a percentage, got: %q", cb[:120])
+	}
+}

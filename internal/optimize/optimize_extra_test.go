@@ -3,6 +3,7 @@ package optimize
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -324,6 +325,34 @@ func TestRunBuildFailure(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "exit status 3") {
 		t.Fatalf("error not surfaced, got %q", res.Output)
+	}
+}
+
+// TestRunBuildMissingWorkdir locks the mode-2 fix: a nonexistent workdir used
+// to make the shell's fork fail with an error naming neither the directory
+// nor the cause ("fork/exec /bin/sh: no such file or directory" — observed
+// live). RunBuild must now stat the dir up front and return a message that
+// names the dir, folded into res.Output so CLI and MCP callers print it.
+func TestRunBuildMissingWorkdir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	res, err := RunBuild(context.Background(), "pwd", missing, Options{})
+	if err == nil {
+		t.Fatal("expected error for missing workdir")
+	}
+	if !strings.Contains(err.Error(), "workdir does not exist") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error should name the missing dir %q, got %q", missing, err.Error())
+	}
+	if !strings.Contains(res.Output, "workdir does not exist") {
+		t.Fatalf("res.Output should carry the workdir message, got %q", res.Output)
+	}
+	// A valid workdir still runs normally.
+	ok, err := RunBuild(context.Background(), "pwd", t.TempDir(), Options{})
+	if err != nil {
+		t.Fatalf("valid workdir should run, got %v", err)
+	}
+	if !strings.Contains(ok.Output, "cmd: pwd") {
+		t.Fatalf("expected cmd: prefix, got %q", ok.Output)
 	}
 }
 

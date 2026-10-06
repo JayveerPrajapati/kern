@@ -38,8 +38,20 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	}
 	fmt.Fprintf(&b, "affected: %d\n", len(imp.Affected))
 	fmt.Fprintf(&b, "files: %d\n", len(imp.Files))
+	// The blast radius must say WHICH files it touches (Fix 2), mirroring the
+	// impact render's affected-files section.
+	for i, f := range imp.Files {
+		if i >= 20 {
+			fmt.Fprintf(&b, "  ... +%d more files\n", len(imp.Files)-i)
+			break
+		}
+		fmt.Fprintf(&b, "  - %s\n", f)
+	}
 	fmt.Fprintf(&b, "services: %d\n", len(imp.Services))
 	fmt.Fprintf(&b, "tests: %d\n", len(imp.Tests))
+	if imp.TestsSamePackage > 0 {
+		fmt.Fprintf(&b, "same-package tests not shown (low relevance): %d\n", imp.TestsSamePackage)
+	}
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
 	// An unresolvable change must never read as a clean bill: surface the

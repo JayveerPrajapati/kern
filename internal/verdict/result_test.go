@@ -6,6 +6,72 @@ import (
 	"time"
 )
 
+// TestRenderCompactVetDiagnosticWarnsNotFails pins F3 defect 1: a
+// diagnostic-only test run (zero failed tests, go vet finding) renders the
+// phase as WARN with the diagnostic, never as FAILED — and a no-runner skip
+// renders SKIPPED, never a passing phase line.
+func TestRenderCompactVetDiagnosticWarnsNotFails(t *testing.T) {
+	vet := VerificationResult{
+		Verdict: VerdictWarn,
+		UnitTests: &TestResult{
+			OK:      true,
+			Status:  StatusWarn,
+			Passed:  2838,
+			Skipped: 152,
+			Output:  "doctor_test.go:51: E2E gate test — full pipeline; runs in nightly non-short suite",
+		},
+	}
+	out := RenderCompact(vet)
+	if !strings.Contains(out, "tests: WARN (diagnostic: doctor_test.go:51: E2E gate test") {
+		t.Errorf("RenderCompact must surface the vet diagnostic as WARN:\n%s", out)
+	}
+	if strings.Contains(out, "tests: FAILED") || strings.Contains(out, "tests: FAIL ") {
+		t.Errorf("a diagnostic-only run must never render a test failure:\n%s", out)
+	}
+
+	noRunner := VerificationResult{
+		Verdict: VerdictWarn,
+		UnitTests: &TestResult{
+			OK:     true,
+			Status: StatusNoRunner,
+			Output: "skipped: no test runner detected (root has no go.mod)",
+		},
+	}
+	out = RenderCompact(noRunner)
+	if !strings.Contains(out, "tests: SKIPPED skipped: no test runner detected") {
+		t.Errorf("no-runner phase must render SKIPPED with the reason:\n%s", out)
+	}
+	if strings.Contains(out, "verdict: PASS") {
+		t.Errorf("no-runner run must never claim PASS:\n%s", out)
+	}
+}
+
+// TestRenderCompactStaticAnalysisSkipped pins the static-analysis
+// did-not-run fix: a phase whose tool could NOT be executed renders
+// "static-analysis: SKIPPED <reason>", never "FAIL tool=go vet findings=0"
+// (an unmeasured run is a skip, not a false FAIL — and never a clean OK).
+func TestRenderCompactStaticAnalysisSkipped(t *testing.T) {
+	skipped := VerificationResult{
+		Verdict: VerdictSkipped,
+		StaticAnalysis: &StaticAnalysisResult{
+			OK:     false,
+			Status: StatusSkipped,
+			Tool:   "go vet",
+			Output: "static-analysis not executed: go vet could not run (exit 1): exec: \"go\": executable file not found in $PATH; ensure go vet is installed and runnable",
+		},
+	}
+	out := RenderCompact(skipped)
+	if !strings.Contains(out, "static-analysis: SKIPPED static-analysis not executed: go vet could not run (exit 1)") {
+		t.Errorf("a did-not-run static analysis must render SKIPPED with the reason:\n%s", out)
+	}
+	if strings.Contains(out, "static-analysis: FAIL") || strings.Contains(out, "findings=0") {
+		t.Errorf("a did-not-run static analysis must never render FAIL:\n%s", out)
+	}
+	if strings.Contains(out, "verdict: PASS") {
+		t.Errorf("a skipped static analysis must never claim PASS:\n%s", out)
+	}
+}
+
 func TestRenderCompactSurfacesFailVerdict(t *testing.T) {
 	v := VerificationResult{
 		Verdict: VerdictFail,
@@ -37,6 +103,21 @@ func TestRenderCompactSurfacesFailVerdict(t *testing.T) {
 	}
 }
 
+func TestRenderCompactSecurityLiveFindingsWarnNotOK(t *testing.T) {
+	live := VerificationResult{Verdict: VerdictPassWithWarning, Security: &SecurityResult{OK: true, Count: 3, High: 2, Low: 1}}
+	if out := RenderCompact(live); !strings.Contains(out, "security: WARN ") || strings.Contains(out, "security: OK") {
+		t.Errorf("live findings must render WARN, not OK:\n%s", out)
+	}
+	suppressedOnly := VerificationResult{Verdict: VerdictPass, Security: &SecurityResult{OK: true, Count: 2, Suppressed: 2}}
+	if out := RenderCompact(suppressedOnly); !strings.Contains(out, "security: OK ") {
+		t.Errorf("suppressed-only findings must stay OK:\n%s", out)
+	}
+	clean := VerificationResult{Verdict: VerdictPass, Security: &SecurityResult{OK: true}}
+	if out := RenderCompact(clean); !strings.Contains(out, "security: OK ") {
+		t.Errorf("clean scan must stay OK:\n%s", out)
+	}
+}
+
 func TestRenderCompactSecurityFindingDetails(t *testing.T) {
 	v := VerificationResult{
 		Verdict: VerdictPassWithWarning,
@@ -49,7 +130,7 @@ func TestRenderCompactSecurityFindingDetails(t *testing.T) {
 				{
 					File:     "auth/login.go",
 					Line:     42,
-					Severity: "info",
+					Severity: "low",
 					Rule:     "ip-leak",
 					Message:  "unencrypted IP reference",
 				},
@@ -57,7 +138,7 @@ func TestRenderCompactSecurityFindingDetails(t *testing.T) {
 		},
 	}
 	out := RenderCompact(v)
-	want := "auth/login.go:42 [info] ip-leak: unencrypted IP reference"
+	want := "auth/login.go:42 [low] ip-leak: unencrypted IP reference"
 	if !strings.Contains(out, want) {
 		t.Errorf("RenderCompact missing finding detail %q in:\n%s", want, out)
 	}
@@ -81,7 +162,7 @@ func TestRenderCompactIncludesFailureOutput(t *testing.T) {
 	}
 	out := RenderCompact(v)
 	for _, want := range []string{
-		"tests: FAILED (go vet: repositories/foo.go:12:34: conversion from int64 to string (int64)) passed=0 failed=0 skipped=0",
+		"tests: FAILED (diagnostic: repositories/foo.go:12:34: conversion from int64 to string (int64)) passed=0 failed=0 skipped=0",
 		"# github.com/x/repositories",
 	} {
 		if !strings.Contains(out, want) {
@@ -155,7 +236,7 @@ func TestRenderCompactIntegrationFailureOutput(t *testing.T) {
 	}
 	out := RenderCompact(v)
 	for _, want := range []string{
-		"integration: FAILED (go vet: integration/x_test.go:4:2: undefined: helper) passed=0 failed=0 skipped=0",
+		"integration: FAILED (diagnostic: integration/x_test.go:4:2: undefined: helper) passed=0 failed=0 skipped=0",
 		"# github.com/x/integ",
 	} {
 		if !strings.Contains(out, want) {

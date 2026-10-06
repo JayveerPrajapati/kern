@@ -9,11 +9,11 @@ import (
 
 // TestPluginDefaultToolsMatchGoDefaultTools pins the opencode plugin's
 // DEFAULT_TOOLS set to the Go defaultTools map: both must advertise exactly
-// the same 22-tool default surface. TestPluginMatchesMCPCatalog (internal/
+// the same default surface. TestPluginMatchesMCPCatalog (internal/
 // setup) pins the plugin set against the FULL catalog and the two plugin
-// copies' byte-identity, and server_filter_test.go pins the Go 22 — but
+// copies' byte-identity, and server_filter_test.go pins the Go set — but
 // nothing asserted plugin-DEFAULT_TOOLS ≡ Go-defaultTools set-equality, so a
-// same-wrong-22 drift on both sides (a renamed default tool) would pass CI.
+// same-wrong set drift on both sides (a renamed default tool) would pass CI.
 // This closes that gap.
 func TestPluginDefaultToolsMatchGoDefaultTools(t *testing.T) {
 	t.Parallel()

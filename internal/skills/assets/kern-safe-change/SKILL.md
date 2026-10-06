@@ -5,7 +5,7 @@ Use for ANY code change in a kern-managed repo - edit, refactor, rename, add a f
 ---
 
 <!-- canonical source: internal/skills/assets/kern-safe-change/SKILL.md; copies must stay identical — run kern setup to sync -->
-<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-22 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
+<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-6 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
 
 # Kern Safe Change & Refactor Runbook
 
@@ -38,6 +38,7 @@ Before modifying any file or symbol, assess the blast radius and risk score:
 Perform the necessary code modifications:
 - For surgical structural changes or renames, prefer `kern_ast_transform` or `kern_rename` over naive regex search/replace.
 - For semantic merges, verify with `kern_semantic` (action=diff).
+- Build, test and lint through kern, not bash. Pass your own command to `kern_verify` and ask only for what you need: `kern_verify command="go test ./..." output=summary` (output: `summary` counts and failing tests, `failures`, `tail:N`, `lines:A-B`, `full`). The full run is kept, so `kern_verify anchor=<id> output=lines:A-B` re-slices it without rerunning. CLI: `kern verify --command "go test ./..." --output summary`.
 
 ---
 

@@ -31,13 +31,23 @@ func runBuild(rest []string) {
 	if cmdStr == "" {
 		fatalUsage("usage: kern build <command>")
 	}
+	// Shell command-substitution (backticks / $(...)) would be executed blind
+	// by RunBuild's sh -c — observed live: `echo \`touch /tmp/x\`` created the
+	// file. Reject BEFORE the governance check (the diagnostic must name the
+	// construct even for an otherwise-allowable command) and before any
+	// execution. Any occurrence rejects, including inside quoted literals:
+	// write literal text (e.g. a commit message containing backticks) to a
+	// file and pass it with -F instead.
+	if containsCommandSubstitution(cmdStr) {
+		fatalPolicy("build: execution denied: command contains shell command-substitution constructs (backtick / $(...) — kern build does not execute them blind; for quoted literals such as commit messages write the text to a file and pass it with -F")
+	}
 	// Building runs arbitrary host commands; it must pass the governance
 	// firewall, fail closed (same gate as the MCP tools). The concrete command
 	// is bound to any approval, so a HIGH/CRITICAL denial prints a resolvable
 	// approval ID (`kern approve <id>`).
 	root := projectRoot(f)
 	if err := governance.CheckExecCommand(cmdStr, root); err != nil {
-		fatal("Build: %v", err)
+		fatalPolicy("build: execution denied by governance: %v", err)
 	}
 	wireRecorder()
 	ctx := context.Background()
@@ -62,6 +72,15 @@ func runBuild(rest []string) {
 
 }
 
+// containsCommandSubstitution reports whether a command string carries shell
+// command-substitution constructs (backticks or $(...)). Presence alone
+// rejects: RunBuild executes through sh -c, which would evaluate the
+// substitution blind — so any occurrence (even inside a quoted literal) is
+// refused, with a file-based workaround for literal text.
+func containsCommandSubstitution(s string) bool {
+	return strings.Contains(s, "`") || strings.Contains(s, "$(")
+}
+
 func runValidate(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
@@ -71,7 +90,7 @@ func runValidate(rest []string) {
 	// Validation runs the detected or user-supplied command (arbitrary host
 	// code); it must pass the governance firewall, fail closed.
 	if err := governance.CheckExec(); err != nil {
-		fatal("Validate: %v", err)
+		fatalPolicy("validate: execution denied by governance: %v", err)
 	}
 	var c *validate.Command
 	if f.cmd != "" {
@@ -233,7 +252,7 @@ func runHeal(rest []string) {
 	}
 	if res.Validated {
 		if res.UsedPlaybook {
-			fmt.Printf("kern: validated OK via recorded playbook (no LLM rounds)\n")
+			fmt.Printf("kern: validated OK via recorded playbook sig=%s (no LLM rounds)\n", res.PlaybookSig)
 		} else {
 			fmt.Printf("kern: validated OK after %d correction round(s)\n", res.Iterations)
 		}
@@ -342,7 +361,7 @@ func runSandbox(rest []string) {
 	// approval, so a HIGH/CRITICAL denial prints a resolvable approval ID
 	// (`kern approve <id>`).
 	if err := governance.CheckExecCommand(strings.Join(cmdParts, " "), root); err != nil {
-		fatal("Sandbox: %v", err)
+		fatalPolicy("sandbox: execution denied by governance: %v", err)
 	}
 	if f.json {
 		res := sandbox.RunGuarded(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f), f.force)
@@ -443,7 +462,7 @@ func runExec(rest []string) {
 		}
 	}
 	if strings.TrimSpace(code) == "" && path == "" {
-		fatalUsage("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]\n       kern exec script.py | kern exec - | kern exec --list")
+		fatalUsage("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]\n       kern exec script.py | kern exec - | kern exec --list\n       isolation: Seatbelt (macOS) / netns (Linux) / fail-closed elsewhere; override: KERN_ALLOW_UNISOLATED=1")
 	}
 	// Executing a script runs arbitrary code; it must pass the governance
 	// firewall, fail closed (same gate as the MCP kern_exec tool). The script
@@ -466,7 +485,7 @@ func runExec(rest []string) {
 	}
 	root := projectRoot(f)
 	if err := governance.CheckExecCommand(binding, root); err != nil {
-		fatal("Exec: %v", err)
+		fatalPolicy("exec: execution denied by governance: %v", err)
 	}
 
 	run := script.Run{Lang: f.lang, Code: code, Path: path}
@@ -573,6 +592,13 @@ func (h *healPlaybookStore) Lookup(signature string) ([]heal.Replacement, bool) 
 	}
 	reps := heal.DecodeReplacements(pb.Steps)
 	if len(reps) == 0 {
+		return nil, false
+	}
+	// Poison-scope limiter (deep-dive C4): a recorded fix may replay only
+	// against the exact content it was recorded from — Apply overwrites files
+	// wholesale. Any drift is reported as a MISS so the heal loop escalates
+	// to the full LLM round instead of replacing current content blindly.
+	if !heal.StepsApplyToCurrent(h.root, pb.Steps) {
 		return nil, false
 	}
 	return reps, true

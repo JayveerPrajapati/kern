@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/rulesblock"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
@@ -87,8 +88,16 @@ func writeGlobalAGENTS() Status {
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		existing = string(b)
 	}
+	// Version guard (C7): never clobber wiring written by a NEWER kern.
+	if v := managedStamp(existing); v != "" && managedNewerThanRunning(v) {
+		return Status{Agent: "global-AGENTS.md", Installed: true, Path: path, Note: "kern section is newer (kern-version " + v + ") — left untouched; remove the stamp line to force a rewrite"}
+	}
 	existing = strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
-	final := mergePrepend(existing, string(kern))
+	final, err := mergePrepend(existing, string(kern))
+	if err != nil {
+		return Status{Agent: "global-AGENTS.md", Path: path, Note: err.Error()}
+	}
+	final = insertManagedStamp(final)
 	if existing != "" && final == existing {
 		return Status{Agent: "global-AGENTS.md", Installed: true, Path: path, Note: "kern-first policy already present"}
 	}
@@ -119,13 +128,21 @@ func writeGlobalClaude() Status {
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		existing = string(b)
 	}
+	// Version guard (C7): never clobber wiring written by a NEWER kern.
+	if v := managedStamp(existing); v != "" && managedNewerThanRunning(v) {
+		return Status{Agent: "claude-global", Installed: true, Path: path, Note: "kern section is newer (kern-version " + v + ") — left untouched; remove the stamp line to force a rewrite"}
+	}
 	// Strip BOTH managed formats so the file converges to a single kern
 	// section: the unmarked "# kern usage rules" blocks (this writer's own
 	// output, possibly accumulated across old runs) AND the marker-delimited
 	// block written by `kern setup --global-rules` (F15 cross-format fix —
 	// without it the two writers stack two coexisting kern sections).
 	existing = strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
-	final := mergeAppend(existing, string(kern))
+	final, err := mergeAppend(existing, string(kern))
+	if err != nil {
+		return Status{Agent: "claude-global", Path: path, Note: err.Error()}
+	}
+	final = insertManagedStamp(final)
 	if existing != "" && final == existing {
 		return Status{Agent: "claude-global", Installed: true, Path: path, Note: "kern-first policy already present"}
 	}
@@ -203,44 +220,40 @@ func backupFile(path string) error {
 	return os.WriteFile(path+".bak."+ts, b, mode)
 }
 
-// removeKernSection removes EVERY "# kern usage rules" block from s (each
-// block runs from the "# kern usage rules" header to the next level-1 header
-// or EOF), preserving all other content. Looping is required: repeated
-// `kern setup --global` runs used to accumulate one block per run because a
-// single-pass removal left earlier blocks in place (F15). Returns s unchanged
-// when no kern block is present.
-func removeKernSection(s string) string {
-	for {
-		idx := strings.Index(s, "# kern usage rules")
-		if idx < 0 {
-			return s
-		}
-		end := len(s)
-		if next := strings.Index(s[idx+1:], "\n# "); next >= 0 {
-			end = idx + 1 + next + 1
-		}
-		s = s[:idx] + s[end:]
-	}
+// removeKernSection removes EVERY kern-managed block from s — both the
+// marker-delimited format and the unmarked "# kern usage rules" format —
+// preserving all other content. The pure text manipulation lives in
+// internal/rulesblock; this wrapper keeps the setup-internal signature.
+func removeKernSection(s string) (string, error) {
+	return rulesblock.ExciseKernBlock(s)
 }
 
 // mergePrepend removes any existing kern section from existing and prepends
 // the fresh kern block at the top, preserving all other content.
-func mergePrepend(existing, kern string) string {
-	cleaned := strings.TrimSpace(removeKernSection(existing))
+func mergePrepend(existing, kern string) (string, error) {
+	cleaned, err := removeKernSection(existing)
+	if err != nil {
+		return "", err
+	}
+	cleaned = strings.TrimSpace(cleaned)
 	kern = strings.TrimRight(kern, "\n")
 	if cleaned == "" {
-		return kern + "\n"
+		return kern + "\n", nil
 	}
-	return kern + "\n\n" + cleaned + "\n"
+	return kern + "\n\n" + cleaned + "\n", nil
 }
 
 // mergeAppend removes any existing kern section from existing and appends the
 // fresh kern block at the end, preserving all other content.
-func mergeAppend(existing, kern string) string {
-	cleaned := strings.TrimRight(removeKernSection(existing), "\n")
+func mergeAppend(existing, kern string) (string, error) {
+	cleaned, err := removeKernSection(existing)
+	if err != nil {
+		return "", err
+	}
+	cleaned = strings.TrimRight(cleaned, "\n")
 	kern = strings.TrimRight(kern, "\n")
 	if cleaned == "" {
-		return kern + "\n"
+		return kern + "\n", nil
 	}
-	return cleaned + "\n\n" + kern + "\n"
+	return cleaned + "\n\n" + kern + "\n", nil
 }

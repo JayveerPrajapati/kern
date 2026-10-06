@@ -180,14 +180,14 @@ func TestGuardCheck_AuthzVerdict_Allowed(t *testing.T) {
 }
 
 // TestGuardCheck_AuthzVerdict_Denied: an unknown agent fails closed — denied
-// verdict, every requested file denied, exit 2, and the boundary check is
+// verdict, every requested file denied, exit 3, and the boundary check is
 // skipped entirely.
 func TestGuardCheck_AuthzVerdict_Denied(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := guardCheckFixture(t)
 	stdout, _, code := runGuardHelper(t, root, "GUARD_HELPER_AGENT=ghost", "GUARD_HELPER_TASK=test")
-	if code != 2 {
-		t.Fatalf("exit code = %d, want 2 (denied verdict is a blocking gate)", code)
+	if code != 3 {
+		t.Fatalf("exit code = %d, want 3 (denied verdict is a blocking gate)", code)
 	}
 	out := assertValidJSON(t, stdout)
 	av, ok := out["authz_verdict"].(map[string]any)
@@ -310,16 +310,17 @@ func TestGuardCheckPublishesEvents(t *testing.T) {
 	}
 
 	// REJECT behavior is unchanged: default threshold 0 with a violation exits
-	// 2 — but the events were already persisted before the panic.
+	// 3 (guard denial — the threshold gate uses the denied tier) — but the
+	// events were already persisted before the panic.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				if e, ok := r.(exitError); ok && e.code == 2 {
+				if e, ok := r.(exitError); ok && e.code == 3 {
 					return
 				}
 				t.Fatalf("unexpected panic: %v", r)
 			}
-			t.Fatal("expected exitError{code: 2} on REJECT, got no panic")
+			t.Fatal("expected exitError{code: 3} on REJECT, got no panic")
 		}()
 		runGuard([]string{"check", root, "--file", "web/caller.go"})
 	}()

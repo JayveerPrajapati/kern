@@ -146,7 +146,7 @@ func newHTTPServerCore(ctx context.Context) (*Server, *http.ServeMux) {
 	// The watcher stops on ctx cancellation or srv.Close() below.
 	srv.StartBackgroundWatch(ctx, watchIntervalFromEnv())
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", srv.handleHTTP)
+	mux.HandleFunc("/mcp", withMCPAuth(mcpAuthToken(), srv.handleHTTP))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		res, err := srv.handleHealth(r.Context(), nil)
 		if err != nil {

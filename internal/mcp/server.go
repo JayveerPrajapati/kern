@@ -19,6 +19,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/watcher"
+	"github.com/JayveerPrajapati/kern/internal/mcpgate"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/project"
@@ -176,7 +177,7 @@ type Server struct {
 	// gate confines every tool call's path-typed arguments (root, dir, or any
 	// key containing "path") to the KERN_MCP_ROOTS roots, resolving symlinks
 	// before containment. A nil gate preserves the default behavior exactly.
-	gate *Gate
+	gate *mcpgate.Gate
 	// commits caches the short HEAD commit per project root so git is spawned
 	// at most once per root per server lifetime.
 	commits map[string]string
@@ -473,7 +474,7 @@ func NewServerForRoot(in io.Reader, out io.Writer, root string) *Server {
 	// (KERN_MCP_NO_CONFINE=1 disables confinement entirely), but the
 	// fail-closed default is root, never the process cwd.
 	if os.Getenv("KERN_MCP_NO_CONFINE") != "1" {
-		s.gate = NewGateForRoots([]string{root})
+		s.gate = mcpgate.NewGateForRoots([]string{root})
 		s.preTool = s.gate.Check
 	}
 	return s
@@ -483,11 +484,11 @@ func NewServerForRoot(in io.Reader, out io.Writer, root string) *Server {
 // KERN_MCP_NO_CONFINE=1 opts out of confinement. A nil gate allows every
 // call; a non-nil gate is enabled unless KERN_MCP_PERMISSIVE=1 opts out, and
 // defaults its roots to the process cwd when KERN_MCP_ROOTS is unset.
-func confinementGate() *Gate {
+func confinementGate() *mcpgate.Gate {
 	if os.Getenv("KERN_MCP_NO_CONFINE") == "1" {
 		return nil
 	}
-	return NewGateFromEnv()
+	return mcpgate.NewGateFromEnv()
 }
 
 type rpcRequest struct {
@@ -956,7 +957,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 	// tool result with isError=true — so the client sees a clean tool error
 	// rather than a panic or a JSON-RPC error. A nil or disabled gate is a
 	// no-op, keeping the default (loopback-client trust) behavior identical.
-	if s.gate != nil && s.gate.enabled && req.Method == "tools/call" {
+	if s.gate != nil && s.gate.Enabled() && req.Method == "tools/call" {
 		var p struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
@@ -1057,7 +1058,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 			"result": map[string]any{
 				"protocolVersion": version,
 				"capabilities":    caps,
-				"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
+				"serverInfo":      map[string]any{"name": serverName, "version": currentServerVersion()},
 				"schemaVersion":   schemaVersion,
 				"instructions":    instructions,
 			},
@@ -1128,6 +1129,7 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
 		scope.etag = ""
 		scope.unchanged = false
+		scope.sliced = false
 	}
 	name, err := s.precheckTool(name, args)
 	if err != nil {
@@ -1138,6 +1140,28 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	// argument surfaces as a clear isError instead of a silent mis-coercion.
 	if err := validateStringArgs(name, args); err != nil {
 		return "", err
+	}
+	// R7 "more" cursor (see retain.go): a slice=<anchor>:lines:A-B|tail:N
+	// re-call reads a sandbox-truncated response's ELIDED part from the
+	// retained-output store WITHOUT executing the tool. Intercepted here —
+	// before the D1 cache gate and dispatch — so a slice request can never
+	// reach tool execution. precheckTool and validateStringArgs still gate it
+	// (F4: like a cache hit, it never skips allowlist/root validation/budget),
+	// and the audit/metrics deferred above record the read. The response is
+	// still bounded by the output budget (A3): toolCallResponse applies the
+	// sandbox to sliced responses too and, when truncation bites, mints a
+	// FRESH anchor for the elided remainder so the recovery path CHAINS
+	// instead of flooding (scope.sliced tells it to retain only the remainder,
+	// never the whole retained entry).
+	if spec := argString(args, "slice"); spec != "" {
+		if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+			scope.sliced = true
+		}
+		out, serr := serveRetainedSlice(spec)
+		if serr != nil {
+			return "", serr
+		}
+		return out, nil
 	}
 	// D1 — tool-response cache: check INSIDE runTool, after precheckTool and
 	// validateStringArgs succeed and before dispatchTool (F4), so a cache hit
@@ -1240,7 +1264,7 @@ func (s *Server) maybeShortCircuit(ctx context.Context, name string, args map[st
 		// downstream in toolCallResponse; minting with -1 keeps the hash
 		// deterministic here (and cacheStore's fallback uses the identical
 		// computation, so fallback and short-circuit agree).
-		budget, err := mcpserve.CallOutputBudget(args)
+		budget, err := mcpserve.CallOutputBudget(name, args)
 		if err != nil {
 			budget = -1
 		}
@@ -1385,6 +1409,7 @@ type indexScope struct {
 	token     string      // MCP progress token; "" = client did not opt in
 	etag      string      // conditional-fetch etag for eligible responses ("" = tool not eligible)
 	unchanged bool        // true when the response is a short-circuit "unchanged (etag E)"
+	sliced    bool        // true when this call is a retained-output slice re-read (R7): the response is served from the cursor store without executing the tool; toolCallResponse still applies the output budget (A3) and, on truncation, mints a chained anchor for the elided remainder
 }
 type indexScopeKey struct{}
 
@@ -1543,53 +1568,4 @@ func (s *Server) commit(root string) string {
 	}
 	s.commits[root] = c
 	return c
-}
-
-// splitShellLine tokenizes a command line into argv, honoring single and
-// double quotes so the documented `sh -c 'cmd ...'` (and Windows `cmd /c "..."`)
-// form is preserved as a single argument instead of being split by whitespace.
-func splitShellLine(line string) []string {
-	var (
-		out      []string
-		cur      strings.Builder
-		inSingle bool
-		inDouble bool
-		started  bool
-	)
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		switch {
-		case inSingle:
-			if c == '\'' {
-				inSingle = false
-			} else {
-				cur.WriteByte(c)
-			}
-		case inDouble:
-			if c == '"' {
-				inDouble = false
-			} else {
-				cur.WriteByte(c)
-			}
-		case c == '\'':
-			inSingle = true
-			started = true
-		case c == '"':
-			inDouble = true
-			started = true
-		case c == ' ' || c == '\t':
-			if started {
-				out = append(out, cur.String())
-				cur.Reset()
-				started = false
-			}
-		default:
-			cur.WriteByte(c)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, cur.String())
-	}
-	return out
 }

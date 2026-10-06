@@ -40,8 +40,19 @@ func TestSnapshotVerifyRoundtrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("snapshot create exit code = %d, want 0 (stderr above)", code)
 	}
-	if !strings.Contains(out, "symbols=") {
-		t.Fatalf("snapshot create output missing summary: %q", out)
+	// F9: the human summary banner lives on stderr — stdout carries ONLY the
+	// snapshot JSON, so `kern snapshot | jq` works.
+	if strings.Contains(out, "symbols=") {
+		t.Fatalf("snapshot summary must NOT pollute stdout (F9); stdout: %q", out)
+	}
+	var errOut string
+	captureStdout(t, func() {
+		errOut = captureStderr(t, func() {
+			code = runSnapshot([]string{dir, "--out", outPath})
+		})
+	})
+	if !strings.Contains(errOut, "symbols=") {
+		t.Fatalf("snapshot summary should be on stderr: %q", errOut)
 	}
 
 	// --verify reads the file back and compares against the same repo.

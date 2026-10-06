@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
@@ -113,10 +114,12 @@ func isAutoCapture(text string) bool {
 	return strings.HasPrefix(text, "User: ") ||
 		strings.HasPrefix(text, "Edited ") ||
 		strings.HasPrefix(text, "Command failed: ") ||
+		strings.HasPrefix(text, "Explored ") ||
 		strings.HasPrefix(text, "latest change:")
 }
 
-// Add appends a lesson, dropping the oldest entries beyond maxEntries. A
+// Add appends a lesson, enforcing the maxEntries cap without letting an
+// automatic capture evict an explicit lesson (see trimToCap). A
 // conversation-capture text is tagged Source "auto" (see isAutoCapture) so it
 // is labeled and excluded from recall regardless of which entry point wrote it
 // (CLI, MCP, or the opencode/hook plugin).
@@ -132,6 +135,40 @@ func Add(root, lesson string) error {
 // tagged Source "auto". Use it from session-capture code paths.
 func AddAuto(root, lesson string) error {
 	return addWithSource(root, lesson, "auto")
+}
+
+// AddExplicit records a deliberate, user-authored lesson — the shared write
+// path behind `kern memory add`, `kern remember` and kern_memory action=add.
+// It dual-writes:
+//   - the TYPED store (ememory/<hash>.json) with Source "user", the store
+//     buddy's "Project memory" section reads. P2-14 moved the digest onto
+//     the typed store, so explicit lessons that wrote only the v1 store
+//     stopped rendering anywhere in the digest; routing them here fixes
+//     that. Source "user" is not "auto", so CurrentMemories (which filters
+//     only by status/type) keeps it and brief.go's Source == "auto" guard
+//     does not skip it.
+//   - the v1 lesson store (memory/<hash>.json) with Source "" so the
+//     existing v1 consumers (`kern memory recall`/`list`, kern_memory
+//     recall/remove/clear, the digest's "Recent session activity") keep
+//     seeing the same explicit lessons.
+//
+// Automatic session captures are NOT routed here — hook/plugin capture uses
+// AddAuto (v1, Source "auto") and stays in "Recent session activity".
+func AddExplicit(root, lesson string) error {
+	if strings.TrimSpace(lesson) == "" {
+		return nil
+	}
+	if _, err := NewMemoryStore(root).Add(domain.Memory{
+		Type:    domain.MemoryLesson,
+		Content: lesson,
+		Source:  "user",
+		Scope:   "project",
+	}); err != nil {
+		return err
+	}
+	// v1 write with Source "" = explicit, so recall/list keep finding it and
+	// it is never labeled [auto].
+	return addWithSource(root, lesson, "")
 }
 
 func addWithSource(root, lesson, source string) error {
@@ -159,10 +196,39 @@ func addWithSource(root, lesson, source string) error {
 		}
 	}
 	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson, Source: source})
-	if len(s.Entries) > maxEntries {
-		s.Entries = s.Entries[len(s.Entries)-maxEntries:]
-	}
+	s.Entries = trimToCap(s.Entries)
 	return writeJSON(Path(root), s)
+}
+
+// trimToCap enforces the maxEntries hard cap without letting an automatic
+// capture evict an explicit lesson. Automatic captures (Source "auto", raw
+// prompts and tool outcomes) are session noise and regenerable, so when the
+// store is over capacity the OLDEST auto entries are dropped first. Only when
+// no auto entries remain (an explicit-only store) is the oldest explicit
+// lesson dropped, so the hard cap still bounds a store that holds nothing but
+// deliberate lessons. An auto flood can therefore evict older auto captures
+// but never an explicit lesson.
+func trimToCap(entries []Entry) []Entry {
+	if len(entries) <= maxEntries {
+		return entries
+	}
+	over := len(entries) - maxEntries
+	dropped := 0
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Source == "auto" && dropped < over {
+			dropped++
+			continue
+		}
+		out = append(out, e)
+	}
+	// Defensive: the store held fewer auto entries than we needed to drop
+	// (an explicit-only store at capacity) — honor the hard cap by dropping
+	// the oldest remaining (explicit) entry as well.
+	if len(out) > maxEntries {
+		out = out[len(out)-maxEntries:]
+	}
+	return out
 }
 
 // List returns the lessons for root, most recent first.

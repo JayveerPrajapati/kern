@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
@@ -505,64 +506,6 @@ func foldWants(fe *foldEnv, fn *ast.FuncDecl, params []paramInfo, zeroValue bool
 	return wc
 }
 
-// confinePath resolves p against root (nearest-existing-ancestor symlink
-// resolution, re-appending the remaining components) and rejects any path
-// that escapes root — "..", absolute paths outside the root, and symlinked
-// parents (root/link -> /etc) that would smuggle a read or write outside the
-// workspace. It returns the absolute cleaned path on success.
-func confinePath(root, p string) (string, error) {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = filepath.Clean(cwd)
-		} else {
-			root = "."
-		}
-	}
-	var abs string
-	if filepath.IsAbs(p) {
-		abs = filepath.Clean(p)
-	} else {
-		abs = filepath.Join(root, p)
-	}
-	real, err := nearestExisting(abs)
-	if err != nil {
-		return "", err
-	}
-	rr, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		rr = root
-	}
-	rel, err := filepath.Rel(rr, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("kern_synthesize_test: file %q escapes workspace root", p)
-	}
-	return abs, nil
-}
-
-// nearestExisting resolves the real location of the nearest existing ancestor
-// of abs (walking up until EvalSymlinks succeeds) and re-appends the
-// remaining components, so a not-yet-existing file under a symlinked
-// directory is judged by its real location.
-func nearestExisting(abs string) (string, error) {
-	var rem []string
-	probe := abs
-	for {
-		real, err := filepath.EvalSymlinks(probe)
-		if err == nil {
-			if len(rem) == 0 {
-				return real, nil
-			}
-			return filepath.Join(append([]string{real}, rem...)...), nil
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return "", fmt.Errorf("kern_synthesize_test: cannot resolve %q", abs)
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
-}
-
 // Synthesize generates a deterministic, idiomatic table-driven test for a function.
 func Synthesize(req Request) (*Result, error) {
 	root := req.Root
@@ -595,7 +538,7 @@ func Synthesize(req Request) (*Result, error) {
 		if !filepath.IsAbs(p) && root != "" {
 			p = filepath.Join(root, p)
 		}
-		if _, cerr := confinePath(root, p); cerr != nil {
+		if _, cerr := fsutil.ConfinePath(root, p, "kern_synthesize_test"); cerr != nil {
 			return nil, cerr
 		}
 		b, err := os.ReadFile(p)
@@ -734,7 +677,7 @@ func Synthesize(req Request) (*Result, error) {
 	}
 	// Reject ".." escapes and symlinked-parent escapes before touching disk:
 	// the derived test file must stay inside the workspace root.
-	if _, cerr := confinePath(root, diskPath); cerr != nil {
+	if _, cerr := fsutil.ConfinePath(root, diskPath, "kern_synthesize_test"); cerr != nil {
 		return nil, cerr
 	}
 
@@ -788,7 +731,7 @@ func Synthesize(req Request) (*Result, error) {
 
 	applied := false
 	if req.Apply && diskPath != "" {
-		if _, cerr := confinePath(root, diskPath); cerr != nil {
+		if _, cerr := fsutil.ConfinePath(root, diskPath, "kern_synthesize_test"); cerr != nil {
 			return nil, cerr
 		}
 		if werr := os.WriteFile(diskPath, []byte(finalTestContent), 0o644); werr != nil {

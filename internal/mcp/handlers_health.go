@@ -20,7 +20,7 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 
 	info := mcphealth.ServerInfo{
 		Transport:       s.transport,
-		Version:         serverVersion,
+		Version:         currentServerVersion(),
 		Protocol:        protocolVersion,
 		Roots:           s.workspaceRoots(),
 		ToolsRegistered: len(tools),

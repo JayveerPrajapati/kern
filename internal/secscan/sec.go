@@ -57,6 +57,19 @@ var (
 
 	reCommandInjection = regexp.MustCompile(`(?i)(?:exec\.Command(?:Context)?|CmdContext|spawn)\s*\([^)]*["']?(?:sh|bash|zsh|cmd|powershell|pwsh)["']?\s*,\s*["']-c["']?[^)]*?\+|(?:system\(|popen\(|os\.system\(|exec\()\s*["'][^"']*["']\s*\+`)
 
+	// reUnsafeHTTP matches HTTP client calls whose URL argument is not a
+	// string literal — a variable URL (env var, request param, config value)
+	// reaching an HTTP sink is a realistic exfiltration/SSRF flow.
+	// Literal URLs are construction, not flow.
+	reUnsafeHTTP = regexp.MustCompile(`(?i)http\.(?:Get|Post|Head)\s*\(\s*[^"'\s]|http\.NewRequest(?:WithContext)?\s*\(\s*(?:"[^"]*"|[a-zA-Z_][a-zA-Z0-9_.]*)\s*,\s*[^"'\s]`)
+
+	// reUnsafeExec matches exec.Command/exec.CommandContext invocations whose
+	// arguments are not all string literals — a variable program name, flag
+	// or payload (token, URL, script) built from identifiers or
+	// concatenation. Literal-only invocations ("git", "status") are
+	// construction, not flow.
+	reUnsafeExec = regexp.MustCompile(`(?i)exec\.Command(?:Context)?\s*\([^)]*(?:[a-zA-Z_][a-zA-Z0-9_]*\s*[,)]|\+)`)
+
 	reWeakCrypto = regexp.MustCompile(`(?i)\b(?:md5\.(?:New|Sum|NewHash)|sha1\.(?:New|Sum|NewHash)|DES\.(?:NewCipher)|RC4|digest\.MD5)\b`)
 
 	reInsecureRandom = regexp.MustCompile(`(?i)\b(?:rand\.(?:Intn|Int|Int31n|Uint32|Uint64|Float64)|Math\.random|Random\.randrange|numpy\.random\.rand)\s*\(`)
@@ -116,6 +129,8 @@ func init() {
 	rules = append(rules,
 		Rule{ID: "sql-injection", Severity: SeverityError, Summary: "dynamic SQL built from variables", RE: reDynamicSQL},
 		Rule{ID: "command-injection", Severity: SeverityError, Summary: "shell command built from variables", RE: reCommandInjection},
+		Rule{ID: "unsafe-exec", Severity: SeverityWarning, Summary: "command executed with variable arguments", RE: reUnsafeExec},
+		Rule{ID: "unsafe-http", Severity: SeverityWarning, Summary: "HTTP request to a variable URL (env, param, or config value)", RE: reUnsafeHTTP},
 		Rule{ID: "unsafe-deserialization", Severity: SeverityWarning, Summary: "untrusted input deserialized into untyped/weak types", RE: reUnsafeDeserialization},
 		Rule{ID: "code-eval", Severity: SeverityInfo, Summary: "dynamic code execution (eval, pickle, unsafe yaml)", RE: reCodeEval},
 		Rule{ID: "unsafe-reflection", Severity: SeverityInfo, Summary: "unsafe memory access via reflect/unsafe", RE: reUnsafeReflection},
@@ -255,6 +270,14 @@ func ScanFile(rel string, src []byte) []Finding {
 			// secret in a value position is still flagged even in a file
 			// named *hashes.go.
 			if r.Label == "HEX" && isHashTableContext(src, idx[0], idx[1], rel) {
+				continue
+			}
+			// Well-known git object constants (empty tree, null SHA) are
+			// structural sentinels, not credentials: kern's own
+			// diff-against-empty-tree gate hardcodes the empty-tree SHA
+			// (internal/bpcli/cli/check.go), and every git toolchain ships
+			// both values. A scanner that flags them is noise (I1).
+			if r.Label == "HEX" && isWellKnownGitHash(string(src[idx[0]:idx[1]])) {
 				continue
 			}
 			// Skip matches inside source-code comment lines (// or # after
@@ -1027,6 +1050,21 @@ func snippet(src []byte, start, end int) string {
 // "uses: owner/repo[/subpath]@<40-hex>". The hex is a commit id
 // (supply-chain pin), never a secret.
 var ghActionsPinRe = regexp.MustCompile(`uses:\s+\S+@[0-9a-f]{40}\b`)
+
+// wellKnownGitHashes are the universally-known git object constants: the
+// empty-tree SHA (git hash-object -t tree /dev/null — the constant diff
+// base for whole-tree scans) and the null SHA ("no commit" sentinel).
+// Neither is a credential; every git toolchain hardcodes them.
+var wellKnownGitHashes = map[string]bool{
+	"4b825dc642cb6eb9a060e54bf8d69288fbee4904": true,
+	"0000000000000000000000000000000000000000": true,
+}
+
+// isWellKnownGitHash reports whether a HEX match is a well-known git object
+// constant (empty tree / null SHA) rather than a credential.
+func isWellKnownGitHash(hit string) bool {
+	return wellKnownGitHashes[strings.ToLower(hit)]
+}
 
 // isGhActionsShaPin reports whether a 40-hex match is the SHA pin of a
 // GitHub Actions action reference on the same line.

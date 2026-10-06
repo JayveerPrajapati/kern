@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // testEnv redirects every user-global path under a temp HOME (and a temp
@@ -49,7 +51,8 @@ func TestWireGlobalRulesCreatesMissing(t *testing.T) {
 	if len(sts) != 6 {
 		t.Fatalf("WireGlobalRules() = %d statuses, want 6", len(sts))
 	}
-	want, _ := globalRulesFS.ReadFile("assets/global-rules.md")
+	want, _ := condenseGlobalRules()
+	stampedWant := insertManagedStamp(string(want))
 	for _, p := range GlobalRulesPaths() {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -59,11 +62,14 @@ func TestWireGlobalRulesCreatesMissing(t *testing.T) {
 		if !strings.Contains(content, globalRulesMarkerOpen) || !strings.Contains(content, globalRulesMarkerClose) {
 			t.Fatalf("%s missing markers", p)
 		}
+		if !strings.Contains(content, stampKernVersion()) {
+			t.Fatalf("%s missing the managed version stamp", p)
+		}
 		if strings.HasSuffix(p, ".mdc") {
 			if !strings.HasPrefix(content, cursorFrontmatter+"\n\n") {
 				t.Fatalf("%s missing cursor frontmatter on line 1:\n%s", p, content)
 			}
-		} else if content != string(want) {
+		} else if content != stampedWant {
 			t.Fatalf("%s content differs from canonical block", p)
 		}
 	}
@@ -139,9 +145,69 @@ func TestWireGlobalRulesReplacesStaleBlock(t *testing.T) {
 	if !strings.HasPrefix(content, "keep me\n") {
 		t.Fatalf("content outside markers lost:\n%s", content)
 	}
-	want, _ := globalRulesFS.ReadFile("assets/global-rules.md")
-	if !strings.Contains(content, string(want)) {
+	want, _ := condenseGlobalRules()
+	if !strings.Contains(content, insertManagedStamp(string(want))) {
 		t.Fatalf("fresh canonical block missing:\n%s", content)
+	}
+}
+
+// TestWireGlobalRulesSkipsNewerStamp (C7): a managed block stamped with a
+// NEWER kern version than the running binary is left untouched — the
+// stale-release-binary clobber path (install.sh post-install running the
+// RELEASE binary's setup over newer local wiring) must be a no-op.
+func TestWireGlobalRulesSkipsNewerStamp(t *testing.T) {
+	testEnv(t)
+	// The tests run with Version "dev" (Local, uncomparable); pin the running
+	// binary to a release so the release-vs-release ordering is exercised.
+	orig := version.Version
+	version.Version = "1.0.0"
+	t.Cleanup(func() { version.Version = orig })
+	p := GlobalRulesPaths()[0]
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A strictly newer release stamp is skipped.
+	newer := globalRulesMarkerOpen + "\n<!-- kern-version: 9.9.9 -->\nPRECIOUS NEWER RULES\n" + globalRulesMarkerClose + "\n"
+	if err := os.WriteFile(p, []byte("user header\n\n"+newer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sts := WireGlobalRules()
+	var s Status
+	for _, st := range sts {
+		if st.Path == p {
+			s = st
+		}
+	}
+	if !s.Installed || !strings.Contains(s.Note, "newer") {
+		t.Fatalf("expected the newer-stamped path to be skipped with a note, got %+v", s)
+	}
+	b, _ := os.ReadFile(p)
+	if strings.Contains(string(b), "kern usage rules for agents") {
+		t.Fatalf("newer-stamped block was rewritten:\n%s", b)
+	}
+	if !strings.Contains(string(b), "PRECIOUS NEWER RULES") {
+		t.Fatalf("newer-stamped content lost:\n%s", b)
+	}
+	// A LOCAL stamp (dev / git hash) is also skipped by a release binary —
+	// the install.sh footgun: local wiring is always newer than a release.
+	local := globalRulesMarkerOpen + "\n<!-- kern-version: dev -->\nPRECIOUS LOCAL RULES\n" + globalRulesMarkerClose + "\n"
+	if err := os.WriteFile(p, []byte("user header\n\n"+local), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	WireGlobalRules()
+	b, _ = os.ReadFile(p)
+	if !strings.Contains(string(b), "PRECIOUS LOCAL RULES") {
+		t.Fatalf("locally-stamped content lost to a release binary:\n%s", b)
+	}
+	// An OLDER stamp is rewritten normally (upgrade path).
+	older := globalRulesMarkerOpen + "\n<!-- kern-version: 0.0.1 -->\nOLD RULES\n" + globalRulesMarkerClose + "\n"
+	if err := os.WriteFile(p, []byte("user header\n\n"+older), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	WireGlobalRules()
+	b, _ = os.ReadFile(p)
+	if strings.Contains(string(b), "OLD RULES") {
+		t.Fatalf("older-stamped block not rewritten:\n%s", b)
 	}
 }
 
@@ -216,8 +282,8 @@ func TestCursorMDCFrontmatter(t *testing.T) {
 	if content[marker-2:marker] != "\n\n" {
 		t.Fatalf("no blank line between frontmatter and managed block:\n%q", content[marker-4:marker])
 	}
-	want, _ := globalRulesFS.ReadFile("assets/global-rules.md")
-	if !strings.Contains(content, string(want)) {
+	want, _ := condenseGlobalRules()
+	if !strings.Contains(content, insertManagedStamp(string(want))) {
 		t.Fatalf("canonical block missing after frontmatter:\n%s", content)
 	}
 	// Idempotent across two runs.
@@ -299,12 +365,55 @@ func TestWindsurfGlobalPath(t *testing.T) {
 // global_rules.md: the managed block must fit inside it, else Windsurf would
 // truncate the file — and with it the kern markers, breaking later re-runs.
 func TestManagedBlockUnderWindsurfCap(t *testing.T) {
-	b, err := globalRulesFS.ReadFile("assets/global-rules.md")
+	b, err := condenseGlobalRules()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := len(b); n >= 6000 {
 		t.Fatalf("managed block is %d bytes, exceeds the Windsurf 6000-char cap", n)
+	}
+}
+
+// TestGlobalRulesDerivedFromFull pins the L1 derivation contract: the
+// condensed global block is derived deterministically from the single
+// canonical rules file (assets/AGENTS.md), carries the global-rules markers,
+// leaks no omit-marker text, stays under the Windsurf 6000-char cap, and the
+// source markers are balanced.
+func TestGlobalRulesDerivedFromFull(t *testing.T) {
+	b, err := condenseGlobalRules()
+	if err != nil {
+		t.Fatalf("condenseGlobalRules() failed: %v", err)
+	}
+	// Determinism: a second call yields identical bytes.
+	b2, err := condenseGlobalRules()
+	if err != nil {
+		t.Fatalf("condenseGlobalRules() (second call) failed: %v", err)
+	}
+	if string(b) != string(b2) {
+		t.Fatal("condenseGlobalRules() not deterministic")
+	}
+	// Wrapped in the global-rules markers.
+	if !strings.HasPrefix(string(b), globalRulesMarkerOpen) {
+		t.Fatalf("derived block does not start with globalRulesMarkerOpen:\n%s", b)
+	}
+	if !strings.HasSuffix(string(b), globalRulesMarkerClose+"\n") {
+		t.Fatalf("derived block does not end with globalRulesMarkerClose")
+	}
+	// No omit-marker text survives the strip.
+	if strings.Contains(string(b), "kern:global-omit") {
+		t.Fatal("derived block contains kern:global-omit marker text")
+	}
+	// Windsurf cap: the derived block must fit the 6000-char whole-file cap.
+	if n := len(b); n >= 6000 {
+		t.Fatalf("derived block is %d bytes, exceeds the Windsurf 6000-char cap", n)
+	}
+	// Source marker balance: every begin marker has a matching end marker.
+	content, err := rulesFS.ReadFile("assets/AGENTS.md")
+	if err != nil {
+		t.Fatalf("read assets/AGENTS.md: %v", err)
+	}
+	if strings.Count(string(content), globalOmitBegin) != strings.Count(string(content), globalOmitEnd) {
+		t.Fatal("unbalanced global-omit markers in assets/AGENTS.md")
 	}
 }
 

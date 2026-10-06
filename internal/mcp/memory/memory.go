@@ -87,7 +87,9 @@ func Add(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			return "", err
 		}
 	} else {
-		if err := memory.Add(root, lesson); err != nil {
+		// Explicit user lesson: dual-write so it surfaces in buddy's
+		// "Project memory" (typed store) and stays recallable (v1 store).
+		if err := memory.AddExplicit(root, lesson); err != nil {
 			return "", err
 		}
 	}

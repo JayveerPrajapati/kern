@@ -767,3 +767,114 @@ func TestHashTableContextRealSecretStillFlagged(t *testing.T) {
 		}
 	}
 }
+
+// TestScanFileUnsafeHTTP pins the F6 sink extension: a variable URL reaching
+// an HTTP client is a realistic source→sink flow and must be detected, while
+// literal-URL calls are construction, not flow.
+func TestScanFileUnsafeHTTP(t *testing.T) {
+	src := []byte(`func fetch(url string) {
+	resp, _ := http.Get(url)
+	_ = resp
+}
+
+func literal() {
+	resp, _ := http.Get("https://example.com/health")
+	_ = resp
+}
+
+func post() {
+	body := strings.NewReader("{}")
+	resp, _ := http.Post(apiEndpoint, "application/json", body)
+	_ = resp
+}
+
+func newReq() {
+	req, _ := http.NewRequest("POST", target, nil)
+	_ = req
+}
+`)
+	findings := ScanFile("client.go", src)
+	var flagged []string
+	for _, f := range findings {
+		if f.Rule == "unsafe-http" {
+			flagged = append(flagged, f.Snippet)
+		}
+	}
+	// http.Get(url), http.Post(apiEndpoint, ...) and http.NewRequest("POST",
+	// target, nil) are variable-URL flows; the literal Get is not.
+	if len(flagged) != 3 {
+		t.Fatalf("expected 3 unsafe-http findings, got %d: %v", len(flagged), flagged)
+	}
+	for _, s := range flagged {
+		if strings.Contains(s, `example.com`) {
+			t.Fatalf("literal URL flagged as unsafe-http: %s", s)
+		}
+	}
+}
+
+// TestScanFileUnsafeExec pins the F6 sink extension: exec.Command with
+// variable arguments (token, URL, script) is a realistic source→sink flow
+// and must be detected, while literal-only invocations stay clean.
+func TestScanFileUnsafeExec(t *testing.T) {
+	src := []byte(`func run(token, url string) {
+	cmd := exec.Command("curl", "-H", "Authorization: Bearer "+token, url)
+	_ = cmd
+}
+
+func runCtx(ctx context.Context, name string, args ...string) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	_ = cmd
+}
+
+func literal() {
+	cmd := exec.Command("git", "status")
+	_ = cmd
+}
+`)
+	findings := ScanFile("exec.go", src)
+	var flagged []string
+	for _, f := range findings {
+		if f.Rule == "unsafe-exec" {
+			flagged = append(flagged, f.Snippet)
+		}
+	}
+	if len(flagged) != 2 {
+		t.Fatalf("expected 2 unsafe-exec findings, got %d: %v", len(flagged), flagged)
+	}
+	for _, s := range flagged {
+		if strings.Contains(s, `"git"`) {
+			t.Fatalf("literal-only exec.Command flagged as unsafe-exec: %s", s)
+		}
+	}
+}
+
+// TestScanFileWellKnownGitHashAllowlisted pins I1: the well-known git
+// empty-tree and null SHAs are structural constants, never credentials; a
+// random 40-hex literal is still a hardcoded-secret finding.
+func TestScanFileWellKnownGitHashAllowlisted(t *testing.T) {
+	src := []byte(`package cli
+
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+const nullSHA = "0000000000000000000000000000000000000000"
+const apiKey = "9f3c71a4d8e2b605c1a7f9d3e5b2c8046a1f9d7e"
+`)
+	findings := ScanFile("check.go", src)
+	for _, f := range findings {
+		if f.Rule != "hardcoded-secret" {
+			continue
+		}
+		if strings.Contains(f.Snippet, "4b825dc642cb6eb9a060e54bf8d69288fbee4904") ||
+			strings.Contains(f.Snippet, "0000000000000000000000000000000000000000") {
+			t.Fatalf("well-known git hash flagged as secret: %+v", f)
+		}
+	}
+	caught := false
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Snippet, "9f3c71a4") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("random 40-hex literal must still be flagged, got %+v", findings)
+	}
+}
