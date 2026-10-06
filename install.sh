@@ -195,10 +195,11 @@ get_version() {
   if [ "$CHANNEL" = "stable" ]; then
     printf '%s\n' "$tags" | pick_highest stable
   else
-    if channel_re2_only "$CHANNEL"; then
-      die "channel '$CHANNEL' uses RE2-only regex syntax (\\d, \\w, \\s, \\b, (?i), ...) that this installer's POSIX-ERE grep does not support; use the ERE spelling instead — [0-9] for \\d, [A-Za-z0-9_] for \\w, case-insensitive classes like [A-Za-z]"
-      return 0
-    fi
+    # RE2-only channel constructs are rejected EAGERLY at startup (see the
+    # dispatch block) — a `die` inside this $(...) command substitution
+    # would be swallowed and silently turn into an empty result. Reaching
+    # here with an invalid ERE yields an empty match set, which the callers
+    # treat as fail-closed (abort, never an @latest fallback).
     printf '%s\n' "$tags" | grep -E "$CHANNEL" 2>/dev/null | pick_highest
   fi
 }
@@ -212,6 +213,50 @@ download() {
   else
     return 1
   fi
+}
+
+# fetch_asset downloads $url to $out with HTTP-status awareness so a
+# transient server error (5xx) is never mistaken for a missing asset (4xx):
+#   0 = downloaded (2xx, or a non-HTTP URL like file:// that succeeded)
+#   1 = no such asset (4xx / missing file) — caller may go-install fall back
+#   2 = server error (5xx) — caller retries once, then aborts loudly
+#   3 = other failure (no tool, network) — caller aborts
+fetch_asset() {
+  url="$1"; out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    code="$(curl -sSL -w '%{http_code}' -o "$out" "$url" 2>/dev/null)"
+    rc=$?
+    if [ "$rc" = "0" ]; then
+      case "$code" in
+        2??) return 0 ;;
+        000)
+          # Non-HTTP URL (e.g. a file:// test fixture): no status code; the
+          # transfer itself is the signal.
+          [ -s "$out" ] && return 0
+          return 3
+          ;;
+        4??) rm -f "$out"; return 1 ;;
+        5??) rm -f "$out"; return 2 ;;
+      esac
+    fi
+    rm -f "$out"
+    [ "$rc" = "37" ] && return 1   # curl: could not read a file:// URL — "no asset"
+    return 3
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    # wget cannot print the status code portably; HEAD the URL to classify
+    # 4xx vs 5xx, then download on success.
+    status="$(wget -S --spider "$url" 2>&1 | grep -o 'HTTP/[0-9.]* [0-9]*' | tail -1)"
+    case "$status" in
+      *" 2"*) ;;
+      *" 4"*) return 1 ;;
+      *" 5"*) return 2 ;;
+      *) return 3 ;;
+    esac
+    wget -qO "$out" "$url" || { rm -f "$out"; return 3; }
+    return 0
+  fi
+  return 3
 }
 
 # installed_version prints the version of the kern binary in $PREFIX
@@ -306,7 +351,82 @@ EOF
   exit 1
 }
 
+# post_install_verify runs the steps shared by BOTH install paths (prebuilt
+# and go-install fallback): macOS Gatekeeper re-sign, a `kern version` check,
+# the real MCP initialize handshake probe, and PATH rc wiring. Factored so
+# the go-install fallback can no longer skip the safety net (F7b).
+# mode=prebuilt asserts the stamped "kern v*" version string; mode=go-install
+# asserts the resolved tag via `go version -m` instead (a source build has no
+# ldflags stamp and always reports a dev-shaped version string).
+post_install_verify() {
+  os="$1"
+  mode="${2:-prebuilt}"
+  [ -n "$os" ] || os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  exe=""
+  case "$os" in
+    mingw*|msys*|cygwin*) exe=".exe" ;;
+  esac
+  if [ "$os" = "darwin" ]; then
+    gatekeeper_prepare darwin
+    step "Re-signed for macOS Gatekeeper (codesign + xattr strip)"
+  fi
+  got="$("$PREFIX/kern${exe}" version 2>/dev/null | head -1)"
+  case "$got" in
+    kern\ v*)
+      step "Verified: ${got}"
+      ;;
+    kern\ *)
+      if [ "$mode" = "go-install" ]; then
+        # Source build via `go install pkg@tag`: no ldflags stamp, so the
+        # version string is dev-shaped; prove the resolved tag instead by
+        # reading the module version the go toolchain embedded. The module
+        # proxy may serve the tag as its commit's pseudo-version (same
+        # source tree — the go toolchain pins `pkg@tag` to that commit, or
+        # fails), so both forms are accepted.
+        mod="$(go version -m "$PREFIX/kern${exe}" 2>/dev/null | awk -v m="github.com/${REPO}" '$1 == "mod" && $2 == m { print $3; exit }')"
+        case "$mod" in
+          "$tag")
+            step "Verified: ${got} (module ${mod})"
+            ;;
+          v[0-9]*.[0-9]*.[0-9]*-0.[0-9]*-[0-9a-f]*)
+            step "Verified: ${got} (module ${mod} — tag ${tag} resolved to its commit)"
+            ;;
+          *)
+            die "'$PREFIX/kern${exe}' was built from source but carries module version '${mod:-?}' instead of the resolved tag '${tag}' — install failed"
+            ;;
+        esac
+      else
+        die "'$PREFIX/kern${exe} version' did not report a release version (got: '${got}') — install failed (the upgrade backup trap restores the previous binaries)"
+      fi
+      ;;
+    *)
+      die "'$PREFIX/kern${exe} version' did not run cleanly (got: '${got:-empty}') — install failed (the upgrade backup trap restores the previous binaries)"
+      ;;
+  esac
+  probe_with_retry "$os"
+  if [ "${KERN_NO_PATH:-0}" != "1" ]; then
+    ensure_path "$PREFIX"
+  else
+    case ":$PATH:" in
+      *":$PREFIX:"*) ;;
+      *) echo "  note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
+    esac
+  fi
+}
+
+# go_install builds kern from source at the RESOLVED release tag — never a
+# bare @latest (F7b) — then runs the same post-install verification as the
+# prebuilt path via post_install_verify. `go install` fetches module source
+# through the Go module proxy and checksum database (GOSUMDB), which is why
+# no download checksum applies on this path. If the tag cannot be honored
+# (no resolved release), go_install refuses loudly instead of installing
+# something else.
 go_install() {
+  tag="$1"
+  if [ -z "$tag" ]; then
+    echo "kern: cannot fall back to 'go install' without a resolved release tag — refusing to install an arbitrary @latest build." >&2
+    return 1
+  fi
   if ! command -v go >/dev/null 2>&1; then
     echo "kern: prebuilt asset for this platform is unavailable and 'go' is not installed." >&2
     echo "kern: install Go (https://go.dev/dl/) or download a release from https://github.com/${REPO}/releases" >&2
@@ -321,10 +441,10 @@ go_install() {
   else
     ts_tags=""
   fi
-  warn "falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
-  go install $ts_tags "github.com/${REPO}/cmd/kern@${VERSION}" &&
-    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${VERSION}" &&
-    go install $ts_tags "github.com/${REPO}/cmd/kern-server@${VERSION}" || return 1
+  warn "falling back to 'go install github.com/${REPO}/cmd/kern@${tag}'"
+  go install $ts_tags "github.com/${REPO}/cmd/kern@${tag}" &&
+    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${tag}" &&
+    go install $ts_tags "github.com/${REPO}/cmd/kern-server@${tag}" || return 1
   gobin="$(go env GOPATH)/bin"
   if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ] && [ -f "$gobin/kern-server" ]; then
     mkdir -p "$PREFIX"
@@ -332,8 +452,8 @@ go_install() {
     cp "$gobin/kern-mcp" "$PREFIX/kern-mcp"
     cp "$gobin/kern-server" "$PREFIX/kern-server"
     chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server"
-    gatekeeper_prepare darwin
-    step "Installed kern kern-mcp kern-server to $PREFIX (go install fallback)"
+    step "Installed kern kern-mcp kern-server to $PREFIX (go install fallback at ${tag})"
+    post_install_verify "" go-install
     return 0
   fi
   echo "kern: installed via go install, but could not find binaries in $gobin." >&2
@@ -365,18 +485,39 @@ wire() {
 install_release() {
   mode="$1"
 
-  platform="$(os_arch)" || {
-    warn "no prebuilt asset pattern for $(uname -s)/$(uname -m)"
-    go_install || die "no prebuilt asset and go-install fallback failed"
-    wire "$PREFIX/kern"
-    return 0
-  }
-  os="${platform%-*}"
-  step "Detected ${platform}"
+  platform="$(os_arch)" || platform=""
 
   tag="$(get_version)"
-  [ -n "$tag" ] || { go_install || die "could not resolve a release version (and go install failed)"; wire "$PREFIX/kern"; return 0; }
+  [ -n "$tag" ] || die "could not resolve a release version (pin '$VERSION', channel '$CHANNEL') — refusing to fall back to an unverified @latest build; check your network or the channel regex"
   step "Target release: ${tag}"
+
+  # Upgrade safety FIRST, before ANY path can overwrite the binaries: the
+  # go-install fallbacks run before the prebuilt path's old backup point, so
+  # a failed fallback during an upgrade must also restore the previous
+  # binaries. exe mirrors the platform branch below (windows -> .exe).
+  exe=""
+  case "${platform%-*}" in windows) exe=".exe" ;; esac
+  tmpdir="$(mktemp -d)"
+  install_ok=0
+  backup_dir=""
+  trap 'if [ "${install_ok:-0}" != "1" ] && [ -n "${backup_dir:-}" ]; then restore_backup 2>/dev/null; fi; rm -rf "$tmpdir"' EXIT
+  if [ "$mode" = "upgrade" ] && [ -x "$PREFIX/kern" ]; then
+    backup_dir="$tmpdir/backup"
+    mkdir -p "$backup_dir"
+    for b in kern kern-mcp kern-server; do
+      [ -f "$PREFIX/$b${exe}" ] && cp "$PREFIX/$b${exe}" "$backup_dir/$b${exe}"
+    done
+  fi
+
+  if [ -z "$platform" ]; then
+    warn "no prebuilt asset pattern for $(uname -s)/$(uname -m)"
+    go_install "$tag" || die "no prebuilt asset and go-install fallback failed"
+    install_ok=1
+    wire "$PREFIX/kern"
+    return 0
+  fi
+  os="${platform%-*}"
+  step "Detected ${platform}"
 
   if [ "$os" = "windows" ]; then
     file="kern-${platform}.zip"
@@ -386,18 +527,31 @@ install_release() {
     exe=""
   fi
   url="${BASE_URL}/releases/download/${tag}/${file}"
-  tmpdir="$(mktemp -d)"
-  install_ok=0
-  backup_dir=""
-  trap 'if [ "${install_ok:-0}" != "1" ] && [ -n "${backup_dir:-}" ]; then restore_backup 2>/dev/null; fi; rm -rf "$tmpdir"' EXIT
 
   printf '  … downloading %s\n' "$file"
-  download "$url" "$tmpdir/${file}" || {
-    warn "no prebuilt asset for ${platform} at ${tag}"
-    go_install || die "download failed and go-install fallback failed"
-    wire "$PREFIX/kern"
-    return 0
-  }
+  fetch_asset "$url" "$tmpdir/${file}"
+  dl_rc=$?
+  if [ "$dl_rc" = "2" ]; then
+    warn "server error downloading ${file} at ${tag} — retrying once"
+    fetch_asset "$url" "$tmpdir/${file}"
+    dl_rc=$?
+  fi
+  case "$dl_rc" in
+    0) ;;
+    1)
+      warn "no prebuilt asset for ${platform} at ${tag}"
+      go_install "$tag" || die "no prebuilt asset and go-install fallback failed"
+      install_ok=1
+      wire "$PREFIX/kern"
+      return 0
+      ;;
+    2)
+      die "the prebuilt asset download failed with a server error after one retry (${url}) — refusing to silently swap in a source build; retry the install later, or pin KERN_VERSION to a release that ships the asset"
+      ;;
+    *)
+      die "could not download ${file} from ${url}"
+      ;;
+  esac
   size=$(wc -c < "$tmpdir/${file}" | tr -d ' ')
   step "Downloaded ${file} ($((size / 1024 / 1024)) MB)"
 
@@ -429,43 +583,13 @@ install_release() {
   fi
   step "Extracted kern, kern-mcp, kern-server"
 
-  # Upgrade safety: back up the current binaries; the EXIT trap above
-  # restores them on any failure path (die / probe exit / early return).
-  if [ "$mode" = "upgrade" ] && [ -x "$PREFIX/kern" ]; then
-    backup_dir="$tmpdir/backup"
-    mkdir -p "$backup_dir"
-    for b in kern kern-mcp kern-server; do
-      [ -f "$PREFIX/$b${exe}" ] && cp "$PREFIX/$b${exe}" "$backup_dir/$b${exe}"
-    done
-  fi
-
   cp "$src/kern${exe}" "$PREFIX/kern${exe}" || die "copying kern to $PREFIX failed"
   cp "$src/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}" || die "copying kern-mcp to $PREFIX failed"
   cp "$src/kern-server${exe}" "$PREFIX/kern-server${exe}" || die "copying kern-server to $PREFIX failed"
   chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}" "$PREFIX/kern-server${exe}"
   step "Installed kern kern-mcp kern-server to $PREFIX"
 
-  if [ "$os" = "darwin" ]; then
-    gatekeeper_prepare darwin
-    step "Re-signed for macOS Gatekeeper (codesign + xattr strip)"
-  fi
-
-  got="$($PREFIX/kern${exe} version 2>/dev/null | head -1)"
-  case "$got" in
-    kern\ v*) step "Verified: ${got}" ;;
-    *) die "'$PREFIX/kern version' did not run cleanly (got: '${got:-empty}') — old binaries restored by the backup trap" ;;
-  esac
-
-  probe_with_retry "$os"
-
-  if [ "${KERN_NO_PATH:-0}" != "1" ]; then
-    ensure_path "$PREFIX"
-  else
-    case ":$PATH:" in
-      *":$PREFIX:"*) ;;
-      *) echo "  note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
-    esac
-  fi
+  post_install_verify "$os"
 
   install_ok=1
   echo
@@ -480,14 +604,54 @@ restore_backup() {
   done
 }
 
-# remove_kern_section excises the kern-first block from an AGENTS.md the
-# same way internal/setup's removeKernSection does: from the
-# "# kern usage rules" heading up to (not including) the next H1 or EOF.
+# remove_kern_section excises EXACTLY the kern-managed block(s) from $1,
+# preserving every non-kern byte. It mirrors what internal/setup actually
+# writes into ~/AGENTS.md, in both formats:
+#   - the marker format ("<!-- kern:global-rules begin ... -->" through its
+#     matching "<!-- kern:global-rules end -->" line), written by `kern
+#     setup --global-rules`, and
+#   - the unmarked format written by `kern setup --global` ("# kern usage
+#     rules" heading through the next H1). Because that block is only
+#     bounded by the next H1 *or EOF*, and user content after it may have
+#     no H1 of its own, the excise also honors the kern rules asset's own
+#     tail line as the block's end anchor (the global-omit close, or the
+#     older pure-Go note) so trailing user content is never swallowed.
+# An unbalanced marker block (open without close) exits 2 so the caller can
+# abort rather than destroy the file. Prints the cleaned content on stdout.
 remove_kern_section() {
   awk '
-    /^# kern usage rules/ { skip = 1; next }
-    skip && /^# /        { skip = 0 }
-    !skip                { print }
+    mode != "marker" && ($0 ~ /^# kern usage rules/ || $0 ~ /^<!-- kern:global-rules begin/) {
+      mode = ($0 ~ /^<!-- kern:global-rules begin/) ? "marker" : "unmarked"
+      anchored = 0
+      nb = 0
+      next
+    }
+    mode == "marker" {
+      if ($0 ~ /^<!-- kern:global-rules end -->/) mode = ""
+      next
+    }
+    mode == "unmarked" {
+      if ($0 ~ /^# /) { mode = ""; print; next }
+      if ($0 ~ /^<!-- kern:global-omit:end -->[\r]?$/ || $0 ~ /^\(`KERN_MCP_FULL=1` only\)[\r]?\.$/) {
+        anchored = 1
+        nb = 0
+        next
+      }
+      buf[++nb] = $0
+      next
+    }
+    { print }
+    END {
+      if (mode == "marker") {
+        print "kern: unbalanced kern-managed marker block (no closing \"<!-- kern:global-rules end -->\") in " ARGV[1] > "/dev/stderr"
+        exit 2
+      }
+      if (mode == "unmarked" && anchored) {
+        start = 1
+        while (start <= nb && buf[start] ~ /^[[:space:]]*$/) start++
+        for (i = start; i <= nb; i++) print buf[i]
+      }
+    }
   ' "$1"
 }
 
@@ -557,7 +721,7 @@ cmd_uninstall() {
   for b in kern kern-mcp kern-server; do
     [ -f "$PREFIX/$b${exe}" ] && echo "  $PREFIX/$b${exe}"
   done
-  [ -f "$HOME/AGENTS.md" ] && grep -q "^# kern usage rules" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-first block in ~/AGENTS.md"
+  [ -f "$HOME/AGENTS.md" ] && grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-managed block in ~/AGENTS.md"
   [ -d "$HOME/.config/kern" ] && echo "  ~/.config/kern"
   [ -d "$HOME/.cache/kern" ] && echo "  ~/.cache/kern"
   if [ "$ASSUME_YES" != "1" ]; then
@@ -571,14 +735,29 @@ cmd_uninstall() {
   for b in kern kern-mcp kern-server; do
     rm -f "$PREFIX/$b${exe}" && step "removed $PREFIX/$b${exe}"
   done
-  if [ -f "$HOME/AGENTS.md" ] && grep -q "^# kern usage rules" "$HOME/AGENTS.md" 2>/dev/null; then
-    cleaned="$(remove_kern_section "$HOME/AGENTS.md")"
-    if [ -n "$(printf '%s' "$cleaned" | tr -d '[:space:]')" ]; then
-      printf '%s\n' "$cleaned" > "$HOME/AGENTS.md"
+  # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
+  # (both formats), preserving every non-kern byte. Messages are honest: the
+  # file is only deleted when it contained nothing but the kern block, and
+  # the backup path is always reported.
+  if [ -f "$HOME/AGENTS.md" ]; then
+    if grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null; then
+      if ! cp "$HOME/AGENTS.md" "$HOME/AGENTS.md.kern-uninstall.bak"; then
+        die "could not back up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak — aborting the AGENTS.md edit (the file was left untouched)"
+      fi
+      step "backed up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak"
+      cleaned="$(remove_kern_section "$HOME/AGENTS.md")" || die "could not excise the kern-managed block from ~/AGENTS.md — the file was left untouched; original backup at ~/AGENTS.md.kern-uninstall.bak"
+      if [ -n "$(printf '%s' "$cleaned" | tr -d '[:space:]')" ]; then
+        printf '%s\n' "$cleaned" > "$HOME/AGENTS.md"
+        step "removed kern-managed block from ~/AGENTS.md (other content preserved; backup at ~/AGENTS.md.kern-uninstall.bak)"
+      else
+        rm -f "$HOME/AGENTS.md"
+        step "removed ~/AGENTS.md (it contained only the kern-managed block; backup at ~/AGENTS.md.kern-uninstall.bak)"
+      fi
     else
-      rm -f "$HOME/AGENTS.md"
+      step "no kern-managed block in ~/AGENTS.md — left untouched"
     fi
-    step "removed kern-first block from ~/AGENTS.md (other content preserved)"
+  else
+    step "no ~/AGENTS.md — nothing to remove"
   fi
   if [ -d "$HOME/.config/kern" ]; then
     rm -rf "$HOME/.config/kern" && step "removed ~/.config/kern"
@@ -718,7 +897,15 @@ install_release upgrade
 # loads the functions only, so a harness can exercise get_version /
 # pick_highest / tag_names against a fixed tag list without side effects.
 if [ "${KERN_SKIP_DISPATCH:-0}" != "1" ]; then
-case "$OP" in
+  # F7(c): reject RE2-only channel regexes EAGERLY, once, OUTSIDE any $(...)
+  # command substitution — a `die` inside get_version's substitution used to
+  # be swallowed, letting the install proceed via `go install @latest` with
+  # exit 0. A pinned KERN_VERSION ignores the channel entirely, so it is
+  # exempt.
+  if [ "$VERSION" = "latest" ] && channel_re2_only "$CHANNEL"; then
+    die "channel '$CHANNEL' uses RE2-only regex syntax (\\d, \\w, \\s, \\b, (?i), ...) that this installer's POSIX-ERE grep does not support; use the ERE spelling instead — [0-9] for \\d, [A-Za-z0-9_] for \\w, case-insensitive classes like [A-Za-z]"
+  fi
+  case "$OP" in
   status)    cmd_status ;;
   uninstall) cmd_uninstall ;;
   upgrade)   cmd_upgrade ;;

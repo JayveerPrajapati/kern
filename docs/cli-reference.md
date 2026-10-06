@@ -10,7 +10,7 @@ summary and links here. This list mirrors the shipped dispatch table
 kern skills (list|show <name>|install)            bundled agent runbooks and automation scripts
 kern optimize <prompt> [--attach FILE] [--session ID] [--model NAME] [--llm MODEL]
 kern preview  <prompt> [--attach FILE]          (dry-run, no stats recorded)
-kern compact <file>                             symbolic summary of a file
+kern compact <file> [--etag E]                    symbolic summary of a file
 kern project [root]                             compact project map
 kern pack [root] [--max-tokens N] [--out FILE]  one paste-ready bundle: tree + instructions + contents
 kern build "<command>" [--dir DIR]              run build, compact output
@@ -25,7 +25,7 @@ kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--li
                                  definition + callers + what it calls; graph exports;
                                  --html with no symbol renders a whole-repo explorer (community bands + search)
 kern inherits <symbol> [root] [--json]           supertypes + subtypes
-kern context <symbolRegex> [--lines N]           minimal source slice
+kern context <symbolRegex> [--lines N] [--etag E]  minimal source slice
 kern why <symbol> [--json]                       rationale: doc comment + dependents
 kern wiki [root] [--out DIR]                     export a markdown wiki, one page per package
 kern stats [--days N] [--session ID] [--json]    token/cost savings
@@ -35,6 +35,7 @@ kern export --csv                                export stats to CSV
 kern tokens [--bpe] "<text>"                     token count (estimator or byte-level BPE counter)
 kern setup [--root ROOT] [--agents opencode,claude,codex]   wire kern into agents
 kern setup --check                               show wiring status
+kern setup --detect --dry-run                    preview what setup would write (would-write lines, nothing changed)
 kern buddy [root]                                session onboarding digest
 kern onboard [root]                              register + index + wire a repo for kern (session-start)
 kern artifacts [task-id]                         inspect task artifacts (ContextPacket → ImpactReport → VerificationReport chain)
@@ -75,7 +76,7 @@ kern cache [root] [--dry-run]                           cache GC: gzip-archive d
 kern lsp [root]                                     LSP over stdio: hover/definition/references from the index
 kern guard init [root]                              scaffold .kern/boundaries.json
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
-                                reject boundary violations (exit 2 when count > N)
+                                reject boundary violations (exit 3 when count > N)
 kern check [--all|--staged|--repo R] [--format F]    run change-firewall gates (secrets, boundaries, duplication)
 kern fix [--file F] [--content C] [--repo R]         validate fix in isolated git worktree; auto-repair loop
 kern ci --base <sha> --head <sha> [--repo R]         pre-merge CI gate; emits tamper-evident receipt
@@ -84,6 +85,13 @@ kern ops "<intent>" [--level L0-L5] [--non-interactive] [--json]   KernOps termi
 kern ops triage --log <path|-> [--non-interactive] [--json]         Auto-SRE incident triage: squeeze log, AST correlation, sandbox repro, auto-repair
 kern fw [root] [--catalog]                       framework detection
 kern verify [<types>|<file|->] [root] [--types T]   hallucination check for file claims, or unified verification engine (types: build,test,security,architecture,dependency)
+kern verify --changed-since <ref> [--types T]       verify only the packages changed since a git ref (build+vet+test on the changed surface; a clean diff prints NO-GO-CHANGES and exits 0)
+kern verify --command "<cmd>" [--output MODE] [--root R] [--timeout s]
+                                                run a go/mvn/gradle/npm/cargo/pytest/make (or read-only git) command
+                                                through kern and print only the slice asked for; MODE = summary
+                                                (default: counts + failing tests) | failures | tail:N | lines:A-B | full;
+                                                exit code = the command's; the full run is kept under an anchor id
+kern verify --anchor <id> --output lines:A-B      re-slice a kept run without rerunning the command
 kern validate [root]                             run the project's build/test, compact
 kern heal "<task>" [--llm MODEL] [--max N] [--force]  snapshot-based LLM auto-fix
 kern analyze <change> [--root ROOT]          analyze a proposed change against the whole system (ADR)
@@ -119,12 +127,22 @@ kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
                                                 with shared org audit/memory/policies)
 ```
 
+## Conditional fetch: `--etag`
+
+`kern explore`, `kern context`, `kern compact` and `kern retrieve` mint an
+etag in each response. Pass the last-seen etag back (`kern explore <sym>
+--etag <E>`; same-named `etag` param on the `kern_explore`, `kern_context`,
+`kern_compact_file` and `kern_retrieve` MCP tools) and, if nothing changed,
+you get `unchanged (etag <E>)` instead of the full payload — re-reads of the
+same symbol/file/context cost almost nothing.
+
 ## More commands (shipped, previously undocumented here)
 
 One-liners straight from the dispatch table's own help text:
 
 ```bash
 kern approve [--approver ID] [--reason TEXT] [--reject]   resolve an approval gate (list pending with no args)
+kern approval wait <id> [--timeout 30m] [--root ROOT]   block until a pending approval is decided (exit 0 approved / 3 rejected / 1 timed out)
 kern deploy <task-id> [--version V]                deploy a task (real deploys require approval)
 kern org [--project NAME=PATH]... <subcommand>     enterprise org admin (projects/agents/teams/memory/audit/search)
 kern policy <set|get|apply> [--root R] [--file F] [--merge]   org policy distribution: write/merge the org policy document, print it (+hash + drift), or re-apply it
@@ -139,6 +157,7 @@ kern authorize-context [-agent ID -task DESC] [--root .] [--json]   compute the 
 kern gen-catalog [--root ROOT]                     regenerate docs/tool-catalog.md from the live MCP catalog
 kern metrics                                        show local change-governance validation metrics
 kern cycles [--json] [--root ROOT]                  package-level import cycles (Tarjan SCC)
+kern debt [root] [--json]                           unified technical-debt report (fragility hotspots + import cycles; composition of existing engines)
 kern surprising [--json] [--root ROOT]              cross-community call edges ranked by community distance x rarity
 kern twin                                           software twin (live map of the repo)
 kern fit-context <symbol|file> [--budget N]         context-adaptive token window compressor
@@ -183,7 +202,7 @@ kern execute <patch|patch-file> [--root ROOT]       apply a patch in a sandbox
 kern exitcode                                       print kern's documented exit-code conventions (0 ok, 1 error, 2 usage, 3 decided-state/policy)
 kern explain-context --task "<change or intent>" [--root ROOT] [--budget N] [--json]   explainable deterministic context plan (alias of orchestrate --mode plan)
 kern explain-finding --finding <json> [--root ROOT] plain-language explanation of a blueprint gate finding
-kern explore <symbol> [root] [--depth N] [--max N] [--explain]   symbol source + blast radius
+kern explore <symbol> [root] [--depth N] [--max N] [--explain] [--etag E]   symbol source + blast radius
 kern fetch-raw-anchor <anchor-id>                   fetch raw uncompressed anchor content (alias of anchor)
 kern fingerprint [flags]                            repo fingerprint
 kern flows [flags]                                  call flows
@@ -206,12 +225,13 @@ kern orchestrate "<intent>" [--root ROOT] [--max-tokens N] [--mode fix|review|ar
 kern path <from-symbol> <to-symbol> [root]          shortest call path
 kern plan <change> [--root ROOT]                    analyze a proposed change
 kern probe "<task text>" [root] [--max N]           task-driven context bundle
+kern project-map [root]                            full per-file project map (the renderer buddy --map appends)
 kern prose "<words>" [root] [--limit N]             map prose <words> to symbol candidates
 kern refactor [flags]                               multi-file transactional AST refactoring engine with sandbox compilation and rollback (alias of refactor-transaction)
 kern register-host-sampler [command] [--key K] [--timeout S] [--model M]   register/unregister a host sampler command for LLM delegation (hosts that do not announce MCP sampling)
 kern reject [flags]                                 reject a pending approval request: reject <id> [--reason ...]
 kern repair-guidance --finding <json> [--root ROOT] repair guidance for a blueprint gate finding
-kern retrieve                                       progressive disclosure retrieval (l1|l2|l3)
+kern retrieve [--etag E]                            progressive disclosure retrieval (l1|l2|l3)
 kern review-consensus [flags]                       normalize review packs into consensus/divergence (P2-002)
 kern review-pack [flags]                            immutable deterministic review pack (P2-001)
 kern run <intent> [--root ROOT]                     intent through the task pipeline
@@ -257,3 +277,11 @@ opt out of the isolation requirement per-machine with
 Host command execution is gated by a governance firewall (fail-closed): set
 `KERN_ALLOW_EXEC=1` or allowlist tools via `KERN_TOOLS` to opt in. `kern build`
 and `kern validate` share the same gate.
+## Exit codes
+
+`kern exitcode` prints the authoritative conventions (0 ok, 1 error, 2 usage,
+3 denied/decided-state). One boundary is worth stating explicitly: **an
+invalid VALUE to a valid flag or argument is a runtime error → exit 1** (e.g.
+`kern validate-proposed --kind modify`, `kern explain-finding` with malformed
+JSON). Exit 2 is reserved for structurally bad usage: unknown flags, missing
+required arguments, and unknown commands.

@@ -80,20 +80,28 @@ function Verify-Kern {
 }
 
 function Install-Go {
+    param([string]$Tag)
+    # F7b (Windows port of the install.sh fix): build from the RESOLVED
+    # release tag, never a bare @latest — a dev-HEAD build must not silently
+    # replace a release. If the tag cannot be honored, refuse loudly.
+    if (-not $Tag) {
+        Write-Host "kern: cannot fall back to 'go install' without a resolved release tag — refusing to install an arbitrary @latest build" -ForegroundColor Red
+        return $false
+    }
     $purego = $env:KERN_PUREGO
     if ($purego -eq "1") {
         Write-Host "kern: KERN_PUREGO=1 — installing the pure-Go build (-tags notreesitter, no C toolchain)" -ForegroundColor Yellow
-        go install -tags notreesitter "github.com/$Repo/cmd/kern@$Version"
-        go install -tags notreesitter "github.com/$Repo/cmd/kern-mcp@$Version"
-        go install -tags notreesitter "github.com/$Repo/cmd/kern-server@$Version"
+        go install -tags notreesitter "github.com/$Repo/cmd/kern@$Tag"
+        go install -tags notreesitter "github.com/$Repo/cmd/kern-mcp@$Tag"
+        go install -tags notreesitter "github.com/$Repo/cmd/kern-server@$Tag"
     } else {
-        Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Version'" -ForegroundColor Yellow
+        Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Tag'" -ForegroundColor Yellow
         # Default go-install build compiles tree-sitter in (hard CGO). On
         # Windows without a C toolchain this fails; set KERN_PUREGO=1 to use
         # the pure-Go -tags notreesitter build instead.
-        go install "github.com/$Repo/cmd/kern@$Version"
-        go install "github.com/$Repo/cmd/kern-mcp@$Version"
-        go install "github.com/$Repo/cmd/kern-server@$Version"
+        go install "github.com/$Repo/cmd/kern@$Tag"
+        go install "github.com/$Repo/cmd/kern-mcp@$Tag"
+        go install "github.com/$Repo/cmd/kern-server@$Tag"
     }
     # go install drops all three binaries into $(go env GOPATH)/bin, which is
     # often NOT on PATH and never reaches $Prefix. Copy them to the canonical
@@ -118,7 +126,13 @@ function Install-Go {
 
 function Confirm-Sha256 {
     param([string]$Path, [string]$Expected)
-    if (-not $Expected) { return $true }
+    # Fail-closed (mirrors install.sh's verify contract): a missing expected
+    # checksum is as fatal as a mismatch — a Windows user must never receive
+    # an unverified binary with zero warning.
+    if (-not $Expected) {
+        Write-Host "kern: no SHA256SUMS entry for $([IO.Path]::GetFileName($Path)) — refusing to install an unverified binary" -ForegroundColor Red
+        return $false
+    }
     $hash = (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
     if ($hash -ne $Expected) {
         Write-Host "kern: checksum mismatch (expected $Expected, got $hash)" -ForegroundColor Red
@@ -173,6 +187,62 @@ function Show-Status {
     }
 }
 
+# Remove-KernSection excises EXACTLY the kern-managed block(s) from a
+# rules file, preserving every non-kern byte — the PowerShell port of
+# install.sh's remove_kern_section. Handles both formats kern setup writes:
+#   - the marker format ("<!-- kern:global-rules begin ... -->" through its
+#     matching "<!-- kern:global-rules end -->" line), and
+#   - the unmarked format ("# kern usage rules" heading through the next H1,
+#     anchored on the rules asset's own tail line so trailing user content
+#     without an H1 is never swallowed).
+# Throws on an unbalanced marker block so the caller can abort rather than
+# destroy the file.
+function Remove-KernSection {
+    param([string]$Content)
+    # Split on LF with an optional preceding CR so Windows CRLF files match
+    # the same anchors as unix LF files.
+    $lines = $Content -split "\r?\n"
+    $out = [System.Collections.Generic.List[string]]::new()
+    $buf = [System.Collections.Generic.List[string]]::new()
+    $mode = ""          # "", "marker" or "unmarked"
+    $anchored = $false
+    foreach ($line in $lines) {
+        if ($mode -eq "" -and ($line -cmatch '^# kern usage rules' -or $line -cmatch '^<!-- kern:global-rules begin')) {
+            $mode = if ($line -cmatch '^<!-- kern:global-rules begin') { "marker" } else { "unmarked" }
+            $anchored = $false
+            $buf.Clear()
+            continue
+        }
+        if ($mode -eq "marker") {
+            if ($line -cmatch '^<!-- kern:global-rules end -->') { $mode = "" }
+            continue
+        }
+        if ($mode -eq "unmarked") {
+            if ($line -cmatch '^# ') { $mode = ""; $out.Add($line); continue }
+            if ($line -cmatch '^<!-- kern:global-omit:end -->$' -or $line -cmatch '^\(`KERN_MCP_FULL=1` only\)\.$') {
+                $anchored = $true
+                $buf.Clear()
+                continue
+            }
+            $buf.Add($line)
+            continue
+        }
+        $out.Add($line)
+    }
+    if ($mode -eq "marker") {
+        throw "unbalanced kern-managed marker block (no closing '<!-- kern:global-rules end -->')"
+    }
+    if ($mode -eq "unmarked" -and $anchored) {
+        $skipBlank = $true
+        foreach ($l in $buf) {
+            if ($skipBlank -and $l -match '^[ \t]*$') { continue }
+            $skipBlank = $false
+            $out.Add($l)
+        }
+    }
+    return ($out -join "`n")
+}
+
 function Uninstall-Kern {
     Write-Host "kern: uninstalling from $Prefix..."
     foreach ($b in @("kern.exe", "kern-mcp.exe", "kern-server.exe")) {
@@ -187,6 +257,43 @@ function Uninstall-Kern {
         $newPath = (($oldPath -split ";" | Where-Object { $_ -ne $Prefix -and $_.Trim() -ne "" }) -join ";")
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "  removed $Prefix from User PATH"
+    }
+    # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
+    # (both formats), preserving every non-kern byte. Messages are honest:
+    # the file is only deleted when it contained nothing but the kern block,
+    # and the backup path is always reported (mirrors the fixed install.sh).
+    $agents = Join-Path $HOME "AGENTS.md"
+    if (Test-Path $agents) {
+        $content = Get-Content -Raw -Path $agents
+        if ($content -cmatch '(?m)^# kern usage rules' -or $content -cmatch '(?m)^<!-- kern:global-rules begin') {
+            $bak = "$agents.kern-uninstall.bak"
+            Copy-Item -Force -Path $agents -Destination $bak
+            Write-Host "  backed up $agents to $bak"
+            try {
+                $cleaned = Remove-KernSection -Content $content
+            } catch {
+                Write-Host "kern: $($_.Exception.Message) — $agents left untouched (backup at $bak)" -ForegroundColor Red
+                exit 1
+            }
+            if ([string]::IsNullOrWhiteSpace($cleaned)) {
+                Remove-Item -Force $agents
+                Write-Host "  removed $agents (it contained only the kern-managed block; backup at $bak)"
+            } else {
+                Set-Content -NoNewline -Path $agents -Value $cleaned
+                Write-Host "  removed kern-managed block from $agents (other content preserved; backup at $bak)"
+            }
+        } else {
+            Write-Host "  no kern-managed block in $agents — left untouched"
+        }
+    } else {
+        Write-Host "  no $agents — nothing to remove"
+    }
+    # ~/.config/kern and ~/.cache/kern, when present (mirrors install.sh).
+    foreach ($d in @((Join-Path $HOME ".config\kern"), (Join-Path $HOME ".cache\kern"))) {
+        if (Test-Path $d) {
+            Remove-Item -Recurse -Force $d
+            Write-Host "  removed $d"
+        }
     }
     Write-Host "kern: uninstalled successfully." -ForegroundColor Green
 }
@@ -227,17 +334,9 @@ if ($Action -eq "uninstall" -or ($args.Count -gt 0 -and $args[0] -eq "uninstall"
 
 $tag = Get-Version
 if (-not $tag) {
-    Write-Host "kern: could not resolve release version" -ForegroundColor Yellow
-    if (Get-Command go -ErrorAction SilentlyContinue) {
-        $goInstalled = Install-Go
-        if ($goInstalled) {
-            Verify-Kern -PrefixDir $Prefix
-            & Wire-Kern
-            exit 0
-        }
-        exit 1
-    }
-    Write-Host "kern: install Go (https://go.dev/dl/) or download from https://github.com/$Repo/releases" -ForegroundColor Red
+    # F7b: an unresolvable release means the tag cannot be honored — abort
+    # loudly instead of installing an unverified @latest build.
+    Write-Host "kern: could not resolve a release version — refusing to install an unverified @latest build; check your network or pin KERN_VERSION" -ForegroundColor Red
     exit 1
 }
 
@@ -247,7 +346,7 @@ $goarch = if ($arch -match "ARM64") { "arm64" } elseif ($arch -match "64") { "am
 if ($goarch -ne "amd64" -and $goarch -ne "arm64") {
     Write-Host "kern: no prebuilt asset for $goarch on Windows; falling back to go install." -ForegroundColor Yellow
     if (Get-Command go -ErrorAction SilentlyContinue) {
-        $goInstalled = Install-Go
+        $goInstalled = Install-Go -Tag $tag
         if ($goInstalled) {
             Verify-Kern -PrefixDir $Prefix
             & Wire-Kern
@@ -272,7 +371,7 @@ try {
     } catch {
         Write-Host "kern: no prebuilt asset for Windows at $tag; falling back to go install." -ForegroundColor Yellow
         if (Get-Command go -ErrorAction SilentlyContinue) {
-            $goInstalled = Install-Go
+            $goInstalled = Install-Go -Tag $tag
             if ($goInstalled) {
                 Verify-Kern -PrefixDir $Prefix
                 & Wire-Kern
@@ -284,13 +383,18 @@ try {
         exit 1
     }
 
-    # Best-effort checksum verification against the release SHA256SUMS asset.
+    # Fail-closed checksum verification against the release SHA256SUMS
+    # asset (mirrors install.sh's verify): a missing asset/entry or a
+    # mismatch aborts the install — never an unverified binary.
     $sumsUrl = "https://github.com/$Repo/releases/download/$tag/SHA256SUMS"
     try {
         $sums = Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing
-        $expected = ($sums.Content -split "`n" | Where-Object { $_ -match [regex]::Escape($file) }) -split "\s+" | Select-Object -First 1
-        if ($expected) { if (-not (Confirm-Sha256 -Path $zip -Expected $expected)) { exit 1 } }
-    } catch { <# SHA256SUMS unavailable; skip #> }
+        $expected = ($sums.Content -split "`n" | Where-Object { $_ -cmatch [regex]::Escape($file) }) -split "\s+" | Select-Object -First 1
+        if (-not (Confirm-Sha256 -Path $zip -Expected $expected)) { exit 1 }
+    } catch {
+        Write-Host "kern: no SHA256SUMS asset for $tag — refusing to install an unverified binary (build from source with 'go install github.com/$Repo/cmd/kern@$tag', or pick a release that ships checksums)" -ForegroundColor Red
+        exit 1
+    }
 
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
     Expand-Archive -Path $zip -DestinationPath $tmp -Force

@@ -195,8 +195,10 @@ sub-tool regardless.
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 117-tool catalog (default is the curated 22-tool surface) |
+| `KERN_MCP_FULL=1` | Advertise the full 117-tool catalog (default is the 6-tool `defaultTools` surface) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
+| `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 36-tool `highLevelTools` set (deprecated; prefer the default 6 or `KERN_MCP_FULL=1`) |
+| `KERN_MCP_CATEGORY=<family>` | Advertise only one functional family — one of `analyze`, `agent`, `arch`, `ast`, `context`, `doc`, `edit`, `evidence`, `exec`, `framework`, `graph`, `governance`, `incident`, `lock`, `memory`, `meta`, `mcpbridge`, `optimize`, `org`, `project`, `review`, `task`, `verify` (e.g. `kern_search` is `graph`); `kern_meta` always stays |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |
 | `KERN_MCP_WATCH=0` | Disable the background index watcher |
@@ -226,10 +228,12 @@ Every tool carries a `riskLevel` so governed clients can gate access:
 
 | Risk | Meaning | Count |
 |---|---|---|
-| `low` | Read-only | 82 |
-| `medium` | Contained state mutation or analysis | 31 |
+| `low` | Read-only | 70 |
+| `medium` | Contained state mutation or analysis | 25 |
 | `high` | Security-sensitive or destructive | 18 |
-| `critical` | Arbitrary command execution or deployment | 5 |
+| `critical` | Arbitrary command execution or deployment | 4 |
+
+Counts sum to the 117-tool catalog (see `docs/tool-catalog.md`).
 
 ## 7. Phase model
 

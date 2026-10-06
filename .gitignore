@@ -43,6 +43,12 @@ index.html
 TODO.md
 *.tar.gz
 
+# Agentic benchmark outputs (kept workspaces + raw agent event streams)
+evaluate/agentic/results/
+
+# Deepwork session state (progress ledgers)
+.slim/deepwork/
+
 
 # --- internal planning docs moved to sibling support_docs/kern_docs/ (not for open source) ---
 docs/deepseek-harness-compliance.md
@@ -75,11 +81,22 @@ docs/agent-intelligence-roadmap.md
 
 
 
+
+# --- blueprint runtime state (kern generated) ---
+.blueprint/audit/
+.blueprint/receipts/
+.blueprint/verdict-cache/
+.blueprint/fingerprint-cache/
+.blueprint/metrics.json
+.blueprint/sec-cache.json
+# --- end blueprint runtime state ---
+
 # --- kern generated (agent wiring, machine-specific) ---
 # Re-run `kern setup` to refresh. Unignore a line to commit shared config.
 .mcp.json
 .claude/
 .cursor/
+.vscode/
 .gemini/
 .kiro/
 .kern/
@@ -95,12 +112,3 @@ GEMINI.md
 .agents/hooks.json
 .github/hooks/
 # --- end kern generated ---
-
-# --- blueprint runtime state (kern generated) ---
-.blueprint/audit/
-.blueprint/receipts/
-.blueprint/verdict-cache/
-.blueprint/fingerprint-cache/
-.blueprint/metrics.json
-.blueprint/sec-cache.json
-# --- end blueprint runtime state ---

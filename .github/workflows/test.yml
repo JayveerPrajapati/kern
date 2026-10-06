@@ -71,6 +71,10 @@ jobs:
         run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
       - name: Architecture doc parity
         run: go test -v ./internal/architecture/ -run TestArchitectureDocParity -count=1
+      - name: Golden question routing suite
+        run: go test ./internal/metaroute/ -run TestClassifyMetaRequest_GoldenQuestions -count=1
+      - name: Per-language parity report
+        run: go test ./internal/index/ -run TestParityReportPerLanguage -count=1
       - name: CLI command usage and parity contract
         run: go test ./cmd/kern/ -run 'TestEveryCommandHasUsage|TestMCPToolsReachableFromCLI' -count=1
 
