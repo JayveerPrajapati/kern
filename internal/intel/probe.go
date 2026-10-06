@@ -39,6 +39,18 @@ type ProbeReport struct {
 
 var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*`)
 
+// hyphenPairRe matches hyphenated word compounds in task prose
+// ("delivery-report") — joined into identifier forms and resolved exactly.
+var hyphenPairRe = regexp.MustCompile(`([A-Za-z][a-z0-9]*)-([A-Za-z][a-z0-9]*)`)
+
+// joinVariants returns the identifier spellings a hyphenated prose compound
+// can take: camelCase, PascalCase, and snake_case.
+func joinVariants(a, b string) []string {
+	aUp := strings.ToUpper(a[:1]) + a[1:]
+	bUp := strings.ToUpper(b[:1]) + b[1:]
+	return []string{a + bUp, aUp + bUp, a + "_" + b}
+}
+
 // Probe turns a natural-language task (bug report, prompt, error text) into a
 // budget-capped micro-context bundle: it extracts candidate identifiers,
 // resolves them against the index, and returns the definition, callers, callees
@@ -62,12 +74,45 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 		}
 	}
 
+	// F4 (eval 2026-10-03): hyphenated compounds ("delivery-report",
+	// "retry-policy") never resolve as bare tokens. Join each hyphen pair
+	// into its camelCase / PascalCase / snake_case forms and resolve those
+	// exactly — exact resolution only, so this adds anchors without fuzzy
+	// noise.
+	for _, m := range hyphenPairRe.FindAllStringSubmatch(task, -1) {
+		for _, j := range joinVariants(m[1], m[2]) {
+			if r, ok := Resolve(ix, j); ok {
+				candidates[r] = true
+				break
+			}
+		}
+	}
+
 	// Fuzzy fallback for natural-language tasks like "decommission a network
 	// service": match extracted keywords against symbol names and segments.
 	if len(candidates) == 0 {
 		keywords := extractKeywords(task)
 		for _, kw := range keywords {
 			for _, match := range fuzzyMatchSymbols(ix, kw, 5) {
+				candidates[match] = true
+			}
+		}
+	} else {
+		// F4: the fallback used to fire only when NOTHING resolved, so a
+		// task that anchored 1 of 4 symbols never recovered the rest.
+		// camelCase-shaped tokens in the raw text that did not resolve
+		// exactly (case mismatch, plural, ...) still get a tight fuzzy pass
+		// (limit 2) — prose "retryPolicy" must anchor the symbol
+		// RetryPolicy.
+		for _, tok := range strings.Fields(task) {
+			tok = strings.Trim(tok, ".,;:!?\"'()[]{}<>")
+			if !isCamelCase(tok) {
+				continue
+			}
+			if _, ok := Resolve(ix, tok); ok {
+				continue // already anchored exactly
+			}
+			for _, match := range fuzzyMatchSymbols(ix, tok, 2) {
 				candidates[match] = true
 			}
 		}

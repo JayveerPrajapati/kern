@@ -2,8 +2,26 @@ package index
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
+
+// announceBuild gates the one-time "building index" stderr announcement to
+// real CLI runs (P2-15): go test binaries are named "<pkg>.test", so every
+// test that builds a fresh index in a t.TempDir() would otherwise reprint
+// the announcement and drown the test output. The real CLI binary is named
+// "kern" (never ".test"), so the user-facing announcement still fires for
+// `kern search` on an unindexed repo.
+var announceBuild = !strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
+
+// buildAnnounceOverride force-enables the announcement regardless of the
+// binary name; only tests set it (to pin the announcement's wording from
+// inside a .test binary).
+var buildAnnounceOverride bool
 
 // LoadOrBuild returns the project's symbol index: the persisted
 // <root>/.kern/index.json when fresh, or a freshly built one (saved back
@@ -78,9 +96,30 @@ func LoadOrBuildContext(ctx context.Context, root string) (*Index, error) {
 					return ix, nil
 				}
 			}
+			// prev == nil: no loadable persisted index exists at all. The
+			// command that reached this fallback (kern search, kern context,
+			// …) is read-shaped, so announce the one-time build on stderr
+			// BEFORE the multi-second write; stdout stays clean for JSON
+			// output modes, and the fresh-load and stale-refresh paths
+			// above return without ever reaching here. The announcement is
+			// silenced under `go test` (binary named "*.test") so fixtures
+			// building fresh indexes don't spam the output.
+			absent := prev == nil
+			if absent && (announceBuild || buildAnnounceOverride) {
+				display := root
+				if abs, aerr := filepath.Abs(root); aerr == nil {
+					display = abs
+				}
+				fmt.Fprintf(os.Stderr, "[kern] no index found — building index for %s (one-time, background-free)…\n", display)
+			}
+			started := time.Now()
 			ix, err := Build(root)
 			if err != nil {
 				return nil, err
+			}
+			if absent && (announceBuild || buildAnnounceOverride) {
+				fmt.Fprintf(os.Stderr, "[kern] indexed %d symbols in %d files (%d packages) in %s\n",
+					len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), time.Since(started).Round(time.Millisecond))
 			}
 			saveOrWarn(ix)
 			return ix, nil

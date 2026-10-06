@@ -57,11 +57,12 @@ func TestRegexExtractorBaselineOverCorpus(t *testing.T) {
 			},
 		},
 		"testfixture/fixtures.ts": {
-			symbols: 11,
+			symbols: 13,
 			edges: map[string]int{
 				"Greeter.constructor": 1,
 				"Greeter.greet":       1,
 				"Greeter.loud":        3,
+				"LoudGreeter.shout":   2,
 				"makeGreeter":         2,
 				"run":                 4,
 			},

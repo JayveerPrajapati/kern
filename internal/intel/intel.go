@@ -139,7 +139,7 @@ func ImportMatches(importPath, dir string) bool {
 		return true
 	}
 	// Java-style (dotted) imports: the package path is a suffix of the source
-	// directory ("com.inn.rcp.foo" <-> ".../java/com/inn/rcp/foo"). The full
+	// directory ("com.example.pkg.foo" <-> ".../java/com/example/pkg/foo"). The full
 	// package path is required; basename-only matches cross shared suffixes.
 	if strings.Contains(importPath, ".") {
 		slash := strings.ReplaceAll(importPath, ".", "/")
@@ -270,11 +270,15 @@ func canon(m map[string]string, name string) string {
 // whole symbol table MUST hoist localNames(ix) out of their loop and pass it
 // here — recomputing it per symbol is O(len(Symbols)) inside an O(len(Symbols))
 // loop, i.e. quadratic time on large repos.
+// Leading-dot targets (".Str.Int.Msg" fluent-chain fragments from the regex
+// extractors) are skipped outright: they are never real symbols, and their
+// simple-name tail ("Msg") could otherwise resolve to an unrelated local
+// symbol and inflate callee lists (F5, deep-dive 2026-10-03).
 func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []string {
 	var out []string
 	for _, ce := range ix.Calls[sym] {
 		c := ce.Target
-		if c == sym {
+		if c == sym || strings.HasPrefix(c, ".") {
 			continue
 		}
 		if local[c] {
@@ -293,7 +297,7 @@ func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []stri
 // The returned map records each symbol's distance from the nearest root.
 // Default precision: all edges are trusted.
 func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
-	reach, dist, _ := BlastRadiusPrecise(ix, roots, false)
+	reach, _, dist, _ := blastRadiusWalk(ix, roots, false)
 	return reach, dist
 }
 
@@ -303,9 +307,38 @@ func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
 // rather than guessed into the blast radius. The third return value is the
 // number of heuristic edges skipped.
 func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string, map[string]int, int) {
+	reach, _, dist, skipped := blastRadiusWalk(ix, roots, strict)
+	return reach, dist, skipped
+}
+
+// blastRadiusWalk is the package-aware blast-radius BFS. The visited set is
+// keyed by symbol NAME (first-seen depth, sorted for determinism), exactly
+// like the pre-package-aware walk, but the neighbors come from the same
+// package-aware attribution explore's direct-caller list uses:
+// ix.CallersFor(sym) resolves each recorded caller of a symbol to the
+// symbols that really call it (package-qualified keys plus same-package bare
+// buckets — never a bare-name merge of every same-named definition), and
+// findCallerDef resolves each caller endpoint to the concrete symbol with
+// the parent as context (same-package, then import-based). Because the
+// visited set is keyed by name, a same-named symbol that is itself a caller
+// (the MCP wrapper "AuthorizeContext" calling the governance core) collapses
+// into the already-visited root instead of re-expanding every same-named
+// definition's edges — the same-name merge can no longer amplify the radius
+// (TestAuthorizeContextDefaultScoped/Denial call the wrapper, not the core).
+// Roots that do not resolve to an indexed symbol keep the legacy raw
+// ix.Callers expansion. The second return value carries the resolved symbol
+// behind each radius name (same order) so file attribution can use the exact
+// symbol instead of a first-match name map ("Generate" is shared by three
+// packages; only evidence's calls the governance core).
+func blastRadiusWalk(ix *index.Index, roots []string, strict bool) ([]string, []index.Symbol, map[string]int, int) {
 	visited := map[string]int{}
-	queue := make([]string, 0, len(roots))
+	type entry struct {
+		name string
+		sym  index.Symbol
+	}
+	queue := make([]entry, 0, len(roots))
 	skipped := 0
+	symByName := map[string]index.Symbol{}
 	var langByFull map[string]string
 	if strict {
 		langByFull = map[string]string{}
@@ -319,26 +352,67 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 		if r == "" {
 			continue
 		}
-		if _, ok := visited[r]; !ok {
-			visited[r] = 0
-			queue = append(queue, r)
+		if _, ok := visited[r]; ok {
+			continue
 		}
+		visited[r] = 0
+		sym, ok := findDef(ix, r)
+		if ok {
+			symByName[r] = sym
+		}
+		queue = append(queue, entry{name: r, sym: sym})
 	}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, caller := range ix.Callers[cur] {
+		if cur.sym.File == "" {
+			// A root that does not resolve to an indexed symbol keeps the
+			// legacy raw-name expansion (callers recorded under its name).
+			for _, caller := range ix.Callers[cur.name] {
+				if strict {
+					// Strict precision: an edge whose caller language is not
+					// fully resolved is unknown, not guessable, so the caller
+					// is skipped.
+					if p := ix.PrecisionByLang[langByFull[caller]]; p != "resolved" {
+						skipped++
+						continue
+					}
+				}
+				if _, ok := visited[caller]; !ok {
+					visited[caller] = visited[cur.name] + 1
+					queue = append(queue, entry{name: caller})
+				}
+			}
+			continue
+		}
+		for _, c := range ix.CallersFor(cur.sym) {
+			callerSym, ok := findCallerDef(ix, c, cur.sym)
+			if !ok {
+				// An unresolvable caller endpoint is still a real caller:
+				// report it under its raw name as a leaf (never expanded).
+				if strict {
+					if p := ix.PrecisionByLang[langByFull[c]]; p != "resolved" {
+						skipped++
+						continue
+					}
+				}
+				if _, ok := visited[c]; !ok {
+					visited[c] = visited[cur.name] + 1
+					queue = append(queue, entry{name: c})
+				}
+				continue
+			}
 			if strict {
-				// Strict precision: an edge whose caller language is not fully
-				// resolved is unknown, not guessable, so the caller is skipped.
-				if p := ix.PrecisionByLang[langByFull[caller]]; p != "resolved" {
+				if p := ix.PrecisionByLang[callerSym.Lang]; p != "resolved" {
 					skipped++
 					continue
 				}
 			}
-			if _, ok := visited[caller]; !ok {
-				visited[caller] = visited[cur] + 1
-				queue = append(queue, caller)
+			name := callerSym.FullName()
+			if _, ok := visited[name]; !ok {
+				visited[name] = visited[cur.name] + 1
+				symByName[name] = callerSym
+				queue = append(queue, entry{name: name, sym: callerSym})
 			}
 		}
 	}
@@ -347,7 +421,41 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 		out = append(out, s)
 	}
 	sort.Strings(out)
-	return out, visited, skipped
+	// outSyms must stay POSITIONALLY PARALLEL to out — the "same order"
+	// contract the doc comment above promises and ExploreBudgeted's depth
+	// cap indexes radiusSyms[i] against it. A radius member that resolves to
+	// no indexed symbol (the Python/JS heuristic-caller case: blast-radius
+	// leaves are raw endpoints findCallerDef cannot resolve) keeps its
+	// zero-value slot here; the pre-fix filtered append shifted every later
+	// symbol one left, which both misattributed BlastFiles and panicked
+	// with "index out of range" on non-Go symbols (live campaign 2026-10-04:
+	// every Python-class and JS-function kern explore crashed here).
+	// affectedFilesOf already skips zero-value Symbols (File == "").
+	outSyms := make([]index.Symbol, len(out))
+	for i, s := range out {
+		if sym, ok := symByName[s]; ok {
+			outSyms[i] = sym
+		}
+	}
+	return out, outSyms, visited, skipped
+}
+
+// affectedFilesOf returns the distinct non-documentation source files of the
+// given symbols, sorted — the symbol-identity analogue of AffectedFiles (a
+// bare name like "Generate" is shared by several packages, so a name-keyed
+// file map would attribute it to the wrong file).
+func affectedFilesOf(syms []index.Symbol) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range syms {
+		if s.File == "" || index.IsDocFile(s.File) || seen[s.File] {
+			continue
+		}
+		seen[s.File] = true
+		out = append(out, s.File)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // AffectedFiles returns the distinct files touched by a set of symbols.

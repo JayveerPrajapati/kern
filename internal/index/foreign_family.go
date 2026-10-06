@@ -1,6 +1,10 @@
 package index
 
-import "regexp"
+import (
+	"path/filepath"
+	"regexp"
+	"strings"
+)
 
 // Per-language-family declaration rules and keyword sets. Each family shares a
 // single rules slice and keyword set across all its languages (e.g. js is used
@@ -170,3 +174,24 @@ var yaml = []declRule{
 }
 
 var yamlKw = kwSet()
+
+// jsonPropNoiseFloor is the size above which data-shaped JSON files are
+// treated as machine-generated output (backtest dumps, API exports) and
+// their prop keys are not indexed.
+const jsonPropNoiseFloor = 512 * 1024
+
+// noisyDataFile reports whether a JSON/YAML file is machine-generated data
+// whose prop-key symbols would drown out real code in search results.
+// Lockfile-style names are always noisy regardless of size; any other JSON
+// above jsonPropNoiseFloor is noisy too. Small hand-written config JSONs
+// (tsconfig.json and friends) keep their props.
+func noisyDataFile(rel string, size int) bool {
+	switch strings.ToLower(filepath.Base(rel)) {
+	case "package-lock.json", "npm-shrinkwrap.json", "composer.lock", "deno.lock",
+		"yarn.lock", "pnpm-lock.yaml", "bun.lockb":
+		return true
+	}
+	lower := strings.ToLower(rel)
+	return (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".jsonc")) &&
+		size > jsonPropNoiseFloor
+}

@@ -125,6 +125,7 @@ var regexExtraEdges = map[string]map[string]map[string]bool{
 		"Greeter.constructor": {"constructor": true},
 		"Greeter.greet":       {"greet": true},
 		"Greeter.loud":        {"loud": true},
+		"LoudGreeter.shout":   {"shout": true},
 	},
 }
 

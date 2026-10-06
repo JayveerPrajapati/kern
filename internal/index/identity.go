@@ -279,14 +279,19 @@ func treeOID(root string) string {
 	defer cancel()
 	env := append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
 
-	// Stage the whole working tree into the throwaway index. --ignore-errors
-	// tolerates unreadable/locked files; git's ignore rules are honored
-	// exactly as the index's own ignore policy honors them for gitignored
-	// paths. .blueprint is excluded by an explicit pathspec (it is NOT
-	// gitignored); .kern is excluded by git's own ignore rules instead — a
-	// pathspec naming it makes `git add` exit 1, aborting the entire slow
-	// path (see the doc comment above for the full explanation).
-	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).blueprint")
+	// Stage the whole working tree into the throwaway index. No
+	// --ignore-errors (B3, deep-dive 2026-10-03): the flag silently DROPS
+	// unreadable/locked files from the throwaway index, so an edit to such a
+	// file would be invisible to the tree OID and a stale index could be
+	// judged fresh. Without it, an unreadable file makes `git add` fail,
+	// treeOID returns "", and callers fall back to the content-hash proof —
+	// fail-closed. git's own ignore rules are honored exactly as the index's
+	// ignore policy honors them for gitignored paths. .blueprint is excluded
+	// by an explicit pathspec (it is NOT gitignored); .kern is excluded by
+	// git's own ignore rules instead — a pathspec naming it makes `git add`
+	// exit 1, aborting the entire slow path (see the doc comment above for
+	// the full explanation).
+	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--", ".", ":(exclude).blueprint")
 	add.Env = env
 	if err := add.Run(); err != nil {
 		return ""

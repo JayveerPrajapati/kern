@@ -1,6 +1,7 @@
 package index
 
 import (
+	"log"
 	"os"
 	"time"
 )
@@ -8,12 +9,17 @@ import (
 // DiskIndexView summarizes the persisted index for a root, or nil when none
 // exists yet (a normal first-run state). Unreadable or schema-mismatched
 // indexes are reported as "rebuild required" — never as silent zeroes. The
-// freshness verdict uses the same decision `kern index --status` makes: the
-// cheap git tree-OID probe when decisive, and the loose content proof
-// otherwise (non-git worktree, legacy index without a tree OID). It is the
-// authoritative `index` block of `kern health`, shared by the CLI (kern
-// health) and the MCP health handler so both surfaces report the persisted
-// state instead of an empty in-memory session cache.
+// freshness verdict is the content-aware loose proof — the same decision
+// `kern index --status` makes. FreshnessProof takes the cheap git tree-OID
+// fast path when the recorded and current OIDs match, and falls through to a
+// content re-hash of the indexed files when the tree moved. The raw
+// TreeOIDProbe verdict is deliberately NOT the final word: a commit that only
+// seals already-indexed content (or touches a .kernignore'd / non-indexed
+// file) flips the git tree OID without changing any indexed file's content,
+// and must not flag the index stale. It is the authoritative `index` block of
+// `kern health`, shared by the CLI (kern health) and the MCP health handler
+// so both surfaces report the persisted state instead of an empty in-memory
+// session cache.
 func DiskIndexView(root string) map[string]any {
 	// The primary store is SQLite in the default build; the JSON cache is
 	// the fallback (nosqlite build, or a legacy repo not yet migrated).
@@ -40,20 +46,30 @@ func DiskIndexView(root string) map[string]any {
 	if ix == nil {
 		return nil
 	}
+	// Single source of truth: the content-aware loose proof (the same
+	// decision `kern index --status` makes). FreshnessProof internally runs
+	// the cheap git tree-OID fast path when the recorded and current OIDs
+	// match, and re-hashes the indexed files only when the tree moved — so a
+	// commit that changes the git tree OID without changing any indexed
+	// file's content is still judged fresh. An unknown/inconclusive proof
+	// still renders as stale (fail-closed), matching the previous "decided"
+	// semantics.
 	verdict := "unknown"
-	if fresh, decided, _ := ix.TreeOIDProbe(root); decided {
-		if fresh {
-			verdict = "fresh"
-		} else {
-			verdict = "stale"
+	proof := ix.FreshnessProof(root)
+	// Opportunistic label self-heal: when the content is fresh but HEAD has
+	// advanced past the build-time commit, refresh the recorded git_commit
+	// label (provenance, no rebuild). Best-effort — a failure never changes
+	// the verdict. Reuses the proof above, so no second tree walk.
+	if proof.Verdict == FreshnessFresh {
+		if _, err := refreshCommitLabelIfFresh(root, ix, true); err != nil {
+			log.Printf("kern health: refresh git_commit label for %s: %v", root, err)
 		}
-	} else {
-		switch ix.FreshnessProof(root).Verdict {
-		case FreshnessFresh:
-			verdict = "fresh"
-		case FreshnessStale:
-			verdict = "stale"
-		}
+	}
+	switch proof.Verdict {
+	case FreshnessFresh:
+		verdict = "fresh"
+	case FreshnessStale:
+		verdict = "stale"
 	}
 	return map[string]any{
 		"root":       root,

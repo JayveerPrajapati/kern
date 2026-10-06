@@ -3,6 +3,7 @@ package index
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -870,6 +871,38 @@ func TestJsonExtract(t *testing.T) {
 	}
 }
 
+func TestJsonLockfilePropsSkipped(t *testing.T) {
+	src := `{"zzlockfileprop": 1, "dependencies": {"left-pad": "1.0.0"}}`
+	for _, name := range []string{
+		"package-lock.json", "npm-shrinkwrap.json", "composer.lock",
+		"yarn.lock", "pnpm-lock.yaml", "deno.lock",
+	} {
+		rel := "fixture/" + name
+		lang := detectLang(rel, []byte(src))
+		if syms := mustExtractForeign(t, rel, []byte(src), lang); len(syms) != 0 {
+			t.Fatalf("%s: expected no prop symbols from lockfile, got %v", name, syms)
+		}
+	}
+}
+
+func TestJsonLargeFilePropsSkipped(t *testing.T) {
+	src := []byte(`{"zzbigjsonprop": ` + strings.Repeat("1", 600*1024) + `}`)
+	if syms := mustExtractForeign(t, "results.json", src, "json"); len(syms) != 0 {
+		t.Fatalf("expected no prop symbols from oversized JSON, got %v", syms)
+	}
+}
+
+func TestJsonSmallConfigPropsKept(t *testing.T) {
+	src := `{
+  "zzsmallconfOK": true,
+  "compilerOptions": {"strict": true}
+}`
+	syms := mustExtractForeign(t, "tsconfig.json", []byte(src), "json")
+	if findSym(syms, "zzsmallconfOK") == nil || findSym(syms, "compilerOptions") == nil {
+		t.Fatalf("expected small-config props to stay indexed, got %v", syms)
+	}
+}
+
 func TestYamlExtract(t *testing.T) {
 	src := `name: kern
 version: 0.1.0
@@ -1012,12 +1045,12 @@ end
 }
 
 func TestForeignImportsJava(t *testing.T) {
-	src := `package com.rakuten.rcp.cloudadapter.config;
+	src := `package com.example.service.config;
 
 import org.springframework.context.annotation.Configuration;
-import static com.rakuten.rcp.cloudadapter.commons.vault.VaultUtil.login;
-import com.rakuten.rcp.cloudadapter.commons.vault.*;
-import com.rakuten.rcp.cloudadapter.commons.utils.Strings;
+import static com.example.service.common.auth.AuthUtil.login;
+import com.example.service.common.auth.*;
+import com.example.service.common.utils.Strings;
 
 @Configuration
 public class Config {
@@ -1026,9 +1059,9 @@ public class Config {
 	imports := foreignImports([]byte(src), "java")
 	want := []string{
 		"org.springframework.context.annotation",
-		"com.rakuten.rcp.cloudadapter.commons.vault",
-		"com.rakuten.rcp.cloudadapter.commons.vault",
-		"com.rakuten.rcp.cloudadapter.commons.utils",
+		"com.example.service.common.auth",
+		"com.example.service.common.auth",
+		"com.example.service.common.utils",
 	}
 	if len(imports) != len(want) {
 		t.Fatalf("expected %d imports, got %d: %v", len(want), len(imports), imports)
@@ -1052,10 +1085,10 @@ func TestForeignImportsNonJava(t *testing.T) {
 }
 
 func TestExtractForeignPopulatesJavaImports(t *testing.T) {
-	src := `package com.rakuten.rcp.cloudadapter.config;
-import com.rakuten.rcp.cloudadapter.commons.vault.IVaultService;
+	src := `package com.example.service.config;
+import com.example.service.common.auth.IAuthService;
 public class Config {
-    IVaultService svc;
+    IAuthService svc;
 }
 `
 	syms, _, _, pkg, err := extractForeign("Config.java", []byte(src), "java")
@@ -1068,34 +1101,34 @@ public class Config {
 	if pkg == nil {
 		t.Fatal("expected a package")
 	}
-	if len(pkg.Imports) != 1 || pkg.Imports[0].Path != "com.rakuten.rcp.cloudadapter.commons.vault" {
-		t.Errorf("pkg.Imports = %v, want the vault package", pkg.Imports)
+	if len(pkg.Imports) != 1 || pkg.Imports[0].Path != "com.example.service.common.auth" {
+		t.Errorf("pkg.Imports = %v, want the auth package", pkg.Imports)
 	}
 }
 
 func TestExtractForeignJavaInheritsGenerics(t *testing.T) {
-	src := `package com.inn.rcp;
+	src := `package com.example.model;
 
-public class EntityEvent<T> extends BaseEvent<T> implements Serializable, Comparable<EntityEvent<T>> {
+public class AuditRecord<T> extends BaseRecord<T> implements Serializable, Comparable<AuditRecord<T>> {
     private String id;
 }
 `
-	syms, _, inherits, _, err := extractForeign("EntityEvent.java", []byte(src), "java")
+	syms, _, inherits, _, err := extractForeign("AuditRecord.java", []byte(src), "java")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(syms) == 0 {
 		t.Fatal("expected symbols from java file")
 	}
-	edges := inherits["EntityEvent"]
+	edges := inherits["AuditRecord"]
 	if len(edges) != 3 {
-		t.Fatalf("expected 3 inheritance edges for EntityEvent, got %+v", edges)
+		t.Fatalf("expected 3 inheritance edges for AuditRecord, got %+v", edges)
 	}
 	foundExtends := false
 	foundSerializable := false
 	foundComparable := false
 	for _, e := range edges {
-		if e == "extends:BaseEvent" {
+		if e == "extends:BaseRecord" {
 			foundExtends = true
 		}
 		if e == "implements:Serializable" {

@@ -223,7 +223,9 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 				recordCopied(ur.r.calls)
 				reusedCount.Add(1)
 			}
-			ix.applyFileResult(ur.r)
+			if err := ix.applyFileResult(ur.r); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		workers := t.workers
@@ -270,6 +272,7 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 		// byte-identical to the serial path.
 		pending := map[int]updateResult{}
 		nextSeq := 0
+		var firstErr error
 		for ur := range results {
 			pending[ur.r.seq] = ur
 			for {
@@ -282,15 +285,19 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 						recordCopied(ur2.r.calls)
 						reusedCount.Add(1)
 					}
-					ix.applyFileResult(ur2.r)
+					if err := ix.applyFileResult(ur2.r); err != nil && firstErr == nil {
+						firstErr = err
+					}
 				}
 				delete(pending, nextSeq)
 				nextSeq++
 			}
 			applied.Store(int64(nextSeq))
 		}
+		if firstErr != nil {
+			return nil, firstErr
+		}
 	}
-
 	// Owners with no defining symbol are pathological (a Build-consistent
 	// index keys every call edge by a symbol's full name), and owners whose
 	// name is defined in several files cannot be attributed to one bucket

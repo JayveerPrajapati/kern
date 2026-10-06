@@ -293,6 +293,11 @@ func extractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 	if spec == nil {
 		return nil, nil, nil, nil, nil
 	}
+	// Machine-generated JSON/YAML (lockfiles, oversized result dumps) would
+	// flood the index with prop-kind keys — skip them entirely.
+	if (lang == "json" || lang == "yaml") && noisyDataFile(rel, len(src)) {
+		return nil, nil, nil, nil, nil
+	}
 	f := analyze(src, spec)
 	calls := map[string][]CallEdge{}
 	inherits := map[string][]string{}
