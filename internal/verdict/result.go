@@ -44,6 +44,18 @@ const (
 // render as a pass.
 const StatusSkipped = "SKIPPED"
 
+// StatusWarn marks a test phase that exited non-zero with ZERO failed
+// tests — a diagnostic (a go vet / policy finding or compile error
+// surfaced by go test before any test executed). Such a run is a WARNING,
+// never a test failure: the tests phase may only FAIL when failed>0 (F3).
+const StatusWarn = "WARN"
+
+// StatusNoRunner marks a test phase that could not run because no test
+// runner was detected. It renders as SKIPPED in the phase lines but folds
+// to a WARN verdict — a vacuous PASS over an unmeasured suite is
+// dishonest (F3).
+const StatusNoRunner = "NO-RUNNER"
+
 // SkipPrefix marks a sub-result Output whose check was skipped rather than
 // failed. The prefix is the skip marker; the text that follows it is the
 // reason. Shared across engine.go (setter) and the renderers (summarizeChecks,
@@ -61,6 +73,10 @@ type VerificationResult struct {
 	Security     *SecurityResult
 	Architecture *ArchitectureResult
 	Dependency   *DependencyResult
+	// Reuse holds reuse (duplication) advisories for newly added functions
+	// that structurally mirror existing ones; nil when not requested. See
+	// ReuseResult: advisory only, never fails, Skipped is informational.
+	Reuse *ReuseResult
 	// E2ETests is nil when E2E tests were not requested or none were detected,
 	// distinguishing "not run" from "ran and passed".
 	E2ETests *E2ETestResult
@@ -137,7 +153,14 @@ type SecurityResult struct {
 	High     int
 	Medium   int
 	Low      int
-	OK       bool
+	// Suppressed counts findings covered by a triage suppression (built-in
+	// defaults or .kern/verify-suppressions.json). Suppressed findings are
+	// excluded from the Critical/High/Low ladder above — those counts
+	// reflect only live problems — but stay listed in Findings with their
+	// reason, and Count remains the raw total including suppressed, so the
+	// report shows the full picture.
+	Suppressed int
+	OK         bool
 	// Error is non-empty when the scan itself failed (e.g. the root directory
 	// could not be read), as opposed to findings being found.
 	Error string
@@ -156,6 +179,13 @@ type Finding struct {
 	Severity string
 	Message  string
 	Snippet  string
+	// Suppressed marks a finding covered by a triage suppression (built-in
+	// defaults or .kern/verify-suppressions.json). Suppressed findings stay
+	// listed here — rendered with SuppressionReason so the triage is
+	// auditable — but they never block the security check and are excluded
+	// from the Critical/High/Low risk ladder.
+	Suppressed        bool
+	SuppressionReason string
 }
 
 // ArchitectureResult aggregates architectural rule violations.
@@ -179,10 +209,27 @@ type DependencyResult struct {
 	// example.com/x required by main.go", "unpinned dependency foo"). Empty =
 	// the project's declared dependencies are consistent.
 	Findings []string
+	// Warnings surfaces advisory findings that are not anomalies (e.g. a
+	// dependency newly added in the working tree vs HEAD). A warning does not
+	// flip OK to false.
+	Warnings []string
 	// Skipped is non-empty when the project has no supported dependency
 	// manifest at all (nothing to verify) — an honest skip, distinct from a
 	// PASS or a FAIL.
 	Skipped string
+}
+
+// ReuseResult aggregates reuse advisories for newly added Go functions that
+// are structurally near-identical to an existing function (the "reuse"
+// verification). Advisory by design (spec line 1084 of the duplication
+// scanner: it never blocks): findings never flip the overall verdict to FAIL.
+// Skipped is INFORMATIONAL ONLY — a clean tree is the normal state and must
+// NOT downgrade a PASS to VerdictSkipped (deliberately unlike the compliance
+// checks, where a skipped check counts as neither passing nor failing).
+type ReuseResult struct {
+	Findings []string
+	Skipped  string
+	OK       bool
 }
 
 // E2ETestResult holds end-to-end test results. E2E tests are distinguished
@@ -218,6 +265,11 @@ type StaticAnalysisResult struct {
 	// log under .kern/audit/<run-id>/ ("" when nothing was captured). Output
 	// above is the clipped tail; this points at the complete log (F4).
 	LogPath string
+	// Status is an explicit per-check status label. "" means the OK bool
+	// decides (OK/FAIL). StatusSkipped means the tool could NOT be executed
+	// (e.g. a sandbox execution failure or a missing binary) — the phase is
+	// neither a pass nor a fail and is excluded from the verdict math.
+	Status string
 }
 
 // PerformanceResult holds benchmark results. Optional — only populated
@@ -340,8 +392,18 @@ func RenderCompact(v VerificationResult) string {
 		line("build", okStatus(v.Build.OK), fmt.Sprintf("(%s)", v.Build.Duration))
 	}
 	if v.UnitTests != nil {
-		if v.UnitTests.Status == StatusSkipped {
+		if v.UnitTests.Status == StatusSkipped || v.UnitTests.Status == StatusNoRunner {
 			b.WriteString("tests: SKIPPED " + FirstLine(v.UnitTests.Output) + "\n")
+		} else if v.UnitTests.Status == StatusWarn {
+			// F3: a diagnostic-only run (non-zero exit, zero failed tests)
+			// is a warning, never a test failure. The status line carries
+			// the diagnostic so the reason is not lost.
+			detail := fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration)
+			reason := testFailureReason(v.UnitTests.Output)
+			if reason == "" {
+				reason = FirstLine(v.UnitTests.Output)
+			}
+			line("tests", "WARN (diagnostic: "+reason+")", detail)
 		} else {
 			detail := fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration)
 			// D1: a FAIL verdict with zero failed tests is contradictory — the
@@ -351,7 +413,7 @@ func RenderCompact(v VerificationResult) string {
 			// "tests: FAIL passed=0 failed=0".
 			if !v.UnitTests.OK && v.UnitTests.Failed == 0 {
 				if reason := testFailureReason(v.UnitTests.Output); reason != "" {
-					line("tests", "FAILED (go vet: "+reason+")", detail)
+					line("tests", "FAILED (diagnostic: "+reason+")", detail)
 				} else {
 					line("tests", okStatus(v.UnitTests.OK), detail)
 				}
@@ -359,7 +421,12 @@ func RenderCompact(v VerificationResult) string {
 				line("tests", okStatus(v.UnitTests.OK), detail)
 			}
 			if !v.UnitTests.OK && strings.TrimSpace(v.UnitTests.Output) != "" {
-				b.WriteString(strings.TrimSpace(v.UnitTests.Output) + "\n")
+				b.WriteString(boundedFailureOutput(v.UnitTests.Output) + "\n")
+			}
+			// F13: the full output lives in the audit log — point at it
+			// instead of dumping it.
+			if !v.UnitTests.OK && v.UnitTests.LogPath != "" {
+				b.WriteString("full log: " + v.UnitTests.LogPath + "\n")
 			}
 		}
 	}
@@ -372,7 +439,7 @@ func RenderCompact(v VerificationResult) string {
 			// FAIL verdict means the suite could not build — surface the reason.
 			if !v.Integration.OK && v.Integration.Failed == 0 {
 				if reason := testFailureReason(v.Integration.Output); reason != "" {
-					line("integration", "FAILED (go vet: "+reason+")", detail)
+					line("integration", "FAILED (diagnostic: "+reason+")", detail)
 				} else {
 					line("integration", okStatus(v.Integration.OK), detail)
 				}
@@ -380,22 +447,38 @@ func RenderCompact(v VerificationResult) string {
 				line("integration", okStatus(v.Integration.OK), detail)
 			}
 			if !v.Integration.OK && strings.TrimSpace(v.Integration.Output) != "" {
-				b.WriteString(strings.TrimSpace(v.Integration.Output) + "\n")
+				b.WriteString(boundedFailureOutput(v.Integration.Output) + "\n")
+			}
+			// F13: same full-log pointer as the unit-test branch.
+			if !v.Integration.OK && v.Integration.LogPath != "" {
+				b.WriteString("full log: " + v.Integration.LogPath + "\n")
 			}
 		}
 	}
 	if v.Security != nil {
 		detail := fmt.Sprintf("findings=%d critical=%d high=%d low=%d", v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
+		if v.Security.Suppressed > 0 {
+			detail += fmt.Sprintf(" (%d suppressed)", v.Security.Suppressed)
+		}
 		if v.Security.Error != "" {
 			detail += " error=" + v.Security.Error
 		}
-		line("security", okStatus(v.Security.OK), detail)
+		status := okStatus(v.Security.OK)
+		if v.Security.OK && v.Security.Critical+v.Security.High+v.Security.Medium+v.Security.Low > 0 {
+			// Live findings are warnings, never a clean OK (F7).
+			status = "WARN"
+		}
+		line("security", status, detail)
 		for i, fd := range v.Security.Findings {
 			if i >= 10 {
 				b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(v.Security.Findings)-10))
 				break
 			}
-			b.WriteString(fmt.Sprintf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message))
+			if fd.Suppressed {
+				b.WriteString(fmt.Sprintf("  - [suppressed] %s:%d [%s] %s: %s — %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message, fd.SuppressionReason))
+			} else {
+				b.WriteString(fmt.Sprintf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message))
+			}
 		}
 	}
 	if v.Architecture != nil {
@@ -417,8 +500,34 @@ func RenderCompact(v VerificationResult) string {
 			}
 		}
 	}
+	if v.Reuse != nil {
+		if v.Reuse.Skipped != "" {
+			b.WriteString("reuse: SKIPPED " + v.Reuse.Skipped + "\n")
+		} else if len(v.Reuse.Findings) > 0 {
+			// Reuse findings are warnings, never a clean OK (F7-style): the
+			// check ran and flagged structurally duplicated new functions.
+			line("reuse", "WARN", fmt.Sprintf("findings=%d", len(v.Reuse.Findings)))
+		} else {
+			line("reuse", okStatus(v.Reuse.OK), fmt.Sprintf("findings=%d", len(v.Reuse.Findings)))
+		}
+		for i, fd := range v.Reuse.Findings {
+			if i >= 10 {
+				b.WriteString(fmt.Sprintf("  ... and %d more reuse findings\n", len(v.Reuse.Findings)-10))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  - %s\n", fd))
+		}
+	}
 	if v.StaticAnalysis != nil {
-		line("static-analysis", okStatus(v.StaticAnalysis.OK), fmt.Sprintf("tool=%s findings=%d", v.StaticAnalysis.Tool, len(v.StaticAnalysis.Findings)))
+		if v.StaticAnalysis.Status == StatusSkipped {
+			// Did-not-run (e.g. the sandbox could not execute the tool): a
+			// skip, never a clean OK nor a false FAIL — the first output
+			// line carries the explicit reason (mirrors the tests SKIPPED
+			// render above).
+			b.WriteString("static-analysis: SKIPPED " + FirstLine(v.StaticAnalysis.Output) + "\n")
+		} else {
+			line("static-analysis", okStatus(v.StaticAnalysis.OK), fmt.Sprintf("tool=%s findings=%d", v.StaticAnalysis.Tool, len(v.StaticAnalysis.Findings)))
+		}
 	}
 	if v.CVE != nil {
 		if v.CVE.Status == StatusSkipped {
@@ -516,7 +625,8 @@ func testFailureReason(output string) string {
 			strings.HasPrefix(t, "ok ") ||
 			strings.HasPrefix(t, "--- ") ||
 			strings.HasPrefix(t, "=== ") ||
-			strings.HasPrefix(t, "PASS") {
+			strings.HasPrefix(t, "PASS") ||
+			!isDiagnosticLine(t) {
 			continue
 		}
 		return t

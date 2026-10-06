@@ -2,9 +2,11 @@ package verification
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -382,4 +384,210 @@ func cutKey(line, key string) (string, bool) {
 		return "", false
 	}
 	return strings.Trim(strings.TrimSpace(v), "\""), true
+}
+
+// ---------------------------------------------------------------------------
+// Dep-path-set extraction (shared with the working-tree vs HEAD diff advisory)
+//
+// diffManifestDeps compares dependency PATH SETS only, never versions, so each
+// ecosystem exposes a content-based extraction helper. The per-ecosystem
+// check parsers above keep their findings logic; these helpers are the
+// refactored path-set extraction those parsers (and the diff) share.
+
+// diffManifestDeps emits advisory warnings for dependency paths newly added in
+// the working tree relative to HEAD (rung 5 of the dependency advisory
+// ladder). For each supported manifest present in the working tree, the HEAD
+// version is fetched with `git show HEAD:<manifest>`; a manifest absent at
+// HEAD (a new file) is skipped — every dep of a brand-new manifest is not a
+// "new dependency". Only the dependency PATH SET is compared, never versions:
+// bumping a version is not adding a dependency. The whole advisory is skipped
+// (no warnings) when the root is not a git repository or has no HEAD.
+func diffManifestDeps(root string) (warnings []string, skipped string) {
+	if !gitHasHEAD(root) {
+		return nil, "dep-diff skipped: not a git repository"
+	}
+	for _, name := range supportedManifests {
+		workPath := filepath.Join(root, name)
+		work, err := os.ReadFile(workPath)
+		if err != nil {
+			continue // manifest not present in the working tree
+		}
+		head, err := gitShowHEAD(root, name)
+		if err != nil {
+			continue // absent at HEAD (new file) — no baseline to diff against
+		}
+		headSet := depPathSet(name, head)
+		for _, p := range depPathSet(name, work) {
+			if !containsPath(headSet, p) {
+				warnings = append(warnings, "new dependency "+p+" ("+name+")")
+			}
+		}
+	}
+	sort.Strings(warnings)
+	return warnings, ""
+}
+
+// gitHasHEAD reports whether root is a git repository with a resolvable HEAD
+// (the baseline every working-tree diff needs). A non-repo root and an
+// initialized-but-commitless repo both fail here.
+func gitHasHEAD(root string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", "HEAD")
+	cmd.Dir = root
+	return cmd.Run() == nil
+}
+
+// gitShowHEAD returns the content of manifest at HEAD, or an error when the
+// manifest does not exist at HEAD (a working-tree-only file) or git failed.
+func gitShowHEAD(root, manifest string) ([]byte, error) {
+	cmd := exec.Command("git", "show", "HEAD:"+manifest)
+	cmd.Dir = root
+	return cmd.Output()
+}
+
+// containsPath reports whether the (unsorted) path set paths contains p.
+func containsPath(paths []string, p string) bool {
+	for _, x := range paths {
+		if x == p {
+			return true
+		}
+	}
+	return false
+}
+
+// depPathSet extracts the dependency PATH SET from a supported manifest's
+// content. Only paths are compared, never versions: a bumped version is not a
+// new dependency. Parse failures yield an empty set — the manifest check
+// itself is fail-closed on the same content; the advisory just contributes
+// nothing for that manifest.
+func depPathSet(name string, data []byte) []string {
+	switch name {
+	case "go.mod":
+		return parseRequiresFromData(data)
+	case "package.json":
+		return nodeDepPaths(data)
+	case "requirements.txt":
+		return pythonDepPaths(data)
+	case "pom.xml":
+		return mavenDepPaths(data)
+	case "Cargo.toml":
+		return rustDepPaths(data)
+	}
+	return nil
+}
+
+// nodeDepPaths extracts the sorted dependency path set (dependencies +
+// devDependencies keys, deduplicated) from package.json content.
+func nodeDepPaths(data []byte) []string {
+	var m nodeManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(deps map[string]string) {
+		for name := range deps {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	add(m.Dependencies)
+	add(m.DevDependencies)
+	sort.Strings(out)
+	return out
+}
+
+// pythonDepPaths extracts the sorted dependency path set from requirements.txt
+// content, applying the same line-skip rules as checkPythonDeps.
+func pythonDepPaths(data []byte) []string {
+	seen := map[string]bool{}
+	var out []string
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "--") {
+			continue // comments, options (-r/-e/-i/--hash etc.)
+		}
+		name, _ := splitRequirement(line)
+		if name == "" {
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mavenDepPaths extracts the sorted dependency path set (groupId:artifactId)
+// from pom.xml content.
+func mavenDepPaths(data []byte) []string {
+	var p pomProject
+	if err := xml.Unmarshal(data, &p); err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range p.Dependencies {
+		id := strings.TrimSpace(d.GroupID) + ":" + strings.TrimSpace(d.ArtifactID)
+		if id == ":" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rustDepPaths extracts the sorted dependency path set from Cargo.toml
+// content, using the same heuristic line parser as checkRustDeps.
+func rustDepPaths(data []byte) []string {
+	seen := map[string]bool{}
+	var out []string
+	section := ""
+	subDep := "" // dependency name when inside a [dependencies.X] sub-table
+	noteSubTable := func() {
+		if subDep != "" && !seen[subDep] {
+			seen[subDep] = true
+			out = append(out, subDep)
+		}
+		subDep = ""
+	}
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+			continue
+		case strings.HasPrefix(line, "["):
+			noteSubTable()
+			section = strings.Trim(line, "[] ")
+			// A [dependencies.foo] sub-table names a single dependency.
+			if strings.HasPrefix(section, "dependencies.") {
+				subDep = strings.TrimPrefix(section, "dependencies.")
+			}
+			continue
+		}
+		if !isDepsSection(section) && subDep == "" {
+			continue
+		}
+		if subDep != "" {
+			continue
+		}
+		name, _, ok := splitCargoDep(line)
+		if !ok {
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	noteSubTable()
+	sort.Strings(out)
+	return out
 }

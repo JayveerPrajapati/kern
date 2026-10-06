@@ -66,7 +66,7 @@ func runSnapshot(rest []string) int {
 			if werr := os.WriteFile(f.out, []byte(out), 0o644); werr != nil {
 				fatal("Snapshot: %v", werr)
 			}
-			fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
+			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", f.out, len(out))
 			return 0
 		}
 		fmt.Print(out)
@@ -84,7 +84,10 @@ func runSnapshot(rest []string) int {
 	if len(identity) > 12 {
 		identity = identity[:12]
 	}
-	fmt.Printf("snapshot: mode=%s symbols=%d edges=%d identity=%s\n",
+	// F9: the human summary is a stderr banner — stdout carries ONLY the
+	// snapshot JSON, so `kern snapshot | jq` works (and stderr discard
+	// cannot pollute the JSON channel, which --help documents as stdout).
+	fmt.Fprintf(os.Stderr, "snapshot: mode=%s symbols=%d edges=%d identity=%s\n",
 		snap.Mode, len(snap.Graph.Nodes), len(snap.Graph.Edges), identity)
 	b, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -94,7 +97,7 @@ func runSnapshot(rest []string) int {
 		if err := os.WriteFile(f.out, b, 0o644); err != nil {
 			fatal("Snapshot: %v", err)
 		}
-		fmt.Printf("wrote %s (%d bytes)\n", f.out, len(b))
+		fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", f.out, len(b))
 		return 0
 	}
 	fmt.Println(string(b))

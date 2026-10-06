@@ -10,11 +10,11 @@ import (
 // opencode plugin (QA Pick #30, finding F-PL1).
 //
 // Several kern CLI commands print their full report to STDOUT and then exit
-// non-zero as a CI signal (kern changes/review exit 3 on risk, kern verify and
-// kern check-draft exit 1 on findings, kern diff-gate exits 1/2 with the
-// 11-check report, kern validate-proposed exits 1/2, ...). The plugin's run()
-// helper throws on non-zero exit and DROPS stdout; only runPayload() captures
-// the report and returns it as the tool result. Any shadow tool that wraps one
+// non-zero as a CI signal (kern changes/review exit 1 on risk findings, kern
+// verify and kern check-draft exit 1 on findings, kern diff-gate exits 1/2/3
+// with the 11-check report, kern validate-proposed exits 1/2, ...). The
+// plugin's run() helper throws on non-zero exit and DROPS stdout; only
+// runPayload() captures the report and returns it as the tool result. Any shadow tool that wraps one
 // of these commands must therefore call runPayload (or runRaw), never run().
 //
 // The historical fix (2025-08-25) covered the then-existing shadows; this test

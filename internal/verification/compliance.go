@@ -203,6 +203,27 @@ var copyleftLicenses = map[string]bool{
 	"MPL-2.0": true,
 }
 
+// acceptedCopyleftModules is the reviewed allowlist of copyleft-licensed
+// dependencies whose license kern accepts. Each entry maps a module path
+// prefix to the license that was reviewed and accepted for that module.
+//
+// Adding a module here is a conscious, reviewed decision — not a blind
+// suppression — and it silences the copyleft WARN for that module ONLY,
+// never for the license family as a whole:
+//
+//   - github.com/hashicorp/golang-lru/v2 — MPL-2.0. MPL-2.0 is FILE-LEVEL
+//     copyleft: it applies only to files copied from (or modifications made
+//     to) the covered source, not to the whole derivative work. Depending on
+//     an UNMODIFIED copy whose license notice is preserved therefore imposes
+//     no copyleft obligation on kern's own code — the module cache ships the
+//     LICENSE intact and kern never strips or vendors it.
+//
+// An acceptance applies only when the classified license equals the reviewed
+// license above; a module that lands on a different license is still flagged.
+var acceptedCopyleftModules = map[string]string{
+	"github.com/hashicorp/golang-lru/v2": "MPL-2.0",
+}
+
 // classifyLicense classifies a license text by the high-precision signatures.
 // It returns "unknown" for any text that does not satisfy a full signature
 // set — deterministic and false-positive-averse. Whitespace runs (including
@@ -253,6 +274,41 @@ var knownLicenses = []struct {
 	{"github.com/labstack/echo", "MIT"},
 	{"gopkg.in/yaml.v3", "MIT"},
 	{"gopkg.in/yaml.v2", "Apache-2.0"},
+	// tree-sitter grammar family — MIT per the LICENSE files in the Go
+	// module cache (each repo ships the standard MIT text; longest-prefix
+	// first so e.g. tree-sitter-javascript/tree-sitter-css are not shadowed
+	// by tree-sitter-java/tree-sitter-c).
+	{"github.com/UserNobody14/tree-sitter-dart", "MIT"},
+	{"github.com/tree-sitter/go-tree-sitter", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-typescript", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-javascript", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-java", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-python", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-rust", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-ruby", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-php", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-css", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-cpp", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-c", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-go", "MIT"},
+	{"github.com/tree-sitter/tree-sitter-bash", "MIT"},
+	// modernc.org family — BSD-3-Clause per the module-cache LICENSE files
+	// (modernc.org/token and ledongthuc/pdf carry the Go Authors BSD text).
+	{"github.com/ledongthuc/pdf", "BSD-3-Clause"},
+	{"modernc.org/sqlite", "BSD-3-Clause"},
+	{"modernc.org/gc/v3", "BSD-3-Clause"},
+	{"modernc.org/libc", "BSD-3-Clause"},
+	{"modernc.org/mathutil", "BSD-3-Clause"},
+	{"modernc.org/memory", "BSD-3-Clause"},
+	{"modernc.org/strutil", "BSD-3-Clause"},
+	{"modernc.org/token", "BSD-3-Clause"},
+	// Miscellaneous well-known modules read from the module cache.
+	{"github.com/dustin/go-humanize", "MIT"},
+	{"github.com/hashicorp/golang-lru/v2", "MPL-2.0"},
+	{"github.com/mattn/go-isatty", "MIT"},
+	{"github.com/mattn/go-pointer", "MIT"},
+	{"github.com/ncruces/go-strftime", "MIT"},
+	{"github.com/remyoudompheng/bigfft", "BSD-3-Clause"},
 }
 
 // knownLicense resolves a module path against the known-license map: the
@@ -337,7 +393,15 @@ func (e *Engine) VerifyLicense() *verdict.LicenseResult {
 			entry.License = "unknown"
 			res.Findings = append(res.Findings, "unknown license: "+m.Path)
 		} else if copyleftLicenses[lic] {
-			res.Findings = append(res.Findings, fmt.Sprintf("copyleft: %s (%s)", m.Path, lic))
+			// A module on the accepted-copyleft allowlist is a conscious,
+			// reviewed exception (see acceptedCopyleftModules) — report it
+			// with an "(accepted)" marker instead of a copyleft finding.
+			// Detection for every other copyleft module is unchanged.
+			if lic == acceptedCopyleftModules[m.Path] {
+				entry.License = lic + " (accepted)"
+			} else {
+				res.Findings = append(res.Findings, fmt.Sprintf("copyleft: %s (%s)", m.Path, lic))
+			}
 		}
 		res.Modules = append(res.Modules, entry)
 	}

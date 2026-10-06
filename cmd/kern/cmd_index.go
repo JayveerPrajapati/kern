@@ -363,9 +363,15 @@ func indexIsFresh(root string, ix *index.Index) bool {
 	if ix == nil {
 		return false
 	}
-	fresh, decided, _ := ix.TreeOIDProbe(root)
-	if decided {
-		return fresh
+	// The cheap git tree-OID probe is a FAST PATH, not a verdict: a decided
+	// match proves fresh, but a decided MISMATCH (a commit that only sealed
+	// already-indexed content moved HEAD^{tree}) must not short-circuit to
+	// stale — fall through to the loose content proof, which re-hashes file
+	// contents and is the authoritative decision (V7 parity with diskview
+	// and EnsureFresh). An inconclusive probe (no recorded tree OID) also
+	// falls through.
+	if fresh, decided, _ := ix.TreeOIDProbe(root); decided && fresh {
+		return true
 	}
 	return ix.FreshnessProof(root).Verdict == index.FreshnessFresh
 }
@@ -464,6 +470,20 @@ func runAst(rest []string) {
 	root := f.root
 	if root == "" && len(args) > 1 {
 		root = args[1]
+	}
+	// F13: `kern ast func run` (unquoted) used to split into pattern="func"
+	// path="run" and then SILENTLY "succeed" (exit 0) indexing a nonexistent
+	// junk path (0 symbols, junk root positions). Reject excess positionals
+	// and unresolvable root paths as usage errors (exit 2) instead — the
+	// same for the quoted multi-word pattern form, which must stay a single
+	// argument (`kern ast "func run"`).
+	if len(args) > 2 {
+		fatalUsage("usage: kern ast <pattern> [root] [--all]\n  too many arguments (pattern and optional root only); quote multi-word patterns: kern ast \"func run\"")
+	}
+	if root != "" {
+		if st, serr := os.Stat(root); serr != nil || !st.IsDir() {
+			fatalUsage("usage: kern ast <pattern> [root] [--all]\n  root %q does not exist or is not a directory (multi-word patterns must be quoted: kern ast \"func run\")", root)
+		}
 	}
 	// --all searches across ALL cached project indexes. But if a root was
 	// explicitly provided (--root or positional), scope to just that repo

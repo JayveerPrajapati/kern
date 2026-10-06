@@ -116,6 +116,34 @@ func TestBuildSkipsAgentWiringDirs(t *testing.T) {
 	}
 }
 
+func TestBuildSkipsPythonArtifactDirs(t *testing.T) {
+	// F6 (2026-10-04 campaign): the index's ignoreDirs skips graphify-out/
+	// and __pycache__/ and never indexes *.egg-info contents (its
+	// source-extension filter rejects PKG-INFO/SOURCES.txt). pack must
+	// follow the same artifact policy instead of bundling build metadata
+	// as source. Artifact files are plain text so only the directory skip
+	// (not the binary filter) can exclude them.
+	root := writeTree(t, map[string]string{
+		"app.py":                        "print('hi')\n",
+		"logcheck.egg-info/PKG-INFO":    "Metadata-Version: 1.0\n",
+		"logcheck.egg-info/SOURCES.txt": "app.py\n",
+		"graphify-out/graph.json":       "{}\n",
+		"__pycache__/app.pyc":           "text-not-binary\n",
+	})
+	b, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Files) != 1 || b.Files[0].Path != "app.py" {
+		t.Fatalf("expected only app.py, got %+v", b.Files)
+	}
+	for _, f := range b.Files {
+		if strings.Contains(f.Path, ".egg-info") || strings.Contains(f.Path, "graphify-out") || strings.Contains(f.Path, "__pycache__") {
+			t.Fatalf("artifact file packed: %+v", f)
+		}
+	}
+}
+
 func TestBuildHonorsGitignoreAndKernignore(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"main.go":          "package main\n",

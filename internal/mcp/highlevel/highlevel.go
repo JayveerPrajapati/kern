@@ -22,14 +22,16 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/loop"
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
-	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
 	rootpkg "github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
+	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -82,7 +84,8 @@ func pendingApprovals(ctx context.Context, h Hooks, root string) ([]domain.Appro
 
 // Analyze implements kern_analyze: runs the analysis through TaskService
 // (optionally lensed), applies a profile wrapper when requested, and reports
-// the authoritative persisted Task record.
+// the Task record — ephemeral by default, persisted only when
+// persist_task=true.
 func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	root := mcpargs.ArgString(args, "root")
 	if root == "" {
@@ -96,12 +99,16 @@ func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	// MCP is the AI-agent surface: create an authoritative Task record so
-	// the analysis is queryable via kern task <id> and the lifecycle
-	// (context packet, risks, evidence) is persisted. The task ID is
-	// appended to the output so the caller can reference it later. Task
-	// persistence is unconditional here — this surface promises the record.
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
+	// MCP is the AI-agent surface: read-only analysis creates an EPHEMERAL
+	// Task record by default (in-memory "a-<n>" ID, no store write — the
+	// CLI surface's F9 default). The record is persisted to the
+	// authoritative store (queryable via kern task <id>) only when the
+	// caller passes persist_task=true. The task ID is appended to the
+	// output so the caller can reference it later.
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+	if mcpargs.ArgBool(args, "persist_task") {
+		ts = ts.WithTaskPersistence(true)
+	}
 	var t *agent.Task
 	var text string
 	if lensName := mcpargs.ArgString(args, "lens"); lensName != "" {
@@ -124,7 +131,8 @@ func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 }
 
 // Plan implements kern_plan: produces a structured domain.Plan via the
-// control-plane Plan workflow and reports the authoritative persisted Task.
+// control-plane Plan workflow and reports the Task record — ephemeral by
+// default, persisted only when persist_task=true.
 func Plan(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	root := mcpargs.ArgString(args, "root")
 	if root == "" {
@@ -138,11 +146,15 @@ func Plan(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// kern_plan now produces a structured domain.Plan via the
-	// control-plane Plan workflow (analyze → memory → impact → risk →
-	// architecture → plan artifact), distinct from kern_analyze. The
-	// authoritative Task record is persisted (queryable via kern task <id>).
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
+	// kern_plan produces a structured domain.Plan via the control-plane
+	// Plan workflow (analyze → memory → impact → risk → architecture →
+	// plan artifact), distinct from kern_analyze. The Task record is
+	// ephemeral by default and persisted (queryable via kern task <id>)
+	// only when persist_task=true.
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+	if mcpargs.ArgBool(args, "persist_task") {
+		ts = ts.WithTaskPersistence(true)
+	}
 	t, plan, text, err := ts.Plan(change)
 	if err != nil {
 		return "", err
@@ -202,6 +214,16 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			types = append(types, t)
 		}
 	}
+	// Phase 4 fast/full tiers mirror the CLI (--fast/--full): fast forces the
+	// pre-commit tier (build + changed-package tests); full opts into the
+	// COMPLETE test suite. full beats fast when both are set, exactly like the
+	// CLI. fast wins over any explicit type list (like the CLI); the opt-in
+	// compliance flags below still append.
+	full := mcpargs.ArgBool(args, "full")
+	fastMode := mcpargs.ArgBool(args, "fast") && !full
+	if fastMode {
+		types = []string{"build", "test"}
+	}
 	// Opt-in compliance checks (cve/license/secrets bool args): each true
 	// arg appends its check to the requested types — the compliance trio
 	// runs ONLY when explicitly requested, never by default.
@@ -219,7 +241,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// check runs instead of degrading into a vacuous "summary: PASS"
 	// where every sub-check is silently skipped. Empty stays defaulted
 	// to "build" above.
-	if err := meta.ValidateVerifyTypes(types); err != nil {
+	if err := catalog.ValidateVerifyTypes(types); err != nil {
 		return "", err
 	}
 	// Governance: only the check types that actually execute host
@@ -232,7 +254,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// command-bound approval `kern approve` can resolve out-of-band
 	// (oracle-gate: the legacy empty-command gate created an unresolvable
 	// in-memory approval).
-	if meta.VerifyTypesExec(types) {
+	if catalog.VerifyTypesExec(types) {
 		if err := governance.CheckExecCommand("kern verify "+strings.Join(types, " "), rootpkg.ResolveRoot(root)); err != nil {
 			return "", fmt.Errorf("%w (set KERN_ALLOW_EXEC=1 or configure KERN_TOOLS allowlist)", err)
 		}
@@ -253,6 +275,35 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// kern_verify now routes through TaskService so the
 	// verification is recorded as an artifact on an authoritative Task.
 	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+	// Phase 4 fast/full options. full passes FullTests so the test step runs
+	// the complete suite; fast scopes the test step to the Go packages with
+	// uncommitted changes (verification.ChangedTestPackages) and falls back to
+	// build-only when nothing changed — never a silent empty test run. Both
+	// apply only when a test-executing type is in the final list (after fast
+	// forcing that is always the case). Mode notes are rendered into the text
+	// output (the highlevel surface returns text, not JSON).
+	var verifyOpts []verification.Option
+	var notes []string
+	if full && verifyTypeHasTest(types) {
+		verifyOpts = append(verifyOpts, verification.FullTests(true))
+		notes = append(notes, "full suite (complete test run)")
+	}
+	if fastMode && verifyTypeHasTest(types) {
+		if pkgs := verification.ChangedTestPackages(rootpkg.ResolveRoot(root)); len(pkgs) > 0 {
+			verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
+			notes = append(notes, fmt.Sprintf("changed packages (%d): %s", len(pkgs), strings.Join(pkgs, " ")))
+		} else {
+			types = dropVerifyTestTypes(types)
+			notes = append(notes, "no changed Go packages — running build only")
+		}
+	}
+	// render prepends the fast/full mode notes to any returned text.
+	render := func(body string) string {
+		if len(notes) == 0 {
+			return body
+		}
+		return strings.Join(notes, "\n") + "\n" + body
+	}
 	if h.Progress != nil {
 		// One message per requested check, cumulative percentage across the
 		// block (the checks run inside the single ts.Verify call below).
@@ -270,7 +321,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		}
 	}
 	verifyStart := time.Now()
-	t, v, err := ts.Verify(types)
+	t, v, err := ts.Verify(types, verifyOpts...)
 	// Telemetry: one verification sample per kern_verify call (the server
 	// recorder is long-lived; surfaces in kern stats performance).
 	metrics.Default().RecordVerification(time.Since(verifyStart))
@@ -287,9 +338,26 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 				fmt.Fprintf(&vb, "%s\n", line)
 			}
 			fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
-			return vb.String(), nil
+			return render(vb.String()), nil
 		}
 		return "", err
+	}
+	// A WARN verdict is a pass that surfaced findings (license unknowns and
+	// copyleft modules, security findings, CVE hits) — the engine reports
+	// it with err == nil, so it lands on this success path. The bare
+	// verdict/summary two-liner would drop every per-check detail line, so
+	// render the full compact verdict (per-check status + finding lines)
+	// instead; a clean PASS keeps the terse two-liner.
+	if v.Verdict == verdict.VerdictWarn {
+		var vb strings.Builder
+		fmt.Fprintln(&vb, pii.Mask(verdict.RenderCompact(v)).Text)
+		// Calibration (Feature Batch C): aggregate confidence line at the
+		// end of the rendered report (best-effort; omitted when no data).
+		if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
+			fmt.Fprintf(&vb, "%s\n", line)
+		}
+		fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+		return render(vb.String()), nil
 	}
 	var vb strings.Builder
 	fmt.Fprintf(&vb, "verdict: %s\n", v.Verdict)
@@ -301,7 +369,39 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		fmt.Fprintf(&vb, "%s\n", line)
 	}
 	fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
-	return vb.String(), nil
+	return render(vb.String()), nil
+}
+
+// verifyTypeHasTest reports whether the requested verify types include the
+// test step. The substring match mirrors the engine's type dispatcher
+// (test/unit/integration), so `types "build,unit"` and "build,test" both
+// count. It drives the fast/full tier notes: a build-only or compliance-only
+// run has no test step to scope or run in full mode.
+func verifyTypeHasTest(types []string) bool {
+	for _, t := range types {
+		tl := strings.ToLower(strings.TrimSpace(t))
+		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
+			return true
+		}
+	}
+	return false
+}
+
+// dropVerifyTestTypes removes the test-step entries (test/unit/integration)
+// from a verify types list — the fast tier's build-only fallback when there
+// are no changed Go packages to test. The substring match mirrors
+// verifyTypeHasTest, so the two can never disagree about what counts as the
+// test step.
+func dropVerifyTestTypes(types []string) []string {
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		tl := strings.ToLower(strings.TrimSpace(t))
+		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // Incident implements kern_incident: ingest an alert (or list/add heal
@@ -376,10 +476,14 @@ func WhatIf(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// kern_what_if routes through TaskService so the impact and
-	// risk are recorded as artifacts on an authoritative Task. The Task
-	// record is persisted (queryable via kern task <id>).
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
+	// kern_what_if routes through TaskService so the impact and risk are
+	// recorded as artifacts on a Task. The record is ephemeral by default
+	// and persisted (queryable via kern task <id>) only when
+	// persist_task=true.
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+	if mcpargs.ArgBool(args, "persist_task") {
+		ts = ts.WithTaskPersistence(true)
+	}
 	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		return "", err
@@ -425,10 +529,14 @@ func Impact(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		}
 		return "RISK for: " + change + "\n" + text, nil
 	}
-	// kern_impact now produces the 11-question deterministic
-	// ImpactReport via TaskService.Impact (graph-driven, no LLM). The
-	// authoritative Task record is persisted (queryable via kern task <id>).
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
+	// kern_impact produces the 11-question deterministic ImpactReport via
+	// TaskService.Impact (graph-driven, no LLM). The Task record is
+	// ephemeral by default and persisted (queryable via kern task <id>)
+	// only when persist_task=true.
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+	if mcpargs.ArgBool(args, "persist_task") {
+		ts = ts.WithTaskPersistence(true)
+	}
 	t, _, text, err := ts.Impact(change)
 	if err != nil {
 		return "", err
@@ -595,7 +703,11 @@ func Run(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	fmt.Fprintf(&lb, "intent:    %s (%s)\n", res.Intent.Type, res.Intent.Target)
 	fmt.Fprintf(&lb, "risk:      %s (approval: %s)\n", res.Risk.Level, res.ApprovalState)
 	fmt.Fprintf(&lb, "caps:      %s\n", strings.Join(res.Capabilities, ", "))
-	fmt.Fprintf(&lb, "tools:     %s\n", strings.Join(res.Tools, ", "))
+	// A1 (deep-dive 2026-10-03): the capability registry recommends the
+	// best tool for the job, which may live outside the default advertised
+	// surface — annotate those with their KERN_MCP_FULL gating so a
+	// default-install agent is never told to call a tool it cannot see.
+	fmt.Fprintf(&lb, "tools:     %s\n", toolsurface.Annotate(res.Tools))
 	fmt.Fprintf(&lb, "agents:    %s\n", strings.Join(res.Agents, ", "))
 	fmt.Fprintf(&lb, "next:      %s\n", res.NextAction)
 	if res.Precheck != nil {

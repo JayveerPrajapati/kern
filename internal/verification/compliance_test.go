@@ -60,6 +60,24 @@ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
 Everyone is permitted to copy and distribute verbatim copies of this license
 document, but changing it is not allowed.`
 
+const mplLicenseText = `Mozilla Public License Version 2.0
+==================================
+
+1. Definitions
+
+1.1. "Contributor" means each individual or legal entity that creates,
+contributes to the creation of, or owns Covered Software.
+
+2. License Grants and Conditions
+
+2.1. Grants
+
+Each Contributor hereby grants You a world-wide, royalty-free, non-exclusive
+license under the terms of this License to use, reproduce, make available,
+modify, display, perform, distribute, and otherwise exploit its
+Contributions, either on an unmodified basis, with modifications, or as part
+of a Larger Work; and to sublicense the same.`
+
 const unknownLicenseText = `Proprietary software license. All rights reserved.
 Do not redistribute, copy, or modify without written permission from Example Corp.`
 
@@ -519,6 +537,40 @@ func TestKnownLicenseFallback(t *testing.T) {
 		{"google.golang.org/grpc", "Apache-2.0"},
 		{"example.com/some/module", ""},
 		{"github.com/stretchr/other-thing", ""},
+		// tree-sitter grammar family (MIT per module-cache LICENSE files).
+		{"github.com/UserNobody14/tree-sitter-dart", "MIT"},
+		{"github.com/tree-sitter/go-tree-sitter", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-bash", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-c", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-cpp", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-css", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-go", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-java", "MIT"},
+		// Longest-prefix ordering: javascript must resolve before java.
+		{"github.com/tree-sitter/tree-sitter-javascript", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-php", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-python", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-ruby", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-rust", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-typescript", "MIT"},
+		{"github.com/tree-sitter/tree-sitter-unknown-grammar", ""},
+		// modernc.org family (BSD-3-Clause per module-cache LICENSE files).
+		{"github.com/ledongthuc/pdf", "BSD-3-Clause"},
+		{"modernc.org/sqlite", "BSD-3-Clause"},
+		{"modernc.org/gc/v3", "BSD-3-Clause"},
+		{"modernc.org/libc", "BSD-3-Clause"},
+		{"modernc.org/mathutil", "BSD-3-Clause"},
+		{"modernc.org/memory", "BSD-3-Clause"},
+		{"modernc.org/strutil", "BSD-3-Clause"},
+		{"modernc.org/token", "BSD-3-Clause"},
+		{"modernc.org/notinmap", ""},
+		// Miscellaneous well-known modules read from the module cache.
+		{"github.com/dustin/go-humanize", "MIT"},
+		{"github.com/hashicorp/golang-lru/v2", "MPL-2.0"},
+		{"github.com/mattn/go-isatty", "MIT"},
+		{"github.com/mattn/go-pointer", "MIT"},
+		{"github.com/ncruces/go-strftime", "MIT"},
+		{"github.com/remyoudompheng/bigfft", "BSD-3-Clause"},
 	}
 	for _, tc := range cases {
 		if got := knownLicense(tc.path); got != tc.want {
@@ -557,6 +609,96 @@ func TestVerifyLicenseKnownModuleFallback(t *testing.T) {
 	for _, fd := range res.Findings {
 		if strings.Contains(fd, "github.com/stretchr/testify") {
 			t.Errorf("known module must not be flagged unknown: %s", fd)
+		}
+	}
+	if !res.OK {
+		t.Error("license check must keep OK=true (advisory)")
+	}
+}
+
+// TestVerifyLicenseCopyleftNotAccepted pins that copyleft detection is
+// UNCHANGED for modules outside the accept-list: a synthetic MPL-2.0 module
+// (license text from the vendor tree, NOT on acceptedCopyleftModules) must
+// still surface the copyleft finding. Acceptance is per-module — a reviewed
+// exception — never per-license-family.
+func TestVerifyLicenseCopyleftNotAccepted(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":                            "module licfixture\n\ngo 1.20\n\nrequire example.com/mpldep v1.0.0\n",
+		"vendor/modules.txt":                "# example.com/mpldep v1.0.0\n## explicit\n",
+		"vendor/example.com/mpldep/LICENSE": mplLicenseText,
+	})
+	res := NewEngine(dir).VerifyLicense()
+	if res == nil {
+		t.Fatal("nil license result")
+	}
+	if res.Skipped != "" {
+		t.Fatalf("license check skipped unexpectedly: %s", res.Skipped)
+	}
+	found := false
+	for _, m := range res.Modules {
+		if m.Module == "example.com/mpldep" {
+			found = true
+			if m.License != "MPL-2.0" {
+				t.Errorf("mpldep license = %q, want MPL-2.0 (no accepted marker — module is not allowlisted)", m.License)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mpldep not present in license modules")
+	}
+	hasCopyleft := false
+	for _, fd := range res.Findings {
+		if !strings.Contains(fd, "example.com/mpldep") {
+			continue
+		}
+		if strings.HasPrefix(fd, "copyleft: ") {
+			hasCopyleft = true
+		}
+		if strings.Contains(fd, "unknown license: ") {
+			t.Errorf("findings = %v, MPL-2.0 module must not be flagged unknown", res.Findings)
+		}
+	}
+	if !hasCopyleft {
+		t.Errorf("findings = %v, want a copyleft finding for a non-accepted MPL-2.0 module", res.Findings)
+	}
+	if !res.OK {
+		t.Error("license check must keep OK=true (advisory)")
+	}
+}
+
+// TestVerifyLicenseAcceptedCopyleftModule pins the reviewed accept-list:
+// hashicorp/golang-lru/v2 resolves via the known-license fallback to MPL-2.0
+// and is on acceptedCopyleftModules, so it must NO LONGER yield a copyleft
+// finding — the module stays visible in the module list with an
+// "(accepted)" marker (the render prints it as "<license> (accepted)").
+func TestVerifyLicenseAcceptedCopyleftModule(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod": "module licfixture\n\ngo 1.20\n\nrequire github.com/hashicorp/golang-lru/v2 v2.0.7\n",
+	})
+	res := NewEngine(dir).VerifyLicense()
+	if res == nil {
+		t.Fatal("nil license result")
+	}
+	if res.Skipped != "" {
+		t.Fatalf("license check skipped unexpectedly: %s", res.Skipped)
+	}
+	found := false
+	for _, m := range res.Modules {
+		if m.Module == "github.com/hashicorp/golang-lru/v2" {
+			found = true
+			if m.License != "MPL-2.0 (accepted)" {
+				t.Errorf("golang-lru/v2 license = %q, want %q", m.License, "MPL-2.0 (accepted)")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("golang-lru/v2 not present in license modules (accepted module must stay visible)")
+	}
+	for _, fd := range res.Findings {
+		if strings.Contains(fd, "github.com/hashicorp/golang-lru/v2") {
+			t.Errorf("accepted module must not produce a finding: %s", fd)
 		}
 	}
 	if !res.OK {

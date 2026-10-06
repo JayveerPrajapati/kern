@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -129,6 +131,39 @@ func TestDispatchCommandHelpStyleFlags(t *testing.T) {
 	}
 }
 
+// TestDispatchCommandBareKernExits0 pins F4: bare `kern` (no command) prints
+// the full usage dump and exits 0 — a help print with no error is not a usage
+// error (unknown commands and bad flags still exit 2).
+func TestDispatchCommandBareKernExits0(t *testing.T) {
+	stderr, code := captureStderrExit(t, func() {
+		dispatchCommand("", nil)
+	})
+	if code != 0 {
+		t.Errorf("dispatchCommand(\"\") exit = %d, want 0", code)
+	}
+	if !strings.Contains(stderr, "Core Workflows") {
+		t.Errorf("expected the usage banner on stderr, got: %.80s", stderr)
+	}
+}
+
+// TestProjectMapCommandRoutes pins F4: `kern project_map` — the command the
+// buddy digest's truncation pointer recommends — is a real read-only command
+// wired to the same renderer as `kern buddy --map`.
+func TestProjectMapCommandRoutes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if code := dispatchCommand("project_map", []string{"--root", dir}); code != 0 {
+			t.Errorf("dispatchCommand(project_map) = %d, want 0", code)
+		}
+	})
+	if !strings.Contains(out, "Project:") || !strings.Contains(out, "a.go") {
+		t.Errorf("expected the per-file project map, got: %.200s", out)
+	}
+}
+
 func TestEveryCommandHasUsage(t *testing.T) {
 	if len(commandTable) < 170 {
 		t.Fatalf("commandTable has %d entries, want >= 170", len(commandTable))
@@ -202,7 +237,7 @@ func TestPackArgsDefaultBudget(t *testing.T) {
 	}
 }
 
-// snakeAliasPairs is the 16 kebab/snake duplicate command pairs (N4): the
+// snakeAliasPairs is the 17 kebab/snake duplicate command pairs (N4): the
 // snake_case forms are hidden from the printed help listings but MUST keep
 // dispatching.
 var snakeAliasPairs = map[string]string{
@@ -218,6 +253,7 @@ var snakeAliasPairs = map[string]string{
 	"memory_ranked":      "memory-ranked",
 	"policy_dsl":         "policy-dsl",
 	"pre_edit":           "pre-edit",
+	"project_map":        "project-map",
 	"prompt_fill":        "prompt-fill",
 	"semantic_diff":      "semantic-diff",
 	"semantic_merge":     "semantic-merge",

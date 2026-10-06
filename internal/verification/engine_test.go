@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
@@ -994,9 +995,11 @@ func TestVerifyStaticAnalysisNoModuleDegrades(t *testing.T) {
 	}
 }
 
-// TestVerifyTestsNoModuleSkips pins F1: with no detected test runner and no
-// go.mod, VerifyTests reports a clean skip instead of running `go test
-// ./...` (which dies outside a module).
+// TestVerifyTestsNoModuleSkips pins F1+F3: with no detected test runner and
+// no go.mod, VerifyTests reports a clean skip instead of running `go test
+// ./...` (which dies outside a module). F3: the skip is stamped
+// StatusNoRunner — the phase renders SKIPPED and the verdict folds to WARN
+// (exit 0), never a vacuous PASS.
 func TestVerifyTestsNoModuleSkips(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-execution verification in -short mode")
@@ -1016,9 +1019,163 @@ func TestVerifyTestsNoModuleSkips(t *testing.T) {
 	if !strings.Contains(res.Output, "skipped") {
 		t.Errorf("output should explain the skip: %s", trunc(res.Output))
 	}
-	if res.Status == verdict.StatusSkipped {
-		// The npm-skip style sets OK=true with no Status; keep it that way.
-		t.Error("no-runner skip should not need verdict.StatusSkipped (OK=true carries it)")
+	if res.Status != verdict.StatusNoRunner {
+		t.Errorf("no-runner skip must carry StatusNoRunner (phase SKIPPED, verdict WARN), got %q", res.Status)
+	}
+	// F3: no runner detected must never claim a plain PASS — the overall
+	// verdict is WARN (exit 0), never PASS.
+	if got := verdict.DeriveVerdict(&verdict.VerificationResult{UnitTests: res}); got != verdict.VerdictWarn {
+		t.Errorf("no-runner verdict = %q, want WARN (never PASS)", got)
+	}
+}
+
+// TestFoldTestOutcomeVetDiagnosticIsWarnNotFail pins F3 defect 1: a go test
+// run that exits non-zero on a vet/policy diagnostic with ZERO failed tests
+// is a WARNING, never a test failure — the tests phase may only FAIL when
+// failed>0. (Live-observed: "tests: FAILED (go vet: doctor_test.go:51: E2E
+// gate test — full pipeline; runs in nightly non-short suite)
+// passed=2838 failed=0 skipped=152".)
+func TestFoldTestOutcomeVetDiagnosticIsWarnNotFail(t *testing.T) {
+	res := &verdict.TestResult{}
+	foldTestOutcome(res, &sandbox.Result{
+		OK: false,
+		Output: "# github.com/x/internal/doctor [github.com/x/internal/doctor.test]\n" +
+			"doctor_test.go:51: E2E gate test — full pipeline; runs in nightly non-short suite\n" +
+			"FAIL\tgithub.com/x/internal/doctor [setup failed]\n" +
+			"--- PASS: TestFast (0.00s)\n",
+	})
+	if res.Failed != 0 {
+		t.Fatalf("Failed = %d, want 0 (a diagnostic is not a test failure)", res.Failed)
+	}
+	if res.Passed != 1 {
+		t.Fatalf("Passed = %d, want 1", res.Passed)
+	}
+	if !res.OK || res.Status != verdict.StatusWarn {
+		t.Fatalf("diagnostic-only run must be OK+StatusWarn (verdict WARN, exit 0), got OK=%v Status=%q", res.OK, res.Status)
+	}
+	if got := verdict.DeriveVerdict(&verdict.VerificationResult{UnitTests: res}); got != verdict.VerdictWarn {
+		t.Fatalf("verdict = %q, want WARN", got)
+	}
+}
+
+// TestFoldTestOutcomeFailingTestStillFails guards the other side of the F3
+// rule: a run with at least one "--- FAIL" line stays a FAIL.
+func TestFoldTestOutcomeFailingTestStillFails(t *testing.T) {
+	res := &verdict.TestResult{}
+	foldTestOutcome(res, &sandbox.Result{
+		OK:     false,
+		Output: "--- FAIL: TestBroken (0.00s)\nFAIL\t./...\n",
+	})
+	if res.Failed != 1 || res.OK {
+		t.Fatalf("a real failed test must stay a FAIL: Failed=%d OK=%v", res.Failed, res.OK)
+	}
+	if got := verdict.DeriveVerdict(&verdict.VerificationResult{UnitTests: res}); got != verdict.VerdictFail {
+		t.Fatalf("verdict = %q, want FAIL", got)
+	}
+}
+
+// TestFoldStaticAnalysisOutcomeExecutionFailureSkipped pins the
+// static-analysis did-not-run fix: a linter run that failed at EXECUTION
+// level — the sandbox could not execute the tool at all (Err non-empty, or a
+// non-zero exit with no tool output) — is stamped StatusSkipped, never a
+// false FAIL. An unmeasured run must neither claim PASS nor false-FAIL the
+// verdict: it derives VerdictSkipped (exit 0).
+func TestFoldStaticAnalysisOutcomeExecutionFailureSkipped(t *testing.T) {
+	res := &verdict.StaticAnalysisResult{Tool: "go vet"}
+	reason := foldStaticAnalysisOutcome(res, &sandbox.Result{
+		OK:       false,
+		ExitCode: 1,
+		Err:      exec.ErrNotFound,
+	})
+	if res.OK {
+		t.Fatal("an execution-level failure must not be OK")
+	}
+	if res.Status != verdict.StatusSkipped {
+		t.Fatalf("Status = %q, want SKIPPED (did-not-run is a skip, not a FAIL)", res.Status)
+	}
+	if reason == "" {
+		t.Fatal("execution failure must produce a SKIPPED reason")
+	}
+	if !strings.Contains(reason, "static-analysis not executed: go vet could not run (exit 1)") ||
+		!strings.Contains(reason, "ensure go vet is installed and runnable") {
+		t.Fatalf("reason must explain the skip and the fix, got: %s", reason)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("Findings = %v, want 0 (nothing ran)", res.Findings)
+	}
+	if got := verdict.DeriveVerdict(&verdict.VerificationResult{StaticAnalysis: res}); got != verdict.VerdictSkipped {
+		t.Fatalf("verdict = %q, want SKIPPED (never PASS, never FAIL)", got)
+	}
+
+	// Same did-not-run skip for a non-zero exit with NO captured output and
+	// no sandbox error (e.g. a missing binary surfaced via the exit code).
+	res2 := &verdict.StaticAnalysisResult{Tool: "staticcheck"}
+	reason2 := foldStaticAnalysisOutcome(res2, &sandbox.Result{OK: false, ExitCode: 127})
+	if res2.Status != verdict.StatusSkipped {
+		t.Fatalf("exit-code-no-output Status = %q, want SKIPPED", res2.Status)
+	}
+	if !strings.Contains(reason2, "could not run (exit 127)") {
+		t.Fatalf("exit-code reason must carry the code, got: %s", reason2)
+	}
+}
+
+// TestFoldStaticAnalysisOutcomeGenuineFindingsStayFail guards the other side
+// of the did-not-run rule: real tool findings keep today's FAIL semantics — a
+// tool that RAN and reported findings is a FAIL, never a skip.
+func TestFoldStaticAnalysisOutcomeGenuineFindingsStayFail(t *testing.T) {
+	res := &verdict.StaticAnalysisResult{Tool: "go vet"}
+	foldStaticAnalysisOutcome(res, &sandbox.Result{
+		OK:     false,
+		Output: "pkg/foo.go:10:2: unreachable code\n# github.com/x/pkg\n",
+	})
+	if res.Status != "" {
+		t.Fatalf("a genuine finding must keep default Status, got %q", res.Status)
+	}
+	if res.OK {
+		t.Fatal("findings must not be OK")
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("Findings = %v, want exactly the 1 non-# line", res.Findings)
+	}
+	if got := verdict.DeriveVerdict(&verdict.VerificationResult{StaticAnalysis: res}); got != verdict.VerdictFail {
+		t.Fatalf("verdict = %q, want FAIL", got)
+	}
+}
+
+// TestFoldTestOutcomePytestCountsTestsNotSuites pins F3 defect 2: when a
+// runner IS detected, the phase counts TESTS from pytest's final summary
+// line — never "1" for the whole suite.
+func TestFoldTestOutcomePytestCountsTestsNotSuites(t *testing.T) {
+	res := &verdict.TestResult{}
+	foldTestOutcome(res, &sandbox.Result{
+		OK:     true,
+		Output: "test_a.py ..\n\n============================== 490 passed, 2 failed in 3.2s ==============================\n",
+	})
+	if res.Passed != 490 || res.Failed != 2 || res.Skipped != 0 {
+		t.Fatalf("Passed=%d Failed=%d Skipped=%d, want 490/2/0 (tests, not the suite fallback 1)", res.Passed, res.Failed, res.Skipped)
+	}
+}
+
+// TestParsePytestSummary pins the F3 pytest summary parser: TEST counts from
+// the final "=== N passed, M failed in Ts ===" line, and no false match on
+// non-pytest output.
+func TestParsePytestSummary(t *testing.T) {
+	p, f, s, found := parsePytestSummary("================= 2 passed in 0.01s =================")
+	if !found || p != 2 || f != 0 || s != 0 {
+		t.Fatalf("2-passed summary: got (%d,%d,%d,found=%v), want (2,0,0,true)", p, f, s, found)
+	}
+	p, f, s, found = parsePytestSummary("=== 1 failed, 2 passed, 3 skipped in 0.1s ===")
+	if !found || p != 2 || f != 1 || s != 3 {
+		t.Fatalf("mixed summary: got (%d,%d,%d,found=%v), want (2,1,3,true)", p, f, s, found)
+	}
+	// The -q form the engine actually runs (`python -m pytest -q`) has no
+	// "====" border.
+	p, f, s, found = parsePytestSummary("..\n2 passed in 0.01s\n")
+	if !found || p != 2 || f != 0 || s != 0 {
+		t.Fatalf("-q summary: got (%d,%d,%d,found=%v), want (2,0,0,true)", p, f, s, found)
+	}
+	if _, _, _, found = parsePytestSummary("ok  github.com/x/pkg\t0.1s\ngo build: no summary here"); found {
+		t.Fatal("non-pytest output must not parse as a pytest summary")
 	}
 }
 

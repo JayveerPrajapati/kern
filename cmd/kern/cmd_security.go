@@ -177,17 +177,17 @@ func runSec(rest []string) {
 		}
 	}
 	// The exit code must be the same in --json and text mode: error-severity
-	// findings are a policy outcome (exit 3, the review-family convention —
-	// QA F2: `kern security` findings and `kern review` risk must agree;
-	// a hard CI failure remains `kern verify --types security`'s FAIL → 1).
+	// findings are a findings-tier outcome (exit 1, matching the review-family
+	// convention — QA F2: `kern security` findings and `kern review` risk must
+	// agree; a hard CI failure remains `kern verify --types security`'s FAIL → 1).
 	// The summary line prints only in text mode: --json keeps stderr empty
-	// so machine consumers can still tell findings (exit 3, empty stderr)
-	// from tool errors (exit 1, stderr populated).
+	// so machine consumers can still tell findings (exit 1, empty stderr)
+	// from tool errors (exit 1, stderr populated — the message text differs).
 	if counts["error"] > 0 {
 		if f.json {
-			panic(exitError{code: 3})
+			panic(exitError{code: 1})
 		}
-		fatalPolicy("sec: %d error-severity finding(s)", counts["error"])
+		fatalFindings("sec: %d error-severity finding(s)", counts["error"])
 	}
 }
 

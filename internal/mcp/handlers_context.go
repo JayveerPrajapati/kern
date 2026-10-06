@@ -19,6 +19,9 @@ func (s *Server) contextHooks() mcpcontext.Hooks {
 }
 
 func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string, error) {
+	if err := s.gateSourceRead(ctx, args); err != nil {
+		return "", err
+	}
 	return mcpcontext.Compact(ctx, s.contextHooks(), args)
 }
 
@@ -39,5 +42,8 @@ func (s *Server) handlePack(ctx context.Context, args map[string]any) (string, e
 }
 
 func (s *Server) handleFitContext(ctx context.Context, args map[string]any) (string, error) {
+	if err := s.gateSourceRead(ctx, args); err != nil {
+		return "", err
+	}
 	return mcpcontext.FitContext(ctx, args)
 }

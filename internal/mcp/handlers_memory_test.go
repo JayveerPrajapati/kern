@@ -37,3 +37,50 @@ func TestHandleMemoryRanked(t *testing.T) {
 		t.Errorf("expected secrets lesson in results, got: %s", res)
 	}
 }
+
+// TestHandleMemoryAddWritesTypedStore pins the P2-14 follow-up for the MCP
+// surface: kern_memory action=add must write the TYPED store (buddy's
+// "Project memory" source) with a non-auto Source so the digest renders it,
+// while still writing the v1 store so recall keeps working.
+func TestHandleMemoryAddWritesTypedStore(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := newTestServer()
+	ctx := context.Background()
+	root := t.TempDir()
+
+	res, err := srv.handleMemory(ctx, map[string]any{
+		"action": "add",
+		"lesson": "Never commit plain-text API secrets to git repository",
+		"root":   root,
+	})
+	if err != nil {
+		t.Fatalf("handleMemory action=add failed: %v", err)
+	}
+	if !strings.Contains(res, "remembered.") {
+		t.Fatalf("unexpected add response: %q", res)
+	}
+
+	// Typed store: the lesson must be current and not auto-sourced, so
+	// buddy's "Project memory" renders it.
+	mems, err := memory.NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.Content == "Never commit plain-text API secrets to git repository" {
+			found = true
+			if m.Source == "auto" {
+				t.Fatalf("explicit lesson Source = %q, want non-auto", m.Source)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("action=add lesson missing from typed store: %+v", mems)
+	}
+
+	// v1 store: recall still finds it.
+	if got := memory.Recall(root, "commit api secrets to git", memory.DefaultRecallLimit); len(got) == 0 {
+		t.Fatal("action=add lesson missing from v1 recall")
+	}
+}

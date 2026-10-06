@@ -1,10 +1,11 @@
 // Meta tool adapter — thin root wrapper around the meta leaf package.
 //
-// The natural-language classifier (classifyMetaRequest and its sub-routers)
-// and the semantic fallback live in internal/mcp/meta as plain functions;
-// this file wires them into *Server: handleMeta builds the leaf Hooks from
-// server state (dispatchTable, validPhase, costHintFor) and delegates to
-// meta.Handle. The unexported shims below (classifyMetaRequest,
+// The natural-language classifier (metaroute.ClassifyMetaRequest and its
+// sub-routers) and the semantic fallback live in internal/metaroute as
+// plain functions; the dispatch surface (meta.Handle) lives in
+// internal/mcp/meta. This file wires them into *Server: handleMeta builds
+// the leaf Hooks from server state (dispatchTable, validPhase, costHintFor)
+// and delegates to meta.Handle. The unexported shims below (classifyMetaRequest,
 // validateVerifyTypes, verifyTypesExec) keep the few remaining in-package
 // callers (tool_cache.go's R1 cacheability gate, handleVerify) on the same
 // code paths without importing the leaf twice.
@@ -16,8 +17,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
+	"github.com/JayveerPrajapati/kern/internal/metaroute"
 )
 
 // handleMeta implements the `kern` meta-tool: it takes a natural-language
@@ -27,10 +30,18 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 	return meta.Handle(ctx, meta.Hooks{
 		// RouteTool reproduces the legacy handleMeta switch exactly:
 		// dispatchTable routes every name in meta.metaRoutedTools to the same
-		// direct handler call the old switch made (no allowlist/cache/audit
-		// wrapping — those only apply to top-level tool calls).
+		// handler the top-level path uses — through the SAME policy funnel:
+		// precheckTool re-applies the KERN_TOOLS allowlist, root-argument
+		// validation, and the safety gateway to the ROUTED tool and its
+		// merged passthrough args (the top-level check validated only the
+		// meta-level args), so allowlisting kern_meta cannot implicitly
+		// grant the full catalog with arbitrary params (oracle gate).
 		RouteTool: func(ctx context.Context, name string, a map[string]any) (string, error) {
-			return s.dispatchTool(ctx, "", name, a)
+			resolved, err := s.precheckTool(name, a)
+			if err != nil {
+				return "", err
+			}
+			return s.dispatchTool(ctx, "", resolved, a)
 		},
 		ValidPhase: validPhase,
 		CostHint: func(tool string) (int, int) {
@@ -89,19 +100,19 @@ func IsNoCodeIntent(err error) bool {
 // R1 cacheability gate (and its test): kern_meta responses are stored/served
 // only when the sub-tool the request routes to is itself cacheable.
 func classifyMetaRequest(request string) (string, map[string]any) {
-	return meta.ClassifyMetaRequest(request)
+	return metaroute.ClassifyMetaRequest(request)
 }
 
-// validateVerifyTypes re-exports the leaf verify-type gate for handleVerify
+// validateVerifyTypes re-exports the catalog verify-type gate for handleVerify
 // (handlers_highlevel.go): garbage types are rejected before the exec
 // firewall and before any check.
 func validateVerifyTypes(types []string) error {
-	return meta.ValidateVerifyTypes(types)
+	return catalog.ValidateVerifyTypes(types)
 }
 
-// verifyTypesExec re-exports the leaf exec-classification for handleVerify:
+// verifyTypesExec re-exports the catalog exec-classification for handleVerify:
 // a request limited to in-process types (architecture/security/dependency/
 // license) must not require the exec allowlist.
 func verifyTypesExec(types []string) bool {
-	return meta.VerifyTypesExec(types)
+	return catalog.VerifyTypesExec(types)
 }

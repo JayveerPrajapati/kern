@@ -86,11 +86,14 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 	root := testfixture.Repo(t)
 
 	// --- MCP leg: real kern_analyze JSON-RPC handler ---
+	// persist_task=true opts the read-only MCP leg into the authoritative
+	// store (the default is ephemeral, F9), so the cross-interface
+	// persistence gate below still holds for both legs.
 	// max_output=0 disables the MCP output sandbox: this gate asserts the
 	// [task: ...] trailer survives end-to-end, and the analyze body legitimately
 	// grows with the repo's test surface (the "tests covering" evidence list).
 	resp := serveOne(t, writeReq("tools/call", 1,
-		`{"name":"kern_analyze","arguments":{"root":"`+root+`","change":"`+crossAnalyzeChange+`","max_output":0}}`))
+		`{"name":"kern_analyze","arguments":{"root":"`+root+`","change":"`+crossAnalyzeChange+`","persist_task":true,"max_output":0}}`))
 	text, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("MCP kern_analyze returned an error: %s", text)

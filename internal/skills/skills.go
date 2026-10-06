@@ -17,6 +17,7 @@ var SkillNames = []string{
 	"kern-safe-change",
 	"kern-incident-triage",
 	"kern-team-orchestration",
+	"kern-minimal-change",
 }
 
 // ReadSkill returns the content of the bundled skill SKILL.md.

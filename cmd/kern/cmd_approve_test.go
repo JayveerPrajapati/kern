@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,6 +57,84 @@ func approvalFixture(t *testing.T, root, taskID, requester, reason string) strin
 	return a.ID
 }
 
+// withScriptedTerminal replaces the interactive approval terminal with a
+// scripted double whose read side is the human's typed confirmation and whose
+// write side discards prompts (a real terminal's read and write paths are
+// independent — unlike a bytes.Buffer, which would echo the prompt back as
+// input). Restores the production resolver after.
+func withScriptedTerminal(t *testing.T, typed string) {
+	t.Helper()
+	old := approveTerminal
+	approveTerminal = func() (io.ReadWriter, error) {
+		return terminal{r: strings.NewReader(typed + "\n"), w: io.Discard}, nil
+	}
+	t.Cleanup(func() { approveTerminal = old })
+}
+
+// terminal is a test double for an interactive terminal: reads come from the
+// human's input source, writes (prompts) go to a sink.
+type terminal struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (t terminal) Read(p []byte) (int, error)  { return t.r.Read(p) }
+func (t terminal) Write(p []byte) (int, error) { return t.w.Write(p) }
+
+// withBlockingTerminal replaces the interactive approval terminal with one
+// that never delivers input, and shrinks the confirmation timeout so the
+// fail-closed timeout path is testable without a 15s wait.
+func withBlockingTerminal(t *testing.T) {
+	t.Helper()
+	oldTerm := approveTerminal
+	oldTimeout := approveConfirmTimeout
+	pr, pw := io.Pipe()
+	approveTerminal = func() (io.ReadWriter, error) { return blockingTerminal{r: pr}, nil }
+	approveConfirmTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		approveTerminal = oldTerm
+		approveConfirmTimeout = oldTimeout
+		pw.Close()
+		pr.Close()
+	})
+}
+
+// blockingTerminal is an io.ReadWriter whose Read blocks until the pipe
+// delivers or closes (nothing ever writes), so the approval gate's bounded
+// read hits its timeout.
+type blockingTerminal struct{ r *io.PipeReader }
+
+func (b blockingTerminal) Read(p []byte) (int, error)  { return b.r.Read(p) }
+func (b blockingTerminal) Write(p []byte) (int, error) { return len(p), nil }
+
+// withNoTerminal replaces the interactive approval terminal with a resolver
+// that always fails — the non-interactive (agent/pipe) case.
+func withNoTerminal(t *testing.T) {
+	t.Helper()
+	old := approveTerminal
+	approveTerminal = func() (io.ReadWriter, error) { return nil, errors.New("no terminal") }
+	t.Cleanup(func() { approveTerminal = old })
+}
+
+// auditEntryFor returns the governance-chain entry for resource, or nil.
+func auditEntryFor(t *testing.T, root, resource string) *governance.AuditEntry {
+	t.Helper()
+	auditDir := filepath.Join(root, ".kern", "audit")
+	l := governance.NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock"))
+	if _, err := l.Replay(); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	for i := range l.All() {
+		e := &l.All()[i]
+		if e.Resource == resource {
+			return e
+		}
+	}
+	return nil
+}
+
 // TestApproveListEmpty locks the no-args branch on an empty store: it must
 // print "no pending approvals", never a bare table header.
 func TestApproveListEmpty(t *testing.T) {
@@ -84,6 +164,7 @@ func TestApproveListPending(t *testing.T) {
 func TestApproveDecision(t *testing.T) {
 	root := newRoot(t)
 	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withScriptedTerminal(t, id)
 	out := captureStdout(t, func() { runApprove([]string{"--root", root, id}) })
 	for _, want := range []string{"approved: " + id, "approver: cli-user"} {
 		if !strings.Contains(out, want) {
@@ -137,6 +218,7 @@ func TestApproveGatedTaskAdvances(t *testing.T) {
 		t.Fatalf("persist: %v", err)
 	}
 	id := approvalFixture(t, root, task.ID, "alice", "deploy to prod")
+	withScriptedTerminal(t, id)
 
 	out := captureStdout(t, func() { runApprove([]string{"--root", root, id}) })
 	for _, want := range []string{"approved: " + id, "task: " + task.ID} {
@@ -157,7 +239,65 @@ func TestApproveGatedTaskAdvances(t *testing.T) {
 // with a fatal (sentinel panic), not a silent no-op.
 func TestApproveUnknownID(t *testing.T) {
 	root := newRoot(t)
+	// Script the terminal so the gate passes (typed == id) and the failure
+	// is the genuine not-found path, not a no-terminal refusal.
+	withScriptedTerminal(t, "t-nonexistent")
 	expectExit(t, 1, func() { runApprove([]string{"--root", root, "t-nonexistent"}) })
+}
+
+// TestApproveRefusedWithoutTerminal locks the fail-closed interactive gate:
+// no interactive terminal (piped stdin, agent context) → approval NOT decided,
+// exit 1, and the refusal is recorded in the governance chain.
+func TestApproveRefusedWithoutTerminal(t *testing.T) {
+	root := newRoot(t)
+	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withNoTerminal(t)
+	expectExit(t, 1, func() { runApprove([]string{"--root", root, id}) })
+
+	if e := auditEntryFor(t, root, "approval:"+id); e == nil || e.Result != "refused" {
+		t.Fatalf("expected refused audit entry for %s, got %+v", id, e)
+	}
+	store := governance.NewFileStore(root)
+	rec, err := store.Get(id)
+	if err != nil || rec.DecidedAt != nil {
+		t.Fatalf("approval must remain undecided after refusal: %+v err=%v", rec, err)
+	}
+}
+
+// TestApproveRefusedWrongToken locks the typed-id intent signal: the human
+// typed something other than the approval id → refused, undecided, audited.
+func TestApproveRefusedWrongToken(t *testing.T) {
+	root := newRoot(t)
+	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withScriptedTerminal(t, "WRONG-TOKEN")
+	expectExit(t, 1, func() { runApprove([]string{"--root", root, id}) })
+
+	if e := auditEntryFor(t, root, "approval:"+id); e == nil || e.Result != "refused" {
+		t.Fatalf("expected refused audit entry for %s, got %+v", id, e)
+	}
+	store := governance.NewFileStore(root)
+	rec, err := store.Get(id)
+	if err != nil || rec.DecidedAt != nil {
+		t.Fatalf("approval must remain undecided after refusal: %+v err=%v", rec, err)
+	}
+}
+
+// TestApproveRefusedTimeout locks the fail-closed timeout: a hung terminal
+// (no human input within the bound) refuses instead of blocking forever.
+func TestApproveRefusedTimeout(t *testing.T) {
+	root := newRoot(t)
+	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withBlockingTerminal(t)
+	expectExit(t, 1, func() { runApprove([]string{"--root", root, id}) })
+
+	if e := auditEntryFor(t, root, "approval:"+id); e == nil || e.Result != "refused" {
+		t.Fatalf("expected refused audit entry for %s, got %+v", id, e)
+	}
+	store := governance.NewFileStore(root)
+	rec, err := store.Get(id)
+	if err != nil || rec.DecidedAt != nil {
+		t.Fatalf("approval must remain undecided after refusal: %+v err=%v", rec, err)
+	}
 }
 
 // TestApproveAlreadyDecidedExits3 locks the decided-state guard: approving an

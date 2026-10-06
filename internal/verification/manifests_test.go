@@ -1,6 +1,7 @@
 package verification
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,30 @@ func hasFinding(findings []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// gitRun runs a git command in dir with the machine's global hooks
+// neutralized (`-c core.hooksPath=`): this host installs global git hooks,
+// and an un-isolated fixture commit would be blocked (or dirty the tree).
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return string(out)
+}
+
+// gitInitFixture initializes a git repo in dir, writes files, and commits
+// them (hooks disabled) so the tree is clean at HEAD.
+func gitInitFixture(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	writeTree(t, dir, files)
+	gitRun(t, dir, "init", "-q")
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "initial")
 }
 
 func TestManifestNodeDeps(t *testing.T) {
@@ -260,5 +285,104 @@ func TestManifestDepsGoUnchanged(t *testing.T) {
 	}
 	if mc.ecosystem != "go" {
 		t.Errorf("ecosystem = %q, want go", mc.ecosystem)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// diffManifestDeps (rung 5 advisory): working-tree vs HEAD dependency diffs.
+
+// TestDiffManifestDepsSameDepsNoWarnings: identical dep path sets in the
+// working tree and at HEAD produce no warnings (a committed go.mod is the
+// steady state).
+func TestDiffManifestDepsSameDepsNoWarnings(t *testing.T) {
+	dir := t.TempDir()
+	gitInitFixture(t, dir, map[string]string{
+		"go.mod":  "module diffixture\n\ngo 1.20\n\nrequire example.com/a v1.0.0\n",
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	warns, skipped := diffManifestDeps(dir)
+	if skipped != "" {
+		t.Errorf("committed repo must not skip the dep diff, got %q", skipped)
+	}
+	if len(warns) != 0 {
+		t.Errorf("same deps working-vs-HEAD must produce no warnings, got %v", warns)
+	}
+}
+
+// TestDiffManifestDepsNewRequireWarns: a dependency path newly added in the
+// working tree is warned with its manifest; a version bump is NOT a new
+// dependency; and the engine keeps OK true (advisory never fails).
+func TestDiffManifestDepsNewRequireWarns(t *testing.T) {
+	dir := t.TempDir()
+	gitInitFixture(t, dir, map[string]string{
+		"go.mod":  "module diffixture\n\ngo 1.20\n\nrequire example.com/a v1.0.0\n",
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	// Working tree: bump a's version (not new) and add b (new).
+	writeTree(t, dir, map[string]string{
+		"go.mod": "module diffixture\n\ngo 1.20\n\nrequire (\n\texample.com/a v1.1.0\n\texample.com/b v2.0.0\n)\n",
+	})
+	warns, skipped := diffManifestDeps(dir)
+	if skipped != "" {
+		t.Errorf("expected no skip, got %q", skipped)
+	}
+	if !hasFinding(warns, "new dependency example.com/b (go.mod)") {
+		t.Errorf("expected a warning for the new module, got %v", warns)
+	}
+	if hasFinding(warns, "example.com/a") {
+		t.Errorf("a version bump must not count as a new dependency, got %v", warns)
+	}
+
+	// The engine surfaces the advisory on Warnings and stays OK (never fails).
+	dr := NewEngine(dir).VerifyDependency("")
+	if !dr.OK {
+		t.Errorf("advisory warnings must not flip OK to false, got OK=%v warnings=%v", dr.OK, dr.Warnings)
+	}
+	if !hasFinding(dr.Warnings, "new dependency example.com/b (go.mod)") {
+		t.Errorf("engine must surface the new-dependency warning, got %v", dr.Warnings)
+	}
+}
+
+// TestDiffManifestDepsNonGitSkips: a non-git root yields the skipped note, no
+// warnings, and never a failure.
+func TestDiffManifestDepsNonGitSkips(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":  "module x\n\ngo 1.20\n",
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	warns, skipped := diffManifestDeps(dir)
+	if len(warns) != 0 {
+		t.Errorf("non-git root must produce no warnings, got %v", warns)
+	}
+	if skipped != "dep-diff skipped: not a git repository" {
+		t.Errorf("skip note = %q", skipped)
+	}
+	dr := NewEngine(dir).VerifyDependency("")
+	if !dr.OK {
+		t.Errorf("non-git skip must not fail the dependency check, got OK=%v", dr.OK)
+	}
+	if !strings.Contains(dr.Skipped, "not a git repository") {
+		t.Errorf("engine must carry the dep-diff skip note, got %q", dr.Skipped)
+	}
+}
+
+// TestDiffManifestDepsManifestNewAtHEAD: a manifest that exists only in the
+// working tree (new file, absent at HEAD) is skipped — its deps are not
+// reported as "all new" noise.
+func TestDiffManifestDepsManifestNewAtHEAD(t *testing.T) {
+	dir := t.TempDir()
+	gitInitFixture(t, dir, map[string]string{
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	writeTree(t, dir, map[string]string{
+		"package.json": `{"dependencies":{"express":"*","lodash":"latest"}}`,
+	})
+	warns, skipped := diffManifestDeps(dir)
+	if skipped != "" {
+		t.Errorf("expected no skip, got %q", skipped)
+	}
+	if len(warns) != 0 {
+		t.Errorf("a manifest new at HEAD must not report its deps as new, got %v", warns)
 	}
 }

@@ -44,8 +44,8 @@ func TestRiskAndSimulateAgreeOnSameChangeString(t *testing.T) {
 	root := reviewRiskFixture(t)
 	const change = "rename Base to Base2"
 
-	riskOut := captureStdout(t, func() { runRisk([]string{change, "--root", root}) })
-	simOut := captureStdout(t, func() { runWhatIf("simulate", []string{change, "--root", root}) })
+	riskOut := captureStdout(t, func() { runAnalyze("analyze", []string{"--lens", "risk", change, "--root", root}) })
+	simOut := captureStdout(t, func() { runImpact([]string{change, "--root", root}) })
 
 	riskTier := riskLevelFromOutput(t, riskOut)
 	simTier := simulateRiskFromOutput(t, simOut)
@@ -75,13 +75,19 @@ func riskLevelFromOutput(t *testing.T, out string) string {
 	return ""
 }
 
-// simulateRiskFromOutput extracts the "risk: <tier>" line from `kern
-// simulate` output.
+// simulateRiskFromOutput extracts the "Risk: <tier>" line from `kern
+// simulate` output (the impact report renderer), dropping the driver-count
+// parenthetical ("Risk: high (3 transitive dependents)") so the bare tier is
+// compared.
 func simulateRiskFromOutput(t *testing.T, out string) string {
 	t.Helper()
 	for _, ln := range strings.Split(out, "\n") {
-		if strings.HasPrefix(ln, "risk: ") {
-			return strings.TrimSpace(strings.TrimPrefix(ln, "risk: "))
+		if strings.HasPrefix(ln, "Risk: ") {
+			tier := strings.TrimSpace(strings.TrimPrefix(ln, "Risk: "))
+			if i := strings.Index(tier, " ("); i >= 0 {
+				tier = tier[:i]
+			}
+			return tier
 		}
 	}
 	t.Fatalf("no risk line found in simulate output:\n%s", out)

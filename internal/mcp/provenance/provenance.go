@@ -11,9 +11,12 @@
 package provenance
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -181,8 +184,66 @@ func Summary(ix *index.Index, p *Provenance) string {
 	if verdict == "" {
 		verdict = string(index.FreshnessUnknown)
 	}
-	return fmt.Sprintf("[kern] index: %d symbols, %d call edges, %d packages · built %s ago · %s · commit %s",
-		len(ix.Symbols), edges, len(ix.Pkgs), age, verdict, p.Index.GitCommit)
+	// the freshness verdict is tree-based and
+	// stays honest, but a plain "fresh · commit X" hides commit skew — the
+	// index can be one or more commits behind HEAD while the tree still
+	// matches (docs-only commits excluded from the tree probe, probe
+	// failure falling back to content hashes, non-git roots). Surface the
+	// current HEAD next to the build commit whenever they differ.
+	suffix := ""
+	if head := headCommitCached(ix.Root); head != "" && head != p.Index.GitCommit {
+		if verdict == string(index.FreshnessFresh) {
+			suffix = fmt.Sprintf(" · HEAD %s (commit differs; indexed content still matches)", head)
+		} else {
+			suffix = fmt.Sprintf(" · HEAD %s (index behind HEAD)", head)
+		}
+	}
+	return fmt.Sprintf("[kern] index: %d symbols, %d call edges, %d packages · built %s ago · %s · commit %s%s",
+		len(ix.Symbols), edges, len(ix.Pkgs), age, verdict, p.Index.GitCommit, suffix)
+}
+
+// headCommitCache memoizes the current HEAD short sha per root for a few
+// seconds: Summary runs on every tool response and a per-call git exec would
+// be measurable. A failed lookup (not a git repo, no commits) returns "" and
+// is cached too — absence must not turn every response into a subprocess.
+var (
+	headCommitMu    sync.Mutex
+	headCommitEntry = map[string]headCommitState{}
+)
+
+type headCommitState struct {
+	sha string
+	at  time.Time
+}
+
+const headCommitTTL = 5 * time.Second
+
+func headCommitCached(root string) string {
+	if root == "" {
+		return ""
+	}
+	headCommitMu.Lock()
+	st, ok := headCommitEntry[root]
+	if ok && time.Since(st.at) < headCommitTTL {
+		headCommitMu.Unlock()
+		return st.sha
+	}
+	headCommitMu.Unlock()
+	sha := headCommitUncached(root)
+	headCommitMu.Lock()
+	headCommitEntry[root] = headCommitState{sha: sha, at: time.Now()}
+	headCommitMu.Unlock()
+	return sha
+}
+
+func headCommitUncached(root string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--verify", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // SimpleName strips the package qualifier from a name, mirroring intel's

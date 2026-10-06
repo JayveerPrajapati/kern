@@ -97,6 +97,15 @@ func (e *Engine) WithFullTests(full bool) *Engine {
 	return e
 }
 
+// TestPackages returns an Option that scopes the default test step to the
+// given Go package patterns (e.g. "./internal/foo"). nil or empty runs the
+// whole module. The KERN_VERIFY_TEST env / verify.test override still wins.
+func TestPackages(pkgs []string) Option {
+	return func(e *Engine) {
+		e.WithTestPackages(pkgs)
+	}
+}
+
 // WithTestPackages scopes the default test step to the given Go package
 // patterns (e.g. "./internal/foo"). nil or empty (the default) runs the whole
 // module (./...). The KERN_VERIFY_TEST env / verify.test override, when set,
@@ -172,12 +181,12 @@ func hasGoMod(root string) bool {
 
 // Verify runs all requested verification types and returns the unified result.
 // Supported types (substring match): "build", "test", "security",
-// "architecture", "dependency", "e2e", "static-analysis", "performance",
-// "cve", "license", "secrets". An empty verifications list runs the defaults
-// (build, test, security, architecture, dependency, e2e, static-analysis,
-// performance) — the compliance checks (cve/license/secrets) run ONLY when
-// explicitly requested. Ordering of the aggregated result is fixed and
-// deterministic.
+// "architecture", "dependency", "reuse", "e2e", "static-analysis",
+// "performance", "cve", "license", "secrets". An empty verifications list
+// runs the defaults (build, test, security, architecture, dependency, reuse,
+// e2e, static-analysis, performance) — the compliance checks (cve/license/
+// secrets) run ONLY when explicitly requested. Ordering of the aggregated
+// result is fixed and deterministic.
 func (e *Engine) Verify(types []string) verdict.VerificationResult {
 	start := time.Now()
 	defer func() { metrics.Default().RecordVerification(time.Since(start)) }()
@@ -189,7 +198,7 @@ func (e *Engine) Verify(types []string) verdict.VerificationResult {
 
 	run := map[string]bool{}
 	if len(types) == 0 {
-		defaults := []string{"build", "test", "security", "architecture", "dependency", "e2e", "static-analysis", "performance"}
+		defaults := []string{"build", "test", "security", "architecture", "dependency", "reuse", "e2e", "static-analysis", "performance"}
 		// CI is included in "run all" only when an adapter is configured, so
 		// a missing adapter never fails or changes today's behavior.
 		if e.CIAdapter != nil {
@@ -218,6 +227,8 @@ func (e *Engine) Verify(types []string) verdict.VerificationResult {
 				run["architecture"] = true
 			case strings.Contains(t, "depend"), strings.Contains(t, "dep"):
 				run["dependency"] = true
+			case strings.Contains(t, "reuse"):
+				run["reuse"] = true
 			case strings.Contains(t, "e2e"), strings.Contains(t, "end-to-end"):
 				run["e2e"] = true
 			case strings.Contains(t, "static"), strings.Contains(t, "analysis"), strings.Contains(t, "vet"), strings.Contains(t, "lint"):
@@ -244,6 +255,10 @@ func (e *Engine) Verify(types []string) verdict.VerificationResult {
 	}
 	if run["dependency"] {
 		res.Dependency = e.VerifyDependency("")
+	}
+	if run["reuse"] {
+		reuseRes := e.VerifyReuse()
+		res.Reuse = &reuseRes
 	}
 	if run["e2e"] {
 		res.E2ETests = e.VerifyE2ETests()
@@ -416,6 +431,18 @@ func summarizeChecks(res *verdict.VerificationResult) string {
 			add("dependency", verdict.OkWord(d.OK))
 		}
 	}
+	if r := res.Reuse; r != nil {
+		switch {
+		case r.Skipped != "":
+			// Informational only (a clean tree is the normal state): never a
+			// verdict downgrade, but still visible in the summary.
+			add("reuse", "SKIPPED "+r.Skipped)
+		case len(r.Findings) > 0:
+			add("reuse", "WARN")
+		default:
+			add("reuse", verdict.OkWord(r.OK))
+		}
+	}
 	if e := res.E2ETests; e != nil {
 		if e.Status == verdict.StatusSkipped {
 			add("e2e", "SKIPPED "+verdict.FirstLine(e.Output))
@@ -424,7 +451,11 @@ func summarizeChecks(res *verdict.VerificationResult) string {
 		}
 	}
 	if s := res.StaticAnalysis; s != nil {
-		add("static-analysis", verdict.OkWord(s.OK))
+		if s.Status == verdict.StatusSkipped {
+			add("static-analysis", "SKIPPED "+verdict.FirstLine(s.Output))
+		} else {
+			add("static-analysis", verdict.OkWord(s.OK))
+		}
 	}
 	if p := res.Performance; p != nil {
 		add("performance", verdict.OkWord(p.OK))
@@ -463,10 +494,15 @@ func summarizeChecks(res *verdict.VerificationResult) string {
 }
 
 // testStatus renders one test check's status: "PASS"/"FAIL" from OK, or
-// "SKIPPED <reason>" when the set was not executed.
+// "SKIPPED <reason>" when the set was not executed (F3: a no-runner skip
+// renders SKIPPED too — it must never read as a pass), or "WARN" for a
+// diagnostic-only run (zero failed tests).
 func testStatus(t *verdict.TestResult) string {
-	if t.Status == verdict.StatusSkipped {
+	switch t.Status {
+	case verdict.StatusSkipped, verdict.StatusNoRunner:
 		return "SKIPPED " + verdict.FirstLine(t.Output)
+	case verdict.StatusWarn:
+		return "WARN"
 	}
 	return verdict.OkWord(t.OK)
 }
@@ -555,8 +591,10 @@ func (e *Engine) VerifyCI() verdict.CIResult {
 // (or KERN_VERIFY_TEST) as a shell command string. The default Go suite runs
 // in short mode (`go test -v -short ./...`) — the fast agent-safe default —
 // unless the engine was switched to the complete suite via FullTests/
-// WithFullTests (P1). PASS/FAIL/SKIP counts are only parsed for `go test -v`
-// output; other runners report OK from the exit status.
+// WithFullTests (P1). PASS/FAIL/SKIP counts are parsed for `go test -v`
+// output and for a pytest-style final summary line (F3: a detected runner
+// counts TESTS, not suites); other runners report OK from the exit status,
+// and a non-zero exit with zero failed tests is a WARN diagnostic (F3).
 func (e *Engine) VerifyTests() *verdict.TestResult {
 	res := &verdict.TestResult{Package: "./..."}
 	if pkgs := e.testPackages; len(pkgs) > 0 {
@@ -583,6 +621,7 @@ func (e *Engine) VerifyTests() *verdict.TestResult {
 		// instead of a false FAIL.
 		if c.Cmd == "npm" && !npmHasTestScript(e.root) {
 			res.OK = true
+			res.Status = verdict.StatusNoRunner
 			res.Output = verdict.SkipPrefix + "package.json has no test script"
 			res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 			return res
@@ -592,8 +631,12 @@ func (e *Engine) VerifyTests() *verdict.TestResult {
 		// suite to run. The `go test ./...` default is invalid outside a
 		// module ("directory prefix . does not contain main module"), so an
 		// absent suite reports a clean skip — never a false FAIL (F1;
-		// mirrors the npm no-test-script skip above).
+		// mirrors the npm no-test-script skip above). F3: the skip is
+		// stamped StatusNoRunner so the phase renders SKIPPED and the
+		// verdict folds to WARN — a vacuous PASS over an unmeasured suite
+		// is dishonest.
 		res.OK = true
+		res.Status = verdict.StatusNoRunner
 		res.Output = verdict.SkipPrefix + "no test runner detected (root has no go.mod)"
 		res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 		return res
@@ -604,6 +647,21 @@ func (e *Engine) VerifyTests() *verdict.TestResult {
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "test", sr.Output, sr.OK)
 	res.Duration = sr.Duration
 	res.OK = sr.OK
+	foldTestOutcome(res, sr)
+	res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
+	return res
+}
+
+// foldTestOutcome folds a raw test-runner outcome into res: the `go test -v`
+// "--- PASS/FAIL/SKIP" lines first, then — when nothing go-style was found —
+// a pytest-style final summary line so a detected runner counts TESTS, never
+// "1" for the whole suite (F3). A non-zero exit with ZERO failed tests is a
+// diagnostic (go vet / compile error surfaced before any test executed),
+// never a test failure: the tests phase may only FAIL when failed>0, so it is
+// stamped StatusWarn (verdict WARN, exit 0) — except the sandbox's fail-closed
+// isolation refusal, which markIsolationSkipped converts to a clean SKIPPED
+// downstream and must keep its !OK signature.
+func foldTestOutcome(res *verdict.TestResult, sr *sandbox.Result) {
 	for _, line := range strings.Split(sr.Output, "\n") {
 		switch {
 		case strings.HasPrefix(line, "--- PASS"):
@@ -614,14 +672,60 @@ func (e *Engine) VerifyTests() *verdict.TestResult {
 			res.Skipped++
 		}
 	}
+	if res.Passed == 0 && res.Failed == 0 && res.Skipped == 0 {
+		if p, f, s, ok := parsePytestSummary(sr.Output); ok {
+			res.Passed, res.Failed, res.Skipped = p, f, s
+		}
+	}
 	if sr.OK && res.Passed == 0 && res.Failed == 0 {
 		res.Passed = 1
 	}
 	if !sr.OK && res.Failed == 0 && strings.TrimSpace(res.Output) == "" && sr.Err != nil {
 		res.Output = sr.Err.Error()
 	}
-	res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
-	return res
+	if !sr.OK && res.Failed == 0 && !strings.Contains(res.Output, "refusing to run unisolated") {
+		res.OK = true
+		res.Status = verdict.StatusWarn
+	}
+}
+
+// parsePytestSummary extracts TEST counts from a pytest final summary line —
+// the verbose "=== 490 passed, 2 failed in 3.2s ===" form or the -q
+// "2 passed in 0.01s" form. found reports whether such a line was
+// recognised (F3: count tests, not suites).
+func parsePytestSummary(output string) (passed, failed, skipped int, found bool) {
+	for _, line := range strings.Split(output, "\n") {
+		// Tolerate the "====" border of the verbose form.
+		t := strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "="))
+		if !strings.Contains(t, " passed") && !strings.Contains(t, " failed") {
+			continue
+		}
+		var p, f, s int
+		matched := false
+		every := true
+		for _, part := range strings.Split(t, ",") {
+			var n int
+			var kind string
+			if _, err := fmt.Sscanf(strings.TrimSpace(part), "%d %s", &n, &kind); err != nil {
+				every = false
+				break
+			}
+			switch {
+			case strings.HasPrefix(kind, "passed"):
+				p = n
+				matched = true
+			case strings.HasPrefix(kind, "failed"), strings.HasPrefix(kind, "error"):
+				f += n
+				matched = true
+			case strings.HasPrefix(kind, "skipped"), strings.HasPrefix(kind, "xfailed"), strings.HasPrefix(kind, "xpassed"):
+				s += n
+			}
+		}
+		if every && matched {
+			passed, failed, skipped, found = p, f, s, true
+		}
+	}
+	return
 }
 
 // testArgs returns the default `go test` arguments for the engine's current
@@ -721,6 +825,27 @@ func (e *Engine) VerifyStaticAnalysis() *verdict.StaticAnalysisResult {
 func (e *Engine) runStaticAnalysis(cmd string, args []string, res *verdict.StaticAnalysisResult) {
 	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
 	res.Duration = sr.Duration
+	reason := foldStaticAnalysisOutcome(res, sr)
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "static-analysis", sr.Output, res.OK)
+	if reason != "" {
+		// The tool never executed — surface the did-not-run reason FIRST so
+		// the SKIPPED render and the summary explain why, instead of a bare
+		// "static-analysis: FAIL tool=go vet findings=0" (an unmeasured run
+		// must neither claim PASS nor false-FAIL).
+		res.Output = reason + "\n" + res.Output
+	}
+}
+
+// foldStaticAnalysisOutcome folds a raw linter-run outcome into res:
+// non-empty, non-#-prefixed output lines are findings; OK requires a clean
+// exit AND no findings. When the run failed at EXECUTION level — the sandbox
+// could not execute the tool at all (Err non-empty, or a non-zero exit with
+// no tool output and zero findings) — the phase is stamped StatusSkipped and
+// the SKIPPED reason is returned ("" when the tool executed normally). A
+// did-not-run must never claim a clean PASS nor a false FAIL: its !OK says
+// nothing about the code. Genuine tool findings (nonzero findings or tool
+// output) keep today's FAIL semantics.
+func foldStaticAnalysisOutcome(res *verdict.StaticAnalysisResult, sr *sandbox.Result) string {
 	for _, line := range strings.Split(sr.Output, "\n") {
 		if line = strings.TrimSpace(line); line == "" {
 			continue
@@ -730,7 +855,16 @@ func (e *Engine) runStaticAnalysis(cmd string, args []string, res *verdict.Stati
 		}
 	}
 	res.OK = sr.OK && len(res.Findings) == 0
-	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "static-analysis", sr.Output, res.OK)
+	if !sr.OK && len(res.Findings) == 0 && (sr.Err != nil || (sr.ExitCode != 0 && strings.TrimSpace(sr.Output) == "")) {
+		res.Status = verdict.StatusSkipped
+		errText := "unknown error"
+		if sr.Err != nil {
+			errText = sr.Err.Error()
+		}
+		return fmt.Sprintf("static-analysis not executed: %s could not run (exit %d): %s; ensure %s is installed and runnable",
+			res.Tool, sr.ExitCode, errText, res.Tool)
+	}
+	return ""
 }
 
 // runGofmtBaseline runs the module-less static-analysis fallback: per-file
@@ -950,41 +1084,81 @@ func (e *Engine) VerifySecurity() *verdict.SecurityResult {
 		return res
 	}
 	res.Count = len(findings)
+	// Triage layer (see suppress.go): merge the compiled-in defaults with
+	// the optional user file .kern/verify-suppressions.json, then mark
+	// matching findings suppressed. A suppressed finding is still reported
+	// (marked [suppressed] with its reason) but never blocks the check and
+	// is excluded from the Critical/High/Low risk ladder, so the counts
+	// reflect only live problems. Count stays the raw total (including
+	// suppressed) so the report shows the full picture.
+	reg := loadSuppressionRegistry(e.root)
+	unsuppressedCritical := 0
 	for _, f := range findings {
-		res.Findings = append(res.Findings, verdict.Finding{
-			File:     f.File,
-			Line:     f.Line,
-			Rule:     f.Rule,
-			Severity: f.Severity,
-			Message:  f.Message,
-			Snippet:  f.Snippet,
-		})
+		vf := verdict.Finding{
+			File:    f.File,
+			Line:    f.Line,
+			Rule:    f.Rule,
+			Message: f.Message,
+			Snippet: f.Snippet,
+		}
+		// Map sec severities (error/warning/info) onto the risk ladder so a
+		// finding's rendered [severity] label matches the summary counts
+		// (critical/high/low) — previously the raw sec severity leaked into
+		// the finding ("[info]" next to a "low=1" summary). The raw severity
+		// still travels on the evidence claim and the eventbus payload below.
+		switch f.Severity {
+		case string(secscan.SeverityError):
+			vf.Severity = "critical"
+		case string(secscan.SeverityWarning):
+			vf.Severity = "high"
+		case string(secscan.SeverityInfo):
+			vf.Severity = "low"
+		default:
+			vf.Severity = f.Severity
+		}
+		reason, suppressed := reg.Match(f)
+		if suppressed {
+			vf.Suppressed = true
+			vf.SuppressionReason = reason
+			res.Suppressed++
+		} else {
+			// Map sec severities (error/warning/info) onto the risk ladder.
+			switch f.Severity {
+			case string(secscan.SeverityError):
+				res.Critical++
+				unsuppressedCritical++
+			case string(secscan.SeverityWarning):
+				res.High++
+			case string(secscan.SeverityInfo):
+				res.Low++
+			}
+		}
+		res.Findings = append(res.Findings, vf)
 		// Emit an evidence-backed claim per finding through the evidence
 		// factory so security findings flow into the result's claim set.
 		res.Claims = append(res.Claims, evidence.FromSecurityFinding(f))
-		// Map sec severities (error/warning/info) onto the risk ladder.
-		switch f.Severity {
-		case string(secscan.SeverityError):
-			res.Critical++
-		case string(secscan.SeverityWarning):
-			res.High++
-		case string(secscan.SeverityInfo):
-			res.Low++
-		}
 		// Emit a security.finding event per finding so the bus carries
 		// individual findings (not just the aggregate) to webhooks/audit.
 		if e.bus != nil {
+			payload := map[string]string{"rule": f.Rule, "severity": f.Severity, "message": f.Message}
+			if suppressed {
+				payload["suppressed"] = "true"
+				payload["suppression_reason"] = reason
+			}
 			e.bus.Publish(eventbus.Event{
 				Kind:    eventbus.SecurityFinding,
 				Source:  "verification",
 				Subject: fmt.Sprintf("%s:%d", f.File, f.Line),
-				Payload: map[string]string{"rule": f.Rule, "severity": f.Severity, "message": f.Message},
+				Payload: payload,
 			})
 		}
 	}
-	// A critical finding fails (blocks) the security check; lower severities
-	// are non-blocking warnings surfaced by verdict aggregation.
-	res.OK = res.Critical == 0
+	// Only an UNSUPPRESSED critical (error) finding fails (blocks) the
+	// security check; lower severities are non-blocking warnings surfaced by
+	// verdict aggregation. When every finding is suppressed the check passes
+	// with the triage visible in the report (Count > 0 renders WARN at the
+	// verdict level — a note, never a silent pass).
+	res.OK = unsuppressedCritical == 0
 	return res
 }
 
@@ -1116,6 +1290,17 @@ func (e *Engine) VerifyDependency(target string) *verdict.DependencyResult {
 			// Could not run the check: never fabricate a PASS.
 			res.OK = false
 		}
+	}
+
+	// New-dependency advisory (rung 5): diff the working-tree manifests
+	// against HEAD and warn on newly added dependency paths. Advisory by
+	// design — warnings never flip OK to false. The diff's skip note applies
+	// ONLY when the manifest check did not already skip (its reason takes
+	// precedence), and never fails the check.
+	warns, diffSkipped := diffManifestDeps(e.root)
+	res.Warnings = append(res.Warnings, warns...)
+	if diffSkipped != "" && res.Skipped == "" {
+		res.Skipped = diffSkipped
 	}
 	return res
 }

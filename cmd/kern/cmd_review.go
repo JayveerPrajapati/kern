@@ -25,6 +25,9 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
+
+	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
+	"path/filepath"
 )
 
 func runAnalyze(cmd string, rest []string) {
@@ -187,25 +190,6 @@ func runAnalyze(cmd string, rest []string) {
 
 }
 
-func runRisk(rest []string) {
-	f, args := parseFlagsOrDie(rest)
-	root := projectRoot(f)
-	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern risk <change> [--root ROOT]")
-	}
-	change := args[0]
-	p, err := app.New(root)
-	if err != nil {
-		fatal("Risk: %v", err)
-	}
-	_, text, err := p.Risk(change)
-	if err != nil {
-		fatal("Risk: %v", err)
-	}
-	fmt.Print(text)
-
-}
-
 func runExecute(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -264,45 +248,6 @@ func joinVerbPositionals(args []string) []string {
 		return []string{strings.Join(args, " ")}
 	}
 	return args
-}
-
-func runWhatIf(cmd string, rest []string) {
-	f, args := parseFlagsOrDie(rest)
-	root := projectRoot(f)
-	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern %s <change> [kind] [new-target] [--root ROOT]", cmd)
-	}
-	args = joinVerbPositionals(args)
-	change := args[0]
-	kind := string(app.ParseChangeKind(change))
-	if len(args) > 1 && args[1] != "" {
-		kind = args[1]
-	}
-	newTarget := ""
-	if len(args) > 2 && args[2] != "" {
-		newTarget = args[2]
-	}
-	p, err := app.New(root)
-	if err != nil {
-		fatal("WhatIf: %v", err)
-	}
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(f.task != "")
-	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
-	if err != nil {
-		fatal("WhatIf: %v", err)
-	}
-	if f.json {
-		printJSON(map[string]any{
-			"change":  change,
-			"kind":    kind,
-			"task_id": t.ID,
-			"state":   t.State,
-			"impact":  t.ImpactReport,
-		})
-		return
-	}
-	fmt.Print(text)
-
 }
 
 func runImpact(rest []string) {
@@ -507,6 +452,24 @@ func verifySkippedReasons(v *verdict.VerificationResult) []string {
 	return reasons
 }
 
+// verifyTestsDetail returns the detail lines printed after the tests status
+// line in the default `kern verify` render (F13): nothing for a green run
+// (passing-test spam suppressed), the failing tests' excerpts for a failed
+// one, and a pointer to the audit log that holds the FULL output whenever
+// the engine wrote one.
+func verifyTestsDetail(t *verdict.TestResult) []string {
+	var lines []string
+	if !t.OK && strings.TrimSpace(t.Output) != "" {
+		if x := verdict.TestFailureExcerpt(t.Output, 40); x != "" {
+			lines = append(lines, x)
+		}
+	}
+	if t.LogPath != "" {
+		lines = append(lines, "full log: "+t.LogPath)
+	}
+	return lines
+}
+
 // containsVerifyTestType reports whether the requested verify types include
 // the test step. The substring match mirrors the engine's type dispatcher
 // (test/unit/integration), so `--types "build,unit"` and positional
@@ -522,7 +485,108 @@ func containsVerifyTestType(types []string) bool {
 	return false
 }
 
+// dropVerifyTestTypes removes the test-step entries (test/unit/integration)
+// from a verify types list — the --fast build-only fallback when there are
+// no changed Go packages to test. Explicit compliance checks added via
+// --cve/--license/--secrets survive. The substring match mirrors
+// containsVerifyTestType, so the two can never disagree about what counts
+// as the test step.
+func dropVerifyTestTypes(types []string) []string {
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		tl := strings.ToLower(strings.TrimSpace(t))
+		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// isTestdataPath reports whether path lives under a testdata/ directory
+// (fixtures — they never run in the test step, so their changes must not
+// scope a verify run to a package that only touched fixtures).
+func isTestdataPath(path string) bool {
+	return path == "testdata" || strings.HasPrefix(path, "testdata/") || strings.Contains(path, "/testdata/")
+}
+
+// changedSincePackages derives the Go packages whose files changed since a
+// git ref (committed after the ref, uncommitted, or untracked), for
+// `kern verify --changed-since <ref>`. It mirrors verification.ChangedTestPackages'
+// package derivation (each changed .go file's dir → ./<dir>, root-package
+// files → ./) over the UNION of `git diff --name-only <ref> --` (tracked
+// changes since the ref, including uncommitted ones) and
+// `git status --porcelain -uall` (untracked files). testdata/ paths are
+// skipped, and files that no longer exist on disk (deleted) are dropped so
+// the scope never names a nonexistent package. An invalid ref returns an
+// error (the caller reports it as a usage error, exit 2); an empty result
+// means "no Go changes since the ref".
+func changedSincePackages(root, ref string) ([]string, error) {
+	// Validate the ref up front: a typo'd ref would otherwise read as "no
+	// changes" (git diff against an empty tree) and silently run the full
+	// suite — the caller must reject it as a usage error instead.
+	if _, err := mcp.GitOutput(root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+		return nil, fmt.Errorf("invalid git ref %q", ref)
+	}
+	out, err := mcp.GitOutput(root, "diff", "--name-only", ref, "--")
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			files[p] = true
+		}
+	}
+	status, err := mcp.GitOutput(root, "status", "--porcelain", "-uall")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		// strip rename "old -> new": the new path is the one that exists
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
+		}
+		files[path] = true
+	}
+	seen := map[string]bool{}
+	for path := range files {
+		if !strings.HasSuffix(path, ".go") {
+			continue
+		}
+		if isTestdataPath(path) {
+			continue
+		}
+		// Deleted files: the diff lists them, but a package whose .go files
+		// no longer exist on disk must not be part of the scope.
+		if _, serr := os.Stat(filepath.Join(root, filepath.FromSlash(path))); serr != nil {
+			continue
+		}
+		dir := filepath.Dir(filepath.ToSlash(path))
+		if dir == "." {
+			dir = "" // root-package files
+		}
+		pkg := "./" + dir
+		if !seen[pkg] {
+			seen[pkg] = true
+		}
+	}
+	pkgs := make([]string, 0, len(seen))
+	for pkg := range seen {
+		pkgs = append(pkgs, pkg)
+	}
+	sort.Strings(pkgs)
+	return pkgs, nil
+}
+
 func runVerify(rest []string) {
+	if runVerifyCommand(rest) {
+		return
+	}
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -740,8 +804,10 @@ func runVerify(rest []string) {
 	// instead, consistent with search/explore/impact (audit L1). The mode flags
 	// above and the compliance trio below are explicit requests and keep working
 	// with no positional.
-	if f.types == "" && len(args) == 0 && !f.cve && !f.license && !f.secrets {
-		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]")
+	if f.types == "" && len(args) == 0 && !f.fast && !f.cve && !f.license && !f.secrets && f.changedSince == "" {
+		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]\n"+
+			"  no checks requested — try 'kern verify build,test', or run your own gate with\n"+
+			"  'kern verify --command \"go test ./...\"'; valid types: %s", verifyTypeList())
 	}
 	// Two forms share this subcommand. The high-level form is
 	// `kern verify <types>` (or `kern verify` with no positional, defaulting
@@ -769,6 +835,16 @@ func runVerify(rest []string) {
 			if !validVerifyType(t) {
 				fatalUsage("invalid --types value '%s' (valid: %s)", t, verifyTypeList())
 			}
+		}
+		// --fast: pre-commit tier — build + changed-package tests only.
+		// It skips security/architecture/dependency/reuse/e2e/static/perf
+		// and keeps the -short suite (the default). --fast wins over any
+		// explicit type list; the opt-in compliance flags (--cve/--license/
+		// --secrets) below still append. --full beats --fast: when both are
+		// given, --fast is ignored entirely (full suite, default scope).
+		fastMode := f.fast && !f.full
+		if fastMode {
+			types = []string{"build", "test"}
 		}
 		// Opt-in compliance checks (--cve/--license/--secrets): each flag
 		// appends its check to the requested types — the compliance trio runs
@@ -807,6 +883,8 @@ func runVerify(rest []string) {
 			} else if f.full {
 				verifyOpts = append(verifyOpts, verification.FullTests(true))
 				fmt.Println("full suite (short mode: kern verify -short)")
+			} else if fastMode {
+				fmt.Println("fast mode (build + changed tests)")
 			} else {
 				fmt.Println("short mode (full suite: kern verify --full)")
 			}
@@ -816,6 +894,50 @@ func runVerify(rest []string) {
 			fatal("%v — run kern index to rebuild it", perr)
 		}
 		ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+		// --changed: scope the test step to packages with uncommitted
+		// changes vs HEAD (incremental verification; the 2-minute full
+		// suite stays the default for --full). --fast implies the same
+		// scoping (fastMode is false when --full is present, so the
+		// combination stays a --full run). No changed Go packages: --changed
+		// falls back to the default scope; the fast tier falls back to
+		// build-only — never a silent empty run.
+		if (f.changed || fastMode) && containsVerifyTestType(types) {
+			if pkgs := verification.ChangedTestPackages(root); len(pkgs) > 0 {
+				verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
+				if !f.json {
+					fmt.Printf("changed packages (%d): %s\n", len(pkgs), strings.Join(pkgs, " "))
+				}
+			} else if fastMode {
+				types = dropVerifyTestTypes(types)
+				if !f.json {
+					fmt.Println("no changed Go packages — running build only")
+				}
+			} else if !f.json {
+				fmt.Println("no changed Go packages — running the default scope")
+			}
+		}
+		// --changed-since <ref>: CI-oriented scoping — verify exactly the
+		// packages touched since a git ref (committed after the ref,
+		// uncommitted, or untracked .go files), with the static-analysis
+		// check (vet) added so the run covers build+vet+test for the
+		// changed surface. A ref with no Go changes since it prints
+		// NO-GO-CHANGES and exits 0 — a clean diff is a success for CI,
+		// never a fall-through to the full ./... suite.
+		if f.changedSince != "" {
+			pkgs, err := changedSincePackages(root, f.changedSince)
+			if err != nil {
+				fatalUsage("verify: %v", err)
+			}
+			if len(pkgs) == 0 {
+				fmt.Printf("NO-GO-CHANGES since %s — nothing to verify\n", f.changedSince)
+				return
+			}
+			verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
+			types = append(types, "static-analysis")
+			if !f.json {
+				fmt.Printf("changed packages since %s (%d): %s\n", f.changedSince, len(pkgs), strings.Join(pkgs, " "))
+			}
+		}
 		verifyStart := time.Now()
 		_, v, err := ts.Verify(types, verifyOpts...)
 		// CLI telemetry: the in-process recorder is loaded/saved by main()
@@ -880,13 +1002,29 @@ func runVerify(rest []string) {
 			}
 		}
 		if v.UnitTests != nil {
-			st := "FAIL"
-			if v.UnitTests.OK {
-				st = "OK"
-			}
-			fmt.Printf("tests: passed=%d failed=%d skipped=%d %s (duration %s)\n", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, st, v.UnitTests.Duration)
-			if out := clipText(v.UnitTests.Output, 500); out != "" {
-				fmt.Println(out)
+			switch {
+			case v.UnitTests.Status == verdict.StatusSkipped, v.UnitTests.Status == verdict.StatusNoRunner:
+				// F3: a not-executed suite reports SKIPPED, never "OK passed=0".
+				fmt.Printf("tests: SKIPPED %s\n", verdict.FirstLine(v.UnitTests.Output))
+			case v.UnitTests.Status == verdict.StatusWarn:
+				// F3: a diagnostic-only run (zero failed tests) reports WARN.
+				fmt.Printf("tests: WARN passed=%d failed=%d skipped=%d (duration %s)\n", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration)
+				if out := clipText(v.UnitTests.Output, 500); out != "" {
+					fmt.Println(out)
+				}
+			default:
+				st := "FAIL"
+				if v.UnitTests.OK {
+					st = "OK"
+				}
+				fmt.Printf("tests: passed=%d failed=%d skipped=%d %s (duration %s)\n", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, st, v.UnitTests.Duration)
+				// F13: the default render shows counts plus the FAILING
+				// tests' excerpts only — passing-test spam (=== RUN /
+				// --- PASS lines) is suppressed, and the audit log holds
+				// the full output for anyone who needs it.
+				for _, ln := range verifyTestsDetail(v.UnitTests) {
+					fmt.Println(ln)
+				}
 			}
 		}
 		if v.Security != nil {
@@ -894,12 +1032,20 @@ func runVerify(rest []string) {
 			if v.Security.OK {
 				st = "OK"
 			}
-			fmt.Printf("security: %s findings=%d critical=%d high=%d low=%d\n", st, v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
+			detail := fmt.Sprintf("security: %s findings=%d critical=%d high=%d low=%d", st, v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
+			if v.Security.Suppressed > 0 {
+				detail += fmt.Sprintf(" (%d suppressed)", v.Security.Suppressed)
+			}
+			fmt.Println(detail)
 			for i, fd := range v.Security.Findings {
 				if i >= 10 {
 					break
 				}
-				fmt.Printf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message)
+				if fd.Suppressed {
+					fmt.Printf("  - [suppressed] %s:%d [%s] %s: %s — %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message, fd.SuppressionReason)
+				} else {
+					fmt.Printf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message)
+				}
 			}
 		}
 		if v.Architecture != nil {
@@ -1139,7 +1285,7 @@ func runChanges(cmd string, rest []string) {
 			// not silently dropped for the markdown view.
 			printJSON(report)
 			if report.TotalRisk > 0 {
-				fatalPolicy("review: %d changed file(s) with risk (total %.1f) — exit 3 (policy family); see JSON output above", len(report.Changes), report.TotalRisk)
+				fatalFindings("review: %d changed file(s) with risk (total %.1f) — exit 1 (findings); see JSON output above", len(report.Changes), report.TotalRisk)
 			}
 			return
 		}
@@ -1158,7 +1304,7 @@ func runChanges(cmd string, rest []string) {
 		}
 		fmt.Println(out)
 		if report.TotalRisk > 0 {
-			fatalPolicy("%d changed file(s) with risk (total %.1f); exit 3 (policy family)", len(report.Changes), report.TotalRisk)
+			fatalFindings("%d changed file(s) with risk (total %.1f); exit 1 (findings)", len(report.Changes), report.TotalRisk)
 		}
 		return
 	}
@@ -1166,13 +1312,13 @@ func runChanges(cmd string, rest []string) {
 	if f.json {
 		printJSON(report)
 		if report.TotalRisk > 0 {
-			fatalPolicy("changes: %d changed file(s) with risk (total %.1f) — exit 3 (policy family); see JSON output above", len(report.Changes), report.TotalRisk)
+			fatalFindings("changes: %d changed file(s) with risk (total %.1f) — exit 1 (findings); see JSON output above", len(report.Changes), report.TotalRisk)
 		}
 		return
 	}
 	fmt.Println(intel.RenderChanges(report))
 	if report.TotalRisk > 0 {
-		fatalPolicy("%d changed file(s) with risk (total %.1f); exit 3 (policy family)", len(report.Changes), report.TotalRisk)
+		fatalFindings("%d changed file(s) with risk (total %.1f); exit 1 (findings)", len(report.Changes), report.TotalRisk)
 	}
 
 }

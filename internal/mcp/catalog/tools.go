@@ -323,12 +323,12 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Cacheable:     true,
 		Description:   "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Pass tier=full for the verbatim file, tier=folded for signatures. Use before reading files in large codebases.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"path": strProp("Absolute or relative path of the file to summarize"),
 			"root": strProp("Project root; when set, path must stay inside it (stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"tier": strProp("'summary' (default), 'full', or 'folded'"),
 			"etag": strProp("Conditional-fetch etag from a previous response"),
-		}, []string{"path"}),
+		}), []string{"path"}),
 	},
 	{
 		Name: "kern_fit_context", Category: CategoryContext,
@@ -379,10 +379,10 @@ var All = []Tool{
 		Phase:         "explore",
 		RiskLevel:     "low",
 		Description:   "Session onboarding digest: the project's conventions, layout, entry points and gotchas distilled from the index, docs, history.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"root":       strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"max_output": strProp("Raise the MCP output sandbox cap for this call (bytes; 0 disables)"),
-		}, nil),
+		}), nil),
 	},
 	{
 		Name: "kern_context_budget", Category: CategoryContext,
@@ -426,11 +426,11 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Cacheable:     true,
 		Description:   "AST-level symbol search across a Go project: patterns like 'func greet', 'type *User*'.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"pattern": strProp("Symbol pattern. Prefixes: func, method, struct, interface, type, const, var. '*' wildcards supported"),
 			"root":    strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"limit":   strProp("Max results (default 50)"),
-		}, []string{"pattern"}),
+		}), []string{"pattern"}),
 	},
 	{
 		Name: "kern_frameworks", Category: CategoryFramework,
@@ -476,12 +476,12 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Cacheable:     true,
 		Description:   "Ranked free-text symbol search: symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"query":    strProp("Free-text query (symbol name, path fragment, or partial name)"),
 			"root":     strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"limit":    strProp("Max results (default 20)"),
 			"semantic": strProp("When 'true', re-rank by Ollama dense embeddings (requires embedding model)"),
-		}, []string{"query"}),
+		}), []string{"query"}),
 	},
 	{
 		Name: "kern_prose", Category: CategoryGraph,
@@ -967,7 +967,7 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Cacheable:     true,
 		Description:   "One-call symbol exploration: definition source, callers, callees, and blast radius up to N hops; optional why-rationale.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"symbol":         strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
 			"root":           strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"depth":          strProp("Cap blast radius to N hops from the symbol (default 2, 0 = unlimited)"),
@@ -981,7 +981,7 @@ var All = []Tool{
 			"min_confidence": strProp("Prune callers/callees below this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: keep all)"),
 			"max_tokens":     strProp("Token budget for source + callee skeletons (default: verbatim, no skeletons)"),
 			"etag":           strProp("Conditional-fetch etag from a previous response"),
-		}, []string{"symbol"}),
+		}), []string{"symbol"}),
 	},
 	{
 		Name: "kern_graph", Category: CategoryGraph,
@@ -1096,12 +1096,13 @@ var All = []Tool{
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "plan",
 		RiskLevel:     "medium",
-		Description:   "Analyze a proposed change or symbol and return a review report under a lens (security, performance, maintainability, architecture) with the persisted task ID.",
+		Description:   "Analyze a proposed change or symbol and return a review report under a lens (security, performance, maintainability, architecture) with the task ID (persisted only when persist_task=true).",
 		InputSchema: schema(map[string]any{
-			"root":    strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
-			"change":  strProp("The change/symbol to analyze, e.g. 'Add a Greet function' or 'helper'"),
-			"lens":    strProp("Review lens: security, performance, maintainability, architecture, balanced, or a combined preset."),
-			"profile": strProp("Output profile: machine-json, action-first, human-readable, or debug (default human-readable)."),
+			"root":         strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
+			"change":       strProp("The change/symbol to analyze, e.g. 'Add a Greet function' or 'helper'"),
+			"lens":         strProp("Review lens: security, performance, maintainability, architecture, balanced, or a combined preset."),
+			"profile":      strProp("Output profile: machine-json, action-first, human-readable, or debug (default human-readable)."),
+			"persist_task": map[string]any{"type": "boolean", "description": "When true, persist the task record (default ephemeral)"},
 		}, []string{"change"}),
 	},
 	{
@@ -1111,8 +1112,9 @@ var All = []Tool{
 		RiskLevel:     "medium",
 		Description:   "Produce an implementation plan for a proposed change: affected files, dependencies, risks, required validation. Deterministic; no LLM.",
 		InputSchema: schema(map[string]any{
-			"root":   strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
-			"change": strProp("The change to plan, e.g. 'Add a Greet function to main.go'"),
+			"root":         strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
+			"change":       strProp("The change to plan, e.g. 'Add a Greet function to main.go'"),
+			"persist_task": map[string]any{"type": "boolean", "description": "When true, persist the task record (default ephemeral)"},
 		}, []string{"change"}),
 	},
 	{
@@ -1133,14 +1135,20 @@ var All = []Tool{
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "verify",
 		RiskLevel:     "medium",
-		Description:   "Verify a change with the unified engine (build, unit tests, security, architecture, dependency).",
-		InputSchema: schema(map[string]any{
+		Description:   "Verify a change with the unified engine (build, unit tests, security, architecture, dependency). fast=changed-scope build+tests; full=complete suite",
+		InputSchema: schema(outputProps(map[string]any{
 			"root":    strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"types":   strProp("Comma-separated checks: build,test,security,architecture,dependency,cve,license,secrets (default 'build')"),
+			"fast":    map[string]any{"type": "boolean", "description": "When true, run build + tests scoped to changed packages (fast tier)"},
+			"full":    map[string]any{"type": "boolean", "description": "When true, run the complete test suite (full beats fast)"},
 			"cve":     map[string]any{"type": "boolean", "description": "When true, run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)"},
 			"license": map[string]any{"type": "boolean", "description": "When true, classify module licenses from go.mod/vendor (deterministic, no network)"},
 			"secrets": map[string]any{"type": "boolean", "description": "When true, scan git history for committed secrets (masked snippets only)"},
-		}, nil),
+			"command": strProp("Optional: run YOUR build/test/lint command instead of the built-in checks; returns only the slice asked for via output"),
+			"output":  strProp("Command-mode slice: summary|failures|tail:N|lines:A-B|full (default summary)"),
+			"anchor":  strProp("Command-mode: re-slice a previously saved full run by its anchor id, no rerun"),
+			"timeout": strProp("Command-mode: timeout in seconds (default 120)"),
+		}), nil),
 	},
 	{
 		Name: "kern_incident", Category: CategoryIncident,
@@ -1175,10 +1183,11 @@ var All = []Tool{
 		RiskLevel:     "medium",
 		Description:   "Simulate the impact of a hypothetical change on the knowledge graph.",
 		InputSchema: schema(map[string]any{
-			"root":       strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
-			"change":     strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
-			"kind":       enumProp("Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol", "remove_symbol", "change_dependency", "add_symbol", "change_signature", "add_dependency", "remove_dependency", "rename_symbol", "split_service", "move_module", "change_infra"),
-			"new_target": strProp("For change_dependency: the symbol Target now depends on"),
+			"root":         strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
+			"change":       strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
+			"kind":         enumProp("Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol", "remove_symbol", "change_dependency", "add_symbol", "change_signature", "add_dependency", "remove_dependency", "rename_symbol", "split_service", "move_module", "change_infra"),
+			"new_target":   strProp("For change_dependency: the symbol Target now depends on"),
+			"persist_task": map[string]any{"type": "boolean", "description": "When true, persist the task record (default ephemeral)"},
 		}, []string{"change"}),
 	},
 	{
@@ -1187,13 +1196,14 @@ var All = []Tool{
 		Phase:         "plan",
 		RiskLevel:     "medium",
 		Description:   "Estimate the impact/blast radius of a change to a symbol.",
-		InputSchema: schema(map[string]any{
-			"root":       strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
-			"change":     strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
-			"kind":       enumProp("Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol", "remove_symbol", "change_dependency", "add_symbol", "change_signature", "add_dependency", "remove_dependency", "rename_symbol", "split_service", "move_module", "change_infra"),
-			"new_target": strProp("For change_dependency: the symbol Target now depends on"),
-			"risk":       strProp("When true, render the governance risk assessment (kern_risk contract) instead of the impact report"),
-		}, []string{"change"}),
+		InputSchema: schema(outputProps(map[string]any{
+			"root":         strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
+			"change":       strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
+			"kind":         enumProp("Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol", "remove_symbol", "change_dependency", "add_symbol", "change_signature", "add_dependency", "remove_dependency", "rename_symbol", "split_service", "move_module", "change_infra"),
+			"new_target":   strProp("For change_dependency: the symbol Target now depends on"),
+			"risk":         strProp("When true, render the governance risk assessment (kern_risk contract) instead of the impact report"),
+			"persist_task": map[string]any{"type": "boolean", "description": "When true, persist the task record (default ephemeral)"},
+		}), []string{"change"}),
 	},
 	{
 		Name: "kern_agents", Category: CategoryAgent,
@@ -1249,14 +1259,15 @@ var All = []Tool{
 		RiskLevel:     "medium",
 		Cacheable:     true,
 		Description:   "Single entry point: describe what you need in natural language; kern classifies and runs the right tool(s). Full catalog reachable through this router.",
-		InputSchema: schema(map[string]any{
+		InputSchema: schema(outputProps(map[string]any{
 			"request":  strProp("Natural-language request describing what you need from kern"),
 			"phase":    enumProp("Agent phase hint for routing; the advertised tool list is filtered server-wide via KERN_MCP_PHASE. Optional.", "explore", "plan", "edit", "verify"),
 			"agent_id": strProp("Agent identity for governed mode (P1.2): scopes results to what this agent may read; omit for raw mode."),
 			"task":     strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
 			"scope":    map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
 			"root":     strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
-		}, []string{"request"}),
+			"args":     map[string]any{"type": "object", "description": "Optional structured passthrough params, merged into the routed tool's arguments AFTER classification (explicit values win). Use it to deliver params the request text cannot carry — e.g. {\"path\": \"internal/x.go\"} for compact_file, {\"pattern\": \"...\"} for ast_search, {\"command\": \"...\"} for exec. Deterministic; no guessing."},
+		}), []string{"request"}),
 	},
 	{
 		Name: "kern_workflow", Category: CategoryTask,

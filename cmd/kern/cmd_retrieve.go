@@ -170,7 +170,7 @@ func runResolve(rest []string) {
 		}
 	}
 	if !ok {
-		fatal("Resolve: unknown handle %q (re-run kern retrieve to refresh the handle store)", args[0])
+		fatal("Resolve: unknown handle %q — kern resolve takes a HANDLE ID printed by 'kern retrieve' (e.g. the id in the L2/L3 output), NOT a symbol name. Run 'kern retrieve --symbol <name>' first to obtain one for this repo root.", args[0])
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {

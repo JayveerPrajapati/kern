@@ -349,8 +349,13 @@ func (eg *entityGraph) codeEndpoint(g *intel.Graph, ref string) (string, bool) {
 // candidates maps a user-provided symbol reference to every candidate symbol
 // node ID, in graph node order, exactly like the old resolveSymbolIDs single
 // scan: an exact node-ID match, a qualified-name match, a bare-name match, or
-// a "Type.Method" receiver match. An ambiguous bare name resolves to ALL
-// matching nodes so same-named symbols union their entity connections.
+// a "Type.Method" receiver match. A BARE reference (no dot) resolves to ALL
+// matching nodes so same-named symbols union their entity connections — the
+// user asked about the name, not a specific package. A QUALIFIED reference
+// ("pkg.Symbol", "Type.Method") is specific: it resolves via the ID,
+// qualified-name and receiver indices ONLY, never the bare-name union —
+// the impact overlay passes node IDs, and pooling a sibling definition's
+// entities (pkg1.Save claiming pkg2.Save's route) is the underlying bug.
 func (eg *entityGraph) candidates(symbol string) []string {
 	bare := symbol
 	receiver := ""
@@ -368,7 +373,9 @@ func (eg *entityGraph) candidates(symbol string) []string {
 		pos[p] = true
 	}
 	add(eg.qualIndex[symbol])
-	add(eg.nameIndex[bare])
+	if receiver == "" {
+		add(eg.nameIndex[bare]) // bare reference: union same-named symbols
+	}
 	if receiver != "" {
 		add(eg.recvIndex[symbol]) // "Receiver.Method"
 	}

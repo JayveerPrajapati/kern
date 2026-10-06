@@ -163,8 +163,8 @@ func TestVerifyAbsFileRefConfinedToRoot(t *testing.T) {
 }
 
 func TestVerifyNonExistentFileLineReportedMissing(t *testing.T) {
-	ix, root := build(t, map[string]string{"RealClass.java": "package com.inn.rcp;\nclass RealClass {\n  void run() {}\n}\n"})
-	text := "see FakeNonExistentClass.java:99 and RealClass.java:2 and RealClass.java:999"
+	ix, root := build(t, map[string]string{"UserService.java": "package com.example.service;\nclass UserService {\n  void run() {}\n}\n"})
+	text := "see FakeNonExistentClass.java:99 and UserService.java:2 and UserService.java:999"
 	rep := Sorted(Verify(ix, root, text))
 	if rep.OK {
 		t.Fatal("expected report to not be OK")
@@ -180,14 +180,14 @@ func TestVerifyNonExistentFileLineReportedMissing(t *testing.T) {
 		t.Fatalf("expected 'not found' in detail, got %q", fakeCheck.Detail)
 	}
 
-	realCheck := findFileCheck(rep, "RealClass.java:2")
+	realCheck := findFileCheck(rep, "UserService.java:2")
 	if realCheck == nil || !realCheck.Found {
-		t.Fatalf("expected RealClass.java:2 to be found, got %+v", realCheck)
+		t.Fatalf("expected UserService.java:2 to be found, got %+v", realCheck)
 	}
 
-	overflowCheck := findFileCheck(rep, "RealClass.java:999")
+	overflowCheck := findFileCheck(rep, "UserService.java:999")
 	if overflowCheck == nil || overflowCheck.Found {
-		t.Fatalf("expected RealClass.java:999 to be missing, got %+v", overflowCheck)
+		t.Fatalf("expected UserService.java:999 to be missing, got %+v", overflowCheck)
 	}
 	if !strings.Contains(overflowCheck.Detail, "exceeds file length") {
 		t.Fatalf("expected 'exceeds file length' in detail, got %q", overflowCheck.Detail)

@@ -30,3 +30,29 @@ func writeGuardScriptTo(dir string) (string, error) {
 func writeGuardScriptGlobal() (string, error) {
 	return writeGuardScriptTo(filepath.Join(globalHomeDir(), ".kern", "hooks"))
 }
+
+// wireGuardHook registers a single kern-guard PreToolUse hook group at path
+// via mergeHookGroups. event is the hooks-object key (agents disagree on
+// casing: Claude/Qwen/Qoder/Codex/Continue use "PreToolUse", Cursor/Copilot
+// "preToolUse"); matcher selects the built-in tools to gate; note is the
+// success Status text.
+func wireGuardHook(agent, event, matcher, path, note string) Status {
+	guardPath, err := writeGuardScriptGlobal()
+	if err != nil {
+		return Status{Agent: agent, Installed: false, Path: path, Note: err.Error()}
+	}
+	groups := map[string]any{
+		event: []any{
+			map[string]any{
+				"matcher": matcher,
+				"hooks": []any{
+					map[string]any{"type": "command", "command": guardPath},
+				},
+			},
+		},
+	}
+	if err := mergeHookGroups(path, groups); err != nil {
+		return Status{Agent: agent, Path: path, Note: err.Error()}
+	}
+	return Status{Agent: agent, Installed: true, Path: path, Note: note}
+}

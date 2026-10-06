@@ -72,6 +72,10 @@ func TestRunFailsClosedWithoutIsolation(t *testing.T) {
 	}
 	t.Setenv("KERN_ALLOW_UNISOLATED", "")
 	t.Setenv("KERN_ALLOW_NET", "")
+	// The nested (KERN_SANDBOX_ACTIVE=1) process env would trigger the inherit
+	// arm instead of the refusal this test pins — clear the marker so the
+	// fail-closed branch is exercised deterministically at any nesting level.
+	t.Setenv("KERN_SANDBOX_ACTIVE", "")
 	root := t.TempDir()
 	res := Run(context.Background(), root, "echo", []string{"hi"}, time.Second)
 	if res.Err == nil {
@@ -88,5 +92,45 @@ func TestRunFailsClosedWithoutIsolation(t *testing.T) {
 	res = Run(context.Background(), root, "echo", []string{"hi"}, time.Second)
 	if res.Err != nil && !strings.Contains(res.Err.Error(), "network isolation not available") {
 		t.Fatalf("unexpected error after opt-in: %v", res.Err)
+	}
+}
+
+// TestRunInheritsOuterSandboxWhenNested pins the nested-sandbox inherit
+// branch: when the availability probe reports unavailable (the `kern verify`
+// dogfood path — a nested sandbox-exec cannot apply a second Seatbelt
+// profile) but the process is already inside an active kern sandbox
+// (KERN_SANDBOX_ACTIVE=1, injected into every guarded child by
+// sandboxChildEnv), the run INHERITS the outer isolation instead of
+// refusing: it executes, notes the inheritance in its output, and records
+// Inherited+Isolated on the network policy. Without the marker, the same
+// unavailable probe must still fail closed (the pre-existing refusal).
+func TestRunInheritsOuterSandboxWhenNested(t *testing.T) {
+	old := isolationProbe
+	isolationProbe = func() bool { return false }
+	defer func() { isolationProbe = old }()
+	t.Setenv("KERN_ALLOW_UNISOLATED", "")
+	t.Setenv("KERN_ALLOW_NET", "")
+	root := t.TempDir()
+
+	t.Setenv("KERN_SANDBOX_ACTIVE", "1")
+	res := Run(context.Background(), root, "echo", []string{"hi"}, 10*time.Second)
+	if res.Err != nil {
+		t.Fatalf("nested run must inherit the outer sandbox, not refuse: %v", res.Err)
+	}
+	if !res.OK {
+		t.Fatalf("inherited run must succeed, got OK=false: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "inheriting outer network isolation") {
+		t.Fatalf("output must carry the inherit note, got: %q", res.Output)
+	}
+	if res.Network == nil || !res.Network.Inherited || !res.Network.Isolated {
+		t.Fatalf("network policy must record Inherited+Isolated, got: %+v", res.Network)
+	}
+
+	// Without the marker, the same unavailable probe must still fail closed.
+	t.Setenv("KERN_SANDBOX_ACTIVE", "")
+	res = Run(context.Background(), root, "echo", []string{"hi"}, 10*time.Second)
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "refusing to run unisolated") {
+		t.Fatalf("unmarked unavailable run must fail closed, got: %v", res.Err)
 	}
 }

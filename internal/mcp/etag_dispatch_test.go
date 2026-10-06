@@ -47,8 +47,9 @@ func TestConditionalFetchEtagOnEligibleResponse(t *testing.T) {
 	if !ok || e == "" {
 		t.Fatalf("eligible response must carry an etag, got %+v", resp)
 	}
-	// The served etag folds in the same effective budget the server used.
-	budget, err := mcpserve.CallOutputBudget(map[string]any{"root": root, "path": f})
+	// The served etag folds in the same effective budget the server used
+	// (per-tool default for kern_compact_file, R7).
+	budget, err := mcpserve.CallOutputBudget("kern_compact_file", map[string]any{"root": root, "path": f})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,8 +262,11 @@ func TestConditionalFetchWorkingSetAndMetaRoute(t *testing.T) {
 	if err := os.WriteFile(f, []byte("package main\n\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Registry records under the agentless "_" bucket when no agent_id flows.
-	args, _ := json.Marshal(map[string]any{"root": root, "path": f, "agent_id": "alice"})
+	// Registry records under the caller's agent_id bucket. The agent must be
+	// registered: kern_compact_file now consults the per-call governor (C6),
+	// and an unregistered agent_id fails closed.
+	agent := registerP12Agent(t)
+	args, _ := json.Marshal(map[string]any{"root": root, "path": f, "agent_id": agent})
 	resp := serveOne(t, writeReq("tools/call", 1, `{"name":"kern_compact_file","arguments":`+string(args)+`}`))
 	text1, isErr := toolResultText(t, resp)
 	if isErr {
@@ -270,7 +274,7 @@ func TestConditionalFetchWorkingSetAndMetaRoute(t *testing.T) {
 	}
 	e := resultField(t, resp, "etag").(string)
 
-	entries := etag.Default.Entries("alice")
+	entries := etag.Default.Entries(agent)
 	found := false
 	for _, en := range entries {
 		if en.Tool == "kern_compact_file" && en.ETag == e {

@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
@@ -197,7 +198,7 @@ var highLevelTools = map[string]bool{
 // surface shrinks. This implements the MCP spec's "high-level tools, not
 // dozens of tiny low-value tools" guidance.
 //
-// The 22-tool set (expanded 2026-10-01 from the original 11) is
+// The 6-tool set (expanded 2026-10-01 from the original 11) is
 // evidence-based: usage telemetry (kern stats --by-tool) showed the biggest
 // token savers and most-used primitives were unadvertised, the original set
 // had zero edit-phase tools (KERN_MCP_PHASE=edit advertised only meta+cross),
@@ -205,30 +206,12 @@ var highLevelTools = map[string]bool{
 // first — rules that were dead letters on default connections. Every phase
 // (explore/plan/edit/verify/meta/cross) is now covered; ~14k advertised
 // tokens, still well under the 24.1k full-catalog gate.
-var defaultTools = map[string]bool{
-	"kern_meta":              true, // NL router → all sub-tools
-	"kern_explore":           true, // symbol source + callers/callees + blast radius
-	"kern_impact":            true, // blast radius of a change
-	"kern_review":            true, // token-optimised review context
-	"kern_search":            true, // ranked symbol search
-	"kern_context":           true, // minimal source slice
-	"kern_optimize":          true, // compress prompts/logs/outputs (action arg)
-	"kern_plan":              true, // implementation plan
-	"kern_verify":            true, // unified verification
-	"kern_run":               true, // orchestrate a whole task
-	"kern_authorize_context": true, // authorized-context primitive (P0.1)
-	"kern_compact_file":      true, // symbolic file summary — top token saver in telemetry
-	"kern_project_map":       true, // repo onboarding map
-	"kern_probe":             true, // task-driven context bundle (replaces 5-10 searches)
-	"kern_retrieve":          true, // L1-L3 progressive-disclosure retrieval
-	"kern_memory":            true, // cross-session project memory (add/recall/remove)
-	"kern_buddy":             true, // session onboarding digest
-	"kern_fit_context":       true, // fit context to a token budget
-	"kern_repair":            true, // deterministic compiler-error → AST fix (edit phase)
-	"kern_heal":              true, // self-correct failing files (edit phase)
-	"kern_commitmsg":         true, // deterministic conventional commit message (edit phase)
-	"kern_synthesize_test":   true, // table-driven test generation (verify phase)
-}
+//
+// The name list lives in the leaf package internal/mcp/toolsurface so the
+// highlevel control plane (kern_run recommendations) can annotate tools
+// outside the default surface with their KERN_MCP_FULL gating (deep-dive
+// A1) without an import cycle.
+var defaultTools = toolsurface.Set()
 
 // schemaVersionFor returns the tool schema contract version this connection
 // negotiated during initialize (P2-003), defaulting to the current catalog
@@ -295,9 +278,9 @@ func (s *Server) filteredTools() []Tool {
 		s.filtered = out
 		return s.filtered
 	}
-	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 38-tool middle set (deprecated;
+	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 36-tool middle set (deprecated;
 	// prefer the default minimal set or KERN_MCP_FULL). Otherwise the NEW
-	// DEFAULT: the minimal 22-tool defaultTools surface.
+	// DEFAULT: the minimal 6-tool defaultTools surface.
 	var keep map[string]bool
 	if highLevelOnly() {
 		keep = highLevelTools

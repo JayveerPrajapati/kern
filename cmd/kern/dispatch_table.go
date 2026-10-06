@@ -102,7 +102,7 @@ var commandTable = map[string]commandEntry{
 	"pack": {category: "snapshot", run: func(cmd string, rest []string) int {
 		runPackCapped(rest)
 		return 0
-	}, help: "paste-ready project bundle (--graph: graph-snapshot pack)", usage: "usage: kern pack [flags]\n  options:\n    --fold             fold function bodies\n    --graph            graph mode / graph-snapshot pack\n    --max-tokens       fit the pack to a token budget\n    --no-instructions  omit generated instructions\n    --out              write output to FILE\n    --tier             summary|folded|full"},
+	}, help: "paste-ready project bundle (--graph: graph-snapshot pack)", usage: "usage: kern pack [flags]\n  options:\n    --fold             fold function bodies\n    --graph            graph mode / graph-snapshot pack\n    --max-tokens       best-effort token budget: the pack skips files that do not fit (and says so); the static tree+instructions floor is never truncated, so a budget below it still yields that floor\n    --no-instructions  omit generated instructions\n    --out              write output to FILE\n    --tier             summary|folded|full"},
 	"build": {category: "exec", run: func(cmd string, rest []string) int {
 		runBuild(rest)
 		return 0
@@ -121,11 +121,19 @@ var commandTable = map[string]commandEntry{
 	"setup": {category: "wiring", run: func(cmd string, rest []string) int {
 		runSetup(rest)
 		return 0
-	}, help: "wire agents/MCP/hooks", usage: "usage: kern setup [flags]\n  options:\n    --agents\n    --agents-md        repo AGENTS.md variant: thin (default, wiring-only; full rules then live in global instructions) or full\n    --check            check mode\n    --detect           detect mode\n    --global           apply at global/user scope\n    --global-rules     manage kern rules in each host's GLOBAL instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md)\n    --root             project root (default: .)\n    --verify           verify mode"},
+	}, help: "wire agents/MCP/hooks", usage: "usage: kern setup [flags]\n  options:\n    --agents\n    --agents-md        repo AGENTS.md variant: thin (default, wiring-only; full rules then live in global instructions) or full\n    --check            check mode\n    --detect           detect mode\n    --dry-run          preview mode: report what would be written, change nothing\n    --global           apply at global/user scope\n    --global-rules     manage kern rules in each host's GLOBAL instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md)\n    --root             project root (default: .)\n    --verify           verify mode"},
 	"buddy": {category: "wiring", run: func(cmd string, rest []string) int {
 		runBrief(rest)
 		return 0
-	}, help: "session onboarding digest", usage: "usage: kern buddy [root]  (alias of brief)\n  options:\n    --root             project root (default: .)"},
+	}, help: "session onboarding digest", usage: "usage: kern buddy [root]  (alias of brief)\n  options:\n    --map              include the full per-file project map\n    --root             project root (default: .)"},
+	"project-map": {category: "wiring", run: func(cmd string, rest []string) int {
+		runProjectMap(rest)
+		return 0
+	}, help: "full per-file project map (the same renderer buddy --map appends)", usage: "usage: kern project-map [root]\n  options:\n    --root             project root (default: .)"},
+	"project_map": {category: "wiring", alias: true, run: func(cmd string, rest []string) int {
+		runProjectMap(rest)
+		return 0
+	}, help: "full per-file project map (alias of project-map)", usage: "usage: kern project_map [root]  (alias of project-map)"},
 	"onboard": {category: "wiring", run: func(cmd string, rest []string) int {
 		runOnboard(rest)
 		return 0
@@ -137,7 +145,7 @@ var commandTable = map[string]commandEntry{
 	"brief": {category: "wiring", run: func(cmd string, rest []string) int {
 		runBrief(rest)
 		return 0
-	}, help: "print the repo onboarding brief (project map, index, hubs, entry points, stats, memory)", usage: "usage: kern brief [root]\n  options:\n    --root             project root (default: .)"},
+	}, help: "print the repo onboarding brief (index, hubs, entry points, stats, memory, compact map)", usage: "usage: kern brief [root]\n  options:\n    --map              include the full per-file project map\n    --root             project root (default: .)"},
 	"skills": {category: "wiring", run: func(cmd string, rest []string) int {
 		runSkills(rest)
 		return 0
@@ -193,7 +201,7 @@ var commandTable = map[string]commandEntry{
 	"memory": {category: "memory", run: func(cmd string, rest []string) int {
 		runMemory(rest)
 		return 0
-	}, help: "engineering memory ops", usage: "usage: kern memory add|list|recall|remove <...>\n  subcommands:\n    add <lesson>        store a lesson ('remember' is an alias)\n    list                list stored lessons\n    recall <prompt>     ranked keyword recall\n    remove <n|prefix>   delete one entry by 1-based list index or text prefix\n  options:\n    --clear            clear/empty the whole store\n    --json             emit JSON output\n    --limit            cap results at N\n    --root             project root (default: .)"},
+	}, help: "engineering memory ops", usage: memoryUsage},
 	"recall": {category: "memory", run: func(cmd string, rest []string) int {
 		runRecall(rest)
 		return 0
@@ -340,6 +348,9 @@ var commandTable = map[string]commandEntry{
 		runApprove(rest)
 		return 0
 	}, help: "resolve an approval gate", usage: "usage: kern approve [flags]\n  options:\n    --approver         approver identity\n    --reason           reason text\n    --reject           reject instead of approve\n    --root             project root (default: .)"},
+	"approval": {category: "governance", run: func(cmd string, rest []string) int {
+		return runApproval(rest)
+	}, help: "observe a pending approval's decision (approval wait)", usage: "usage: kern approval <subcommand> [flags]\n  subcommands:\n    wait               block until the approval is decided — prints \"pending: <id>\" once at start, then the decision when it lands\n                       (exit 0 approved / 3 rejected / 1 timed out)\n  options:\n    --timeout          how long to wait for the decision (duration, e.g. 30m, 90s, 500ms; default 30m)\n    --root             project root (default: .)"},
 	"deploy": {category: "autonomy", run: func(cmd string, rest []string) int {
 		runDeploy(rest)
 		return 0
@@ -362,10 +373,10 @@ var commandTable = map[string]commandEntry{
 	"verify": {category: "verification", run: func(cmd string, rest []string) int {
 		runVerify(rest)
 		return 0
-	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; overrides the --short run)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over both --short and --full runs)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
+	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  incremental: kern verify test --changed (scope the test step to packages with uncommitted changes)\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --fast             pre-commit tier: build + tests scoped to uncommitted-changed packages only (build-only when nothing changed; skips security/arch/dependency/e2e)\n    --changed-since   scope the test step to packages changed since a git ref (CI: build+vet+test on the changed surface; a clean diff prints NO-GO-CHANGES and exits 0)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; overrides the short and fast modes)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over both --short and --full runs)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
 	"check-draft": {category: "verification", run: func(cmd string, rest []string) int {
 		return runCheckDraft(rest)
-	}, help: "validate draft code against the index", usage: "usage: kern check-draft <file|-> [root] [--lang LANG] [--file F]\n  options:\n    --file             draft source file (default: positional arg or stdin)\n    --lang             language\n    --root             project root (default: .)"},
+	}, help: "validate draft code against the index", usage: "usage: kern check-draft <file|-> [root] [--lang LANG] [--file F]\n  scope: index/symbol validation only (draft symbols resolve against the\n  built index); secrets scanning lives in 'kern sec' — check-draft never\n  inspects for secrets.\n  options:\n    --file             draft source file (default: positional arg or stdin)\n    --lang             language\n    --root             project root (default: .)"},
 	"taint": {category: "security", run: func(cmd string, rest []string) int {
 		runTaint(rest)
 		return 0
@@ -657,11 +668,11 @@ var commandTable = map[string]commandEntry{
 	"retrieve": {category: "context", run: func(cmd string, rest []string) int {
 		runRetrieve(rest)
 		return 0
-	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: retrieveUsage + "\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type\n    --etag             conditional-fetch etag from a previous response"},
+	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: retrieveUsage + "\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            disclosure level l1 (index summary) | l2 (neighborhood) | l3 (source); default l2\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type\n    --etag             conditional-fetch etag from a previous response"},
 	"resolve": {category: "context", run: func(cmd string, rest []string) int {
 		runResolve(rest)
 		return 0
-	}, help: "resolve a retrieval handle to l2|l3 content", usage: "usage: kern resolve <handle-id> [root] [--level l2|l3] [--max-tokens N]\n  options:\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --max-tokens       token cap\n    --root             project root (default: .)"},
+	}, help: "resolve a retrieval handle to l2|l3 content", usage: "usage: kern resolve <handle-id> [root] [--level l2|l3] [--max-tokens N]\n  <handle-id> is the handle ID printed by 'kern retrieve' output — NOT a\n  symbol name; a handle must be obtained from a retrieve run for this repo.\n  options:\n    --json             emit JSON output\n    --level            disclosure level l2 (neighborhood) | l3 (source); default l2\n    --max-tokens       token cap\n    --root             project root (default: .)"},
 	"context-envelope": {category: "context", run: func(cmd string, rest []string) int {
 		// `kern context-envelope` is a thin wrapper over
 		// `kern orchestrate --mode envelope` (surface consolidation T2b):
@@ -944,7 +955,7 @@ var commandTable = map[string]commandEntry{
 	"fw-trace": {category: "framework", run: func(cmd string, rest []string) int {
 		runFWTrace(rest)
 		return 0
-	}, help: "trace framework execution flow (route -> middleware -> handler -> DI service -> DB model)", usage: "usage: kern fw-trace [filter] [--root ROOT] [--json]\n  options:\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	}, help: "trace framework execution flow (route -> middleware -> handler -> DI service -> DB model)", usage: "usage: kern fw-trace [filter] [--root ROOT] [--json]\n  [filter] (also settable via the --pattern flag): case-insensitive\n  substring matched against each route's PATH, HANDLER name or HTTP METHOD\n  — NOT against framework names, so passing a framework name (e.g.\n  \"express\") matches nothing unless it also appears in a route\n  path/handler/method.\n  extractor coverage: Go (gin/echo/chi-style registrations), JS/TS\n  (Express/Fastify/NestJS decorators), Python (FastAPI/Flask), Java\n  (Spring annotations). Go net/http stdlib handlers (http.HandleFunc,\n  http.NewServeMux) and other frameworks are detected but NOT route-traced.\n  options:\n    --root             project root (default: .)\n    --json             emit result as JSON"},
 	"mutate": {category: "verification", run: func(cmd string, rest []string) int {
 		return runMutationTest(rest)
 	}, help: "lightweight AST mutation testing to catch test suite gaps and surviving mutants", usage: "usage: kern mutate [flags]\n  options:\n    --files            comma-separated target files\n    --max              maximum mutants to evaluate (default 20)\n    --dry-run          list mutants without running test suite\n    --cmd              custom test command\n    --min-score        exit 1 when the mutation score is below N percent\n    --root             project root (default: .)\n    --json             emit result as JSON"},
@@ -952,6 +963,260 @@ var commandTable = map[string]commandEntry{
 		runFragility(rest)
 		return 0
 	}, help: "correlate git defect/fix commit history with AST call graph to identify fragility hotspots", usage: "usage: kern fragility [target] [flags]\n  options:\n    --target           target file or symbol filter\n    --commits          commits history depth (default: 60)\n    --min-fixes        minimum bug fixes threshold\n    --limit            max hotspots to display\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"debt": {category: "analysis", run: func(cmd string, rest []string) int {
+		runDebt(rest)
+		return 0
+	}, help: "unified technical-debt report: fragility hotspots + import cycles, composed from the existing engines", usage: "usage: kern debt [root] [flags]\n  defect-churn debt: git fix history x call graph (kern fragility engine)\n  structural debt: package import cycles, Tarjan SCC (kern cycles engine)\n  options:\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+}
+
+// commandFlags (F10 strict flags): the flags each command accepts, keyed by
+// command name, WITHOUT the leading "--" (single-dash long forms normalize
+// the same way parseFlags normalizes them; -k/-h keep their single-dash
+// spellings). dispatchCommand rejects any flag token a command does not
+// declare here — the shared parseFlags knows every flag in the system, so
+// without this per-command registry a command silently accepted flags it
+// does not consume (`kern budget --budget 100` applied the default because
+// --budget belongs to context-watch). The lists mirror each command's
+// usage/options block plus the flag fields its handler actually reads.
+// Aliases share their primary command's set. Pass-through commands are
+// listed in commandRawArgs and intentionally have no entry here.
+var commandFlags = map[string][]string{
+	// meta
+	"version": {}, "--version": {}, "-v": {}, "guide": {}, "exitcode": {},
+	"completion": {},
+	// wiring
+	"setup": {"agents", "agents-md", "check", "detect", "dry-run", "global", "global-rules", "root", "verify"},
+	"buddy": {"map", "root"}, "brief": {"map", "root"},
+	"project-map": {"root"}, "project_map": {"root"},
+	"onboard":               {"root"},
+	"update":                {"channel", "dry-run", "force", "pin", "preflight"}, // --preflight: hidden install.sh decision-only mode
+	"skills":                {"global"},
+	"doctor":                {"arch-drift", "calibration", "json", "root"},
+	"agents":                {"json", "probe", "root"},
+	"register-host-sampler": {"key", "model", "timeout"},
+	"config":                {"json", "root"},
+	// compression / prompt
+	"optimize":    {"attach", "cache", "fewshot", "kind", "llm", "mask", "model", "names", "session"},
+	"preview":     {"attach", "cache", "fewshot", "kind", "llm", "mask", "model", "names", "session"},
+	"log":         {"context-after", "context-before", "kind", "profile", "root"},
+	"tokens":      {"bpe"},
+	"compact":     {"etag", "root", "tier"},
+	"project":     {"max-files"},
+	"pack":        {"fold", "graph", "max-tokens", "no-instructions", "out", "tier"},
+	"budget":      {"file", "json", "max", "max-tokens", "mode", "query", "root", "symbol"},
+	"terse":       {"file", "json", "max", "max-tokens", "mode", "query", "root", "symbol"},
+	"fit-context": {"file", "json", "max-tokens", "mode", "query", "root", "symbol"},
+	"mask":        {"names"},
+	"swap":        {"max", "mode"},
+	"semcache":    {"json"},
+	"stats":       {"by-agent", "by-tool", "days", "json", "reset", "session"},
+	"diff":        {"json", "limit", "session"},
+	"export":      {"by-agent", "by-tool", "days", "json", "reset", "session"},
+	"cache":       {"dry-run"},
+	"remember":    {"root"},
+	"memory":      {"clear", "json", "limit", "root"},
+	"recall":      {"limit", "root"},
+	"schema":      {"schema"},
+	"prompt":      {"file", "schema", "task"},
+	"precache":    {"interval", "once", "watch"},
+	// exec
+	"build":    {"dir", "root", "session", "timeout"},
+	"validate": {"cmd", "json", "root", "timeout"},
+	"exec":     {"json", "lang", "list", "max", "root", "stdin", "timeout"},
+	"sandbox":  {"force", "json", "root", "timeout"}, // args after `--` are the raw command (validator stops at `--`)
+	"execute":  {"root"},
+	"do":       {"level", "mode", "root"},
+	// analysis / graph
+	"analyze":   {"lens", "profile", "root", "task"},
+	"plan":      {"json", "root", "task"},
+	"risk":      {"lens", "profile", "root", "task"},
+	"impact":    {"json", "lens", "precision", "risk", "root", "runtime"},
+	"what-if":   {"json", "lens", "precision", "risk", "root", "runtime"},
+	"simulate":  {"json", "lens", "precision", "risk", "root", "runtime"},
+	"calibrate": {"root", "thresholds"},
+	"bench":     {"json", "root"},
+	"debt":      {"json", "root"},
+	"fragility": {"commits", "json", "limit", "min-fixes", "root", "target"},
+	"explain":   {"root"},
+	"why":       {"json", "min-confidence", "root"},
+	"wiki":      {"obsidian", "out", "root"},
+	"graph":     {"cypher", "entities", "graphml", "html", "json", "limit", "max-tokens", "mermaid", "min-confidence", "one-line", "out", "root"},
+	"inherits":  {"json", "root"},
+	"context":   {"etag", "lens", "lines", "profile", "root"},
+	"changes":   {"file", "json", "lens", "max", "profile", "range", "root", "runtime"},
+	"review":    {"file", "json", "lens", "max", "profile", "range", "root", "runtime"},
+	"hubs":      {"bridges-only", "json", "root"},
+	"bridges":   {"json", "root"},
+	"testgaps":  {"json", "root"}, "test-gaps": {"json", "root"},
+	"flows":       {"json", "root"},
+	"entries":     {"json", "pattern", "root"},
+	"communities": {"full", "json", "root"},
+	"path":        {"from", "json", "min-confidence", "root", "to"},
+	"dead":        {"json", "root"},
+	"surprising":  {"json", "root"},
+	"cycles":      {"json", "root"},
+	"larges":      {"json", "root"},
+	"arch":        {"json", "root"},
+	"churn":       {"json", "range", "root"},
+	"cochange":    {"json", "range", "root"},
+	"explore":     {"depth", "etag", "explain", "json", "max", "min-confidence", "root"},
+	"near":        {"depth", "json", "max", "root"}, "walk": {"depth", "json", "max", "root"},
+	"probe":    {"json", "max", "min-confidence"},
+	"trace":    {"json", "limit"},
+	"twin":     {"root"},
+	"snapshot": {"format", "limit", "max-tokens", "out", "root", "strict", "symbol", "verify"},
+	// search
+	"index":     {"force", "json", "root", "status", "strict", "update"},
+	"watch":     {"interval", "root"},
+	"ast":       {"all", "root"},
+	"search":    {"json", "limit", "repos", "root", "semantic"},
+	"prose":     {"limit", "root"},
+	"fts":       {"json", "limit", "root"},
+	"repos":     {"json", "limit", "root"},
+	"docs":      {"limit", "root", "semantic"},
+	"doc-fetch": {"name", "root"}, "doc_fetch": {"name", "root"},
+	"doc-search": {"limit", "root"}, "doc_search": {"limit", "root"},
+	"entry-points": {"pattern", "root"}, "entrypoints": {"pattern", "root"},
+	// framework
+	"fw": {"root"}, "frameworks": {"root"},
+	"fw-trace": {"json", "pattern", "root"},
+	// context / retrieval
+	"retrieve":          {"depth", "etag", "json", "level", "limit", "lines", "max", "max-tokens", "query", "root", "symbol", "task-type"},
+	"resolve":           {"json", "level", "max-tokens", "root"},
+	"context-envelope":  {"change", "max-tokens", "mode", "root"},
+	"explain-context":   {"budget", "json", "mode", "root", "task"},
+	"orchestrate":       {"change", "max-tokens", "mode", "root", "with-skill"},
+	"eval":              {"eval", "json", "max-tokens", "mode", "root", "with-skill"},
+	"host":              {"check", "dry-run", "root", "task", "uninstall"},
+	"authorize-context": {"agent", "deny-path", "json", "root", "symbol", "task"},
+	// autonomy
+	"team":            {"root"},
+	"workflow":        {"root", "task"},
+	"ops":             {"auto-approve", "json", "level", "log", "non-interactive", "repo"},
+	"kernops":         {"auto-approve", "json", "level", "log", "non-interactive", "repo"},
+	"loop":            {"level", "mode", "root", "schedule"},
+	"autonomy":        {"level", "mode", "root", "schedule"},
+	"run":             {"level", "root"},
+	"learn":           {"root"},
+	"modernize":       {"root"},
+	"task":            {"root"},
+	"tasks":           {"root"},
+	"efficiency":      {"root"},
+	"agent-message":   {"from", "task", "to"},
+	"agent-interrupt": {},
+	"deploy":          {"root", "version"},
+	"artifacts":       {"json", "root"},
+	"incident":        {"correlate", "json", "list-playbooks", "root", "runbook"},
+	"correlate":       {"code", "root"},
+	"flight":          {"agent", "json", "keep-tasks", "older-than", "root", "status", "task"},
+	"events":          {"json", "kinds", "payload", "root", "subject"},
+	"runtime":         {"json", "root"},
+	// governance
+	"approve":           {"approver", "reason", "reject", "root"},
+	"approval":          {"root", "timeout"},
+	"audit":             {"json", "root"},
+	"policy":            {"file", "json", "merge", "root"},
+	"evidence":          {"agent-id", "expect-fingerprint", "file", "full-state", "out", "restore", "root", "sign", "task", "url"},
+	"check":             {"agent-id", "all", "allow-unisolated", "approval-id", "ci", "fast", "format", "intent", "isolate-network", "json", "repo", "require-kern", "resilience", "source", "staged", "task", "tests"},
+	"diff-gate":         {"blocking", "init-baseline", "json", "no-tests", "root", "timeout"},
+	"fix":               {"content", "file", "json", "repo"},
+	"metrics":           {"json", "repo", "reset"},
+	"request-approval":  {"files", "intent", "repo", "requester", "source"},
+	"reject":            {"approver", "reason", "root"},
+	"verify-receipt":    {"check-diff", "in-toto", "json", "receipt-id", "repo", "sarif"},
+	"ci":                {"artifact-file", "base", "head", "json", "no-cache", "no-human", "receipt", "repo", "strict-latency"},
+	"install":           {"global"},
+	"validate-proposed": {"files", "root", "source"},
+	"explain-finding":   {"finding", "root"},
+	"repair-guidance":   {"finding", "root"},
+	"guard":             {"agent-id", "file", "force", "json", "precision", "range", "sarif", "task", "threshold"},
+	"fingerprint":       {"file", "json", "root"},
+	// verification / security
+	"verify":             {"changed", "changed-since", "cve", "eval", "fast", "full", "json", "license", "root", "scan", "secrets", "short", "skill", "types", "verify-pipeline", "verify-silent", "verify-token-reduction"},
+	"check-draft":        {"file", "lang", "root"},
+	"heal":               {"force", "llm", "task", "yes"},
+	"taint":              {"file", "generate", "range", "root"},
+	"sec":                {"engine", "json", "root", "severity"},
+	"security":           {"engine", "json", "root", "severity"},
+	"mutate":             {"cmd", "dry-run", "file", "files", "json", "max", "min-score", "root", "symbol"},
+	"repair-diagnostics": {"apply", "compiler-output", "json", "root"},
+	"review-pack":        {"json", "lens", "max-tokens", "out", "task"},
+	"review-consensus":   {"json"},
+	// refactor
+	"delete":               {"apply", "force", "json", "root"},
+	"rename":               {"apply", "force", "json", "root"},
+	"refactor-transaction": {"apply", "cmd", "edits", "json", "root"},
+	"refactor":             {"apply", "cmd", "edits", "json", "root"},
+	"udiff":                {"compact", "out", "root"},
+	// servers
+	"mcp":        {"category", "http", "json", "project", "tls-cert", "tls-key"},
+	"lsp":        {"root"},
+	"lsp-bridge": {"action", "column", "file", "json", "line", "root", "server-cmd"},
+	"serve":      {"addr", "enterprise", "project", "root"},
+	"web":        {"addr", "enterprise", "project", "root"},
+	"ui":         {"addr", "enterprise", "project", "root"},
+	"org":        {"json", "project"},
+	"health":     {"json", "root"},
+	// meta router
+	"meta":    {"pipeline", "root"},
+	"ask":     {"pipeline", "root"},
+	"compose": {"pipeline", "root", "timeout"},
+	// git
+	"hook":      {"global", "range"},
+	"commitmsg": {"range", "root", "staged", "subject"},
+	"commit":    {"all", "dry-run", "message"},
+	// locks
+	"lock":   {"hold", "root", "timeout", "wait"},
+	"unlock": {"root"},
+	"status": {"json"},
+	"stream": {"action", "channel", "chunk-size", "message", "payload", "percent", "progress-token"},
+	// docgen
+	"gen-contracts": {"root"},
+	"gen-docs":      {"doc", "root"},
+	"gen-catalog":   {"root"},
+	// mcp-mirror (migrated FlagSet contracts, see parseFlags doc)
+	"pre-edit":           {"file", "json", "lines", "root", "symbol"},
+	"pre_edit":           {"file", "json", "lines", "root", "symbol"},
+	"prompt-fill":        {"file", "inject-memory", "root", "task", "template"},
+	"prompt_fill":        {"file", "inject-memory", "root", "task", "template"},
+	"semantic-diff":      {"from", "range", "root", "to"},
+	"semantic_diff":      {"from", "range", "root", "to"},
+	"evidence-anchor":    {"claim", "file", "line", "root", "symbol"},
+	"evidence_anchor":    {"claim", "file", "line", "root", "symbol"},
+	"context-watch":      {"budget", "format", "text"},
+	"context_watch":      {"budget", "format", "text"},
+	"agent-fingerprint":  {"agent", "format"},
+	"agent_fingerprint":  {"agent", "format"},
+	"cross-repo-impact":  {"repo", "root", "symbol", "target"},
+	"cross_repo_impact":  {"repo", "root", "symbol", "target"},
+	"memory-ranked":      {"half-life", "k", "prompt", "root"},
+	"memory_ranked":      {"half-life", "k", "prompt", "root"},
+	"policy-dsl":         {"diff", "file", "policy", "root"},
+	"policy_dsl":         {"diff", "file", "policy", "root"},
+	"agent-coordination": {"action", "agent", "from", "notes", "resource", "root", "task", "to", "ttl"},
+	"agent_coordination": {"action", "agent", "from", "notes", "resource", "root", "task", "to", "ttl"},
+	"agent-role-rbac":    {"action", "agent", "role", "root", "tool"},
+	"agent_role_rbac":    {"action", "agent", "role", "root", "tool"},
+	"ast-transform":      {"action", "apply", "body", "field", "field-type", "file", "iface", "root", "sig", "tag", "target"},
+	"ast_transform":      {"action", "apply", "body", "field", "field-type", "file", "iface", "root", "sig", "tag", "target"},
+	"semantic-merge":     {"apply", "base", "file", "json", "local", "remote", "root"},
+	"semantic_merge":     {"apply", "base", "file", "json", "local", "remote", "root"},
+	"synthesize-test":    {"apply", "auto-gap", "file", "json", "root", "sinks", "target"},
+	"synthesize_test":    {"apply", "auto-gap", "file", "json", "root", "sinks", "target"},
+}
+
+// commandRawArgs marks pass-through commands whose arguments are forwarded
+// verbatim to a subprocess or to a subcommand family with its own per-subcommand
+// flag grammars. Their flags are NOT validated at dispatch (F10 exception,
+// deliberate and explicit): the receiving layer owns flag parsing and errors.
+var commandRawArgs = map[string]bool{
+	// mcp-client: add/list/rm/call subcommands each carry their own flag sets
+	// (--transport, --command, --arg, --header, --env, --url, --input, ...).
+	"mcp-client": true,
+	// blueprint: umbrella routing to the bpcli subcommands (check/diff-gate/
+	// fix/metrics/request-approval/reject/verify-receipt/ci/install), each
+	// with its own FlagSet.
+	"blueprint": true,
 }
 
 // runStatsEntry is the shared handler for the `stats` command and its

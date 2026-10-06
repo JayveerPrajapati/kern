@@ -14,17 +14,24 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 	"github.com/JayveerPrajapati/kern/internal/mcp/transport"
 )
 
 func runMCP(rest []string) {
 	// `kern mcp tools` lists the catalog instead of starting a server —
-	// the discoverability front door for the long tail the default
-	// 22-tool MCP advertisement hides behind kern_meta (KERN_MCP_FULL=1
-	// exposes all; the meta router reaches everything).
+	// the discoverability front door for the long tail the default MCP
+	// advertisement hides behind kern_meta (KERN_MCP_FULL=1 exposes all;
+	// the meta router reaches everything).
 	if len(rest) > 0 && rest[0] == "tools" {
 		runMCPToolsList(rest[1:])
 		return
+	}
+	// Fail loudly at startup on a misspelled KERN_MCP_CATEGORY (a no-op
+	// filter is a silent capability loss): the valid set comes from the
+	// catalog's single source of truth, never a duplicated literal.
+	if err := mcp.ValidateMCPSurfaceEnv(); err != nil {
+		fatal("mcp: %v", err)
 	}
 	f, args := parseFlagsOrDie(rest)
 	httpAddr := mcpHTTPAddr(args, f)
@@ -87,9 +94,10 @@ func runMCP(rest []string) {
 
 // runMCPToolsList prints the full MCP tool catalog, grouped by category.
 // It is the discoverability front door for the ~145-tool surface: the
-// default MCP advertisement exposes 22 starter tools and hides the rest
-// behind the kern_meta router, so a user (or agent) otherwise has no way
-// to enumerate every capability, its phase and its risk level.
+// default MCP advertisement exposes only the minimal toolsurface.Set() set
+// and hides the rest behind the kern_meta router, so a user (or agent)
+// otherwise has no way to enumerate every capability, its phase and its
+// risk level.
 func runMCPToolsList(rest []string) {
 	fs := flag.NewFlagSet("kern mcp tools", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -137,7 +145,11 @@ func runMCPToolsList(rest []string) {
 		return
 	}
 
-	fmt.Printf("kern MCP catalog: %d tools (default MCP surface advertises 22; KERN_MCP_FULL=1 exposes all; kern_meta routes to everything)\n\n", len(tools))
+	// The default-surface count is DERIVED from toolsurface.Set() — the
+	// single source of truth for the advertised set — so the banner can
+	// never drift from the wire again (it used to hardcode "22" while
+	// tools/list delivered 6).
+	fmt.Printf("kern MCP catalog: %d tools (default MCP surface advertises %d; KERN_MCP_FULL=1 exposes all; kern_meta routes to everything)\n\n", len(tools), len(toolsurface.Set()))
 	byCat := map[string][]catalog.Tool{}
 	for _, t := range tools {
 		byCat[t.Category] = append(byCat[t.Category], t)

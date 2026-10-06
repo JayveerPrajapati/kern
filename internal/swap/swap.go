@@ -265,6 +265,33 @@ func Fit(text, root string, maxTokens int) (string, bool) {
 	return out, fits
 }
 
+// UnswappableFences reports how many tagged fenced blocks (```lang:path)
+// in the document could NOT be swapped: their file path does not resolve
+// under root (missing file, escapes root via ../, oversized) or their
+// symbolic summary renders empty. It returns the count and the first
+// offending path. Callers use it to explain a no-swap result honestly —
+// the fence WAS present, but swap could not act on it (L13: the no-swap
+// message must name this third reason alongside "none present" and
+// "all within budget").
+func UnswappableFences(text, root string) (count int, first string) {
+	for _, loc := range fencedBlock.FindAllStringSubmatchIndex(text, -1) {
+		path := text[loc[4]:loc[5]]
+		swappable := false
+		if full := fileAt(root, path); full != "" {
+			if sum := code.Summarize(path, []byte(full), 80); strings.TrimSpace(sum.Render()) != "" {
+				swappable = true
+			}
+		}
+		if !swappable {
+			count++
+			if first == "" {
+				first = path
+			}
+		}
+	}
+	return count, first
+}
+
 func fileAt(root, path string) string {
 	absRoot := ""
 	if root != "" {

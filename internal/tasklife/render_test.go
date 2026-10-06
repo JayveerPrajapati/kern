@@ -190,3 +190,182 @@ func TestRenderImpactArchitectureRules(t *testing.T) {
 		t.Fatalf("missing expected architecture rule names in:\n%s", out)
 	}
 }
+
+// TestRenderImpactCoveringTestsHeaderCapped pins V3: when the covering-tests
+// list overflows maxCoveringTests, the header must state the DISPLAYED count
+// with the real total alongside, so it never contradicts the "+N more (use
+// --json for full list)" overflow line below it. The label names the ranked
+// tiers only — same-package noise is a separate count line (Fix 1).
+func TestRenderImpactCoveringTestsHeaderCapped(t *testing.T) {
+	var tests []string
+	for i := 0; i < 383; i++ {
+		tests = append(tests, fmt.Sprintf("TestSym%03d", i))
+	}
+	out := renderImpactText(domain.ImpactReport{
+		Target:                "shortFingerprint",
+		WhoCalls:              []string{"caller1"},
+		TestsCover:            tests,
+		TestsCoverSamePackage: 431,
+	})
+	if !strings.Contains(out, "Tests that cover it (file-paired + name-matched + direct callers): 10 shown of 383") {
+		t.Fatalf("capped header must show displayed count + real total, got:\n%s", out)
+	}
+	if !strings.Contains(out, "... +373 more (use --json for full list)") {
+		t.Fatalf("expected +373 overflow line, got:\n%s", out)
+	}
+	// 10 shown + 373 hidden must equal the total the header reports.
+	if !strings.Contains(out, "Tests that cover it (file-paired + name-matched + direct callers): 10 shown of 383") {
+		t.Fatalf("header math is inconsistent, got:\n%s", out)
+	}
+	if strings.Contains(out, "Tests that cover it (file-paired + name-matched + direct callers): 383") {
+		t.Fatalf("header must not lead with the hidden total, got:\n%s", out)
+	}
+	// The same-package remainder is a count-only line, never a list (Fix 1).
+	if !strings.Contains(out, "same-package tests not shown (low relevance): 431") {
+		t.Fatalf("expected the same-package count-only line, got:\n%s", out)
+	}
+}
+
+// TestRenderImpactCoveringTestsHeaderUncapped pins the inverse: a report with
+// few tests keeps the plain exact-count header with no "shown of" wording.
+func TestRenderImpactCoveringTestsHeaderUncapped(t *testing.T) {
+	out := renderImpactText(domain.ImpactReport{
+		Target:     "dispatchCommand",
+		WhoCalls:   []string{"main"},
+		TestsCover: []string{"TestDispatchCommandUnknownExits2", "TestDispatchCommandHelp", "TestDispatchCommandRun"},
+	})
+	if !strings.Contains(out, "Tests that cover it (file-paired + name-matched + direct callers): 3") {
+		t.Fatalf("uncapped header must show the exact count, got:\n%s", out)
+	}
+	if strings.Contains(out, "shown of") {
+		t.Fatalf("uncapped header must not use 'shown of' wording, got:\n%s", out)
+	}
+	if strings.Contains(out, "more (use --json") {
+		t.Fatalf("uncapped report must not truncate, got:\n%s", out)
+	}
+	if strings.Contains(out, "same-package tests not shown") {
+		t.Fatalf("no same-package line when TestsCoverSamePackage is 0, got:\n%s", out)
+	}
+}
+
+// TestRenderImpactCoveringTestsTiersShownAsList pins Fix 1's rendering: the
+// ranked covering tests (file-paired, name-matched, direct callers) render as
+// the list, in tier order, and the same-package remainder appears only as a
+// count line — never as list entries implying the whole package covers the
+// symbol.
+func TestRenderImpactCoveringTestsTiersShownAsList(t *testing.T) {
+	out := renderImpactText(domain.ImpactReport{
+		Target:   "runTaint",
+		WhoCalls: []string{"commandTable"},
+		TestsCover: []string{
+			"TestParseTaintRange", // file-paired + name-matched (cmd_security_test.go)
+			"TestTaintHelper",     // name-matched (taint token)
+			"t.TestDirectCaller",  // direct caller
+		},
+		TestsCoverSamePackage: 418,
+	})
+	if !strings.Contains(out, "Tests that cover it (file-paired + name-matched + direct callers): 3") {
+		t.Fatalf("expected the ranked-tiers header, got:\n%s", out)
+	}
+	for _, want := range []string{"TestParseTaintRange", "TestTaintHelper", "t.TestDirectCaller"} {
+		if !strings.Contains(out, "- "+want) {
+			t.Fatalf("ranked covering test %q must be listed, got:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "same-package tests not shown (low relevance): 418") {
+		t.Fatalf("expected the same-package count-only line, got:\n%s", out)
+	}
+	for _, hidden := range []string{"TestAcquireLockWithWaitAcquiresAfterRelease", "TestAgentMessageKnownRecipientQueues"} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("same-package noise %q must not be listed as a covering test, got:\n%s", hidden, out)
+		}
+	}
+}
+
+// TestRenderImpactAffectedFiles pins Fix 2: the impact report lists the
+// files the blast radius touches (deduped, capped at maxImpactListItems).
+func TestRenderImpactAffectedFiles(t *testing.T) {
+	out := renderImpactText(domain.ImpactReport{
+		Target:   "runTaint",
+		WhoCalls: []string{"commandTable"},
+		Files:    []string{"cmd/kern/cmd_security.go", "cmd/kern/dispatch_table.go"},
+	})
+	if !strings.Contains(out, "Affected files: 2") {
+		t.Fatalf("expected Affected files header, got:\n%s", out)
+	}
+	for _, want := range []string{"cmd/kern/cmd_security.go", "cmd/kern/dispatch_table.go"} {
+		if !strings.Contains(out, "- "+want) {
+			t.Fatalf("affected file %q must be listed, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderWhatIfSamePackageTestsCountOnly pins Fix 1 on the what-if render:
+// the same-package remainder renders as a count-only line.
+func TestRenderWhatIfSamePackageTestsCountOnly(t *testing.T) {
+	imp := whatif.Impact{
+		Change:           whatif.Change{Kind: whatif.RemoveSymbol, Target: "runTaint"},
+		Risk:             "medium",
+		Recommendation:   "check callers",
+		Tests:            []string{"TestParseTaintRange"},
+		TestsSamePackage: 431,
+	}
+	out := RenderWhatIfText(whatif.RemoveSymbol, "runTaint", "runTaint", imp)
+	if !strings.Contains(out, "tests: 1") {
+		t.Fatalf("expected ranked tests count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "same-package tests not shown (low relevance): 431") {
+		t.Fatalf("expected the same-package count-only line, got:\n%s", out)
+	}
+}
+
+// TestRenderImpactWhatCallsShowsTransitiveContext pins V4: when RiskDetail is
+// the transitive-dependents count that drove the risk tier and it exceeds the
+// direct caller count, the "What calls this" line must surface both so "Risk:
+// medium (3 transitive dependents)" next to "What calls this: 1" reads as a
+// direct→transitive relationship, not a contradiction.
+func TestRenderImpactWhatCallsShowsTransitiveContext(t *testing.T) {
+	out := renderImpactText(domain.ImpactReport{
+		Target:     "shortFingerprint",
+		WhoCalls:   []string{"caller1"},
+		Risk:       "medium",
+		RiskDetail: "3 transitive dependents",
+	})
+	if !strings.Contains(out, "What calls this: 1 (graph nodes; 3 transitive dependents)") {
+		t.Fatalf("expected direct+transitive counts on the What calls line, got:\n%s", out)
+	}
+}
+
+// TestRenderImpactWhatCallsNoTransitiveContext pins the boundaries: the
+// transitive context is only appended when RiskDetail is the
+// transitive-dependents form. Fallback details ("N direct callers",
+// "N services depend on it") and an empty detail keep the plain line.
+func TestRenderImpactWhatCallsNoTransitiveContext(t *testing.T) {
+	cases := []struct {
+		name     string
+		detail   string
+		direct   []string
+		wantLine string
+	}{
+		{"empty detail", "", []string{"caller1"}, "What calls this: 1 (graph nodes)"},
+		{"fallback direct callers", "2 direct callers", []string{"caller1", "caller2"}, "What calls this: 2 (graph nodes)"},
+		{"fallback services", "2 services depend on it", []string{"caller1"}, "What calls this: 1 (graph nodes)"},
+		{"transitive equal to direct", "1 transitive dependents", []string{"caller1"}, "What calls this: 1 (graph nodes)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := renderImpactText(domain.ImpactReport{
+				Target:     "sym",
+				WhoCalls:   tc.direct,
+				Risk:       "medium",
+				RiskDetail: tc.detail,
+			})
+			if !strings.Contains(out, tc.wantLine) {
+				t.Fatalf("expected line %q, got:\n%s", tc.wantLine, out)
+			}
+			if strings.Contains(out, "graph nodes; ") {
+				t.Fatalf("unexpected transitive context for detail %q, got:\n%s", tc.detail, out)
+			}
+		})
+	}
+}

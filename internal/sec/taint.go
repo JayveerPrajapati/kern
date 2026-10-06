@@ -25,6 +25,7 @@ type TaintFinding struct {
 // entry-point path exists in the call graph.
 var sourcePatterns = []string{
 	"os.Args",
+	"os.Getenv(",
 	".Query()",
 	".FormValue(",
 	".Param(",

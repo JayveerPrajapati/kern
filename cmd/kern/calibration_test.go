@@ -45,14 +45,14 @@ func TestCalibrationFindingsSection(t *testing.T) {
 }
 
 // TestRunVerifyTextAppendsConfidenceLine proves the CLI kern verify text path
-// appends the aggregate calibration confidence line (fresh store →
-// "insufficient data") and that --json output stays a plain object.
+// suppresses the aggregate calibration confidence line on a fresh store
+// (insufficient data → no footer) and that --json output stays a plain object.
 func TestRunVerifyTextAppendsConfidenceLine(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "1")
 	root := jsonCliFixture(t)
 	out := captureStdout(t, func() { runVerify([]string{"security", "--root", root}) })
-	if !strings.Contains(out, "confidence: insufficient data") {
-		t.Fatalf("verify text missing confidence line:\n%s", out)
+	if strings.Contains(out, "confidence: insufficient data") {
+		t.Fatalf("verify text must NOT append an insufficient-data confidence line:\n%s", out)
 	}
 	// JSON path unchanged: still a structured object, no text lines.
 	jout := captureStdout(t, func() { runVerify([]string{"security", "--root", root, "--json"}) })

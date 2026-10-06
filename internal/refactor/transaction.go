@@ -40,6 +40,24 @@ type TransactionResult struct {
 	VerificationSkipped bool `json:"verification_skipped,omitempty"`
 }
 
+// minimalExecEnv builds the environment for the spawned compile child. The
+// full operator environment (secrets) must never reach the child: pass only
+// PATH (to find the toolchain), HOME (go's default GOCACHE/GOPATH/GOENV
+// locations), TMPDIR (go temp files) and the Go toolchain vars the compile
+// step genuinely needs when the operator set them (custom GOPATH/GOCACHE/
+// GOMODCACHE/GOPROXY/GOTOOLCHAIN). GOENV itself is deliberately excluded: go
+// reads it from $HOME/.config/go/env via HOME, so `go env -w` settings
+// survive the narrowing.
+func minimalExecEnv() []string {
+	env := []string{"PATH=" + os.Getenv("PATH")}
+	for _, k := range []string{"HOME", "TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN"} {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
+}
+
 // ExecuteTransaction applies batch modifications in an isolated workspace,
 // verifies compilation, and commits atomically to the live root only on success.
 func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*TransactionResult, error) {
@@ -150,7 +168,11 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 		parts := strings.Fields(compileCmd)
 		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 		cmd.Dir = sandboxDir
-		cmd.Env = os.Environ()
+		// Security: never hand the spawned process the operator's full
+		// environment (all secrets). Mirror the host-sampler allowlist
+		// (PATH, HOME, TMPDIR) plus the Go toolchain vars the compile step
+		// genuinely needs when the operator set them.
+		cmd.Env = minimalExecEnv()
 
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf

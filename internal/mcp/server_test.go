@@ -93,7 +93,7 @@ func TestInitialize(t *testing.T) {
 		t.Fatalf("bad protocolVersion: %v", res["protocolVersion"])
 	}
 	si := res["serverInfo"].(map[string]any)
-	if si["name"] != serverName || si["version"] != serverVersion {
+	if si["name"] != serverName || si["version"] != currentServerVersion() {
 		t.Fatalf("bad serverInfo: %v", si)
 	}
 }
@@ -121,7 +121,10 @@ func TestInitializeInstructions(t *testing.T) {
 }
 
 func TestSetServerVersionPropagates(t *testing.T) {
-	t.Parallel()
+	// Not parallel: this test mutates the package-level serverVersion global
+	// that other tests read (initialize, health, security hooks). The value
+	// is atomic so there is no data race, but the propagation assertions must
+	// not observe a concurrent writer — keep it sequential.
 	SetServerVersion("9.9.9-test")
 	defer SetServerVersion("dev")
 	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
@@ -130,8 +133,8 @@ func TestSetServerVersionPropagates(t *testing.T) {
 		t.Fatalf("expected stamped version in initialize, got %v", si["version"])
 	}
 	SetServerVersion("")
-	if serverVersion != "9.9.9-test" {
-		t.Fatalf("SetServerVersion(\"\") must not blank the version, got %q", serverVersion)
+	if currentServerVersion() != "9.9.9-test" {
+		t.Fatalf("SetServerVersion(\"\") must not blank the version, got %q", currentServerVersion())
 	}
 }
 

@@ -441,7 +441,7 @@ func runStatsPerformance(reset, jsonOut bool) (string, error) {
 var verifyTypeKeywords = []string{
 	"build", "test", "unit", "integration",
 	"security", "sec", "architecture", "archi", "arch",
-	"dependency", "dep",
+	"dependency", "dep", "reuse",
 	"cve", "license", "licen", "secrets", "secret",
 	"e2e", "end-to-end", "static", "analysis", "vet", "lint",
 	"performance", "perf", "bench", "ci",
@@ -482,7 +482,7 @@ func isVerifyTypes(s string) bool {
 	}
 	for _, t := range strings.Split(trimmed, ",") {
 		switch strings.TrimSpace(t) {
-		case "build", "test", "security", "architecture", "dependency", "cve", "license", "secrets":
+		case "build", "test", "security", "architecture", "dependency", "reuse", "cve", "license", "secrets":
 		default:
 			return false
 		}
@@ -709,18 +709,38 @@ func clipJSONValue(rv reflect.Value) reflect.Value {
 }
 
 // printSavingsFooter writes the canonical savings banner as the last
-// human-readable line of an optimization command: the percentage saved, the
+// human-readable line of an optimization command: the percentage saved (vs
+// the labeled denominator — "file read raw", "input verbatim", …), the
 // number of tokens removed, and the estimated USD saved at the given
 // cost-per-token rate (callers pass context.CostPerToken(), which honors the
-// KERN_COST_PER_TOKEN override and defaults to 1e-5 $/token). It prints
-// nothing when no tokens were actually saved.
-func printSavingsFooter(w io.Writer, beforeTokens, afterTokens int, costPerToken float64) {
+// KERN_COST_PER_TOKEN override and defaults to 1e-5 $/token). The denominator
+// label is mandatory: the percentage must never appear without saying what
+// it is relative to (L2/honest reporting). It prints nothing when no tokens
+// were actually saved.
+func printSavingsFooter(w io.Writer, beforeTokens, afterTokens int, costPerToken float64, baseline string) {
 	saved := beforeTokens - afterTokens
 	if saved <= 0 {
 		return
 	}
-	_, _ = fmt.Fprintf(w, "[%.0f%% ──> %d tokens ──> $%.4f]\n",
-		strutil.Pct(beforeTokens, afterTokens), saved, float64(saved)*costPerToken)
+	if baseline == "" {
+		baseline = "input"
+	}
+	_, _ = fmt.Fprintf(w, "[%.0f%% vs %s ──> %d tokens ──> $%.4f]\n",
+		strutil.Pct(beforeTokens, afterTokens), baseline, saved, float64(saved)*costPerToken)
+}
+
+// printTokenSavings writes the "kern: X -> Y tokens (saved N, P%…)" stderr
+// accounting line shared by optimize/log/budget/terse. The line claims
+// compression happened, so it prints ONLY on a genuine reduction
+// (after < before) — equal or inflated results stay silent (F11). The
+// percentage's denominator is the before count X, stated on the same line,
+// so the % never appears without its denominator (L2/honest reporting).
+func printTokenSavings(w io.Writer, before, after int, extra, suffix string) {
+	if after >= before {
+		return
+	}
+	fmt.Fprintf(w, "kern: %d -> %d tokens (saved %d, %.1f%%%s)%s\n",
+		before, after, before-after, strutil.Pct(before, after), extra, suffix)
 }
 
 func projectLangs() string {
@@ -778,6 +798,16 @@ func fatalUsage(format string, args ...any) {
 func fatalPolicy(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
 	panic(exitError{code: 3})
+}
+
+// fatalFindings prints an error to stderr and exits with code 1 (findings
+// tier — see `kern exitcode`). Use it for findings-family outcomes (kern
+// review / kern changes / kern security findings): reported results that
+// are signals for scripts and CI, not denials.
+// Like fatal, it panics with the exitError sentinel.
+func fatalFindings(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
+	panic(exitError{code: 1})
 }
 
 func splitNames(s string) []string {

@@ -162,13 +162,17 @@ func Path(ctx context.Context, ix *index.Index, args map[string]any) (string, er
 	if from == "" || to == "" {
 		return "", fmt.Errorf("from and to are required")
 	}
+	// Keep the raw inputs: intel.Resolve returns "" for a symbol it cannot
+	// resolve, so the unknown-symbol error must print the USER's input, not
+	// the post-Resolve (empty) value.
+	fromIn, toIn := from, to
 	from, okFrom := intel.Resolve(ix, from)
 	to, okTo := intel.Resolve(ix, to)
 	if !okFrom {
-		return "", fmt.Errorf("unknown symbol: %s", from)
+		return "", fmt.Errorf("unknown symbol: %s", fromIn)
 	}
 	if !okTo {
-		return "", fmt.Errorf("unknown symbol: %s", to)
+		return "", fmt.Errorf("unknown symbol: %s", toIn)
 	}
 	minConf := mcpargs.ArgString(args, "min_confidence")
 	return intel.RenderPath(ix, intel.ShortestPathMin(ix, from, to, minConf)), nil
@@ -185,7 +189,7 @@ func Cycles(ctx context.Context, ix *index.Index, args map[string]any) (string, 
 }
 
 func Dead(ctx context.Context, ix *index.Index, args map[string]any) (string, error) {
-	dead := intel.DeadCode(ix)
+	dead := intel.FilterDeadByPath(intel.DeadCode(ix), mcpargs.ArgString(args, "path"))
 	limit := 0
 	if v := mcpargs.ArgString(args, "limit"); v != "" {
 		n, err := mcpargs.AtoiArg(v, limit)
@@ -194,10 +198,7 @@ func Dead(ctx context.Context, ix *index.Index, args map[string]any) (string, er
 		}
 		limit = n
 	}
-	if limit > 0 && len(dead) > limit {
-		dead = dead[:limit]
-	}
-	return intel.RenderDead(dead), nil
+	return intel.RenderDeadLimited(dead, limit), nil
 
 }
 
@@ -513,6 +514,32 @@ func clipQuery(s string) string {
 	return s[:117] + "..."
 }
 
+// normalizeSearchName lowercases a symbol name and strips underscores, dots
+// and whitespace so containment can be compared across naming conventions
+// ("run_taint", "runTaint", "run taint" and "pkg.runTaint" all normalize to
+// "runtaint").
+func normalizeSearchName(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, ".", "")
+	return strings.Join(strings.Fields(s), "")
+}
+
+// hasStrongSearchMatch reports whether any ranked hit is a STRONG match for
+// the query: the normalized match name contains the normalized query or vice
+// versa. Pure fuzzy hits (shared trigrams with no token containment) are
+// weak — a nonsense query must not masquerade as a valid hit list.
+func hasStrongSearchMatch(query string, matches []index.Symbol) bool {
+	norm := normalizeSearchName(query)
+	for _, m := range matches {
+		n := normalizeSearchName(m.FullName())
+		if strings.Contains(n, norm) || strings.Contains(norm, n) {
+			return true
+		}
+	}
+	return false
+}
+
 func Search(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map[string]any) (string, error) {
 	query := mcpargs.ArgString(args, "query")
 	if query == "" {
@@ -560,6 +587,21 @@ func Search(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args ma
 	}
 	if len(matches) == 0 {
 		return "no symbols matched: " + clipQuery(query) + staleNote(ix), nil
+	}
+	// Clean-miss signal: a nonsense query can return a list of unrelated
+	// fuzzy hits that reads as a valid answer and misleads agents. When NO
+	// hit is a strong containment match, say so and show only the top few
+	// weak hits instead of serving the bare list. Conservative: a single
+	// strong match keeps the full results as today.
+	if !hasStrongSearchMatch(query, matches) {
+		var weak []string
+		for _, m := range matches {
+			weak = append(weak, m.FullName())
+			if len(weak) == 3 {
+				break
+			}
+		}
+		return "no strong symbol matches for: " + clipQuery(query) + " — weak fuzzy matches (low confidence, may be unrelated): " + strings.Join(weak, ", ") + staleNote(ix), nil
 	}
 	var b strings.Builder
 	for _, m := range matches {
@@ -870,7 +912,7 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		callees := gov.FilterQualified(ix, ix.CallsFor(rep.Definition), true)
 		radius := gov.FilterQualified(ix, rep.BlastRadius, false)
 		rep.Callers = mcpgov.SimpleNames(callers)
-		rep.Callees = mcpgov.SimpleNames(callees)
+		qualifyCallees(ix, rep, callees)
 		rep.BlastRadius = radius
 		rep.BlastFiles = intel.AffectedFiles(ix, radius)
 		rep.Source = gov.FilterContextFooter(ix, rep.Source)
@@ -879,6 +921,9 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		names = append(names, radius...)
 		gvc.StampGov(gov, provenance.SymbolProvenances(ix, names))
 	} else {
+		// Raw mode: no governance filter, so the callee list is the index's own
+		// (qualified) call targets — same qualification as the governed path.
+		qualifyCallees(ix, rep, ix.CallsFor(rep.Definition))
 		names := append([]string{rep.Resolved}, rep.Callers...)
 		names = append(names, rep.Callees...)
 		names = append(names, rep.BlastRadius...)
@@ -911,6 +956,48 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		}
 	}
 	return rendered + FreshnessFooter(args, ix), nil
+}
+
+// qualifyCallees replaces the report's callee list with the QUALIFIED names
+// (pkg.Func, Type.Method) and re-keys the confidence/synthesis maps to those
+// names, in both governed and raw mode. The unqualified echo ("Join",
+// "Printf", "Stat") was genuinely ambiguous, and the source block's "calls:"
+// line already lists the same callees qualified, so the simple-name list was
+// redundant noise. Labels fall back to the recorded simple-name entries,
+// then to the per-edge confidence, so [EXTRACTED]/[INFERRED]/[AMBIGUOUS]
+// survive the switch.
+func qualifyCallees(ix *index.Index, rep *intel.ExploreReport, callees []string) {
+	if len(callees) == 0 {
+		rep.Callees = nil
+		return
+	}
+	rep.Callees = callees
+	if rep.CalleeConf != nil {
+		conf := make(map[string]string, len(callees))
+		for _, c := range callees {
+			label := rep.CalleeConf[mcpgov.SimpleName(c)]
+			if label == "" {
+				label = intel.EdgeConfidenceLabel(ix, rep.Resolved, c)
+			}
+			if label != "" {
+				conf[c] = label
+			}
+		}
+		rep.CalleeConf = conf
+	}
+	if rep.CalleeSynth != nil {
+		synth := make(map[string]string, len(callees))
+		for _, c := range callees {
+			s := rep.CalleeSynth[mcpgov.SimpleName(c)]
+			if s == "" {
+				s = intel.EdgeSynthLabel(ix, rep.Resolved, c)
+			}
+			if s != "" {
+				synth[c] = s
+			}
+		}
+		rep.CalleeSynth = synth
+	}
 }
 
 // exploreSuggestions builds the "did you mean" hint for a failed

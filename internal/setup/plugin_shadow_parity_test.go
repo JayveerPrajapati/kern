@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,10 +34,15 @@ func TestPluginShadowExemptionParity(t *testing.T) {
 		// exempt (guard exit 0 == TS simple)
 		"git status", "git status --short", "git log", "git log --oneline", "git log --pretty=oneline",
 		"pwd", "true", "whoami", "date -u", "echo hello", "ls -la", "which gcc",
+		// read-only kern diagnostics — exact invocation only (guard exit 0 ==
+		// TS simple)
+		"kern version", "kern --version", "kern doctor", "kern health",
 		// governed (guard exit 2 == TS non-simple)
 		"git log -p", "git log --patch", "git log -u", "git log --raw", "git log --oneline -p",
 		"git diff", "git show HEAD:main.go", "git blame file.go",
 		"git statusX", "pwd123", "echo $HOME",
+		// any kern invocation beyond the four exempt forms stays governed
+		"kern update", "kern version --json",
 		"pwd\nmake", "git status\nrm -rf /tmp/x",
 		"git log --oneline | head -5", "echo $(whoami)", "ls; rm -rf /tmp/x", "grep foo file.go > out.txt",
 		"sed -n '1,5p' file.go", "cat source.go", "make", "go test ./...",
@@ -239,10 +245,12 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 		switch {
 		case strings.Contains(reason, "kern_compact_file"):
 			guardReasons["read"] = reason
-		case strings.Contains(reason, "kern_ast_search"):
-			guardReasons["grep"] = reason
-		case strings.Contains(reason, "kern_validate"):
+		case strings.Contains(reason, "kern_verify"):
+			// bash reason — must be classified before the grep anchor: its
+			// "kern alternative" tail also names kern_search.
 			guardReasons["bash"] = reason
+		case strings.Contains(reason, "kern_search"):
+			guardReasons["grep"] = reason
 		case strings.Contains(reason, "kern_project_map"):
 			guardReasons["glob"] = reason
 		}
@@ -271,10 +279,10 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 		switch {
 		case strings.Contains(msg, "kern_compact_file"):
 			pluginThrows["read"] = append(pluginThrows["read"], msg)
-		case strings.Contains(msg, "kern_ast_search"):
-			pluginThrows["grep"] = append(pluginThrows["grep"], msg)
-		case strings.Contains(msg, "kern_validate"):
+		case strings.Contains(msg, "kern_verify"):
 			pluginThrows["bash"] = append(pluginThrows["bash"], msg)
+		case strings.Contains(msg, "kern_search"):
+			pluginThrows["grep"] = append(pluginThrows["grep"], msg)
 		case strings.Contains(msg, "kern_project_map"):
 			pluginThrows["glob"] = append(pluginThrows["glob"], msg)
 		}
@@ -384,5 +392,207 @@ process.stdout.write(JSON.stringify(out));
 	}
 	if res.CdNpmCompoundMatch {
 		t.Error("`cd X && npm test` first token matched the content-intent set — execution-class compounds must keep flowing to kern build")
+	}
+}
+
+// TestPluginShadowBannerEmptyReason pins the mode-1 fix: the governed-bash
+// failure banner must NEVER render an empty why. Live failure: a nonzero exit
+// with zero captured output showed only "Failed with exit code 2" — nothing
+// to explain what happened. The banner function is extracted verbatim from
+// the shipped plugin (marker-delimited) and executed under node, mirroring
+// the predicate-parity harness pattern.
+func TestPluginShadowBannerEmptyReason(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not found: %v — skipping banner check", err)
+	}
+	pluginSrc, err := pluginFS.ReadFile("assets/plugin/kern.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pluginSrc)
+	start := strings.Index(src, "// --- governed-bash banner start")
+	if start < 0 {
+		t.Fatal("banner block start marker '// --- governed-bash banner start' not found in plugin")
+	}
+	end := strings.Index(src, "// --- governed-bash banner end ---")
+	if end < 0 || end < start {
+		t.Fatal("banner block end marker '// --- governed-bash banner end ---' not found in plugin")
+	}
+	block := src[start:end]
+	block = strings.Replace(block, "function governedBashBanner(exitCode: number, text: string): string {", "function governedBashBanner(exitCode, text) {", 1)
+
+	nodeScript := filepath.Join(t.TempDir(), "banner.js")
+	nodeSrc := block + `
+const out = {
+  empty: governedBashBanner(2, ""),
+  emptyWs: governedBashBanner(1, "  \n\t "),
+  denial: governedBashBanner(3, "kern: build: execution denied by governance: approval appr-x pending — resolve with: kern approve appr-x"),
+  withText: governedBashBanner(1, "make: *** no rule to make target"),
+};
+process.stdout.write(JSON.stringify(out));
+`
+	if err := os.WriteFile(nodeScript, []byte(nodeSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("node", nodeScript).Output()
+	if err != nil {
+		t.Fatalf("node banner harness failed: %v", err)
+	}
+	var res struct {
+		Empty    string `json:"empty"`
+		EmptyWs  string `json:"emptyWs"`
+		Denial   string `json:"denial"`
+		WithText string `json:"withText"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("unmarshal node banner output %q: %v", out, err)
+	}
+
+	// Mode 1: nonzero exit + empty captured text MUST render a diagnostic.
+	for name, banner := range map[string]string{"empty": res.Empty, "emptyWs": res.EmptyWs} {
+		if !strings.HasPrefix(banner, "[kern] command failed (exit code ") {
+			t.Errorf("%s banner should be the plain-failure prefix, got: %q", name, banner)
+		}
+		if !strings.Contains(banner, "command produced no output") {
+			t.Errorf("%s banner must append the empty-output diagnostic, got: %q", name, banner)
+		}
+	}
+	// Denial banner keeps its denied prefix and the new sentence is not
+	// required there (the pre-execution sentence lives on the Go side).
+	if !strings.HasPrefix(res.Denial, "[kern] governed command denied/blocked (exit code 3):") {
+		t.Errorf("denial banner prefix wrong, got: %q", res.Denial)
+	}
+	// Non-empty output is unchanged: no diagnostic appended.
+	want := "[kern] command failed (exit code 1):\nmake: *** no rule to make target"
+	if res.WithText != want {
+		t.Errorf("banner with text = %q, want %q", res.WithText, want)
+	}
+}
+
+// TestPluginShadowCommandForwardedVerbatim pins F2: the governed bash path
+// must hand the ORIGINAL command string to `kern build` as ONE verbatim
+// argument. The assembly is extracted verbatim from the shipped plugin (the
+// sq quote helper + runWithExit's cmdStr line) and executed under node; the
+// argv `kern build` would receive is recovered through an argv-printing
+// stand-in and compared byte-for-byte. Live regressions: a compound with
+// single quotes + parens + redirects hit a sh "syntax error near unexpected
+// token '('" (quotes mangled, metacharacters left unquoted), and
+// `grep -c '^kern_'` reached grep as `\^kern_\` ("trailing backslash",
+// exit 2) — both caused by an extra manual escaping layer (a broken quote
+// idiom in the sq helper) applied before the host `$` transport, which
+// already quotes each interpolated value as one argument.
+func TestPluginShadowCommandForwardedVerbatim(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not found: %v — skipping governed-bash quoting check", err)
+	}
+	pluginSrc, err := pluginFS.ReadFile("assets/plugin/kern.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pluginSrc)
+
+	// Extract the sq quote helper verbatim (identical in runRaw/runPayload/
+	// runWithExit) and strip the TS parameter annotation for plain node.
+	sqMarker := "const sq = (s: string) => `"
+	sqStart := strings.Index(src, sqMarker)
+	if sqStart < 0 {
+		t.Fatal("sq quote helper not found in plugin — quoting parity harness would silently skip")
+	}
+	sqEnd := strings.Index(src[sqStart:], "\n")
+	if sqEnd < 0 {
+		t.Fatal("sq helper line unterminated")
+	}
+	sqLine := strings.TrimSpace(src[sqStart : sqStart+sqEnd])
+	sqLine = strings.Replace(sqLine, "const sq = (s: string) => ", "const sq = (s) => ", 1)
+
+	// Extract runWithExit's cmdStr assembly (the governed bash path): the
+	// line whose `${args.map(sq).join(" ")}` embeds the raw command into the
+	// sh -c script. Marker is unique to runWithExit (runPayload's line has
+	// `${preserveExit ...}` there, runRaw has `( ${command} )`).
+	asmMarker := `join(" ")} > ${sq(outFile)} 2>&1; printf '%s' "$?"`
+	asmStart := strings.Index(src, asmMarker)
+	if asmStart < 0 {
+		t.Fatal("runWithExit cmdStr assembly not found in plugin — quoting parity harness would silently skip")
+	}
+	asmLineStart := strings.LastIndex(src[:asmStart], "\n") + 1
+	asmEnd := strings.Index(src[asmStart:], "\n")
+	if asmEnd < 0 {
+		t.Fatal("cmdStr assembly line unterminated")
+	}
+	asmLine := strings.TrimSpace(src[asmLineStart : asmStart+asmEnd])
+	if !strings.HasPrefix(asmLine, "const cmdStr = `") {
+		t.Fatalf("extracted assembly line = %q, want the runWithExit const cmdStr line", asmLine)
+	}
+
+	// The exact commands observed failing live (literal \n inside the single
+	// quotes, as the agent typed them).
+	cases := []string{
+		`printf 'package main\n' > main.go && echo "== health (unindexed) ==" && kern health 2>&1 | head -12; echo "EXIT=$?"`,
+		`kern mcp tools 2>&1 | grep -c '^kern_'`,
+	}
+	casesJSON, err := json.Marshal(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand-in for the kern binary: prints its argv so the test can assert on
+	// the exact arguments kern build would have received.
+	printer := filepath.Join(t.TempDir(), "argv.sh")
+	if err := os.WriteFile(printer, []byte("#!/bin/sh\ni=0\nfor a in \"$@\"; do\n  i=$((i+1))\n  printf 'ARG%d=%s\\n' \"$i\" \"$a\"\ndone\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The harness mirrors the plugin's call shape: bin + one command arg.
+	// args = [printer, cmd] plays the role of the plugin's ["build", cmd];
+	// the printer script sees $@ = [cmd] — exactly the argument `kern build`
+	// would receive. The command must arrive as ONE byte-verbatim argument.
+	nodeScript := filepath.Join(t.TempDir(), "forward.js")
+	nodeSrc := `const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+` + sqLine + "\n" + `
+const printer = ` + strconv.Quote(printer) + `;
+const bin = "/bin/sh";
+const outFile = path.join(os.tmpdir(), "kern-fwd-" + process.pid + ".out");
+const cases = ` + string(casesJSON) + `;
+function forward(cmd) {
+  const args = [printer, cmd];
+  ` + asmLine + `
+  try { execFileSync("/bin/sh", ["-c", cmdStr], { stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {}
+  const text = fs.readFileSync(outFile, "utf8");
+  return text.split("\n").filter((l) => l.startsWith("ARG")).map((l) => l.slice(l.indexOf("=") + 1));
+}
+const out = {};
+for (const c of cases) out[c] = forward(c);
+process.stdout.write(JSON.stringify(out));
+`
+	if err := os.WriteFile(nodeScript, []byte(nodeSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("node", nodeScript).Output()
+	if err != nil {
+		t.Fatalf("node forwarding harness failed: %v\n%s", err, out)
+	}
+	var res map[string][]string
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("unmarshal node output %q: %v", out, err)
+	}
+
+	for _, cmd := range cases {
+		argv, ok := res[cmd]
+		if !ok {
+			t.Fatalf("node harness returned no argv for %q — extraction drift?", cmd)
+		}
+		want := []string{cmd}
+		if len(argv) != len(want) {
+			t.Errorf("command %q forwarded as %d argument(s) %v, want exactly 1 (%v) — the command must reach kern build as ONE verbatim argument", cmd, len(argv), argv, want)
+			continue
+		}
+		for i := range want {
+			if argv[i] != want[i] {
+				t.Errorf("command %q forwarded arg %d = %q, want %q (byte-verbatim)", cmd, i, argv[i], want[i])
+			}
+		}
 	}
 }

@@ -9,10 +9,27 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
+// memoryUsage is the single source of the `kern memory` help text: printed
+// by bare `kern memory` (F4) and reused as the dispatch-table entry's usage
+// field for `kern memory --help`.
+const memoryUsage = "usage: kern memory add|list|recall|remove <...>\n" +
+	"  subcommands:\n" +
+	"    add <lesson>        store a lesson ('remember' is an alias)\n" +
+	"    list                list stored lessons\n" +
+	"    recall <prompt>     ranked keyword recall\n" +
+	"    remove <n|prefix>   delete one entry by 1-based list index or text prefix\n" +
+	"  options:\n" +
+	"    --clear            clear/empty the whole store\n" +
+	"    --json             emit JSON output\n" +
+	"    --limit            cap results at N\n" +
+	"    --root             project root (default: .)"
+
 // memoryAdd stores a lesson in project memory. It is the shared body of
-// `kern memory add` and its alias entry `kern remember`.
+// `kern memory add` and its alias entry `kern remember`. Explicit lessons
+// dual-write via memory.AddExplicit: the typed store (buddy's "Project
+// memory") and the v1 store (recall/list).
 func memoryAdd(ctx context.Context, root, lesson string) {
-	if err := memory.Add(root, lesson); err != nil {
+	if err := memory.AddExplicit(root, lesson); err != nil {
 		fatal("Memory: %v", err)
 	}
 	fmt.Println("remembered.")
@@ -116,6 +133,18 @@ func runMemory(rest []string) {
 			// fall-through to the list path.
 			fatalUsage("memory: unknown subcommand %q (usage: kern memory add|list|recall|remove <...> or kern remember <lesson>)", args[0])
 		}
+	}
+	// F4: bare `kern memory` (no subcommand, no explicit request) silently
+	// fell through to a (possibly empty) list print and exit 0 — print the
+	// memory help instead. --clear/--json remain working explicit requests;
+	// `kern memory recall` with no prompt stays a usage error. The help text
+	// is the shared memoryUsage const (not printCommandHelp, which reads
+	// commandTable and would form an initialization cycle with the dispatch
+	// table entry that calls this handler).
+	if !f.clear && !f.json {
+		fmt.Println("kern memory — engineering memory ops")
+		fmt.Println(memoryUsage)
+		return
 	}
 	if f.clear {
 		if err := memory.Clear(root); err != nil {

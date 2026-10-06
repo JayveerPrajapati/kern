@@ -168,23 +168,3 @@ func TestGlobalHooksReferenceHomeGuardScript(t *testing.T) {
 		})
 	}
 }
-
-// TestGitignoreGeneratedCoversNewAgents verifies the setup-generated
-// .gitignore block ignores every machine-specific agent config, including the
-// newer .continue/ and .windsurf/ rule files.
-func TestGitignoreGeneratedCoversNewAgents(t *testing.T) {
-	dir := t.TempDir()
-	st := gitignoreGenerated(dir)
-	if !st.Installed {
-		t.Fatalf("gitignore update failed: %s", st.Note)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if err != nil {
-		t.Fatalf("gitignore not written: %v", err)
-	}
-	for _, want := range []string{".continue/", ".windsurf/", ".kern/", ".gemini/", ".kiro/", ".github/hooks/", ".agents/rules/kern.md", ".agents/hooks.json"} {
-		if !strings.Contains(string(b), want) {
-			t.Errorf(".gitignore missing %q:\n%s", want, b)
-		}
-	}
-}

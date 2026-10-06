@@ -6,9 +6,7 @@
         "kern-mcp"
       ],
       "enabled": true,
-      "environment": {
-        "KERN_ALLOW_EXEC": "1"
-      },
+      "environment": {},
       "type": "local"
     }
   }

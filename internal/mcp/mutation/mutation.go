@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mutation"
@@ -33,6 +34,19 @@ func Test(ctx context.Context, args map[string]any) (string, error) {
 	dryRun := mcpargs.ArgString(args, "dry_run") == "true"
 	testCmd := mcpargs.ArgString(args, "test_command")
 	format := mcpargs.ArgString(args, "format")
+
+	// Security: test_command is a client-supplied exec surface — parts[0] is
+	// attacker-picked and runs arbitrary host code with the operator's
+	// permissions — so it must pass the governance exec firewall, the same
+	// KERN_ALLOW_EXEC / KERN_TOOLS gate as kern_exec/kern_sandbox. The
+	// engine's derived default (go test . -count=1) is a fixed constant
+	// inherent to the mutation feature and is not gated; only a
+	// client-supplied command is.
+	if strings.TrimSpace(testCmd) != "" {
+		if err := governance.CheckExecCommand(testCmd, root, "kern_mutate_test"); err != nil {
+			return "", err
+		}
+	}
 
 	report, err := mutation.Run(ctx, mutation.Options{
 		Root:        root,

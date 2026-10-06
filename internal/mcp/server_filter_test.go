@@ -16,7 +16,7 @@ func clearMCPSurfaceEnv(t *testing.T) {
 }
 
 // TestFilteredToolsDefaultMinimal verifies the NEW default: no env override
-// advertises exactly the 22-tool defaultTools surface.
+// advertises exactly the toolsurface.Set() default surface.
 func TestFilteredToolsDefaultMinimal(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -178,7 +178,7 @@ func TestFilteredTools_PhaseExplore(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "explore")
 	assertPhaseSurface(t, "explore",
-		[]string{"kern_search", "kern_meta", "kern_optimize", "kern_run"},
+		[]string{"kern_search", "kern_meta"},
 		[]string{"kern_plan", "kern_verify", "kern_rename"})
 }
 
@@ -188,7 +188,7 @@ func TestFilteredTools_PhasePlan(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "plan")
 	assertPhaseSurface(t, "plan",
-		[]string{"kern_plan", "kern_impact", "kern_meta", "kern_optimize"},
+		[]string{"kern_impact", "kern_meta"},
 		[]string{"kern_rename", "kern_verify", "kern_probe"})
 }
 
@@ -198,7 +198,7 @@ func TestFilteredTools_PhaseEdit(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "edit")
 	assertPhaseSurface(t, "edit",
-		[]string{"kern_meta", "kern_run", "kern_optimize"},
+		[]string{"kern_meta"},
 		[]string{"kern_plan", "kern_verify", "kern_probe"})
 }
 
@@ -208,7 +208,7 @@ func TestFilteredTools_PhaseVerify(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "verify")
 	assertPhaseSurface(t, "verify",
-		[]string{"kern_verify", "kern_review", "kern_meta", "kern_optimize"},
+		[]string{"kern_verify", "kern_meta"},
 		[]string{"kern_plan", "kern_rename", "kern_probe"})
 }
 

@@ -30,23 +30,6 @@ func continueSettingsPath() string {
 // same matcher+hooks group shape Claude/Qwen/Qoder use — so mergeHookGroups
 // preserves unrelated keys and never duplicates the kern group on re-run.
 func wireContinueHooks() Status {
-	guardPath, err := writeGuardScriptGlobal()
-	if err != nil {
-		return Status{Agent: "continue-hooks", Installed: false, Path: continueSettingsPath(), Note: err.Error()}
-	}
-	path := continueSettingsPath()
-	groups := map[string]any{
-		"PreToolUse": []any{
-			map[string]any{
-				"matcher": "Bash|Read|Grep|Glob",
-				"hooks": []any{
-					map[string]any{"type": "command", "command": guardPath},
-				},
-			},
-		},
-	}
-	if err := mergeHookGroups(path, groups); err != nil {
-		return Status{Agent: "continue-hooks", Path: path, Note: err.Error()}
-	}
-	return Status{Agent: "continue-hooks", Installed: true, Path: path, Note: "continue PreToolUse hook registered"}
+	return wireGuardHook("continue-hooks", "PreToolUse", "Bash|Read|Grep|Glob",
+		continueSettingsPath(), "continue PreToolUse hook registered")
 }

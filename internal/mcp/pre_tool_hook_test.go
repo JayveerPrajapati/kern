@@ -169,7 +169,7 @@ func TestPreToolHook_GateAttachedByDefault(t *testing.T) {
 		if s.preTool == nil {
 			t.Fatal("gate must still be attached (cwd-confined) as the default hook in zero-config")
 		}
-		if s.gate == nil || !s.gate.enabled {
+		if s.gate == nil || !s.gate.Enabled() {
 			t.Fatal("zero-config gate must be enabled and confined to the cwd")
 		}
 		if err := s.Serve(); err != nil {

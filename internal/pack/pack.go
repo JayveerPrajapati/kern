@@ -84,6 +84,17 @@ var instructionNames = []string{
 
 const defaultMaxFileBytes = 512 << 10
 
+// skipDir reports whether a directory basename is excluded from the pack
+// walk. It reuses code.IsIgnoredDir — the same set as the index's
+// ignoreDirs (internal/index/engine.go: VCS/build dirs, agent-tooling
+// wiring, graphify-out) — plus Python *.egg-info build-metadata dirs,
+// which the index never indexes (its source-extension filter rejects
+// PKG-INFO/SOURCES.txt): pack must not feed build metadata to LLMs as
+// source either.
+func skipDir(name string) bool {
+	return code.IsIgnoredDir(name) || strings.HasSuffix(name, ".egg-info")
+}
+
 // FilesTokens returns the total token count of the packed source files
 // (excluding instructions). Used by the budget-too-small warning to report
 // how many tokens instructions consumed.
@@ -120,7 +131,7 @@ func Build(root string, opts Options) (*Bundle, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if path != abs && (code.IsIgnoredDir(d.Name()) || ig.Ignored(rel)) {
+			if path != abs && (skipDir(d.Name()) || ig.Ignored(rel)) {
 				return filepath.SkipDir
 			}
 			return nil

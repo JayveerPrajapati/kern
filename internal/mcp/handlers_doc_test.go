@@ -87,3 +87,30 @@ func TestHandleDocDispatch(t *testing.T) {
 		t.Fatalf("expected unknown-action error, got %v", err)
 	}
 }
+
+// TestHandleDocDefaultsRootToWorkspace pins F11: kern_doc with no root arg
+// must search the project the server serves (the workspace root), never the
+// process working directory. A root-bound server's cwd can differ from the
+// project it serves; docsearch's empty-root fallback previously indexed
+// whatever tree the cwd contained and leaked other projects' doc hits.
+func TestHandleDocDefaultsRootToWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	docContent := "# Widget Guide\n\nWidget configuration for the served project only.\n"
+	if err := os.WriteFile(filepath.Join(root, "docs", "guide.md"), []byte(docContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForRoot(strings.NewReader(""), io.Discard, root)
+	defer s.Close()
+	// No root argument: the server's workspace root must be used.
+	res, err := s.handleDoc(context.Background(), map[string]any{
+		"action": "search", "query": "Widget"})
+	if err != nil {
+		t.Fatalf("handleDoc without root: %v", err)
+	}
+	if !strings.Contains(res, "Widget Guide") {
+		t.Errorf("expected docs from the served workspace root, got: %q", res)
+	}
+}

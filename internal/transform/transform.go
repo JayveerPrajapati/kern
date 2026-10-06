@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -80,64 +81,6 @@ type Result struct {
 	Applied      bool     `json:"applied"`
 }
 
-// confinePath resolves p against root (nearest-existing-ancestor symlink
-// resolution, re-appending the remaining components) and rejects any path
-// that escapes root — "..", absolute paths outside the root, and symlinked
-// parents (root/link -> /etc) that would smuggle a read or write outside the
-// workspace. It returns the absolute cleaned path on success.
-func confinePath(root, p string) (string, error) {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = filepath.Clean(cwd)
-		} else {
-			root = "."
-		}
-	}
-	var abs string
-	if filepath.IsAbs(p) {
-		abs = filepath.Clean(p)
-	} else {
-		abs = filepath.Join(root, p)
-	}
-	real, err := nearestExisting(abs)
-	if err != nil {
-		return "", err
-	}
-	rr, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		rr = root
-	}
-	rel, err := filepath.Rel(rr, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("kern_ast_transform: file %q escapes workspace root", p)
-	}
-	return abs, nil
-}
-
-// nearestExisting resolves the real location of the nearest existing ancestor
-// of abs (walking up until EvalSymlinks succeeds) and re-appends the
-// remaining components, so a not-yet-existing file under a symlinked
-// directory is judged by its real location.
-func nearestExisting(abs string) (string, error) {
-	var rem []string
-	probe := abs
-	for {
-		real, err := filepath.EvalSymlinks(probe)
-		if err == nil {
-			if len(rem) == 0 {
-				return real, nil
-			}
-			return filepath.Join(append([]string{real}, rem...)...), nil
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return "", fmt.Errorf("kern_ast_transform: cannot resolve %q", abs)
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
-}
-
 // Transform executes the requested AST transformation.
 func Transform(req Request) (*Result, error) {
 	var src []byte
@@ -148,7 +91,7 @@ func Transform(req Request) (*Result, error) {
 		if req.Root != "" && !filepath.IsAbs(filePath) {
 			filePath = filepath.Join(req.Root, filePath)
 		}
-		if _, cerr := confinePath(req.Root, filePath); cerr != nil {
+		if _, cerr := fsutil.ConfinePath(req.Root, filePath, "kern_ast_transform"); cerr != nil {
 			return nil, cerr
 		}
 		data, err := os.ReadFile(filePath)
@@ -203,7 +146,7 @@ func Transform(req Request) (*Result, error) {
 		if _, perr := parser.ParseFile(token.NewFileSet(), filePath, newCode, parser.ParseComments); perr != nil {
 			return nil, fmt.Errorf("refusing to apply: generated code does not parse: %w", perr)
 		}
-		if _, cerr := confinePath(req.Root, filePath); cerr != nil {
+		if _, cerr := fsutil.ConfinePath(req.Root, filePath, "kern_ast_transform"); cerr != nil {
 			return nil, cerr
 		}
 		if err := os.WriteFile(filePath, newCode, 0644); err != nil {

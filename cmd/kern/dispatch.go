@@ -9,11 +9,13 @@ import (
 
 // resolveCommandAndFlags extracts the subcommand and its remaining arguments
 // from os.Args. It also handles the two pre-dispatch exits: no command at all
-// (prints usage, exit 2) and a `--help`/`-h` request (prints usage, exit 0).
+// (prints usage, exit 0 — a help print, not an error) and a `--help`/`-h`
+// request (prints usage, exit 0).
 func resolveCommandAndFlags() (cmd string, rest []string) {
 	if len(os.Args) < 2 {
-		// No command: fall through to dispatch's unknown-command default, which
-		// prints usage and returns exit code 2 on the normal sentinel path so
+		// No command: fall through to dispatch's bare-kern default, which
+		// prints usage and returns exit code 0 (the help path — usage
+		// ERRORS like unknown commands stay 2) on the normal sentinel path so
 		// main() persists metrics before os.Exit (a direct os.Exit would skip it).
 		return "", nil
 	}
@@ -194,16 +196,82 @@ func printCategoryHelp(cat string) bool {
 // command shares the same shutdown path.
 func dispatchCommand(cmd string, rest []string) int {
 	if e, ok := commandTable[cmd]; ok {
+		// F10: strict per-command flags. The shared parseFlags knows every
+		// flag in the system, so without this check a command silently
+		// accepted flags it does not consume (`kern budget --budget 100`
+		// applied the default because --budget belongs to context-watch).
+		// Reject flags the command does not declare → usage error, exit 2,
+		// matching the strict `kern mcp tools` FlagSet.
+		if bad := unknownFlagIn(cmd, rest); bad != "" {
+			fmt.Fprintf(os.Stderr, "kern: %s: unknown flag: %s\n", cmd, bad)
+			fmt.Fprintf(os.Stderr, "run 'kern %s --help' for the flags this command accepts\n", cmd)
+			return 2
+		}
 		return e.run(cmd, rest)
 	}
 	if cmd == "" {
 		// Bare `kern` (no command): keep the full usage dump so the
-		// no-command default stays self-documenting.
+		// no-command default stays self-documenting. A help print with no
+		// error is not a usage error — exit 0, same as `kern --help`
+		// (unknown commands and bad flags still exit 2).
 		usage()
-		return 2
+		return 0
 	}
 	printUnknownCommand(cmd)
 	return 2
+}
+
+// unknownFlagIn returns the first flag token in rest that the command does
+// not declare in commandFlags, or "" when every flag is declared. The
+// per-command lists are defined next to the command table (dispatch_table.go);
+// commandRawArgs marks pass-through commands whose args are forwarded
+// verbatim and are NOT validated here.
+//
+// Matching the shared parser's semantics:
+//   - single-dash long flags (-json) normalize to their -- form;
+//   - a bare `--` ends flag validation: everything after it is pass-through
+//     (the `kern sandbox [root] -- <command...>` convention), so shell flags
+//     like `-c` can never be misread as kern flags;
+//   - `-h`/`--help` are consumed by resolveCommandAndFlags before dispatch
+//     and are always tolerated defensively;
+//   - negative numbers and a bare `-` (stdin) are positionals, not flags.
+func unknownFlagIn(cmd string, rest []string) string {
+	if commandRawArgs[cmd] {
+		return ""
+	}
+	allowed := make(map[string]bool, len(commandFlags[cmd])+2)
+	for _, f := range commandFlags[cmd] {
+		allowed[f] = true
+	}
+	allowed["help"] = true
+	allowed["h"] = true
+	// A token immediately after a known flag (without an inline =value) may
+	// be that flag's VALUE — the shared parser consumes it via
+	// setStr/setIntFlag/take (e.g. `--symbol -weird`). Value-position tokens
+	// are never flagged here; the parser itself still rejects genuinely
+	// unknown flags in non-value position.
+	prevFlagTookValue := false
+	for _, arg := range rest {
+		if arg == "--" {
+			break
+		}
+		if prevFlagTookValue {
+			prevFlagTookValue = false
+			continue
+		}
+		if !isFlagToken(arg) {
+			continue
+		}
+		name, _, hasInline := splitFlag(arg)
+		if len(name) > 1 && name[0] == '-' && name[1] != '-' && isAlpha(name[1]) && name != "-h" {
+			name = "--" + name[1:]
+		}
+		if !allowed[strings.TrimPrefix(name, "--")] {
+			return name
+		}
+		prevFlagTookValue = !hasInline
+	}
+	return ""
 }
 
 // printUnknownCommand writes a one-line unknown-command error to stderr with

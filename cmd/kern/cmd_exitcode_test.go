@@ -10,6 +10,25 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
+// TestRunVerifyBareUsageIsActionable pins F4: bare `kern verify` stays a
+// usage error (exit 2) but the message suggests the concrete next step —
+// 'kern verify build,test' and the --command flag — instead of a bare
+// usage line.
+func TestRunVerifyBareUsageIsActionable(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	stderr, code := captureStderrExit(t, func() {
+		runVerify(nil)
+	})
+	if code != 2 {
+		t.Fatalf("runVerify(nil) exit = %d, want 2", code)
+	}
+	for _, want := range []string{"kern verify build,test", "--command"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("bare verify message missing %q, got: %.300s", want, stderr)
+		}
+	}
+}
+
 // TestRunDoctorExitsNonzeroOnFail pins the e2e round-2 fix: `kern doctor`
 // printed "verdict: failures" but exited 0. Any [fail]-level finding must
 // map to exit 1 (warn-only runs stay 0).
@@ -145,6 +164,29 @@ func TestVerifyExitCodeContract(t *testing.T) {
 	}
 }
 
+// TestVerifyStaticAnalysisSkippedExitsZero pins the static-analysis
+// did-not-run fix at the exit-code contract: a verify whose static-analysis
+// check could NOT be executed (StatusSkipped) derives VerdictSkipped —
+// neither PASS nor FAIL — and exits 0. An unmeasured run must never
+// false-FAIL.
+func TestVerifyStaticAnalysisSkippedExitsZero(t *testing.T) {
+	res := verdict.VerificationResult{
+		StaticAnalysis: &verdict.StaticAnalysisResult{
+			OK:     false,
+			Status: verdict.StatusSkipped,
+			Tool:   "go vet",
+			Output: "static-analysis not executed: go vet could not run (exit 1): exec failure; ensure go vet is installed and runnable",
+		},
+	}
+	got := verdict.DeriveVerdict(&res)
+	if got != verdict.VerdictSkipped {
+		t.Fatalf("static-analysis-SKIPPED verdict = %q, want SKIPPED (never PASS, never FAIL)", got)
+	}
+	if code := verifyExitCode(got); code != 0 {
+		t.Fatalf("verifyExitCode for a static-analysis-SKIPPED run = %d, want 0", code)
+	}
+}
+
 // TestVerifyOutcomeLineWording pins F7: "verification FAILED" is reserved for
 // a FAIL verdict; WARN and SKIPPED have their own wording, and a SKIPPED
 // verdict names the reason (e.g. "govulncheck not installed").
@@ -178,7 +220,7 @@ func TestVerifyOutcomeLineWording(t *testing.T) {
 }
 
 // TestReviewRiskExitsPolicy pins F19: kern review / kern changes with risk
-// found exit 3 (policy family) on both the text and --json paths, while a
+// found exit 1 (findings tier) on both the text and --json paths, while a
 // review of an unindexed file (no risk) exits 0.
 func TestReviewRiskExitsPolicy(t *testing.T) {
 	root := jsonCliFixture(t)
@@ -186,11 +228,11 @@ func TestReviewRiskExitsPolicy(t *testing.T) {
 		t.Fatalf("index build: %v", err)
 	}
 	// main.go is indexed and its symbols (main, helper) are untested, so
-	// TotalRisk > 0 → policy exit 3 (F19).
-	assertExitCode(t, 3, func() { runChanges("review", []string{"--root", root, "--file", "main.go"}) })
-	assertExitCode(t, 3, func() { runChanges("review", []string{"--root", root, "--json", "--file", "main.go"}) })
-	assertExitCode(t, 3, func() { runChanges("changes", []string{"--root", root, "--file", "main.go"}) })
-	assertExitCode(t, 3, func() { runChanges("changes", []string{"--root", root, "--json", "--file", "main.go"}) })
+	// TotalRisk > 0 → findings exit 1 (F19).
+	assertExitCode(t, 1, func() { runChanges("review", []string{"--root", root, "--file", "main.go"}) })
+	assertExitCode(t, 1, func() { runChanges("review", []string{"--root", root, "--json", "--file", "main.go"}) })
+	assertExitCode(t, 1, func() { runChanges("changes", []string{"--root", root, "--file", "main.go"}) })
+	assertExitCode(t, 1, func() { runChanges("changes", []string{"--root", root, "--json", "--file", "main.go"}) })
 	// A file that is not in the index contributes no risk → exit 0 (no
 	// exitError panic).
 	runChanges("review", []string{"--root", root, "--file", "not_indexed.go"})

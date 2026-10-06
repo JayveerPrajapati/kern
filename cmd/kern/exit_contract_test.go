@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -19,10 +20,12 @@ import (
 //
 // Contract pinned (verified live 2026-09-24):
 //
-//	kern changes <dirty>      -> 3   (risk findings, fatalPolicy)
-//	kern review  <dirty>      -> 3   (risk findings, fatalPolicy)
-//	kern security <secret>    -> 3   (error findings; was 1 pre-policy-family)
-//	kern diff-gate --blocking -> 1   (WARN elevated to BLOCK)
+//	kern changes <dirty>      -> 1   (risk findings, fatalFindings)
+//	kern review  <dirty>      -> 1   (risk findings, fatalFindings)
+//	kern security <secret>    -> 1   (error findings)
+//	kern diff-gate --blocking -> 1   (fixture BLOCKs on the hardcoded secret;
+//	                                 the WARN→BLOCK --blocking elevation -> 3 is
+//	                                 pinned in TestDiffGateServiceVerdicts)
 //	kern verify --types build -> 1   (FAIL verdict on a broken build)
 //	kern exec <failing>       -> 1   (script exit propagates)
 func TestFindingsCommandExitContract(t *testing.T) {
@@ -82,9 +85,9 @@ func TestFindingsCommandExitContract(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"changes dirty -> 3", nil, []string{"changes", "."}, 3},
-		{"review dirty -> 3", nil, []string{"review", "."}, 3},
-		{"security secret -> 3", nil, []string{"security", "."}, 3},
+		{"changes dirty -> 1", nil, []string{"changes", "."}, 1},
+		{"review dirty -> 1", nil, []string{"review", "."}, 1},
+		{"security secret -> 1", nil, []string{"security", "."}, 1},
 		{"diff-gate blocking -> 1", nil, []string{"diff-gate", ".", "--blocking", "--no-tests"}, 1},
 		{"verify broken build -> 1", nil, []string{"verify", ".", "--types", "build"}, 1},
 		{"exec failing script -> 1", []string{"KERN_ALLOW_EXEC=1", "KERN_TOOLS=kern_exec"}, []string{"exec", "exit 7", "--lang", "bash"}, 1},
@@ -100,7 +103,7 @@ func TestFindingsCommandExitContract(t *testing.T) {
 // TestSecGosecExitContract pins the optional gosec engine's exit contract:
 // a HIGH-severity gosec finding is advisory under the default error-only
 // lens (exit 0 — Model C: external engines never gate), and only
-// KERN_SEC_PROMOTE lifting its rule ID reaches the policy-family exit 3.
+// KERN_SEC_PROMOTE lifting its rule ID reaches the findings-tier exit 1.
 func TestSecGosecExitContract(t *testing.T) {
 	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
 		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
@@ -155,11 +158,58 @@ func TestSecGosecExitContract(t *testing.T) {
 		want int
 	}{
 		{"sec gosec HIGH default lens -> 0", []string{"KERN_GOSEC=" + gosecBin}, []string{"sec", "."}, 0},
-		{"sec gosec HIGH promoted -> 3", []string{"KERN_GOSEC=" + gosecBin, "KERN_SEC_PROMOTE=G104"}, []string{"sec", "."}, 3},
+		{"sec gosec HIGH promoted -> 1", []string{"KERN_GOSEC=" + gosecBin, "KERN_SEC_PROMOTE=G104"}, []string{"sec", "."}, 1},
 	}
 	for _, c := range cases {
 		if got := runc(c.env, c.args...); got != c.want {
 			t.Errorf("%s: exit %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// TestAuthorizeContextExitContract pins the authorize-context exit contract
+// (P1.4, 2026-10-03 findings): the CODE returns 3 on denial (policy family,
+// like every risk/findings command) while docs/authorized-context.md and the
+// generated global rules had drifted to 2. This test pins BOTH halves: the
+// behavioral exit code (an unknown agent is denied fail-closed at the
+// authentication stage -> exit 3) and the doc row, so neither can drift again.
+func TestAuthorizeContextExitContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: builds a binary and runs it against a fixture repo")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Doc parity first (cheap, no build): the exit-code table must say 3 = denied.
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "authorized-context.md"))
+	if err != nil {
+		t.Fatalf("read docs/authorized-context.md: %v", err)
+	}
+	docS := string(doc)
+	if !strings.Contains(docS, "| 3    | denied") {
+		t.Errorf("docs/authorized-context.md exit-code table must document 3 = denied (code returns 3, policy family)")
+	}
+	if strings.Contains(docS, "| 2    | denied") {
+		t.Errorf("docs/authorized-context.md still documents 2 = denied - the code returns 3; doc and code must match")
+	}
+
+	// Behavioral: build the binary and run a denial through the real exit path.
+	bin := filepath.Join(t.TempDir(), "kern")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build kern: %v (%s)", err, out)
+	}
+	fix := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fix, "go.mod"), []byte("module fix\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fix, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Unknown agent -> fail-closed authentication denial -> exit 3.
+	cmd := exec.Command(bin, "authorize-context", "-agent", "ghost", "-task", "t", "-root", fix)
+	_ = cmd.Run()
+	if got := cmd.ProcessState.ExitCode(); got != 3 {
+		t.Errorf("authorize-context denied (unknown agent): exit %d, want 3", got)
 	}
 }

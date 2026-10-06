@@ -338,9 +338,13 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		},
 	})
 
-	// Determine approval state and next action.
+	// Determine approval state and next action. A1 (deep-dive 2026-10-03):
+	// the recommended follow-up tools must be callable on a DEFAULT MCP
+	// install (the 22-tool surface) — kern_exec/kern_validate are
+	// KERN_MCP_FULL-gated, so they are named as such, never as the primary
+	// instruction.
 	approvalState := "none"
-	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_exec/kern_validate) or run the autonomous loop via CLI: kern do \"" + intent + "\""
+	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_heal/kern_repair; kern_exec/kern_validate need KERN_MCP_FULL=1) or run the autonomous loop via CLI: kern do \"" + intent + "\""
 	if risk.ApprovalRequired {
 		approvalState = "required"
 		nextAction = "request approval"

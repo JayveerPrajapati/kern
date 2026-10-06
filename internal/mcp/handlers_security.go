@@ -34,7 +34,7 @@ func (s *Server) securityHooks() security.Hooks {
 		LoadIndex:      s.loadIndex,
 		ChangedContext: s.changedContext,
 		SecuritySvc:    securitySvc{},
-		ServerVersion:  serverVersion,
+		ServerVersion:  currentServerVersion(),
 	}
 }
 

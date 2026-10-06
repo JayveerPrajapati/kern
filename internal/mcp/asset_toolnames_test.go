@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 )
 
 // TestAssetToolNamesInCatalog is the permanent form of the Phase-3 content
@@ -22,7 +24,6 @@ func TestAssetToolNamesInCatalog(t *testing.T) {
 	root := repoRoot(t)
 
 	assets := []string{
-		filepath.Join(root, "internal", "setup", "assets", "global-rules.md"),
 		filepath.Join(root, "internal", "setup", "assets", "AGENTS.md"),
 	}
 	// Bespoke per-agent instruction rules (continue/windsurf/kiro).
@@ -67,5 +68,47 @@ func TestAssetToolNamesInCatalog(t *testing.T) {
 	if len(violations) > 0 {
 		sort.Strings(violations)
 		t.Fatalf("%d stale tool name(s) referenced in embedded assets:\n%s", len(violations), strings.Join(violations, "\n"))
+	}
+}
+
+// TestAssetMentionsAllDefaultTools is the inverse invariance guard (Part A,
+// improvement plan 2026-10-03): TestAssetToolNamesInCatalog catches asset
+// names that no longer EXIST, but nothing caught an asset silently DROPPING
+// one of the default-surface tools from its guidance (the hand-typed
+// "advertised by default (toolpolicy.go defaultTools)" enumeration). Every
+// default-surface tool must be mentioned (backticked) in both rule assets, so
+// the guidance can never lag the advertised surface.
+func TestAssetMentionsAllDefaultTools(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	assets := []string{
+		filepath.Join(root, "internal", "setup", "assets", "AGENTS.md"),
+	}
+
+	defaults := map[string]bool{}
+	for _, n := range toolsurface.Default {
+		defaults[n] = true
+	}
+	if len(defaults) == 0 {
+		t.Fatal("no default tools resolved — defaultToolNames() is broken")
+	}
+
+	for _, p := range assets {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read asset %s: %v", p, err)
+		}
+		text := string(b)
+		var missing []string
+		for n := range defaults {
+			if !strings.Contains(text, "`"+n+"`") {
+				missing = append(missing, n)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			t.Fatalf("%s does not mention %d default-surface tool(s): %s", filepath.ToSlash(strings.TrimPrefix(p, root+"/")), len(missing), strings.Join(missing, ", "))
+		}
 	}
 }

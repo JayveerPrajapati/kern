@@ -1,11 +1,14 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
 func TestAddAndList(t *testing.T) {
@@ -289,5 +292,315 @@ func TestAddAutoDedupesDuplicateCaptures(t *testing.T) {
 	}
 	if counts["Edited internal/api/handlers.go"] != 1 {
 		t.Fatalf("different capture must not be deduped, got %d", counts["Edited internal/api/handlers.go"])
+	}
+}
+
+// TestAddExplicitWritesTypedAndV1 pins the P2-14 follow-up: an explicit user
+// lesson (the body behind `kern memory add` / kern_memory action=add) must
+// land in the TYPED store buddy's "Project memory" reads — Source "user",
+// not "auto", so CurrentMemories keeps it and brief's auto guard does not
+// skip it — AND in the v1 store (Source "") so `kern memory recall` keeps
+// finding it.
+func TestAddExplicitWritesTypedAndV1(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	const lesson = "Always run tests before committing code changes"
+	if err := AddExplicit(root, lesson); err != nil {
+		t.Fatalf("AddExplicit: %v", err)
+	}
+
+	// Typed store: buddy's "Project memory" source of truth.
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *domain.Memory
+	for i := range mems {
+		if mems[i].Content == lesson {
+			found = &mems[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("explicit lesson missing from typed store CurrentMemories: %+v", mems)
+	}
+	if found.Source == "auto" {
+		t.Fatalf("explicit lesson Source = %q, want a non-auto source", found.Source)
+	}
+	if found.Type != domain.MemoryLesson {
+		t.Fatalf("explicit lesson Type = %q, want %q", found.Type, domain.MemoryLesson)
+	}
+
+	// v1 store: recall and list keep working against the same lesson.
+	if got := Recall(root, "run tests before committing", DefaultRecallLimit); len(got) != 1 || got[0].Text != lesson {
+		t.Fatalf("v1 recall lost explicit lesson: %+v", got)
+	}
+	for _, e := range List(root) {
+		if e.Text == lesson && e.Source == "auto" {
+			t.Fatalf("v1 explicit lesson tagged auto: %+v", e)
+		}
+	}
+}
+
+// TestAutoFloodDoesNotEvictExplicitLessons: a flood of automatic captures far
+// beyond maxEntries must never evict explicit lessons — the auto entries are
+// trimmed oldest-first and fill only the leftover capacity.
+func TestAutoFloodDoesNotEvictExplicitLessons(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	const n = 5
+	explicit := make([]string, n)
+	for i := 0; i < n; i++ {
+		explicit[i] = fmt.Sprintf("explicit lesson %d about the api", i)
+		if err := Add(root, explicit[i]); err != nil {
+			t.Fatalf("Add explicit #%d: %v", i, err)
+		}
+	}
+	// Flood with unique auto captures far beyond maxEntries.
+	for i := 0; i < maxEntries*4; i++ {
+		if err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
+			t.Fatalf("AddAuto #%d: %v", i, err)
+		}
+	}
+	ls := List(root)
+	if len(ls) > maxEntries {
+		t.Fatalf("store exceeded cap: %d > %d", len(ls), maxEntries)
+	}
+	// Every explicit lesson must survive the flood.
+	for _, want := range explicit {
+		found := false
+		for _, e := range ls {
+			if e.Text == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("explicit lesson %q was evicted by auto flood", want)
+		}
+	}
+	// The flood fills the remaining capacity with auto entries (oldest
+	// autos trimmed first, so the newest maxEntries-n autos survive).
+	auto := 0
+	for _, e := range ls {
+		if e.Source == "auto" {
+			auto++
+		}
+	}
+	if auto != len(ls)-n {
+		t.Fatalf("got %d auto entries, want %d", auto, len(ls)-n)
+	}
+	if !containsText(ls, fmt.Sprintf("User: auto flood prompt %d", maxEntries*4-1)) {
+		t.Fatalf("newest auto capture should survive, got %+v", ls)
+	}
+	if containsText(ls, "User: auto flood prompt 0") {
+		t.Fatalf("oldest auto capture should have been trimmed first")
+	}
+}
+
+// TestExplicitOnlyStoreDropsOldestAtCap: with no auto entries present, the
+// hard cap still applies — an explicit-only store at capacity drops the
+// oldest explicit lesson on the next add.
+func TestExplicitOnlyStoreDropsOldestAtCap(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	for i := 0; i < maxEntries; i++ {
+		if err := Add(root, fmt.Sprintf("explicit lesson %02d", i)); err != nil {
+			t.Fatalf("Add #%d: %v", i, err)
+		}
+	}
+	if err := Add(root, "newest explicit lesson"); err != nil {
+		t.Fatalf("Add over cap: %v", err)
+	}
+	ls := List(root)
+	if len(ls) != maxEntries {
+		t.Fatalf("got %d entries, want cap %d", len(ls), maxEntries)
+	}
+	if containsText(ls, "explicit lesson 00") {
+		t.Fatalf("oldest explicit lesson should be dropped at cap, still present: %+v", ls)
+	}
+	if ls[0].Text != "newest explicit lesson" {
+		t.Fatalf("newest lesson must survive, got %+v", ls)
+	}
+}
+
+// TestMixedAutoAndExplicitInterleaved: interleaved explicit lessons and auto
+// captures — all explicit lessons survive and autos are trimmed oldest-first.
+func TestMixedAutoAndExplicitInterleaved(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	explicit := map[string]bool{}
+	for i := 0; i < maxEntries*2; i++ {
+		if i%3 == 0 {
+			lesson := fmt.Sprintf("interleaved explicit lesson %d", i)
+			explicit[lesson] = true
+			if err := Add(root, lesson); err != nil {
+				t.Fatalf("Add explicit #%d: %v", i, err)
+			}
+		} else {
+			if err := AddAuto(root, fmt.Sprintf("User: interleaved auto capture %d", i)); err != nil {
+				t.Fatalf("AddAuto #%d: %v", i, err)
+			}
+		}
+	}
+	ls := List(root)
+	if len(ls) > maxEntries {
+		t.Fatalf("store exceeded cap: %d > %d", len(ls), maxEntries)
+	}
+	got := map[string]bool{}
+	for _, e := range ls {
+		got[e.Text] = true
+	}
+	for want := range explicit {
+		if !got[want] {
+			t.Fatalf("explicit lesson %q evicted by interleaved auto captures", want)
+		}
+	}
+	// Oldest autos evicted first: the very first auto capture is gone,
+	// the very last one survives.
+	if got["User: interleaved auto capture 1"] {
+		t.Fatalf("oldest auto capture should have been trimmed first")
+	}
+	if !got["User: interleaved auto capture 98"] {
+		t.Fatalf("newest auto capture should survive, got %+v", ls)
+	}
+}
+
+// TestRecallFindsExplicitAfterAutoFlood: after an auto flood, Recall (which
+// skips auto entries) must still surface the explicit lessons.
+func TestRecallFindsExplicitAfterAutoFlood(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := Add(root, "the billing service signs every webhook with hmac sha256"); err != nil {
+		t.Fatalf("Add lesson: %v", err)
+	}
+	for i := 0; i < maxEntries*3; i++ {
+		if err := AddAuto(root, fmt.Sprintf("User: flood prompt %d about deployment", i)); err != nil {
+			t.Fatalf("AddAuto #%d: %v", i, err)
+		}
+	}
+	got := Recall(root, "how is the billing webhook signed?", 5)
+	if len(got) == 0 {
+		t.Fatalf("recall found nothing after auto flood: %+v", List(root))
+	}
+	if !strings.Contains(got[0].Text, "billing") {
+		t.Fatalf("expected the explicit billing lesson first, got %q", got[0].Text)
+	}
+}
+
+// containsText reports whether any entry in ls carries the exact text want.
+func containsText(ls []Entry, want string) bool {
+	for _, e := range ls {
+		if e.Text == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRestartPersistsExplicitLessons: explicit lessons written by one store
+// instance must be readable by a FRESH instance. The v1 store keeps no
+// in-memory cache — Load/List/Recall re-read the JSON file from disk on every
+// call (Load -> readJSON(Path(root))), so a second Load over the same root is
+// the true restart boundary: the file at Path(root) is the only state that
+// carries between processes.
+func TestRestartPersistsExplicitLessons(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+
+	// Instance 1: real Add calls (load -> mutate -> writeJSON).
+	lessons := []string{
+		"the payment service retries idempotency keys with backoff",
+		"the auth middleware validates jwt expiry in the api layer",
+	}
+	for _, l := range lessons {
+		if err := Add(root, l); err != nil {
+			t.Fatalf("Add %q: %v", l, err)
+		}
+	}
+
+	// The JSON file is the persistence boundary — it must exist on disk.
+	if _, err := os.Stat(Path(root)); err != nil {
+		t.Fatalf("store file missing after Add: %v", err)
+	}
+
+	// Instance 2 (fresh process): a fresh Load re-reads the file from disk.
+	// No state is shared with instance 1 beyond the file.
+	s := Load(root)
+	if len(s.Entries) != len(lessons) {
+		t.Fatalf("restart: got %d entries, want %d: %+v", len(s.Entries), len(lessons), s.Entries)
+	}
+	for _, want := range lessons {
+		if !containsText(s.Entries, want) {
+			t.Fatalf("restart: explicit lesson %q missing after reload", want)
+		}
+	}
+
+	// The public List surface must agree, most recent first.
+	ls := List(root)
+	if len(ls) != len(lessons) || ls[0].Text != lessons[1] || ls[1].Text != lessons[0] {
+		t.Fatalf("restart: List mismatch: %+v", ls)
+	}
+
+	// Recall must surface the explicit lessons after restart.
+	got := Recall(root, "how does the payment service retry idempotency?", 5)
+	if len(got) == 0 || !strings.Contains(got[0].Text, "retries") {
+		t.Fatalf("restart: recall failed: %+v", got)
+	}
+}
+
+// TestExplicitLessonsSurviveRestartAndAutoFlood: explicit lessons must survive
+// BOTH a restart (fresh instance re-reading the JSON file) AND an auto flood
+// beyond maxEntries. This pins the regression where a 50/50 auto ring evicted
+// explicit lessons before the source-aware trim existed — the pre-fix store
+// lost explicit lessons permanently because the trim dropped oldest-first
+// regardless of source.
+func TestExplicitLessonsSurviveRestartAndAutoFlood(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+
+	// Instance 1: seed explicit lessons, then flood with auto captures.
+	explicit := []string{
+		"explicit lesson about the billing webhook signature",
+		"explicit lesson about the session cookie",
+		"explicit lesson about the tenant id prefix",
+	}
+	for _, l := range explicit {
+		if err := Add(root, l); err != nil {
+			t.Fatalf("Add explicit %q: %v", l, err)
+		}
+	}
+	for i := 0; i < maxEntries*4; i++ {
+		if err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
+			t.Fatalf("AddAuto #%d: %v", i, err)
+		}
+	}
+
+	// Instance 2 (restart): a fresh Load re-reads the ring from disk.
+	s := Load(root)
+	if len(s.Entries) != maxEntries {
+		t.Fatalf("restart: store exceeded cap: got %d, want %d", len(s.Entries), maxEntries)
+	}
+	for _, want := range explicit {
+		if !containsText(s.Entries, want) {
+			t.Fatalf("restart: explicit lesson %q evicted by auto flood", want)
+		}
+	}
+
+	// Recall across the restart boundary must still surface the explicit
+	// lessons (auto captures are excluded from recall).
+	got := Recall(root, "how is the billing webhook signed?", 5)
+	if len(got) == 0 || !strings.Contains(got[0].Text, "billing") {
+		t.Fatalf("restart: explicit lesson not recallable after flood: %+v", List(root))
+	}
+
+	// The remaining capacity is auto captures, oldest autos trimmed first.
+	auto := 0
+	for _, e := range s.Entries {
+		if e.Source == "auto" {
+			auto++
+		}
+	}
+	if auto != maxEntries-len(explicit) {
+		t.Fatalf("restart: got %d auto entries, want %d", auto, maxEntries-len(explicit))
 	}
 }

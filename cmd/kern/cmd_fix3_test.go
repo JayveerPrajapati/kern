@@ -258,7 +258,7 @@ func TestWhatIfImpactTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	// what-if --task persists.
 	var out string
 	if code := recoverExitCode(func() {
-		out = captureStdout(t, func() { runWhatIf("what-if", []string{"FindUser", "--root", dir, "--task", "wi", "--json"}) })
+		out = captureStdout(t, func() { runImpact([]string{"FindUser", "--root", dir, "--task", "wi", "--json"}) })
 	}); code != 0 {
 		t.Fatalf("what-if --task exited %d, want 0", code)
 	}
@@ -291,7 +291,7 @@ func TestWhatIfImpactTaskPersistenceGatedOnTaskFlag(t *testing.T) {
 	// Absent --task: no store growth.
 	before := storeRecordCount(t, dir)
 	if code := recoverExitCode(func() {
-		captureStdout(t, func() { runWhatIf("what-if", []string{"FindUser", "--root", dir, "--json"}) })
+		captureStdout(t, func() { runImpact([]string{"FindUser", "--root", dir, "--json"}) })
 	}); code != 0 {
 		t.Fatalf("what-if exited %d, want 0", code)
 	}

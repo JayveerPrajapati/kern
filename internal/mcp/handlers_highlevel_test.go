@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +267,38 @@ func TestHandleVerifyAcceptsArchitecture(t *testing.T) {
 	}
 }
 
+// TestHandleVerifyLicenseWarnSurfacesFindings pins P0-4: kern_verify with
+// types=license on a go.mod-only fixture returns a WARN verdict with err==nil
+// (license findings never fail the check), and the rendered output must carry
+// the per-check status AND the finding detail lines — never just the bare
+// "verdict: WARN / summary:" two-liner that used to drop them. The fixture's
+// main module has no LICENSE file, so it classifies "unknown" → one finding.
+func TestHandleVerifyLicenseWarnSurfacesFindings(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleVerify(context.Background(), "", map[string]any{"root": root, "types": "license"})
+	if err != nil {
+		t.Fatalf("handleVerify(license): %v", err)
+	}
+	if !strings.Contains(out, "verdict: WARN") {
+		t.Errorf("output missing WARN verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "license: WARN") {
+		t.Errorf("output missing per-check license status line:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown license: demo") {
+		t.Errorf("output missing license finding detail (P0-4 regression):\n%s", out)
+	}
+	if strings.Contains(out, "license: OK") {
+		t.Errorf("output must not claim a clean license OK:\n%s", out)
+	}
+	if !strings.Contains(out, "[task: ") {
+		t.Errorf("output missing task line:\n%s", out)
+	}
+}
+
 // TestHandleWhatIfGarbageWarns: kern_what_if with an unresolvable change
 // (bare symbol absent from the index) must surface a visible not-found
 // warning instead of a clean "Safe to proceed" bill; a real symbol from the
@@ -318,38 +352,61 @@ func TestHandleLoopAutonomousFailsFastWithoutProvider(t *testing.T) {
 	}
 }
 
-// TestHandleAnalyzePersistsTaskRecord locks the F9 regression fix on the MCP
-// surface: handleAnalyze's comment promises an authoritative Task record
-// queryable via kern task <id>, so the record must be written to the persisted
-// store — a fresh TaskService (a new process) must resolve the printed task ID.
-func TestHandleAnalyzePersistsTaskRecord(t *testing.T) {
+// TestHandleAnalyzeTaskPersistenceOptIn locks the F9 opt-in contract on the
+// MCP surface: kern_analyze is read-only, so a DEFAULT call must create only
+// an ephemeral in-memory task (a-<n> ID, no store write) — a fresh
+// TaskService (a new process) must NOT resolve the printed task ID. Passing
+// persist_task=true opts into the authoritative record (t-<n>, queryable via
+// kern task <id>), which a fresh TaskService must resolve.
+func TestHandleAnalyzeTaskPersistenceOptIn(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
+
+	taskID := func(out string) string {
+		t.Helper()
+		const marker = "[task: "
+		start := strings.Index(out, marker)
+		if start < 0 {
+			t.Fatalf("output has no %q line:\n%s", marker, out)
+		}
+		rest := out[start+len(marker):]
+		end := strings.Index(rest, " — ")
+		if end < 0 {
+			t.Fatalf("cannot parse task line from output:\n%s", out)
+		}
+		return rest[:end]
+	}
+
+	// Default kern_analyze call: the task record must stay ephemeral.
 	out, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet"})
 	if err != nil {
-		t.Fatalf("handleAnalyze: %v", err)
+		t.Fatalf("handleAnalyze (default): %v", err)
 	}
-	const marker = "[task: "
-	start := strings.Index(out, marker)
-	if start < 0 {
-		t.Fatalf("output has no %q line:\n%s", marker, out)
+	ephID := taskID(out)
+	if !strings.HasPrefix(ephID, "a-") {
+		t.Fatalf("default task id = %q, want ephemeral a-<n> (no persisted record)", ephID)
 	}
-	rest := out[start+len(marker):]
-	end := strings.Index(rest, " — ")
-	if end < 0 {
-		t.Fatalf("cannot parse task line from output:\n%s", out)
-	}
-	id := rest[:end]
-	if !strings.HasPrefix(id, "t-") {
-		t.Fatalf("task id = %q, want store-assigned t-<n> (authoritative record)", id)
-	}
-	// A fresh service reads the same persisted store `kern task <id>` reads.
+	// A fresh service reads the same persisted store `kern task <id>` reads;
+	// the ephemeral record must NOT be there.
 	ts := tasklife.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
-	if got, ok := ts.Get(id); !ok {
-		t.Fatalf("task %q not queryable from a fresh TaskService after handleAnalyze", id)
+	if _, ok := ts.Get(ephID); ok {
+		t.Fatalf("default kern_analyze persisted task %q — read-only calls must stay ephemeral", ephID)
+	}
+
+	// persist_task=true: the caller opted into the authoritative record.
+	out, err = s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "persist_task": true})
+	if err != nil {
+		t.Fatalf("handleAnalyze (persist_task=true): %v", err)
+	}
+	perID := taskID(out)
+	if !strings.HasPrefix(perID, "t-") {
+		t.Fatalf("persist_task=true task id = %q, want store-assigned t-<n> (authoritative record)", perID)
+	}
+	if got, ok := ts.Get(perID); !ok {
+		t.Fatalf("task %q not queryable from a fresh TaskService after persist_task=true", perID)
 	} else if got.State == "" {
-		t.Fatalf("task %q loaded from store has no state", id)
+		t.Fatalf("task %q loaded from store has no state", perID)
 	}
 }
 
@@ -363,4 +420,27 @@ func mustMCPPlatform(t *testing.T, root string) *app.Platform {
 		t.Fatalf("app.New(%s): %v", root, err)
 	}
 	return p
+}
+
+// TestVerifyWithoutCommandKeepsOldBehavior pins the kern_verify dispatch
+// routing: command mode (verifyCommand) only engages when a command or an
+// anchor argument is present; a plain verify (types=...) must keep the old
+// architecture-verdict path. The command runner itself lives in
+// internal/verifycmd; this test guards the mcp-side routing boundary.
+func TestVerifyWithoutCommandKeepsOldBehavior(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A real source file keeps the plain verify path from rejecting the
+	// fixture as an empty index (rejectEmptyIndex fires when a root has no
+	// indexable source files); the assertion is about dispatch, not the
+	// architecture verdict.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := mcpAssertOK(t, "kern_verify", map[string]any{"root": dir, "types": "architecture"})
+	if strings.Contains(out, "anchor=") {
+		t.Fatalf("plain verify must not take the command path:\n%s", out)
+	}
 }

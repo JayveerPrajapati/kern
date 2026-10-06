@@ -29,6 +29,15 @@ async function withTempFile<T>(name: string, content: string, fn: (file: string)
 
 const DEFAULT_COMPACT_THRESHOLD = 4000
 
+// F11: the "[kern] compressed" banner is a savings claim — emit it only when
+// compression genuinely shrank the text; equal or inflated output ships bare
+// so a zero/negative "saving" is never reported as if compression happened.
+function compressedFooter(textLen: number, compressedLen: number): string {
+  return compressedLen >= textLen
+    ? ""
+    : `[kern] compressed ${textLen} -> ${compressedLen} chars\n`
+}
+
 // --- Session event capture (P0-2, borrowed from mksglu/context-mode) ---
 // Record what the session did (file edits, failing commands) into project
 // memory so that after a context compaction — or in a fresh session — the
@@ -44,6 +53,75 @@ const FAIL_RE = /^\s*(?:error|fatal|panic|failed|cannot)[:;]|panic:|command not 
 // flooded by ordinary conversation (evicting real lessons).
 let lastChatAt = 0
 let lastChatText = ""
+
+// --- Exploration capture (context-reuse WRITE end) ---
+// Read-only kern tools (kern_explore/kern_search/kern_context/kern_buddy)
+// are what a lane actually learned from. Recording their successful calls
+// as low-volume "Explored <target> → <top result>" rows lets the read end
+// (brief.go's "Recent session activity" section) show what was already
+// explored so a later session or subagent lane does not re-derive it.
+// Records are deduped per target within the session, capped, byte-bounded,
+// and skipped whenever the call failed or matched nothing.
+const EXPLORE_TOOLS = new Set(["kern_explore", "kern_search", "kern_context", "kern_buddy"])
+const EXPLORE_SESSION_MAX = 20 // exploration records per session
+const EXPLORE_RECORD_MAX = 200 // hard byte bound per record
+const exploredTargets = new Set() // session-level dedupe by symbol/query
+let exploredCount = 0 // session cap counter
+
+// exploreTarget returns the symbol/query a read-only kern tool call was
+// about: kern_search's query, kern_buddy's root (or "session digest"), and
+// the symbol argument for the rest. Empty when the call had no usable
+// target.
+function exploreTarget(tool, args) {
+  if (typeof args !== "object" || args === null) return ""
+  if (tool === "kern_search") return typeof args.query === "string" ? args.query.trim() : ""
+  if (tool === "kern_buddy") {
+    return typeof args.root === "string" && args.root.trim() ? args.root.trim() : "session digest"
+  }
+  return typeof args.symbol === "string" ? args.symbol.trim() : ""
+}
+
+// topResultRef extracts the top result reference from a successful
+// read-only kern tool output: the evidence footer (explore/context) first,
+// then the first path:line mention (search results, callers/callees), then
+// the buddy digest's "Project: <root>" line. Empty when the output holds no
+// location at all — a no-match or failed call, which the caller skips.
+function topResultRef(text) {
+  if (!text) return ""
+  const ev = /(?:^|\n)evidence: (\S+?):(\d+)/.exec(text)
+  if (ev) return `${ev[1]}:${ev[2]}`
+  const m = /([A-Za-z0-9_@./-]+\.[A-Za-z0-9]+):(\d+)/.exec(text)
+  if (m) return `${m[1]}:${m[2]}`
+  const pr = /^Project: (\S+)/m.exec(text)
+  return pr ? pr[1] : ""
+}
+
+// rememberExploration records one successful read-only kern tool call via
+// the plugin's remember() (kern remember → memory store, Source "auto").
+// Hosts that prefix the MCP server name register the tools twice
+// (kern_kern_explore); normalize to the canonical name. Best-effort like
+// every capture: failures are swallowed by the caller.
+async function rememberExploration(tool, args, text, remember) {
+  const t = tool.replace(/^kern_kern_/, "kern_")
+  if (!EXPLORE_TOOLS.has(t)) return
+  if (!text || /^error/i.test(text.trim())) return
+  const target = exploreTarget(t, args)
+  if (!target) return
+  const ref = topResultRef(text)
+  if (!ref) return
+  if (exploredTargets.has(target)) return
+  if (exploredCount >= EXPLORE_SESSION_MAX) return
+  exploredTargets.add(target)
+  exploredCount++
+  let rec = `Explored ${target} → ${ref}`
+  if (Buffer.byteLength(rec, "utf8") >= EXPLORE_RECORD_MAX) {
+    rec = rec.slice(0, EXPLORE_RECORD_MAX - 4)
+    while (rec.length > 1 && Buffer.byteLength(rec + "…", "utf8") >= EXPLORE_RECORD_MAX) rec = rec.slice(0, -1)
+    rec = rec.trimEnd() + "…"
+  }
+  await remember(rec, EXPLORE_RECORD_MAX)
+}
+// --- End exploration capture ---
 
 function fileArg(args: any): string {
   if (typeof args !== "object" || args === null) return ""
@@ -193,19 +271,27 @@ await stat(filePath) // existence probe — unreadable/missing stays governed
 return false
 }
 
-// Content-free git subcommands and trivial commands exempt from governed bash
-// routing: no build/test/PII surface, and the governed wrapper adds latency
-// without value. Only SINGLE commands qualify — any shell operator,
-// substitution, redirection, variable expansion ($), or newline (multi-line
-// compound) means the full governed path. git diff/show/blame are NOT exempt:
-// they emit file content, so they stay governed like any other code read.
+// Content-free git subcommands, read-only kern diagnostics, and trivial
+// commands exempt from governed bash routing: no build/test/PII surface, and
+// the governed wrapper adds latency without value. Only SINGLE commands
+// qualify — any shell operator, substitution, redirection, variable
+// expansion ($), or newline (multi-line compound) means the full governed
+// path. git diff/show/blame are NOT exempt: they emit file content, so they
+// stay governed like any other code read.
 const TRIVIAL_COMMANDS = new Set(["pwd", "date", "whoami", "true", "echo", "ls", "which"])
 const READONLY_GIT = new Set(["status", "log"])
+// Read-only kern diagnostics exempt from governed routing: EXACT invocation
+// only — "kern update" (or any subcommand/flag beyond these four bare forms)
+// stays governed. The four are content-free, so the governed wrapper adds
+// latency without value.
+const READONLY_KERN = new Set(["kern version", "kern --version", "kern doctor", "kern health"])
 // Flags that make `git log` emit file content (patch bodies / raw diffs).
 const GIT_LOG_PATCH_FLAGS = ["-p", "--patch", "-u", "--raw"]
 function isSimpleCommand(cmd: string): boolean {
 if (/[;&|<>`$\n\r]/.test(cmd)) return false
-const parts = cmd.trim().split(/\s+/)
+const trimmed = cmd.trim()
+if (READONLY_KERN.has(trimmed)) return true
+const parts = trimmed.split(/\s+/)
 if (parts.length === 0) return false
 if (parts[0] === "git") {
 if (parts.length < 2 || !READONLY_GIT.has(parts[1])) return false
@@ -351,7 +437,7 @@ kern_arch: "explore",
   kern_why: "explore",
   kern_workflow: "cross",
 }
-// defaultTools mirrors internal/mcp/toolpolicy.go's 22-tool default surface so the
+// defaultTools mirrors internal/mcp/toolpolicy.go's 6-tool default surface so the
 // plugin advertises the same tools the MCP server does when no env vars are
 // set. KERN_MCP_FULL=1, KERN_MCP_PHASE, and KERN_TOOLS all lift the default
 // (matching the server's behavior).
@@ -359,25 +445,9 @@ const DEFAULT_TOOLS = new Set([
   "kern_meta", // NL router → all sub-tools
   "kern_explore", // symbol source + callers/callees + blast radius
   "kern_impact", // blast radius of a change
-  "kern_review", // token-optimised review context
   "kern_search", // ranked symbol search
-  "kern_context", // minimal source slice
-  "kern_optimize", // compress prompts
-  "kern_plan", // implementation plan
   "kern_verify", // unified verification
-  "kern_run", // orchestrate a whole task
-  "kern_authorize_context", // authorized-context primitive (P0.1)
-  "kern_compact_file", // symbolic file summary — top token saver in telemetry
-  "kern_project_map", // repo onboarding map
-  "kern_probe", // task-driven context bundle (replaces 5-10 searches)
-  "kern_retrieve", // L1-L3 progressive-disclosure retrieval
-  "kern_memory", // cross-session project memory (add/recall/remove)
   "kern_buddy", // session onboarding digest
-  "kern_fit_context", // fit context to a token budget
-  "kern_repair", // deterministic compiler-error → AST fix (edit phase)
-  "kern_heal", // self-correct failing files (edit phase)
-  "kern_commitmsg", // deterministic conventional commit message (edit phase)
-  "kern_synthesize_test", // table-driven test generation (verify phase)
 ])
 
 // filterToolSurface applies the same advertisement rules as the MCP server's
@@ -399,10 +469,10 @@ function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial
     const p = TOOL_PHASES[name] ?? ""
     if (active && p !== "meta" && p !== "cross" && p !== active) continue
     if (allowlist.length > 0 && !allowlist.includes(name)) continue
-// No env override → default to the same 22-tool surface as the MCP
-	// server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
-	// and must always stay advertised to keep precedence over the
-	// built-ins they replace.
+// No env override → default to the same 6-tool surface as the MCP
+// server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
+// and must always stay advertised to keep precedence over the
+// built-ins they replace.
 	if (name.startsWith("kern_") && !full && !active && allowlist.length === 0 && !DEFAULT_TOOLS.has(name)) continue
     out[name] = def
   }
@@ -494,13 +564,46 @@ export default (async ({ directory, $ }) => {
   // $KERN_SYSTEM_PROMPT = system prompt, stdout = reply). Example:
   // KERN_HOST_SAMPLER_CMD="opencode run" kern-mcp
   const runRaw = async (command: string, workdir?: string, timeout?: number): Promise<string> => {
-    const p = $`sh -c ${command}`
-    if (workdir) p.cwd(workdir)
-    const ms = ceilingMs(timeout)
-    const out = typeof (p as any).timeout === "function"
-      ? await p.timeout(ms).quiet()
-      : await withTimeout(p.quiet(), ms)
-    return out.stdout.toString()
+    // Full capture (UX fix): run through an outFile wrapper so a non-zero
+    // exit never degrades into the host's bare "Failed with exit code N"
+    // error rendering — which drops stdout AND stderr entirely (observed
+    // live). The wrapper prints the real exit code on its own stdout; the
+    // command's streams land in temp files. Success keeps the old contract
+    // (stdout only); failure returns stdout+stderr with the exit code
+    // annotated, so the agent sees WHY the command failed.
+    const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+    const stamp = `${process.pid}-${randomBytes(4).toString("hex")}`
+    const outF = resolve(tmpdir(), `kern-shadow-${stamp}.out`)
+    const errF = resolve(tmpdir(), `kern-shadow-${stamp}.err`)
+    try {
+      // Subshell so the redirect covers every command of a compound — a
+      // bare `A && B > f` would capture only B.
+      const wrapped = `( ${command} ) > ${sq(outF)} 2> ${sq(errF)}; printf '%s' "$?"`
+      const p = $`sh -c ${wrapped}`
+      if (workdir) p.cwd(workdir)
+      const ms = ceilingMs(timeout)
+      const out = typeof (p as any).timeout === "function"
+        ? await p.timeout(ms).quiet()
+        : await withTimeout(p.quiet(), ms)
+      const code = parseInt(out.stdout.toString().trim(), 10)
+      if (Number.isNaN(code)) {
+        // The wrapper never printed an exit code — the command line failed
+        // to parse (sh syntax error) or the shell died. Surface the shell's
+        // own stderr instead of returning an empty success. Return (not
+        // throw): the host renders thrown tool errors as a bare failure
+        // with no payload, which would drop this diagnostic.
+        return out.stderr.toString().trim() || "shell could not execute the command"
+      }
+      const stdout = await readFile(outF, "utf8").catch(() => "")
+      if (Number.isNaN(code) || code === 0) return stdout
+      const stderr = await readFile(errF, "utf8").catch(() => "")
+      const parts = [stdout, stderr.trim() !== "" ? `[stderr]\n${stderr}` : ""].filter(Boolean)
+      const body = parts.join("\n")
+      return body ? `${body}\n[exit code: ${code}]` : `[exit code: ${code}]`
+    } finally {
+      await rm(outF, { force: true })
+      await rm(errF, { force: true })
+    }
   }
 
   // Kern-first adoption logging (opt-in, KERN_ADOPTION_LOG=1): each shadow
@@ -531,15 +634,16 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
     // Several kern CLI commands print their full report to stdout and then
     // exit non-zero BY DESIGN as a CI signal (kern changes/review exit 1 when
     // risk > 0, kern security on error findings, kern validate on FAILED,
-    // kern guard check exits 2 on violations, kern build/heal/sandbox/exec on
+    // kern guard check exits 3 on violations, kern build/heal/sandbox/exec on
     // command failure). The report must survive as the tool result. Capture it
     // via sh -c with output redirection and a forced exit 0: some host `$`
     // shells reject redirect tokens in the template literal itself AND do not
     // attach stdout to the rejection error, either of which would lose the
     // report. With preserveExit=true the forced exit 0 is dropped and a
-    // non-zero exit throws with the captured output, so callers that need the
-    // real exit status (kern_exec: "stderr is only surfaced on failure") get it.
-    const sq = (s: string) => `'${s.replace(/'/g, `'\\\\''`)}'`
+    // non-zero exit returns the captured output as the tool result, so
+    // callers that need the real exit status (kern_exec: "stderr is only
+    // surfaced on failure") still surface it.
+    const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
     const outFile = resolve(tmpdir(), `kern-shadow-${process.pid}-${randomBytes(4).toString("hex")}.out`)
     try {
       const cmdStr = `${sq(bin)} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1${preserveExit ? "" : "; exit 0"}`
@@ -548,8 +652,19 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
         if (typeof (p as any).timeout === 'function') await p.timeout(ceilingMs(timeoutMs)).quiet()
         else await withTimeout(p.quiet(), ceilingMs(timeoutMs))
       } catch (err) {
-        if (preserveExit) throw new Error(await readFile(outFile, 'utf8'))
-        throw err
+        if (preserveExit) {
+          // Non-zero exit (or timeout) of the wrapped command: return the
+          // captured output as the tool result so the agent sees why it
+          // failed — a thrown error surfaces as a bare failure with no
+          // payload (observed live). Fall back to the error message when
+          // nothing was captured.
+          const captured = await readFile(outFile, "utf8").catch(() => "")
+          return captured || (err instanceof Error ? err.message : String(err))
+        }
+        // Timeout/spawn failure on the non-preserveExit path: return the
+        // diagnostic instead of throwing — the host drops thrown-error
+        // payloads, leaving the agent with a bare failure and no reason.
+        return err instanceof Error ? err.message : String(err)
       }
       const text = await readFile(outFile, 'utf8')
       // NOTE: no etag learning here — runPayload merges stderr into the
@@ -562,6 +677,54 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       await rm(outFile, { force: true })
     }
   }
+
+  // Governed execution with full output + exit-code capture (UX fix): like
+  // runPayload, but instead of forcing exit 0 (or throwing the captured
+  // text away with only a bare "Failed with exit code N"), it reports the
+  // real exit code alongside the captured output so the caller can return a
+  // non-zero result AS the tool result — the host renders thrown tool
+  // errors without their payload, which silently discarded both the
+  // command's output and the denial reason (observed live). A rejection
+  // from this helper still means timeout/spawn failure (the wrapper itself
+  // always exits 0), so callers keep their existing throw semantics for
+  // those.
+  const runWithExit = async (args: string[], timeoutMs?: number): Promise<{ text: string; exitCode: number }> => {
+    // sq produces STANDARD POSIX single-quote quoting ('\'' for an embedded
+    // quote). The host `$` transport hands cmdStr to sh -c as ONE argument
+    // (lossless), so the inner sh must recover the args exactly as the
+    // plugin received them — no extra escaping layer may be applied here.
+    // Live regressions (F2): a compound with quotes/parens/redirects hit a sh
+    // "syntax error near unexpected token '('" (quotes mangled, metachars
+    // left unquoted), and `grep -c '^kern_'` reached grep as `\^kern_\`
+    // ("trailing backslash", exit 2).
+    const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+    const outFile = resolve(tmpdir(), `kern-shadow-${process.pid}-${randomBytes(4).toString("hex")}.out`)
+    try {
+      const cmdStr = `${sq(bin)} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1; printf '%s' "$?"`
+      const p = $`sh -c ${cmdStr}`
+      const out = typeof (p as any).timeout === "function"
+        ? await p.timeout(ceilingMs(timeoutMs)).quiet()
+        : await withTimeout(p.quiet(), ceilingMs(timeoutMs))
+      const code = parseInt(out.stdout.toString().trim(), 10)
+      const text = await readFile(outFile, "utf8").catch(() => "")
+      return { text, exitCode: Number.isNaN(code) ? 0 : code }
+    } finally {
+      await rm(outFile, { force: true })
+    }
+  }
+
+  // --- governed-bash banner start (extracted verbatim by TestPluginShadowBannerEmptyReason) ---
+  // Renders the bash shadow's failure banner. Never renders an empty why: a
+  // nonzero exit with no captured output means the command was rejected
+  // before execution or the runner failed to start (observed live: opencode
+  // showed only "Failed with exit code 2" with zero output). Say so instead
+  // of returning an empty payload.
+  function governedBashBanner(exitCode: number, text: string): string {
+    const denied = /blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)
+    const why = text.trim() === "" ? "\ncommand produced no output — rejected before execution or the runner failed to start; classify the segments and retry the governed part directly" : ""
+    return `${denied ? "[kern] governed command denied/blocked" : "[kern] command failed"} (exit code ${exitCode}):\n${text}${why}`
+  }
+  // --- governed-bash banner end ---
 
   // Best-effort: a memory-log failure must never break the host tool call.
   async function remember(lesson: string, maxLen = 300): Promise<void> {
@@ -1054,8 +1217,33 @@ return run(flags)
           depth: tool.schema.string().optional(),
           max: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
+          tier: tool.schema.string().optional(),
+          start_line: tool.schema.string().optional(),
+          end_line: tool.schema.string().optional(),
         },
         async execute(args) {
+          const wantsFile = args.tier || args.start_line || args.end_line
+          const dot = args.symbol.lastIndexOf(".")
+          const sep = Math.max(args.symbol.lastIndexOf("/"), args.symbol.lastIndexOf("\\"))
+          const isCodePath = dot > sep && CODE_EXTENSIONS.has(args.symbol.slice(dot + 1).toLowerCase()) &&
+            existsSync(resolve(args.root ?? ".", args.symbol))
+          if (wantsFile || isCodePath) {
+            const start = Number(args.start_line) || 0
+            const end = Number(args.end_line) || 0
+            const cflags: string[] = ["compact", args.symbol]
+            if (args.root) cflags.push("--root", args.root)
+            if (start || end) cflags.push("--tier", "full")
+            else if (args.tier) cflags.push("--tier", args.tier)
+            const body = await run(cflags)
+            if (!start && !end) return body
+            const lines = body.replace(/\n$/, "").split("\n")
+            const from = Math.max(start, 1)
+            const to = Math.min(end >= from ? end : from + 199, lines.length)
+            if (from > lines.length) return `error: start_line ${from} is past the end of ${args.symbol} (${lines.length} lines)`
+            const out = [`${args.symbol} lines ${from}-${to} of ${lines.length}:`]
+            for (let i = from; i <= to; i++) out.push(`${i}: ${lines[i - 1]}`)
+            return out.join("\n")
+          }
           const flags: string[] = ["explore", args.symbol]
           if (args.depth !== undefined) flags.push("--depth", String(args.depth))
           if (args.max !== undefined) flags.push("--max", String(args.max))
@@ -1870,13 +2058,17 @@ kern_probe: tool({
       }),
       kern_verify: tool({
         description:
-          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance checks are opt-in: cve/license/secrets run govulncheck, the license classifier, and the committed-secret scan (all advisory; missing binary or manifest reports SKIPPED).",
+          "HIGH-LEVEL (ADR-0006): verify a change (build, unit tests, security, architecture, dependency) — returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance opt-in: cve/license/secrets (advisory; missing binary reports SKIPPED). Command mode: command=YOUR build/test/lint cmd with output=summary|failures|tail:N|lines:A-B|full; re-slice the kept full run with anchor.",
         args: {
           root: tool.schema.string().optional(),
           types: tool.schema.string().optional(),
           cve: tool.schema.boolean().optional(),
           license: tool.schema.boolean().optional(),
           secrets: tool.schema.boolean().optional(),
+          command: tool.schema.string().optional(),
+          output: tool.schema.string().optional(),
+          anchor: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
         },
         async execute(args) {
           const flags: string[] = ["verify"]
@@ -1885,6 +2077,10 @@ kern_probe: tool({
           if (args.cve) flags.push("--cve")
           if (args.license) flags.push("--license")
           if (args.secrets) flags.push("--secrets")
+          if (args.command) flags.push("--command", args.command)
+          if (args.output) flags.push("--output", args.output)
+          if (args.anchor) flags.push("--anchor", args.anchor)
+          if (args.timeout) flags.push("--timeout", String(Math.round(args.timeout)))
           return runPayload(flags)
         },
       }),
@@ -2907,7 +3103,7 @@ if (await isSimpleRead(args.filePath)) {
             // them raw, and the empty-compact fallback above is the non-code
             // path. This catch is the code path only.
             logAdoption("read", false)
-            throw new Error("Use kern_compact_file (symbolic summary, faster) or kern_context (source slice) instead of the built-in read. Call kern_compact_file with {\"path\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard.")
+            throw new Error("Use kern_explore with the file path as symbol (symbolic summary; add tier=full for the verbatim file, or start_line/end_line for a line window) instead of the built-in read; kern_compact_file does the same when KERN_MCP_FULL=1. Call kern_explore with {\"symbol\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard.")
           }
         },
       }),
@@ -2968,7 +3164,7 @@ return out
 } catch {
 // kern unavailable — block (Contract Y): never a node-fs scan.
 logAdoption("grep", false)
-throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
 }
 }
 if (args.include || /[[\]\\^$.|?*+()]/.test(args.pattern)) {
@@ -2979,7 +3175,7 @@ if (args.include || /[[\]\\^$.|?*+()]/.test(args.pattern)) {
 // condition that used to fall through to a second grepFallback branch is
 // covered here, so that dead branch is gone.
 logAdoption("grep", false)
-throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
 }
 // Symbol query path: no include filter, no regex metacharacters — this is
 // what kern_ast_search is for.
@@ -2993,13 +3189,13 @@ return out + "\n[kern] grep routed to kern_search (symbol query, not regex)"
 // kern unavailable — block (Contract Y): a node-fs scan would bypass
 // the guard entirely.
 logAdoption("grep", false)
-throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
 }
         },
       }),
       bash: tool({
         description:
-          "Run a shell command. Simple content-free commands (git status, git log without patch flags, pwd, ls, which, echo, date) run raw. Content-intent commands (grep, find, cat, head, tail, awk, sed, ...) are blocked — use kern_ast_search / kern_search instead. Everything else runs through kern build (governed, compact output). timeout is in MILLISECONDS (default 120000, max 1800000).",
+          "Run a shell command. Simple content-free commands (git status, git log without -p, pwd, ls, which, echo, date) and read-only kern diagnostics (kern version/doctor/health) run raw. Content-intent commands (grep, cat, head, sed, ...) are blocked — use kern_ast_search / kern_search instead. Everything else runs through kern build (governed, compact). timeout in MS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -3030,7 +3226,7 @@ throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) 
           const firstTok = cmd.split(/\s+/)[0]
           if (contentIntents.has(firstTok)) {
             logAdoption("bash", false)
-            throw new Error("Use kern_validate (build/test/lint) or kern_exec (governed command execution) instead of the built-in bash. Set KERN_ENFORCE=0 to disable this guard.\nkern alternative: kern_context/kern_explore/kern_search for symbol context · kern_exec (KERN_MCP_FULL=1) for governed commands")
+            throw new Error("Use kern_verify instead of the built-in bash — it is the sanctioned path for go build / go vet / go test. Run your own build/test/lint command with kern_verify {\"command\":\"go test ./...\",\"output\":\"summary\"} (output: summary|failures|tail:N|lines:A-B|full; the full run is kept, so re-slice it with {\"anchor\":\"<id>\",\"output\":\"lines:A-B\"}), or call it with no arguments for build+test+security in one verdict. For governed one-off commands use kern_exec (KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.\\nkern alternative: kern_context/kern_explore/kern_search for symbol context · content-free compounds like 'git status && git log' are allowed through")
           }
           // kern build runs any command (sh -c) in the project dir, gated by
           // the governance firewall, and returns compact output. kern exec is
@@ -3039,13 +3235,29 @@ throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) 
           // shell usage — so every command goes through the same governed path.
           try {
             const flags: string[] = ["build", cmd]
-            if (args.workdir) flags.push("--dir", args.workdir)
+            if (args.workdir) {
+              // Fail fast with a clear reason: a missing workdir makes the
+              // governed path's shell fail with an error that names neither
+              // the directory nor the cause ("fork/exec /bin/sh: no such
+              // file or directory" — observed live). Return (not throw) so
+              // the host renders the message instead of dropping it.
+              if (!existsSync(args.workdir)) {
+                logAdoption("bash", false)
+                return `error: workdir does not exist: ${args.workdir} — create it first`
+              }
+              flags.push("--dir", args.workdir)
+            }
             if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
             // Pass the agent's budget (ms) through so the governed path honors
-            // it instead of the 2-minute default ceiling.
-            const out = await run(flags, args.timeout)
+            // it instead of the 2-minute default ceiling. runWithExit captures
+            // the full output and the real exit code: a failed command
+            // returns its output + an exit-code line instead of throwing into
+            // the host's bare "Failed with exit code N" rendering (which drops
+            // the payload AND the denial reason — observed live).
+            const { text, exitCode } = await runWithExit(flags, args.timeout)
             logAdoption("bash", true)
-            return out
+            if (exitCode === 0) return text
+            return governedBashBanner(exitCode, text)
           } catch (err) {
             // Never silently bypass the exec firewall: if the governed path
             // was DENIED (no KERN_TOOLS allowlist / no KERN_ALLOW_EXEC, or an
@@ -3059,16 +3271,21 @@ throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) 
             const e = err as { message?: string; stdout?: Buffer | Uint8Array; stderr?: Buffer | Uint8Array }
             const text = [e.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n")
             if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) {
-              // Served by kern's governed path (denial/timeout) — still kern-routed.
+              // Served by kern's governed path (denial/timeout) — still
+              // kern-routed. Return the diagnostic instead of throwing: the
+              // host renders thrown tool errors as a bare failure with no
+              // payload, dropping the denial/timeout reason (observed live).
               logAdoption("bash", true)
-              throw err
+              return text || (err instanceof Error ? err.message : String(err))
             }
             if (!existsSync(bin)) {
               logAdoption("bash", false)
               return runRaw(args.command, args.workdir, args.timeout)
             }
+            // Genuine governed-path failure with the kern binary present —
+            // same delivery: the diagnostic becomes the tool result.
             logAdoption("bash", true)
-            throw err
+            return text || (err instanceof Error ? err.message : String(err))
           }
         },
       }),
@@ -3127,6 +3344,10 @@ throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) 
           if (first && first.trim().length > 0) {
             await remember(`Command failed: ${first.trim()}`)
           }
+        } else {
+          // Read-only kern exploration: record what the session learned
+          // (no-op for every other tool name).
+          await rememberExploration(input.tool, input.args, text, remember)
         }
       } catch {
         /* swallow */
@@ -3148,7 +3369,7 @@ throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) 
         if (!compressed || compressed.trim() === "") return
         output.output = SILENT_MODE
           ? compressed
-          : `[kern] compressed ${text.length} -> ${compressed.length} chars\n${compressed}`
+          : compressedFooter(text.length, compressed.length) + compressed
       } catch {
         // Never break tool execution on optimizer failure.
       }

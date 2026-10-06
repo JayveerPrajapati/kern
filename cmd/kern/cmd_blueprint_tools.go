@@ -178,6 +178,20 @@ func runRepairGuidance(rest []string) {
 			if err := json.Unmarshal([]byte(payload), &finding); err != nil {
 				fatalUsage("repair-guidance: --finding must be a JSON object: %v", err)
 			}
+			if finding == nil {
+				fatalUsage("repair-guidance: --finding must be a JSON object (e.g. {\"rule_id\": \"format:gofmt\", \"file\": \"x.go\"})")
+			}
+			// P2-D3: a finding without a rule_id is INCOMPLETE data — the
+			// handler renders hollow guidance ("Finding () at :0:", exit 0).
+			// Fail loud (exit 1) exactly like explain-finding does, so both
+			// commands agree on the same malformed finding.
+			if m, ok := finding.(map[string]any); ok {
+				if rid, _ := m["rule_id"].(string); rid == "" {
+					fatal("repair-guidance: JSON parse error: finding missing required field \"rule_id\" (got: %s)", payload)
+				}
+			} else {
+				fatal("repair-guidance: JSON parse error: --finding must be a JSON object (got: %s)", payload)
+			}
 		}
 		return map[string]any{"repo": root, "finding": finding}
 	}

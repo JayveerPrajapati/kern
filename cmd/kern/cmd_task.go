@@ -262,6 +262,12 @@ func runTasks(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
 	if len(args) > 0 {
+		// L10: `kern tasks list` is a plausible-but-unsupported spelling;
+		// the exit is already 2, but the message must suggest the supported
+		// forms instead of a bare usage line.
+		if args[0] == "list" {
+			fatalUsage("usage: kern tasks [--root ROOT]\n  unsupported spelling 'kern tasks list' — use 'kern task list' (or bare 'kern tasks')")
+		}
 		fatalUsage("usage: kern tasks [--root ROOT]")
 	}
 	runTaskList(root)

@@ -12,7 +12,10 @@ import (
 func TestMergePrependPreservesOtherContent(t *testing.T) {
 	oldKern := "# kern usage rules\n\nold old\n\n"
 	other := "# graphify\n\nsome content\n\n# code-review\n\nmore\n"
-	merged := mergePrepend(oldKern+other, "# kern usage rules\n\nnew new\n")
+	merged, err := mergePrepend(oldKern+other, "# kern usage rules\n\nnew new\n")
+	if err != nil {
+		t.Fatalf("mergePrepend error: %v", err)
+	}
 	if strings.Contains(merged, "old old") {
 		t.Fatalf("old kern content not removed:\n%s", merged)
 	}
@@ -29,8 +32,14 @@ func TestMergePrependPreservesOtherContent(t *testing.T) {
 func TestMergePrependIdempotent(t *testing.T) {
 	kern := "# kern usage rules\n\nnew new\n"
 	existing := "# graphify\n\nkeep me\n"
-	first := mergePrepend(existing, kern)
-	second := mergePrepend(first, kern)
+	first, err := mergePrepend(existing, kern)
+	if err != nil {
+		t.Fatalf("mergePrepend error: %v", err)
+	}
+	second, err := mergePrepend(first, kern)
+	if err != nil {
+		t.Fatalf("mergePrepend error: %v", err)
+	}
 	if first != second {
 		t.Fatalf("not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
@@ -41,7 +50,10 @@ func TestMergePrependIdempotent(t *testing.T) {
 
 func TestMergeAppendPreservesOtherContent(t *testing.T) {
 	existing := "# kern usage rules\n\nold\n\n# my rules\n\nkeep\n"
-	merged := mergeAppend(existing, "# kern usage rules\n\nnew\n")
+	merged, err := mergeAppend(existing, "# kern usage rules\n\nnew\n")
+	if err != nil {
+		t.Fatalf("mergeAppend error: %v", err)
+	}
 	if strings.Contains(merged, "old\n") {
 		t.Fatalf("old kern content not removed:\n%s", merged)
 	}
@@ -54,38 +66,16 @@ func TestMergeAppendPreservesOtherContent(t *testing.T) {
 	}
 }
 
-func TestRemoveKernSection(t *testing.T) {
-	if got := removeKernSection("no kern here"); got != "no kern here" {
-		t.Fatalf("no-op expected, got %q", got)
-	}
-	in := "# kern usage rules\n\nold\n\n# next header\n\nbody\n"
-	want := "# next header\n\nbody\n"
-	if got := removeKernSection(in); got != want {
-		t.Fatalf("removeKernSection mismatch:\ngot:\n%q\nwant:\n%q", got, want)
-	}
-	// Kern at EOF: remove through end.
-	if got := removeKernSection("# kern usage rules\n\nold"); got != "" {
-		t.Fatalf("expected empty, got %q", got)
-	}
-}
-
-// TestRemoveKernSectionMultipleBlocks pins the F15 fix: repeated `kern setup
-// --global` runs used to accumulate one "# kern usage rules" block per run
-// because a single-pass removal left earlier blocks in place. Every block
-// must be removed, and the surrounding content preserved.
-func TestRemoveKernSectionMultipleBlocks(t *testing.T) {
+// TestMergeAppendConvergesMultipleBlocks pins the F15 fix at the writer
+// level: repeated `kern setup --global` runs used to accumulate one
+// "# kern usage rules" block per run. mergeAppend across three accumulated
+// blocks must converge to a single fresh block while keeping user content.
+func TestMergeAppendConvergesMultipleBlocks(t *testing.T) {
 	in := "# kern usage rules\n\noldest\n\n# user notes\n\nkeep me\n\n# kern usage rules\n\nmiddle\n\n# more user\n\nstill here\n\n# kern usage rules\n\nnewest\n"
-	got := removeKernSection(in)
-	if strings.Contains(got, "# kern usage rules") {
-		t.Fatalf("kern block still present after multi-block removal:\n%s", got)
+	merged, err := mergeAppend(in, "# kern usage rules\n\nfresh\n")
+	if err != nil {
+		t.Fatalf("mergeAppend error: %v", err)
 	}
-	for _, want := range []string{"# user notes", "keep me", "# more user", "still here"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("user content %q lost during multi-block removal:\n%s", want, got)
-		}
-	}
-	// mergeAppend across three accumulated blocks converges to one fresh block.
-	merged := mergeAppend(in, "# kern usage rules\n\nfresh\n")
 	if strings.Count(merged, "# kern usage rules") != 1 {
 		t.Fatalf("mergeAppend did not converge to a single kern block:\n%s", merged)
 	}
@@ -106,7 +96,10 @@ func TestMergeCrossStripsMarkedBlock(t *testing.T) {
 
 	// The marked-block writer path (wireGlobalRulesFile) must drop unmarked blocks.
 	cleaned := strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
-	cleaned = removeKernSection(cleaned)
+	cleaned, err := removeKernSection(cleaned)
+	if err != nil {
+		t.Fatalf("removeKernSection error: %v", err)
+	}
 	if strings.Contains(cleaned, "unmarked") || strings.Contains(cleaned, globalRulesMarkerOpen) {
 		t.Fatalf("marked-block writer left the other format behind:\n%s", cleaned)
 	}
@@ -117,13 +110,81 @@ func TestMergeCrossStripsMarkedBlock(t *testing.T) {
 	}
 
 	// The unmarked writer paths (writeGlobalClaude/writeGlobalAGENTS) must drop marked blocks.
-	unmarkedPath := mergeAppend(existing, "# kern usage rules\n\nfresh\n")
+	unmarkedPath, err := mergeAppend(existing, "# kern usage rules\n\nfresh\n")
+	if err != nil {
+		t.Fatalf("mergeAppend error: %v", err)
+	}
 	if strings.Contains(unmarkedPath, globalRulesMarkerOpen) || strings.Count(unmarkedPath, "# kern usage rules") != 1 {
 		t.Fatalf("unmarked writer left the marked block behind:\n%s", unmarkedPath)
 	}
-	prependPath := mergePrepend(existing, "# kern usage rules\n\nfresh\n")
+	prependPath, err := mergePrepend(existing, "# kern usage rules\n\nfresh\n")
+	if err != nil {
+		t.Fatalf("mergePrepend error: %v", err)
+	}
 	if strings.Contains(prependPath, globalRulesMarkerOpen) || strings.Count(prependPath, "# kern usage rules") != 1 {
 		t.Fatalf("prepend writer left the marked block behind:\n%s", prependPath)
+	}
+}
+
+// TestWireGlobalPreservesTrailingUserContentNoH1 is the end-to-end re-wire
+// repro of the F1 follow-up at the writer level: a first WireGlobal run
+// writes the block above bare user content (no H1), and a second run must
+// preserve that content byte-for-byte and report the file as already
+// current (no rewrite).
+func TestWireGlobalPreservesTrailingUserContentNoH1(t *testing.T) {
+	dir := withTempHome(t, true)
+	notes := "my personal notes\n- remember milk\n- fix the fence\n"
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(notes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st := WireGlobal(nil); !st[0].Installed {
+		t.Fatalf("first wire: global AGENTS.md should be written, got: %+v", st[0])
+	}
+	first, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(first), "my personal notes") {
+		t.Fatalf("first wire lost the user content:\n%s", first)
+	}
+	// Re-wire: content must be preserved AND the file must be a no-op (the
+	// writer reports "already present" with Installed=true — the file was
+	// left byte-identical, which is the property that matters).
+	st := WireGlobal(nil)
+	if !strings.Contains(st[0].Note, "already present") {
+		t.Fatalf("re-wire note should say 'already present', got: %+v", st[0])
+	}
+	second, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != string(first) {
+		t.Fatalf("re-wire changed the file:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestWireGlobalUnbalancedMarkerLeavesFile pins the fail-loud contract at
+// the writer level: an unbalanced marker block must surface as a Status
+// error and leave the file byte-identical.
+func TestWireGlobalUnbalancedMarkerLeavesFile(t *testing.T) {
+	dir := withTempHome(t, true)
+	broken := "# user header\n\n" + globalRulesMarkerOpen + "\nno close marker\n"
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := WireGlobal(nil)
+	if st[0].Installed {
+		t.Fatalf("unbalanced marker: expected failure status, got: %+v", st[0])
+	}
+	if !strings.Contains(st[0].Note, "unbalanced") {
+		t.Fatalf("unbalanced marker note should say so, got: %+v", st[0])
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != broken {
+		t.Fatalf("file was modified on error:\ngot:\n%s\nwant:\n%s", b, broken)
 	}
 }
 

@@ -61,19 +61,20 @@ type Alternative struct {
 
 // Impact is the deterministic result of simulating a change.
 type Impact struct {
-	Change         Change
-	Affected       []string       // transitively affected symbol qualified names
-	Files          []string       // distinct files containing affected symbols
-	Services       []string       // affected service names (from WhatServicesAffected)
-	Tests          []string       // tests that cover the affected (from WhatTestsCover)
-	Isolated       bool           // true when nothing depends on the change (low risk)
-	Risk           string         // "low" | "medium" | "high"
-	Recommendation string         // deterministic, evidence-based
-	Claims         []domain.Claim // typed claims produced by the simulation (e.g. RECOMMENDATION)
-	Alternatives   []Alternative  // lower-risk ways to achieve the same goal
-	Mitigations    []string       // concrete steps to reduce the risk of the change
-	Confidence     float64        // 0..1 confidence in the impact estimate
-	Databases      []string       // databases affected by the change
+	Change           Change
+	Affected         []string       // transitively affected symbol qualified names
+	Files            []string       // distinct files containing affected symbols
+	Services         []string       // affected service names (from WhatServicesAffected)
+	Tests            []string       // tests that cover the affected (file-paired + name-matched + direct callers)
+	TestsSamePackage int            // same-package tests omitted from Tests (count-only render line)
+	Isolated         bool           // true when nothing depends on the change (low risk)
+	Risk             string         // "low" | "medium" | "high"
+	Recommendation   string         // deterministic, evidence-based
+	Claims           []domain.Claim // typed claims produced by the simulation (e.g. RECOMMENDATION)
+	Alternatives     []Alternative  // lower-risk ways to achieve the same goal
+	Mitigations      []string       // concrete steps to reduce the risk of the change
+	Confidence       float64        // 0..1 confidence in the impact estimate
+	Databases        []string       // databases affected by the change
 	// BrokenCallSites are the direct callers that would break because they call
 	// the changed symbol with its old signature/name (ChangeSignature and
 	// RenameSymbol only; empty/nil for every other kind).
@@ -205,13 +206,18 @@ func Simulate(g *intel.Graph, c Change) Impact {
 	}
 	sort.Strings(imp.Services)
 	seenTests := make(map[string]bool)
-	for _, n := range g.WhatTestsCover(c.Target) {
+	// Ranked coverage: file-paired + name-matched + direct-caller tests are
+	// the covering list; the same-package remainder is a count-only line
+	// (Fix 1 — a same-package bucket must not read as coverage).
+	rankedCover, samePkgCover := g.WhatTestsCoverRanked(c.Target, false)
+	for _, n := range rankedCover {
 		if nm := nodeName(n); nm != "" && !seenTests[nm] {
 			seenTests[nm] = true
 			imp.Tests = append(imp.Tests, nm)
 		}
 	}
 	sort.Strings(imp.Tests)
+	imp.TestsSamePackage = len(samePkgCover)
 	// Broken call sites: for signature/rename changes, every direct caller of
 	// the target breaks because it must be updated to the new signature/name.
 	// Collected from the raw "calls" edges into the target (excluding self
@@ -277,7 +283,44 @@ func Simulate(g *intel.Graph, c Change) Impact {
 	}
 	imp.Facts = facts(c, imp)
 	imp.Limitations = limitations(c, imp)
+	// B4 (deep-dive 2026-10-03): bare-name call buckets. Call edges are
+	// recorded by simple name, so when a BARE target name is defined in more
+	// than one package the affected set / broken call sites are the UNION
+	// across all of them — surface the ambiguity instead of letting an
+	// over-counted blast radius (e.g. thousands of "callers" for a name like
+	// New/Get/Run) read as a precise estimate. Qualified references
+	// ("a.Save") already resolve to one node, so they do not warn.
+	if simple := simpleTargetName(c.Target); simple != "" && simple == c.Target {
+		if defs := g.DefsWithSimpleName(simple); len(defs) > 1 {
+			shown := defs
+			if len(shown) > 5 {
+				shown = append(append([]string(nil), defs[:5]...), fmt.Sprintf("… +%d more", len(defs)-5))
+			}
+			imp.Limitations = append(imp.Limitations, fmt.Sprintf(
+				"target simple name %q matches %d definitions (%s) — call edges are recorded by bare name, so counts are the union across all of them and may over-count; use a qualified 'pkg.Symbol' reference for an exact blast radius",
+				simple, len(defs), strings.Join(shown, ", ")))
+		}
+	}
+	// B7 (deep-dive 2026-10-03): interface dispatch is not modelled. A method
+	// invoked only through an interface has no visible call edge, so blast
+	// radius for method targets may UNDER-count. The dead-code surface grades
+	// this uncertainty ("uncertain" tier); the impact surface must say it too.
+	if id, ok := g.ResolveNodeID(c.Target); ok {
+		if n, found := graphByID[id]; found && n.Symbol != nil && n.Symbol.Kind == "method" {
+			imp.Limitations = append(imp.Limitations, "interface dispatch is not modelled: callers reaching this method through an interface are invisible to the call graph, so the affected set may under-count")
+		}
+	}
 	return imp
+}
+
+// simpleTargetName strips a change target to its simple (last) name segment:
+// "pkg.Type.Method" → "Method", "New" → "New". It is the name call edges are
+// recorded by, hence the one whose collisions matter.
+func simpleTargetName(target string) string {
+	if i := strings.LastIndexByte(target, '.'); i >= 0 {
+		return target[i+1:]
+	}
+	return target
 }
 
 // simState bundles the graph access and the affected-set registration

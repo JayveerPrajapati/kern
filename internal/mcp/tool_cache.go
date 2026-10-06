@@ -15,8 +15,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
-	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
+	"github.com/JayveerPrajapati/kern/internal/metaroute"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/version"
 )
@@ -118,6 +118,26 @@ func toolCacheable(name string) bool {
 // working set" / "workingset") is per-agent registry state, so it is never
 // cached either — the classifier marks it with the workingset argument and
 // this gate detects the marker.
+// resolveCacheCall maps a top-level tool call to the effective (routed)
+// call it will execute: a kern_meta call is classified to its sub-tool with
+// the F3 structured passthrough args merged over the classifier-synthesized
+// ones, so the cache gates, file fingerprints, and keys all see the call
+// that actually runs (F-1 fingerprint parity with the direct call; R3
+// semantic detection through the passthrough). Any other tool maps to
+// itself. Pure and deterministic: lookup and store paths agree.
+func resolveCacheCall(name string, args map[string]any) (string, map[string]any) {
+	if name != "kern_meta" {
+		return name, args
+	}
+	routed, rargs := classifyMetaRequest(argString(args, "request"))
+	if sub, ok := args["args"].(map[string]any); ok {
+		for k, v := range sub {
+			rargs[k] = v
+		}
+	}
+	return routed, rargs
+}
+
 func cacheableForCall(name string, args map[string]any) bool {
 	if !toolCacheable(name) {
 		return false
@@ -126,8 +146,11 @@ func cacheableForCall(name string, args map[string]any) bool {
 		return false // R3: embedding-model-dependent output is never cached
 	}
 	if name == "kern_meta" {
-		routed, rargs := classifyMetaRequest(argString(args, "request"))
-		if argBool(rargs, meta.WorkingsetArg) {
+		routed, rargs := resolveCacheCall(name, args)
+		if argBool(rargs, "semantic") {
+			return false // R3: embedding-model-dependent output is never cached (passthrough included)
+		}
+		if argBool(rargs, metaroute.WorkingsetArg) {
 			return false // B1: the workingset listing is per-agent state
 		}
 		return toolCacheable(routed)
@@ -156,6 +179,7 @@ var fileFingerprintArgs = map[string][]string{
 // fileFingerprintArgs — a byte-identical key for the index-backed trio and
 // pure-arg tools (zero behavior change).
 func fileFingerprint(name string, args map[string]any, root string) string {
+	name, args = resolveCacheCall(name, args) // kern_meta: fingerprint the ROUTED file-backed tool (F-1)
 	argNames, ok := fileFingerprintArgs[name]
 	if !ok {
 		return ""
@@ -194,6 +218,9 @@ func fileFingerprint(name string, args map[string]any, root string) string {
 // free. The identity is passed in because lookup and store must agree on the
 // same string.
 func cacheKeyFor(name string, args map[string]any, root, identity string) string {
+	// kern_meta keys key the ROUTED call, so the fingerprint and schema
+	// version match what a direct call to the same tool would use (F-1/R3).
+	name, args = resolveCacheCall(name, args)
 	// Serve-time and identity-only conditional-fetch concerns (etag, no_cache,
 	// agent_id, task) are stripped by the ONE shared helper
 	// (etag.StripServeTimeArgs — the same F8 set the working-set registry key
@@ -322,7 +349,7 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 			// the fallback and the short-circuit agree byte-for-byte. A
 			// malformed max_output errors the call downstream; -1 keeps the
 			// hash deterministic here too.
-			budget, err := mcpserve.CallOutputBudget(args)
+			budget, err := mcpserve.CallOutputBudget(name, args)
 			if err != nil {
 				budget = -1
 			}

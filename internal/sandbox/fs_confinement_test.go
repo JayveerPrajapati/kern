@@ -236,6 +236,23 @@ func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
 	if !gres.OK {
 		t.Fatalf("sandboxed `go version` must succeed under FS confinement; err=%v out=%q", gres.Err, gres.Output)
 	}
+
+	// The sandboxed `go version` writes Go telemetry files into $HOME — the
+	// fake test home, a t.TempDir. Those writes normally finish before go
+	// exits, but sandbox-exec's documented child-linger intermittency (see
+	// the retry above) can leave a late write racing t.TempDir's RemoveAll
+	// cleanup (ENOTEMPTY "directory not empty"). Prune the dynamic
+	// go-telemetry subtree with a bounded retry so the TempDir cleanup never
+	// sees a half-written tree.
+	t.Cleanup(func() {
+		lib := filepath.Join(home, "Library")
+		for i := 0; i < 5; i++ {
+			if err := os.RemoveAll(lib); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 }
 
 // TestSeatbeltProfileForLoopbackBindRelaxation pins the verify-path relaxed

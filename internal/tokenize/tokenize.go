@@ -46,6 +46,11 @@ type Estimator struct {
 	Kind Kind
 }
 
+// defaultTokensPerChar is the chars-per-token density assumption behind the
+// heuristic Estimator: prose runs ~4 chars per token (the classic "chars/4"
+// rule of thumb), code ~3.5 and logs ~3.2. It is only a cheap fallback — the
+// default counter is the exact BPE tokenizer — so savings figures derived
+// from the Estimator are estimates, never BPE-precise (V2).
 var defaultTokensPerChar = map[Kind]float64{
 	KindGeneric: 1.0 / 4.0,
 	KindCode:    1.0 / 3.5,

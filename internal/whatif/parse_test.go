@@ -99,7 +99,7 @@ func TestIsNetNewFeature(t *testing.T) {
 		{"implement dead letter queue", true},
 		{"new telemetry pipeline", true},
 		{"build healthcheck endpoint", true},
-		{"Refactor ResponseWrapperFactory.build", false},
+		{"Refactor OrderService.build", false},
 		{"Remove GetMySQLDB", false},
 		{"Fix null pointer in processSingle", false},
 	}

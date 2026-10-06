@@ -57,7 +57,7 @@ Core Workflows (The 5 Essential Verbs):
 
 Context & Token Optimization:
   kern optimize <prompt> [--fewshot] [--mask]     Compress & fine-tune prompts with project memory
-  kern fit-context <symbol|file> [--budget N]     Multi-tier adaptive token window compressor
+  kern fit-context <symbol|file> [--max-tokens N]  Multi-tier adaptive token window compressor
   kern pack [root] [--max-tokens N] [--graph]     Token-dense context bundle for LLMs
   kern compact <file>                             Symbolic signature summary of a file
 

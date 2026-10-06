@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/highlevel"
+	"github.com/JayveerPrajapati/kern/internal/verifycmd"
 )
 
 // highlevelHooks wires the server's platform resolver and the governance
@@ -49,6 +50,9 @@ func (s *Server) handleExecute(ctx context.Context, args map[string]any) (string
 // progress notifications (the client's progress token is threaded through the
 // per-call indexScope; see progressToken).
 func (s *Server) handleVerify(ctx context.Context, id string, args map[string]any) (string, error) {
+	if argString(args, "command") != "" || argString(args, "anchor") != "" {
+		return verifycmd.Verify(ctx, s.roots, args)
+	}
 	h := s.highlevelHooks()
 	// M4: relay phase progress as MCP notifications/progress so a client-side
 	// 30s timeout sees liveness instead of treating a healthy >30s verify as
