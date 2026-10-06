@@ -6,47 +6,29 @@
 > [`internal/mcp/toolpolicy.go`](../internal/mcp/toolpolicy.go) (default surface, env knobs). Every tool name below was
 > cross-checked letter-by-letter against the catalog source.
 
-kern ships a **117-tool** MCP catalog. **22 tools are advertised by default**; the rest are opt-in via
+kern ships a **117-tool** MCP catalog. **6 tools are advertised by default**; the rest are opt-in via
 environment variables. This guide maps intents to the right tool so you rarely need the full list.
 
 ## Default surface vs full catalog
 
-By default the server advertises the `defaultTools` surface (toolpolicy.go:203+) — evidence-based
-(usage telemetry + phase coverage): the original 11-tool set had zero edit-phase tools and hid the
-most-used token savers; the 22-tool set covers every phase (explore/plan/edit/verify/meta/cross) and
-the tools the AGENTS.md kern-rules mandate first, at ~14k advertised tokens (well under the 24.1k
-full-catalog gate):
+By default the server advertises the `defaultTools` surface (toolpolicy.go:203+) — a focused
+6-tool core: `kern_meta` (the NL router) plus the explore/plan/verify primitives the AGENTS.md
+kern-rules mandate first, at a small fraction of the 24.1k full-catalog gate:
 
 | # | Tool | Purpose (from catalog description) |
 |---|------|------------------------------------|
 | 1 | `kern_meta` | NL router — classify a natural-language request and run the right tool(s) |
 | 2 | `kern_explore` | One-call symbol exploration: source, callers, callees, blast radius |
 | 3 | `kern_impact` | Blast radius of a change |
-| 4 | `kern_review` | Token-optimised review context |
-| 5 | `kern_search` | Ranked symbol search |
-| 6 | `kern_context` | Minimal source slice |
-| 7 | `kern_optimize` | Compress prompts / logs / outputs (action=prompt\|log\|output) |
-| 8 | `kern_plan` | Implementation plan |
-| 9 | `kern_verify` | Unified verification |
-| 10 | `kern_run` | Orchestrate a whole task |
-| 11 | `kern_authorize_context` | Authorized-context primitive (P0.1) |
-| 12 | `kern_compact_file` | Symbolic file summary — the top token saver in usage telemetry |
-| 13 | `kern_project_map` | Repo onboarding map |
-| 14 | `kern_probe` | Task-driven context bundle (replaces 5–10 searches) |
-| 15 | `kern_retrieve` | L1–L3 progressive-disclosure retrieval |
-| 16 | `kern_memory` | Cross-session project memory (action: add / list / recall / ranked / remove / clear) |
-| 17 | `kern_buddy` | Session onboarding digest |
-| 18 | `kern_fit_context` | Fit context to a token budget |
-| 19 | `kern_repair` | Deterministic compiler-error → AST fix (edit phase) |
-| 20 | `kern_heal` | Self-correct failing files (edit phase) |
-| 21 | `kern_commitmsg` | Deterministic conventional commit message (edit phase) |
-| 22 | `kern_synthesize_test` | Table-driven test generation (verify phase) |
+| 4 | `kern_search` | Ranked symbol search |
+| 5 | `kern_verify` | Unified verification |
+| 6 | `kern_buddy` | Session onboarding digest |
 
 Opt-in knobs (all read once per server lifetime in `filteredTools`, toolpolicy.go:242+):
 
 | Env var | Effect |
 |---------|--------|
-| *(unset)* | Advertise the 22 default tools above |
+| *(unset)* | Advertise the 6 default tools above |
 | `KERN_MCP_FULL=1` | Advertise the full 117-tool catalog |
 | `KERN_MCP_PHASE=explore\|plan\|edit\|verify` | Filter either surface to the active phase (meta/cross tools always stay) |
 | `KERN_MCP_SINGLE_TOOL=1` | Collapse to `kern_meta` alone |
@@ -183,4 +165,4 @@ See [agents-pipeline.md](agents-pipeline.md) for the specialist pipeline those t
 request (deterministic keyword matching — no LLM, no network) and runs the right tool(s) internally
 (tools.go:1315). It participates in phase filtering only when the sub-tool it routes to is itself allowed
 (server.go:1142), and it reaches every sub-tool handler regardless of what the connection advertises — so
-the 22-tool default surface loses no capability, only visibility.
+the 6-tool default surface loses no capability, only visibility.

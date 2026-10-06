@@ -1,0 +1,39 @@
+name: nightly-full
+# Nightly full (non-short) test suite. The per-push test.yml job runs
+# `go test -short`, which skips ~153 tests including every real-worktree
+# loop test (L5 proof gate, pause+budget, governed-loop repair) and the
+# binary-backed blueprint G2/G7 gates (setup-tools installs kern on PATH,
+# so those run here for real). This job runs the whole suite without
+# -short, plus vet, the architecture parity gate, and the governance
+# gate — on a nightly schedule with manual dispatch.
+on:
+  schedule:
+    - cron: '0 6 * * *' # daily, 06:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nightly-full-${{ github.workflow }}
+  cancel-in-progress: true
+jobs:
+  full-suite:
+    name: Full suite (no -short)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
+      - name: go test ./... (no -short)
+        run: go test -timeout 30m ./...
+      - name: go vet ./...
+        run: go vet ./...
+      - name: Architecture parity gate
+        run: go test ./internal/architecture/ -count=1
+      - name: Governance gate
+        run: go run ./cmd/kern check --ci

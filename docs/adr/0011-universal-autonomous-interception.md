@@ -87,12 +87,12 @@ The server runs over standard JSON-RPC 2.0 (`stdio` transport) with zero externa
 ### 3.2 The 139-Tool Catalog & Phase Routing ([`catalog/tools.go`](internal/mcp/catalog/tools.go))
 Kern organises its 139 tools into 4 lifecycle phases plus cross-cutting control planes (historical pre-consolidation count — see correction below):
 
-> **Correction (2026-10-01):** the catalog consolidated to **117 tools** (22 default-advertised) in the 8-family merge (commits 442b654 + 0b1d662, 2026-10-01). The "139" figure throughout this section is the pre-consolidation historical count, retained for audit trail. The live count is pinned by TestMCPToolCatalogSizeCap (capFloor 110 / capCeil 160, `internal/mcp/catalog_drift_test.go`) and TestDocsStateMCPToolCount (`internal/setup`).
+> **Correction (2026-10-01):** the catalog consolidated to **117 tools** (6 default-advertised) in the 8-family merge (commits 442b654 + 0b1d662, 2026-10-01). The "139" figure throughout this section is the pre-consolidation historical count, retained for audit trail. The live count is pinned by TestMCPToolCatalogSizeCap (capFloor 110 / capCeil 160, `internal/mcp/catalog_drift_test.go`) and TestDocsStateMCPToolCount (`internal/setup`).
 
 #### Phase 1: Explore (Code Discovery & Semantic Navigation)
 * `kern_meta`: Natural-language entry point; automatically classifies and dispatches commands in-process.
 * `kern_explore`: Deep symbol and file exploration (call trees, callers, callees, downstream dependencies).
-* `kern_search` / `kern_ast_search`: Fast symbol matching across 17 indexed languages (<10ms).
+* `kern_search` / `kern_ast_search`: Fast symbol matching across 18 indexed languages (<10ms).
 * `kern_compact_file`: Emits token-dense symbol signatures instead of verbatim file contents (70-90% token reduction).
 * `kern_project_map`: Generates hierarchical structural maps of repositories.
 * `kern_doc_search`: Offline documentation search over indexed local guides and specifications.

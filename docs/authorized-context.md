@@ -108,7 +108,7 @@ Exit codes:
 | Code | Meaning                                    |
 |------|--------------------------------------------|
 | 0    | allowed — scope + proof printed            |
-| 2    | denied — proof (and denied list) still printed |
+| 3    | denied — proof (and denied list) still printed (policy family exit code; a denial, not a usage error) |
 | 1    | error (bad flags, index load failure, etc.)|
 
 Example:
@@ -231,7 +231,7 @@ Every field of `AuthorizationProof` (`internal/governance/types.go`):
 | `agent`          | `AgentSummary`      | Identity portion of the proof: `id` and `permission_count` (number of permissions on the resolved `AgentIdentity`). |
 | `task_scope`     | `TaskScope`         | The effective scope the decision was computed under: `task_id`, `paths`, `denied_paths`, `services`, `envs`, `artifacts`. |
 | `fingerprint`    | `string`            | Hex SHA-256 over the stable inputs (below).                      |
-| `index_freshness`| `string`            | `"fresh"` when the index was updated < 5 minutes ago, else `"stale"`. |
+| `index_freshness`| `string`            | the index freshness verdict from the same proof machinery every other tool trusts (git tree-OID compare with content-hash fallback): `"fresh"`, `"stale"`, or `"unknown"`. |
 | `index_version`  | `string`            | `index.UpdatedAt` formatted as RFC 3339 UTC.                     |
 | `decided_at`     | `time.Time`         | When the decision was made (UTC).                                |
 

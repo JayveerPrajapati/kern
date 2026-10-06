@@ -92,6 +92,9 @@ project's console.
   Every key also honors its historical env var (`KERN_MODEL`, `KERN_EXEC_RISK`,
   `KERN_WEBHOOKS`, `KERN_ROOTS`, …), which always wins. **Secrets and safety
   toggles stay env-only** and are never read from the file: `KERN_AUTH_TOKEN`,
+  `KERN_MCP_AUTH_TOKEN` (opt-in bearer token for the HTTP MCP transport: when
+  set, `POST /mcp` requires `Authorization: Bearer <token>`; `/health` stays
+  open; unset keeps the default owner-only unix-socket / loopback behavior),
   `KERN_GITHUB_TOKEN`, `KERN_K8S_TOKEN`, OpenAI/Anthropic/Gemini keys,
   `KERN_ALLOW_*`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_NO_CONFINE`, `KERN_TOOLS`,
   `KERN_MCP_FULL/PHASE/SINGLE_TOOL/HIGH_LEVEL_ONLY/AUDIT_DIR`,

@@ -19,12 +19,9 @@ re-reading files. All tools run locally; the only network call in kern is the ex
 
 The server practices progressive disclosure at the advertisement layer:
 
-- **Default (no env):** a curated lifecycle surface of 22 tools — `kern_meta`
-  (the natural-language router) plus `search`, `context`, `explore`,
-  `compact_file`, `project_map`, `probe`, `retrieve`, `plan`, `impact`,
-  `fit_context`, `repair`, `heal`, `commitmsg`, `verify`, `review`,
-  `synthesize_test`, `run`, `optimize`, `memory`, `buddy`, and
-  `authorize_context`. This is what `kern setup`'s generated `.mcp.json`
+- **Default (no env):** a curated lifecycle surface of 6 tools — `kern_meta`
+  (the natural-language router) plus `explore`, `impact`, `search`,
+  `verify`, and `buddy`. This is what `kern setup`'s generated `.mcp.json`
   wires, and what a client sees from a plain handshake. The set is
   evidence-based (usage telemetry + phase coverage).
 - **`KERN_MCP_FULL=1`:** the full 117-tool catalog, paginated per the MCP spec

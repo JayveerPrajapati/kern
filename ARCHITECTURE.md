@@ -19,12 +19,13 @@ Stdlib and third-party (e.g. build-tagged tree-sitter) imports are always
 allowed; a subsystem's own subpackages are always allowed.
 
 Known drift (documented honestly, caps set accordingly): `internal/mcp` is a
-monolith (20.9k LOC, 130 deps), capped, not hidden — its cap (21,275) sits
-essentially at the baseline, so the subtree cannot quietly accrete at all.
-The row measures the whole subtree (root plus every mcp/* leaf), so crossing
-the cap forces moving a family OUT of `internal/mcp` to a top-level sibling
-(the blueprint→bppolicy and mcp→mcpserve pattern — extracting to another
-mcp/<leaf> stays inside the subtree and cannot relieve it), not cap-raising. `internal/blueprint` is modularized into `internal/bppolicy`,
+monolith (20.0k LOC after the metaroute extraction), capped, not hidden — its
+cap (21,275) sits above the baseline, so the subtree can only accrete
+modestly before extraction is forced again. The row measures the whole
+subtree (root plus every mcp/* leaf), so crossing the cap forces moving a
+family OUT of `internal/mcp` to a top-level sibling (the blueprint→bppolicy,
+mcp→mcpserve and mcp→metaroute pattern — extracting to another mcp/<leaf>
+stays inside the subtree and cannot relieve it), not cap-raising. `internal/blueprint` is modularized into `internal/bppolicy`,
 `internal/bpreceipt`, `internal/resilience`, `internal/bpcli`,
 `internal/gates`, and `internal/scanners`; what remains (domain, service,
 adapters/kern, audit, sandbox, checks/diffgate) is 6.4k LOC and capped like
@@ -39,7 +40,7 @@ integration suite with no production code.
 
 | subsystem | dir | LOC baseline | cap |
 |---|---|---|---|
-| `cmd/kern` | 19121 | 23718 |
+| `cmd/kern` | 19979 | 23718 |
 | `internal/agent` | 1882 | 2900 |
 | `internal/agents` | 1055 | 1700 |
 | `internal/app` | 2930 | 4395 |
@@ -48,7 +49,7 @@ integration suite with no production code.
 | `internal/bpcli` | 6497 | 8954 |
 | `internal/bppolicy` | 1171 | 1727 |
 | `internal/bpreceipt` | 991 | 1487 |
-| `internal/brief` | 347 | 600 |
+| `internal/brief` | 632 | 948 |
 | `internal/budget` | 212 | 400 |
 | `internal/cache` | 530 | 800 |
 | `internal/calibrate` | 770 | 1100 |
@@ -64,7 +65,7 @@ integration suite with no production code.
 | `internal/deployment` | 165 | 300 |
 | `internal/diff` | 879 | 1100 |
 | `internal/docbudget` | 124 | 200 |
-| `internal/docsearch` | 818 | 1200 |
+| `internal/docsearch` | 888 | 1200 |
 | `internal/doctor` | 1017 | 1500 |
 | `internal/domain` | 2404 | 3200 |
 | `internal/draft` | 746 | 1119 |
@@ -81,16 +82,17 @@ integration suite with no production code.
 | `internal/fw` | 1348 | 2100 |
 | `internal/fragility` | 282 | 500 |
 | `internal/gates` | 1069 | 1600 |
-| `internal/governance` | 5398 | 5600 |
+| `internal/gitblocks` | 296 | 444 |
+| `internal/governance` | 6041 | 6344 |
 | `internal/guard` | 639 | 959 |
 | `internal/heal` | 634 | 1000 |
 | `internal/hook` | 539 | 900 |
 | `internal/host` | 391 | 600 |
 | `internal/ignore` | 288 | 500 |
 | `internal/incident` | 1095 | 1400 |
-| `internal/index` | 11464 | 12900 |
+| `internal/index` | 12687 | 12900 |
 | `internal/integration` | 0 | 100 |
-| `internal/intel` | 9915 | 11800 |
+| `internal/intel` | 10772 | 11800 |
 | `internal/learnclaim` | 90 | 135 |
 | `internal/learning` | 698 | 1100 |
 | `internal/lenses` | 281 | 500 |
@@ -99,11 +101,11 @@ integration suite with no production code.
 | `internal/loop` | 2013 | 2600 |
 | `internal/lsp` | 658 | 1000 |
 | `internal/lspbridge` | 996 | 1600 |
-| `internal/mcp` | 20899 | 21275 |
+| `internal/mcp` | 20018 | 21275 |
 | `internal/mcp/agentctl` | 220 | 300 |
 | `internal/mcp/bridge` | 81 | 200 |
 | `internal/mcp/blueprint` | 174 | 350 |
-| `internal/mcp/catalog` | 2148 | 3200 |
+| `internal/mcp/catalog` | 2044 | 3200 |
 | `internal/mcp/compose` | 166 | 300 |
 | `internal/mcp/context` | 361 | 600 |
 | `internal/mcp/contextwatch` | 164 | 300 |
@@ -127,7 +129,7 @@ integration suite with no production code.
 | `internal/mcp/lsp` | 139 | 300 |
 | `internal/mcp/mcpargs` | 147 | 300 |
 | `internal/mcp/memory` | 195 | 350 |
-| `internal/mcp/meta` | 952 | 1450 |
+| `internal/mcp/meta` | 1381 | 1450 |
 | `internal/mcp/merge` | 187 | 350 |
 | `internal/mcp/mutation` | 95 | 200 |
 | `internal/mcp/optimize` | 284 | 400 |
@@ -150,12 +152,16 @@ integration suite with no production code.
 | `internal/mcp/skill` | 76 | 200 |
 | `internal/mcp/stream` | 157 | 300 |
 | `internal/mcp/synthtest` | 140 | 250 |
+| `internal/mcp/toolsurface` | 84 | 126 |
 | `internal/mcp/transform` | 100 | 250 |
 | `internal/mcp/transport` | 325 | 525 |
 | `internal/mcp/watcher` | 214 | 321 |
 | `internal/mcpclient` | 528 | 800 |
+| `internal/mcpgate` | 355 | 533 |
+| `internal/mcpguide` | 237 | 356 |
 | `internal/mcpserve` | 223 | 335 |
 | `internal/memory` | 1949 | 2900 |
+| `internal/metaroute` | 1344 | 2016 |
 | `internal/metrics` | 706 | 1100 |
 | `internal/modernization` | 812 | 900 |
 | `internal/mutation` | 715 | 1100 |
@@ -180,6 +186,7 @@ integration suite with no production code.
 | `internal/resilience` | 1199 | 1799 |
 | `internal/retrieval` | 632 | 900 |
 | `internal/reviewpack` | 535 | 900 |
+| `internal/rulesblock` | 172 | 260 |
 | `internal/runtime` | 1959 | 3000 |
 | `internal/sandbox` | 1746 | 2507 |
 | `internal/sandbox/landlock` | 471 | 707 |
@@ -187,26 +194,28 @@ integration suite with no production code.
 | `internal/scanners` | 2069 | 3104 |
 | `internal/script` | 670 | 1000 |
 | `internal/sdk` | 279 | 500 |
-| `internal/sec` | 647 | 971 |
-| `internal/secscan` | 1258 | 1887 |
+| `internal/sec` | 648 | 971 |
+| `internal/secscan` | 1296 | 1887 |
 | `internal/semcache` | 890 | 1335 |
 | `internal/session` | 182 | 273 |
-| `internal/setup` | 3243 | 3800 |
+| `internal/setup` | 3582 | 3800 |
 | `internal/skills` | 402 | 600 |
 | `internal/stats` | 231 | 400 |
 | `internal/storage` | 697 | 1100 |
 | `internal/strutil` | 59 | 100 |
-| `internal/swap` | 303 | 455 |
-| `internal/tasklife` | 7620 | 11430 |
+| `internal/swap` | 330 | 455 |
+| `internal/tasklife` | 7874 | 11430 |
 | `internal/synthtest` | 1238 | 1700 |
 | `internal/terse` | 876 | 1100 |
 | `internal/testfixture` | 202 | 400 |
 | `internal/tokenize` | 1050 | 1500 |
+| `internal/tokstats` | 271 | 407 |
 | `internal/transform` | 461 | 600 |
 | `internal/twin` | 1680 | 1900 |
 | `internal/validate` | 797 | 1300 |
 | `internal/verdict` | 782 | 1173 |
 | `internal/verification` | 3200 | 4800 |
+| `internal/verifycmd` | 828 | 1242 |
 | `internal/version` | 364 | 600 |
 | `internal/web` | 4452 | 4700 |
 | `internal/webhook` | 204 | 400 |
