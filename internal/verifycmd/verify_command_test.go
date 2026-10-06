@@ -166,6 +166,7 @@ func TestShapeWindows(t *testing.T) {
 var anchorRe = regexp.MustCompile(`anchor=(anchor-[0-9a-f]+)`)
 
 func TestVerifyCommandRunsAndReslices(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n\ngo 1.21\n"), 0o644); err != nil {
 		t.Fatal(err)

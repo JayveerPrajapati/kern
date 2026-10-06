@@ -244,6 +244,10 @@ func StorePath(root string) string {
 // silently clobber a newer index.json written by a current binary — the
 // indexVersion guard only runs at load time, not at save time.
 func (ix *Index) Save() error {
+	// Ensure the local repository ignores .kern via .git/info/exclude without
+	// dirtying or requiring a tracked .gitignore file.
+	ensureGitExclude(ix.Root)
+
 	// SQLite-primary (default build): the concurrent WAL store is the
 	// canonical write path for the persisted index, so a build/update writes
 	// ONE format instead of three (JSON + gob snapshot + SQLite). The JSON
@@ -270,9 +274,6 @@ func (ix *Index) Save() error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	// Ensure the local repository ignores .kern via .git/info/exclude without
-	// dirtying or requiring a tracked .gitignore file.
-	ensureGitExclude(ix.Root)
 
 	// Unique temp file avoids the race where two processes both write to
 	// p + ".tmp" and one truncates the other's bytes before rename.
@@ -351,13 +352,7 @@ func ensureGitExclude(root string) {
 	var infoDir string
 	if fi.IsDir() {
 		infoDir = filepath.Join(gitDir, "info")
-	} else {
-		// Could be a worktree or submodule pointing to a gitdir file:
-		// "gitdir: /path/to/.git/worktrees/name"
-		b, err := os.ReadFile(gitDir)
-		if err != nil {
-			return
-		}
+	} else if b, err := os.ReadFile(gitDir); err == nil {
 		line := strings.TrimSpace(string(b))
 		if strings.HasPrefix(line, "gitdir:") {
 			target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
@@ -368,14 +363,15 @@ func ensureGitExclude(root string) {
 		} else {
 			return
 		}
+	} else {
+		return
 	}
 	_ = os.MkdirAll(infoDir, 0o755)
 	excludePath := filepath.Join(infoDir, "exclude")
 	b, _ := os.ReadFile(excludePath)
 	content := string(b)
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == ".kern" || trimmed == ".kern/" {
+		if trimmed := strings.TrimSpace(line); trimmed == ".kern" || trimmed == ".kern/" {
 			return // already excluded
 		}
 	}
@@ -383,8 +379,7 @@ func ensureGitExclude(root string) {
 	if len(content) == 0 || strings.HasSuffix(content, "\n") {
 		separator = ""
 	}
-	newContent := content + separator + "# kern local exclude\n.kern/\n"
-	if err := os.WriteFile(excludePath, []byte(newContent), 0o644); err != nil {
+	if err := os.WriteFile(excludePath, []byte(content+separator+"# kern local exclude\n.kern/\n"), 0o644); err != nil {
 		// Benign for indexing, but never invisible: without the entry git
 		// tracks .kern/, so say why it is missing.
 		log.Printf("kern index: could not add .kern/ to %s (git may show .kern as untracked): %v", excludePath, err)
