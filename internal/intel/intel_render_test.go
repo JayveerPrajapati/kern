@@ -2,6 +2,7 @@ package intel
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -483,5 +484,54 @@ func TestSearchReposInDedupsNestedRepoHits(t *testing.T) {
 	}
 	if len(exact) != 1 || exact[0].Repo != filepath.Base(parent) {
 		t.Errorf("parent-only exact hits = %+v, want 1 hit from the parent repo", exact)
+	}
+}
+
+// TestSearchReposReportsMissingRepo pins L6: a registered repo whose path
+// no longer exists must be reported, not silently skipped (silent skipping
+// read as "search is cwd-only" — 0 hits with no explanation). The surviving
+// repo still contributes hits.
+func TestSearchReposReportsMissingRepo(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "app.go"), []byte("package main\nfunc Foo() {}\n"), 0o644)
+	ix := buildIndex(t, dir)
+	_ = ix.Save()
+	reg, err := LoadRepos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Add(dir, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	// Register a repo whose path is deleted AFTER registration (the registry
+	// stores the absolute path at add time).
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.MkdirAll(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Add(gone, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	hits := SearchRepos("Foo", 10)
+	_ = w.Close()
+	os.Stderr = old
+	_, _ = io.Copy(&stderr, r)
+	if len(hits) == 0 {
+		t.Fatal("expected search hit in the surviving repo")
+	}
+	if !strings.Contains(stderr.String(), "gone") {
+		t.Errorf("expected missing-repo note on stderr, got %q", stderr.String())
 	}
 }

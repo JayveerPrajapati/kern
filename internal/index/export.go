@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"text/template"
 
-	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/tokstats"
 )
 
 //go:embed export_graph.html
@@ -76,35 +74,12 @@ type GraphEdge struct {
 	ConfidenceLabel string `json:"confidence_label,omitempty"` // EXTRACTED/INFERRED/AMBIGUOUS (standard)
 }
 
-// TokenStats records the token count of the full context versus the compressed
-// graph/context representation, so callers can display a savings summary.
-type TokenStats struct {
-	FullContext   int    `json:"full_context_tokens"`
-	CompactTokens int    `json:"compact_tokens"`
-	SavingsPct    int    `json:"savings_percent"`
-	Source        string `json:"source,omitempty"` // "graph" or "context"
-}
-
-// Summary renders a one-line token-savings summary, or "" when no savings
-// apply (e.g. an empty or non-positive full-context count).
-func (t TokenStats) Summary() string {
-	if t.FullContext <= 0 {
-		return ""
-	}
-	if t.CompactTokens >= t.FullContext {
-		return fmt.Sprintf("tokens: %s %d → %d (0%% saved; compact includes metadata)",
-			t.Source, t.FullContext, t.CompactTokens)
-	}
-	return fmt.Sprintf("tokens: %s %d → %d (%d%% saved)",
-		t.Source, t.FullContext, t.CompactTokens, t.SavingsPct)
-}
-
 // GraphResult is the structured neighbourhood of a symbol.
 type GraphResult struct {
-	Root  string      `json:"root"`
-	Nodes []GraphNode `json:"nodes"`
-	Edges []GraphEdge `json:"edges"`
-	Stats TokenStats  `json:"stats,omitempty"`
+	Root  string              `json:"root"`
+	Nodes []GraphNode         `json:"nodes"`
+	Edges []GraphEdge         `json:"edges"`
+	Stats tokstats.TokenStats `json:"stats,omitempty"`
 }
 
 // Neighborhood returns the definition, callers, and callees of a symbol as a
@@ -164,7 +139,20 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	for _, id := range ids {
 		g.Nodes = append(g.Nodes, byID[id])
 	}
-	g.Stats = ix.TokenSavingsForNeighborhood(g)
+	// Collect the distinct node files in NODE ORDER for the savings
+	// denominator: TokenSavingsForNeighborhood concatenates them into the
+	// full-text baseline, and the walk order matters to the BPE count (a
+	// token can span a file boundary), so it must match the original
+	// in-index walk exactly.
+	var nodeFiles []string
+	seenFiles := map[string]bool{}
+	for _, n := range g.Nodes {
+		if n.File != "" && !seenFiles[n.File] {
+			seenFiles[n.File] = true
+			nodeFiles = append(nodeFiles, n.File)
+		}
+	}
+	g.Stats = tokstats.TokenSavingsForNeighborhood(ix.Root, nodeFiles, g.GraphJSON())
 	return g, true
 }
 
@@ -180,8 +168,30 @@ func (ix *Index) WholeGraph(limit int) GraphResult {
 	if len(labels) == 0 {
 		labels = ix.CommunityLabels()
 	}
+	// B5 (deep-dive 2026-10-03): the ranking degree and the emitted edges
+	// must describe the SAME graph. The raw Calls/Callers buckets include
+	// unresolved external targets (assert.Equal, fmt.Sprintf, fluent
+	// fragments) that can never be emitted as edges between indexed
+	// symbols — counting them let noise-shaped names outrank genuinely
+	// connected ones. Degree counts only edges whose other endpoint
+	// resolves to a defined symbol.
+	defined := make(map[string]bool, len(ix.Symbols))
+	for _, s := range ix.Symbols {
+		defined[s.FullName()] = true
+	}
 	degree := func(id string) int {
-		return len(ix.Calls[id]) + len(ix.Callers[id])
+		d := 0
+		for _, ce := range ix.Calls[id] {
+			if ce.Target != id && defined[ce.Target] {
+				d++
+			}
+		}
+		for _, c := range ix.Callers[id] {
+			if c != id && defined[c] {
+				d++
+			}
+		}
+		return d
 	}
 	// FullName is not unique across languages (bash/python/go each define
 	// "main", pack/brief/engine each define "Build"), so dedupe candidates
@@ -263,153 +273,16 @@ func topDir(root, file string) string {
 	return "."
 }
 
-// computeTokenSavings compares tokens in the concatenated source files of all
-// graph nodes against the compact text form (graph JSON or context text).
-func computeTokenSavings(fullText, compact, source string) TokenStats {
-	return tokenStatsFromCounts(tokenize.Count(fullText), tokenize.Count(compact), source)
-}
-
-// tokenStatsFromCounts assembles a TokenStats from already-computed token
-// counts. Kept separate from computeTokenSavings so cached file-token counts
-// (see fileTokenCount) can build the footer without re-reading or re-tokenizing
-// the definition file on every query.
-func tokenStatsFromCounts(fullTokens, compactTokens int, source string) TokenStats {
-	savings := 0
-	if fullTokens > 0 {
-		savings = int(float64(fullTokens-compactTokens) / float64(fullTokens) * 100)
-	}
-	return TokenStats{
-		FullContext:   fullTokens,
-		CompactTokens: compactTokens,
-		SavingsPct:    savings,
-		Source:        source,
-	}
-}
-
-// savingsCacheKey identifies one cached file-token count: the absolute file
-// path plus the file's mtime at the moment it was tokenized. The mtime is the
-// invalidation signal — the same trust model reuseByMtime uses (an edit that
-// does not bump mtime already evades kern's other caches), so a content edit
-// that touches the mtime is picked up on the next query.
-type savingsCacheKey struct {
-	path  string
-	mtime int64
-}
-
-// savingsCache is a small bounded memo of definition-file token counts used by
-// the token-savings footers. Computing one costs a file read plus a full
-// tokenize (~35ms on real files) purely for a cosmetic footer, so the count is
-// cached until the file's mtime changes. The compact-text half of the savings
-// computation is query-specific and cheap, so it is never cached.
-type savingsCache struct {
-	mu      sync.Mutex
-	entries map[savingsCacheKey]int
-}
-
-// savingsCacheCap bounds the memo. Entries are evicted arbitrarily (any live
-// entry repopulates on the next miss), keeping memory bounded without the
-// complexity of an LRU.
-const savingsCacheCap = 64
-
-// fileTokenSavingsCache is the process-wide memo. It is safe to share across
-// indexes: a file's token count is a pure function of the file on disk, and
-// the key includes the absolute path, so projects never collide.
-var fileTokenSavingsCache = &savingsCache{entries: map[savingsCacheKey]int{}}
-
-// fileTokenCount returns the token count of the file at path, memoized by
-// (path, mtime). A missing or unreadable file counts as 0, matching the
-// previous behavior of TokenSavingsForGraph (a failed read yielded nil
-// fullData). The mtime is re-statted on every call, so an edit that bumps the
-// mtime is observed on the next query; the read + tokenize happens only on a
-// miss. The stat/read pair is not atomic, but a concurrent edit between them
-// can only leave an unreachable stale entry (the next call stats the new mtime
-// and misses it), never a wrong hit.
-func fileTokenCount(path string) int {
-	if path == "" {
-		return 0
-	}
-	fi, err := os.Stat(path)
-	var mtime int64
-	if err == nil {
-		mtime = fi.ModTime().UnixNano()
-	}
-	key := savingsCacheKey{path: path, mtime: mtime}
-	fileTokenSavingsCache.mu.Lock()
-	if n, ok := fileTokenSavingsCache.entries[key]; ok {
-		fileTokenSavingsCache.mu.Unlock()
-		return n
-	}
-	fileTokenSavingsCache.mu.Unlock()
-
-	// Miss: read + tokenize outside the lock so concurrent queries never
-	// serialize on the expensive part.
-	data, rerr := os.ReadFile(path)
-	n := 0
-	if rerr == nil {
-		n = tokenize.Count(string(data))
-	}
-	fileTokenSavingsCache.mu.Lock()
-	if len(fileTokenSavingsCache.entries) >= savingsCacheCap {
-		for k := range fileTokenSavingsCache.entries {
-			delete(fileTokenSavingsCache.entries, k)
-			break
-		}
-	}
-	fileTokenSavingsCache.entries[key] = n
-	fileTokenSavingsCache.mu.Unlock()
-	return n
-}
-
-// TokenSavingsForGraph computes token savings for the Graph() text output,
-// comparing it against the full source file of the symbol's definition.
-func (ix *Index) TokenSavingsForGraph(defFile, compact string) TokenStats {
-	fullTokens := 0
-	if defFile != "" {
-		fullTokens = fileTokenCount(filepath.Join(ix.Root, defFile))
-	}
-	return tokenStatsFromCounts(fullTokens, tokenize.Count(compact), "graph")
-}
-
-// TokenSavingsForContext computes token savings for the Context() text output.
-func (ix *Index) TokenSavingsForContext(defFile, compact string) TokenStats {
-	var fullData []byte
-	if defFile != "" {
-		var err error
-		fullData, err = os.ReadFile(filepath.Join(ix.Root, defFile))
-		if err != nil {
-			fullData = nil
-		}
-	}
-	return computeTokenSavings(string(fullData), compact, "context")
-}
-
-// TokenSavingsForNeighborhood computes token savings for the Neighborhood JSON,
-// comparing the compact JSON against the full source files of all referenced
-// nodes.
-func (ix *Index) TokenSavingsForNeighborhood(g GraphResult) TokenStats {
-	var fullText strings.Builder
-	seen := map[string]bool{}
-	for _, n := range g.Nodes {
-		if n.File != "" && !seen[n.File] {
-			seen[n.File] = true
-			if data, err := os.ReadFile(filepath.Join(ix.Root, n.File)); err == nil {
-				fullText.Write(data)
-			}
-		}
-	}
-	return computeTokenSavings(fullText.String(), g.GraphJSON(), "neighborhood")
-}
-
 // ResolveDottedMethod resolves a dotted method reference ("Type.Method" or
 // "pkg.Type.Method") to the method symbols whose receiver matches the
 // qualifier. The index may key a Java method's FullName as
-// "com.inn.rcp.ResponseWrapperFactory.build" while the user types
-// "ResponseWrapperFactory.build", and overloads all share one FullName, so an
+// "com.example.service.OrderService.build" while the user types
+// "OrderService.build", and overloads all share one FullName, so an
 // exact map lookup cannot disambiguate. Matching tiers:
 //
-//  1. receiver equals the qualifier exactly ("ResponseWrapperFactory.build")
+//  1. receiver equals the qualifier exactly ("OrderService.build")
 //  2. receiver is package-qualified and ends in the qualifier
-//     ("com.inn.rcp.ResponseWrapperFactory.build")
+//     ("com.example.service.OrderService.build")
 //  3. the qualifier is more-qualified than the receiver (nested classes:
 //     "Outer.Inner.build" where the receiver is "Inner")
 //
@@ -619,20 +492,6 @@ func xmlEsc(s string) string {
 	return r.Replace(s)
 }
 
-func tokenStatsPanel(s TokenStats) string {
-	if s.FullContext <= 0 {
-		return ""
-	}
-	pct := s.SavingsPct
-	note := ""
-	if s.CompactTokens >= s.FullContext {
-		pct = 0
-		note = "; compact includes metadata"
-	}
-	return fmt.Sprintf(`<span style="color:#94a3b8;font-size:11px">\u21d2 %s %d → %d tokens (%d%% saved%s)</span>`,
-		s.Source, s.FullContext, s.CompactTokens, pct, note)
-}
-
 // graphHTMLData holds the interpolated values injected into export_graph.html.
 // All values are pre-escaped by the caller; text/template inserts them verbatim.
 type graphHTMLData struct {
@@ -694,7 +553,7 @@ func (g GraphResult) GraphHTML(ix *Index) string {
 	if err := graphHTMLTmpl.Execute(&b, graphHTMLData{
 		JSON:        string(data),
 		Title:       html.EscapeString(title),
-		TokenStats:  tokenStatsPanel(g.Stats),
+		TokenStats:  tokstats.TokenStatsPanel(g.Stats),
 		Colors:      kindColorJSON(),
 		StaleBanner: ix.StalenessBanner(files),
 	}); err != nil {

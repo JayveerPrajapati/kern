@@ -36,3 +36,13 @@ export function run(): void {
   const g = new Greeter("world");
   console.log(h, g.loud());
 }
+
+// Inherited-method call shape (Phase 5 / A5): shout() calls this.greet(),
+// which is defined on the BASE class Greeter, not on LoudGreeter. The
+// receiver-less callee edge (LoudGreeter.shout -> greet) exercises the
+// intel layer's bare-callee resolution for an inherited receiver method.
+class LoudGreeter extends Greeter {
+  shout(): string {
+    return this.greet() + "!";
+  }
+}

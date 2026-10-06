@@ -355,11 +355,23 @@ func SearchReposIn(root string, query string, limit int) []RepoHit {
 		return nil
 	}
 	var hits []RepoHit
+	var skipped []string
 	for _, repo := range repos {
+		// L6: a registered repo whose path is gone (moved/deleted after
+		// `kern repos add`, which stores the absolute path) must not
+		// silently vanish into an empty index — LoadOrBuild would recreate
+		// the directory and produce an empty index that contributes 0 hits,
+		// reading as "search is cwd-only". Report it so a missing repo is
+		// never mistaken for an unsearched one.
+		if st, serr := os.Stat(repo.Root); serr != nil || !st.IsDir() {
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", repo.Name, repo.Root))
+			continue
+		}
 		ix, err := ReadIndex(repo.Root)
 		if err != nil || ix == nil {
 			ix, err = index.LoadOrBuild(repo.Root)
 			if err != nil || ix == nil {
+				skipped = append(skipped, fmt.Sprintf("%s (%s)", repo.Name, repo.Root))
 				continue
 			}
 		}
@@ -368,6 +380,10 @@ func SearchReposIn(root string, query string, limit int) []RepoHit {
 			rh.Root = repo.Root
 			hits = append(hits, rh)
 		}
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "kern: repos search: %d registered repo(s) skipped (missing or unbuildable): %s\n",
+			len(skipped), strings.Join(skipped, ", "))
 	}
 	hits = dedupNestedRepoHits(hits)
 	sort.Slice(hits, func(i, j int) bool {

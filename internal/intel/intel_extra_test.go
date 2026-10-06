@@ -224,9 +224,9 @@ func TestPrints(t *testing.T) {
 func TestResolveDottedMethod(t *testing.T) {
 	ix := index.New("/tmp")
 	ix.Symbols = []index.Symbol{
-		{Kind: "method", Name: "build", Receiver: "EntityEvent", File: "com/inn/rcp/EntityEvent.java", Line: 1, Lang: "java"},
-		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.ResponseWrapperFactory", File: "com/inn/rcp/ResponseWrapperFactory.java", Line: 1, Lang: "java"},
-		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.GraphUtils", File: "com/inn/rcp/GraphUtils.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "RecordItem", File: "com/example/model/RecordItem.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.example.service.OrderService", File: "com/example/service/OrderService.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.example.util.DataProcessor", File: "com/example/util/DataProcessor.java", Line: 1, Lang: "java"},
 		{Kind: "func", Name: "OtherFn", File: "x.go", Line: 1, Lang: "go"},
 	}
 
@@ -234,9 +234,9 @@ func TestResolveDottedMethod(t *testing.T) {
 		query string
 		want  string
 	}{
-		{"ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
-		{"com.inn.rcp.ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
-		{"EntityEvent.build", "EntityEvent.build"},
+		{"OrderService.build", "com.example.service.OrderService.build"},
+		{"com.example.service.OrderService.build", "com.example.service.OrderService.build"},
+		{"RecordItem.build", "RecordItem.build"},
 		{"NoSuchClass.build", ""},
 	}
 	for _, c := range cases {

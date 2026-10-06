@@ -56,6 +56,62 @@ func TestRankedSearchDemotesGenerated(t *testing.T) {
 	}
 }
 
+// TestRankedSearchDemotesTestAndFixture pins the Phase 5 demotion: a symbol
+// defined in a _test.go file or a testdata/ fixture ranks BELOW an equally
+// matching production symbol (identical name, identical query), but is still
+// returned when it is the only match — deprioritization, not exclusion (the
+// resolveSymbol/ResolveFuzzy fallback contract).
+func TestRankedSearchDemotesTestAndFixture(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":             "module demo\n\ngo 1.22\n",
+		"api/send.go":        "package api\n\n// Send delivers the payload.\nfunc Send() {}\n",
+		"api/send_test.go":   "package api\n\n// Send mirrors the production symbol from a test file.\nfunc Send() {}\n",
+		"api/data.go":        "package api\n\n// Data is a production symbol.\nfunc Data() {}\n",
+		"testdata/hub.go":    "package testdata\n\n// Data mirrors the production symbol from a testdata fixture.\nfunc Data() {}\n",
+		"api/runner_test.go": "package api\n\n// Runner exists only in a test file.\nfunc Runner() {}\n",
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Equal-scope query "send": the production Send (send.go) must outrank the
+	// test-file Send (send_test.go) despite identical names and scoring.
+	sends := RankedSearchScored(ix, "send", 10)
+	if len(sends) < 2 {
+		t.Fatalf("expected both Send symbols, got %d", len(sends))
+	}
+	if sends[0].Symbol.File != "api/send.go" {
+		t.Errorf("production Send should rank first, got %s (score %d)", sends[0].Symbol.File, sends[0].Score)
+	}
+	if sends[1].Score >= sends[0].Score {
+		t.Errorf("test Send score %d must be below production Send score %d", sends[1].Score, sends[0].Score)
+	}
+
+	// Equal-scope query "data": the production Data (api/data.go) must outrank
+	// the testdata fixture Data (testdata/hub.go), and the fixture stays
+	// reachable in the results.
+	datas := RankedSearchScored(ix, "data", 10)
+	if len(datas) < 2 {
+		t.Fatalf("expected both Data symbols, got %d", len(datas))
+	}
+	if datas[0].Symbol.File != "api/data.go" {
+		t.Errorf("production Data should rank first, got %s (score %d)", datas[0].Symbol.File, datas[0].Score)
+	}
+	if datas[1].Score >= datas[0].Score {
+		t.Errorf("fixture Data score %d must be below production Data score %d", datas[1].Score, datas[0].Score)
+	}
+
+	// Only-match query "runner": the test-only Runner is still returned.
+	only := RankedSearchScored(ix, "runner", 10)
+	if len(only) == 0 {
+		t.Fatal("expected the test-only Runner to still surface as the only match")
+	}
+	if only[0].Symbol.Name != "Runner" || only[0].Symbol.File != "api/runner_test.go" {
+		t.Errorf("expected test-only Runner as the unique hit, got %+v", only[0])
+	}
+}
+
 func TestRankedSearchGeneratedStillReachable(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"go.mod":            "module demo\n\ngo 1.22\n",

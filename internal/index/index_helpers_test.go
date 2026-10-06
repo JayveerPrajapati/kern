@@ -297,9 +297,9 @@ func writeJSONFixture(t *testing.T, ix *Index) {
 func TestResolveNameDottedMethod(t *testing.T) {
 	ix := New("/tmp")
 	ix.Symbols = []Symbol{
-		{Kind: "method", Name: "build", Receiver: "EntityEvent", File: "com/inn/rcp/EntityEvent.java", Line: 1, Lang: "java"},
-		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.ResponseWrapperFactory", File: "com/inn/rcp/ResponseWrapperFactory.java", Line: 1, Lang: "java"},
-		{Kind: "method", Name: "build", Receiver: "GraphUtils", File: "com/inn/rcp/GraphUtils.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "RecordItem", File: "com/example/model/RecordItem.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.example.service.OrderService", File: "com/example/service/OrderService.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "DataProcessor", File: "com/example/util/DataProcessor.java", Line: 1, Lang: "java"},
 		{Kind: "func", Name: "OtherFn", File: "x.go", Line: 1, Lang: "go"},
 	}
 	ix.buildSymbolIndex()
@@ -308,12 +308,12 @@ func TestResolveNameDottedMethod(t *testing.T) {
 		query string
 		want  string // expected resolved FullName; "" => not found
 	}{
-		{"ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
-		{"com.inn.rcp.ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
-		{"EntityEvent.build", "EntityEvent.build"},
-		{"GraphUtils.build", "GraphUtils.build"},
+		{"OrderService.build", "com.example.service.OrderService.build"},
+		{"com.example.service.OrderService.build", "com.example.service.OrderService.build"},
+		{"RecordItem.build", "RecordItem.build"},
+		{"DataProcessor.build", "DataProcessor.build"},
 		{"NoSuchClass.build", ""},
-		{"build", "EntityEvent.build"}, // bare name: deterministic first match
+		{"build", "RecordItem.build"}, // bare name: deterministic first match
 	}
 	for _, c := range cases {
 		got, ok := resolveName(ix, c.query)
@@ -332,7 +332,7 @@ func TestResolveNameDottedMethod(t *testing.T) {
 func TestResolveDottedMethodNestedClass(t *testing.T) {
 	ix := New("/tmp")
 	ix.Symbols = []Symbol{
-		{Kind: "method", Name: "build", Receiver: "Inner", File: "com/inn/rcp/Outer.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "Inner", File: "com/example/model/Outer.java", Line: 1, Lang: "java"},
 	}
 	ix.buildSymbolIndex()
 	// A more-qualified query for a nested class still resolves.

@@ -92,6 +92,86 @@ func (s *server) Serve() string { return "ok" }
 	}
 }
 
+// TestDeadCodeDynamicLanguagesUncertain pins P2-10: shell, JavaScript/
+// TypeScript and Python symbols dispatch by name (script invocation, HTML/event
+// wiring, __main__/entry-point metadata), so an absent caller set in the index
+// cannot prove death. They must be reported "uncertain" — never "certain" or
+// "probable" — regardless of how their name looks. A Go file in the same tree
+// pins that the Go path keeps its exact existing behavior alongside.
+func TestDeadCodeDynamicLanguagesUncertain(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+
+func LibLive() {}
+
+func libInner() string { return "y" }
+`,
+		"ci.sh": `#!/bin/bash
+
+deploy() {
+  echo "deploying"
+}
+
+_cleanup() {
+  rm -rf tmp
+}
+`,
+		"lib.py": `def helper():
+    return 1
+
+def _private_helper():
+    return 2
+`,
+		"app.ts": `export function compute(x: number): number {
+  return x * 2
+}
+
+function localOnly(): string {
+  return "y"
+}
+`,
+		"ui.js": `export function render() {
+  return "<div/>"
+}
+
+function internalOnly(): string {
+  return "z"
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := DeadCode(ix)
+	if len(dead) == 0 {
+		t.Fatal("expected dead symbols, got none")
+	}
+	conf := map[string]string{}
+	for _, d := range dead {
+		conf[d.Name] = d.Confidence
+	}
+	// Dynamic-language symbols: always uncertain, exported or not.
+	for _, name := range []string{"deploy", "_cleanup", "helper", "_private_helper", "compute", "localOnly", "render", "internalOnly"} {
+		got, ok := conf[name]
+		if !ok {
+			t.Errorf("expected %s to be reported dead, got dead set %v", name, conf)
+			continue
+		}
+		if got != ConfidenceUncertain {
+			t.Errorf("%s: confidence = %q, want %q (by-name dispatch means the index cannot prove death)",
+				name, got, ConfidenceUncertain)
+		}
+	}
+	// Go symbols in the same tree keep their exact existing verdicts.
+	if conf["LibLive"] != ConfidenceProbable {
+		t.Errorf("LibLive: confidence = %q, want %q (Go exported path unchanged)", conf["LibLive"], ConfidenceProbable)
+	}
+	if conf["libInner"] != ConfidenceCertain {
+		t.Errorf("libInner: confidence = %q, want %q (Go private path unchanged)", conf["libInner"], ConfidenceCertain)
+	}
+}
+
 // TestDeadCodeFieldReceiverMethodNotReported pins the field-receiver lens
 // fix: a live method invoked through a struct field
 // ("a.taskSvc.Deploy" -> "TaskService.Deploy") must never be listed dead.
@@ -192,7 +272,7 @@ func _hidden() string { return "z" }
 	}
 	// The summary line must count the unexported symbols as private.
 	out := RenderDead(DeadCode(ix))
-	if !strings.Contains(out, "summary: 3 dead symbols (2 private, 1 public-API)") {
+	if !strings.Contains(out, "summary: 3 dead symbols (2 private, 1 public-API;") {
 		t.Errorf("summary misclassifies visibility, got:\n%s", out)
 	}
 }

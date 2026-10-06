@@ -282,10 +282,20 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 		return nil
 	}
 	// V7b: a query is code-intent when it names code-ish concepts — the
-	// deterministic signal that headings should be demoted and code kinds
-	// promoted. Doc queries ("what is the architecture", "how does X
-	// work") keep the plain ranking.
+	// deterministic signal that code kinds should be promoted. Doc queries
+	// ("what is the architecture", "how does X work") keep the plain
+	// ranking.
 	codeIntent := isCodeIntentQuery(query)
+	// I5 (deep-dive A2, 2026-10-03): markdown headings are prose, not
+	// symbols — they are EXCLUDED from ranked search entirely unless the
+	// query is doc-shaped ("what is…", "how does…", "explain…"), where a
+	// heading hit is genuinely the best answer. This is the structural fix
+	// for heading pollution feeding kern_search/kern_retrieve/kern_plan
+	// ("Test with curl" as a plan "test" — a doc heading, not code).
+	// docIntent wins over codeIntent: doc questions about code ("how does
+	// the api server work") still rank code first via the codeIntent
+	// demotion below, but headings stay reachable.
+	includeHeadings := isDocIntentQuery(query)
 	// Precompute the lowercase name/full-name/file for every symbol once, so
 	// the scoring loop below never repeats strings.ToLower (nor the
 	// FullName() concatenation it wraps) per symbol. Semantics are identical:
@@ -312,6 +322,9 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 	segCache := map[string][]string{}
 	var hits []RepoHit
 	for i, s := range ix.Symbols {
+		if s.Kind == "heading" && !includeHeadings {
+			continue
+		}
 		name := lowerNames[i]
 		full := lowerFulls[i]
 		file := lowerFiles[i]
@@ -348,6 +361,8 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 			// V7b: for code-oriented queries, code symbols must beat prose
 			// headings ("What Is Conduit?" matches query words trivially
 			// but a developer looking for symbols wants the type/func).
+			// (Headings only reach here on doc-intent queries — see
+			// includeHeadings above.)
 			if s.Kind == "heading" {
 				score -= 100
 			} else if isCodeKind(s.Kind) {
@@ -356,6 +371,17 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 		}
 		if ix.IsGenerated(s.File) {
 			score -= 60
+		}
+		// F6 (2026-10-07): symbols defined in test files or testdata fixtures
+		// are demoted by a fixed 100-point penalty so production symbols rank
+		// above them by default. Demotion is NOT exclusion: a test/fixture
+		// symbol that is the only or best match still surfaces. The penalty
+		// keeps the resolveSymbol/ResolveFuzzy fallback contract intact: a
+		// matched-all test hit carries at least ~240 raw (90 segment match +
+		// 150 all-match boost) before this penalty, staying above the 150
+		// high-confidence gate those resolvers require.
+		if IsTestFile(s.File) || IsFixtureFile(s.File) {
+			score -= 100
 		}
 		hits = append(hits, RepoHit{Symbol: s, Score: score, MatchedAll: matched == len(words)})
 	}
@@ -515,6 +541,28 @@ func isCodeIntentQuery(q string) bool {
 		"error", "crash", "call", "caller", "implement", "route", "config",
 	} {
 		if strings.Contains(lq, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDocIntentQuery heuristically detects documentation-shaped queries where
+// a markdown heading hit is genuinely the best answer ("what is the retry
+// policy", "how does indexing work", "explain the budget model", "where are
+// the docs"). Deterministic phrase matching — no LLM. Doc intent wins over
+// code intent for heading inclusion (I5/A2): a doc question about code
+// keeps headings reachable while code symbols still rank first.
+func isDocIntentQuery(q string) bool {
+	lq := " " + strings.ToLower(strings.TrimSpace(q)) + " "
+	for _, phrase := range []string{
+		"what is", "what are", "what does", "what's",
+		"how does", "how do", "how is", "how are", "how to",
+		"explain", "describe", "overview", "summary of", "documentation",
+		"docs", "doc ", "guide", "tutorial", "readme", "changelog",
+		"where is the doc", "introduction",
+	} {
+		if strings.Contains(lq, phrase) {
 			return true
 		}
 	}

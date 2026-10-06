@@ -27,7 +27,9 @@ const (
 	// that declares interfaces; it is the most likely shape for an
 	// interface-dispatch false positive. Signature matching is not verified —
 	// this is a cheap heuristic, not proof that the method satisfies an
-	// interface.
+	// interface. It is also the verdict for dynamically-dispatched languages
+	// (shell, JavaScript/TypeScript, Python), where by-name invocation is
+	// invisible to the call graph and an absent caller set cannot prove death.
 	ConfidenceUncertain = "uncertain"
 )
 
@@ -43,6 +45,10 @@ type DeadSymbol struct {
 	Lines      int    `json:"lines"`
 	Public     bool   `json:"public"`
 	Confidence string `json:"confidence"` // one of ConfidenceCertain, ConfidenceProbable, ConfidenceUncertain
+	// TestOnly is true when the symbol has callers but every one is a test.
+	TestOnly bool `json:"test_only,omitempty"`
+	// Note explains a downgraded verdict (unattributable same-named callers).
+	Note string `json:"note,omitempty"`
 }
 
 // DeadCode finds callable symbols (functions and methods) with no in-project
@@ -57,7 +63,10 @@ type DeadSymbol struct {
 // reported dead even though it is in use. Each result carries a Confidence
 // tier that reflects this: unexported symbols (no callers) are "certain",
 // exported symbols (no callers) are "probable", and exported methods in
-// packages that declare interfaces are "uncertain".
+// packages that declare interfaces are "uncertain". Shell, JavaScript/
+// TypeScript and Python symbols are always "uncertain": they dispatch by name
+// (script invocation, HTML/event wiring, entry points) in ways the call graph
+// cannot see, so the index cannot prove them dead.
 func DeadCode(ix *index.Index) []DeadSymbol {
 	fileMap := buildFileMap(ix)
 	// Scan the indexed Go files once for non-call references. Hoisting this out
@@ -66,6 +75,10 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 	// Package directories that declare interfaces: an exported method there may
 	// satisfy one of them and be invoked only via interface dispatch.
 	ifaceDirs := interfaceDirs(ix)
+	nameCount := make(map[string]int, len(ix.Symbols))
+	for _, s := range ix.Symbols {
+		nameCount[s.Name]++
+	}
 	var out []DeadSymbol
 	for _, s := range ix.Symbols {
 		if s.Kind != "func" && s.Kind != "method" {
@@ -83,11 +96,20 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 		}
 		callers := ix.CallersFor(s)
 		if len(callers) == 0 {
-			out = append(out, DeadSymbol{
+			d := DeadSymbol{
 				Name: full, Kind: s.Kind, File: s.File, Line: s.Line,
 				Lines: s.Lines(), Public: isPublic(s.Name),
 				Confidence: deadConfidence(s, ifaceDirs),
-			})
+			}
+			// Plain functions are keyed by bare name, so edges to a name defined
+			// in several packages share one bucket and CallersFor drops any it
+			// cannot pin to this package. Recorded-but-dropped callers mean
+			// "zero callers" is unproven.
+			if s.Receiver == "" && nameCount[s.Name] > 1 && len(ix.Callers[full]) > 0 {
+				d.Confidence = ConfidenceUncertain
+				d.Note = fmt.Sprintf("%d call site(s) to the same-named %q in other packages could not be attributed", len(ix.Callers[full]), s.Name)
+			}
+			out = append(out, d)
 			continue
 		}
 		// Called only from tests: production-dead, test-alive.
@@ -102,7 +124,7 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 			out = append(out, DeadSymbol{
 				Name: full, Kind: s.Kind, File: s.File, Line: s.Line,
 				Lines: s.Lines(), Public: isPublic(s.Name),
-				Confidence: deadConfidence(s, ifaceDirs),
+				Confidence: deadConfidence(s, ifaceDirs), TestOnly: true,
 			})
 		}
 	}
@@ -137,6 +159,17 @@ func isPublic(name string) bool {
 // graph — so it is only probable. An exported method in a package that declares
 // interfaces is the most likely interface-dispatch candidate: uncertain.
 func deadConfidence(s index.Symbol, ifaceDirs map[string]bool) string {
+	// Dynamic languages dispatch by name and the index cannot see those
+	// bindings: shell functions are invoked by name from other scripts or via
+	// $PATH, JS/TS symbols are wired through HTML/event handlers and dynamic
+	// imports, and Python functions are reached through __main__/entry-point
+	// metadata. An absent caller set in the index therefore cannot prove death
+	// for these languages — always report them uncertain, never certain or
+	// probable.
+	switch s.Lang {
+	case "shell", "javascript", "typescript", "python":
+		return ConfidenceUncertain
+	}
 	if !isPublic(s.Name) {
 		return ConfidenceCertain
 	}
@@ -166,29 +199,78 @@ func interfaceDirs(ix *index.Index) map[string]bool {
 // caveat: unexported symbols are certainly dead, exported symbols are probably
 // dead (interface dispatch is invisible to the index), and exported methods in
 // packages declaring interfaces are merely uncertain.
-func RenderDead(dead []DeadSymbol) string {
-	var b strings.Builder
-	b.WriteString("dead code (no in-project callers):\n")
-	public, private := 0, 0
+func RenderDead(dead []DeadSymbol) string { return RenderDeadLimited(dead, 0) }
+
+// FilterDeadByPath keeps symbols whose file is at or under any of the given
+// repo-relative prefixes. No usable prefix keeps everything.
+func FilterDeadByPath(dead []DeadSymbol, prefixes ...string) []DeadSymbol {
+	var ps []string
+	for _, p := range prefixes {
+		if p = strings.Trim(filepath.ToSlash(p), "/"); p != "" && p != "." {
+			ps = append(ps, p)
+		}
+	}
+	if len(ps) == 0 {
+		return dead
+	}
+	var out []DeadSymbol
+	for _, d := range dead {
+		for _, p := range ps {
+			if d.File == p || strings.HasPrefix(d.File, p+"/") {
+				out = append(out, d)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// RenderDeadLimited renders the report summary-first so a display cap
+// (limit > 0) can never hide the totals.
+func RenderDeadLimited(dead []DeadSymbol, limit int) string {
+	public, private, testOnly, uncertain := 0, 0, 0, 0
 	for _, d := range dead {
 		if d.Public {
 			public++
 		} else {
 			private++
 		}
+		if d.TestOnly {
+			testOnly++
+		}
+		if d.Confidence == ConfidenceUncertain {
+			uncertain++
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "summary: %d dead symbols (%d private, %d public-API; %d test-only, %d uncertain)\n",
+		len(dead), private, public, testOnly, uncertain)
+	b.WriteString("dead code (no production callers):\n")
+	shown := dead
+	if limit > 0 && len(shown) > limit {
+		shown = shown[:limit]
+	}
+	for _, d := range shown {
 		fmt.Fprintf(&b, "  %-8s %-32s %s:%d  (%d lines)%s\n",
 			d.Kind, d.Name, d.File, d.Line, d.Lines, deadCaveat(d))
 	}
 	if len(dead) == 0 {
-		b.WriteString("  (none — every non-entry symbol has a caller)\n")
+		b.WriteString("  (none — every non-entry symbol has a production caller)\n")
 	}
-	fmt.Fprintf(&b, "summary: %d dead symbols (%d private, %d public-API)\n",
-		len(dead), private, public)
+	if len(shown) < len(dead) {
+		fmt.Fprintf(&b, "  … %d more not shown (limit %d)\n", len(dead)-len(shown), limit)
+	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // deadCaveat renders the confidence caveat for a single dead symbol.
 func deadCaveat(d DeadSymbol) string {
+	if d.Note != "" {
+		return "  [uncertain: " + d.Note + "]"
+	}
+	if d.TestOnly {
+		return "  [test-only callers — " + strings.ToLower(d.Confidence) + "]"
+	}
 	switch d.Confidence {
 	case ConfidenceCertain:
 		return "  [certainly dead]"

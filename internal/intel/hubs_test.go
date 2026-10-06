@@ -278,3 +278,60 @@ func TestHubSetUsesWeightedRanking(t *testing.T) {
 		}
 	}
 }
+
+// TestHubsExcludesTestAndFixtureSymbols pins Phase 5: a test-file symbol or a
+// testdata/ fixture symbol must never rank as a hub when production symbols
+// exist. ProdHub, TestHub and FixtureHub are given equal evidence (production
+// callers via ix.Callers), so only the file-provenance filter can separate
+// them: ProdHub (prod/prod.go) stays, TestHub (prod/prod_test.go) and
+// FixtureHub (testdata/fix.go) are excluded.
+func TestHubsExcludesTestAndFixtureSymbols(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "ProdHub", File: "prod/prod.go", Line: 10},
+			{Kind: "func", Name: "ProdCaller", File: "prod/prod.go", Line: 20},
+			{Kind: "func", Name: "TestHub", File: "prod/prod_test.go", Line: 10},
+			{Kind: "func", Name: "FixtureHub", File: "testdata/fix.go", Line: 10},
+			{Kind: "func", Name: "FixtureCaller", File: "app/app.go", Line: 20},
+		},
+		// Callers only (no outgoing Calls) so the caller symbols themselves
+		// never qualify as hubs; the hub candidates carry the caller signal.
+		Callers: map[string][]string{
+			"ProdHub":    {"ProdCaller", "TestHub"},
+			"FixtureHub": {"FixtureCaller"},
+		},
+	}
+	hubs := Hubs(ix, 10)
+	if len(hubs) != 1 {
+		t.Fatalf("expected exactly 1 hub (ProdHub), got %+v", hubs)
+	}
+	if hubs[0].Symbol != "ProdHub" {
+		t.Errorf("expected ProdHub as the only hub, got %+v", hubs[0])
+	}
+}
+
+// TestHubsAllTestIndexEmpty pins the all-test behavior: when EVERY symbol
+// lives in a test file or a testdata fixture, Hubs returns zero hubs — the
+// exclusion is absolute, with no unfiltered fallback that would reintroduce
+// the excluded noise. Each symbol carries an outgoing call edge so it WOULD
+// qualify as a hub without the file filter.
+func TestHubsAllTestIndexEmpty(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "TestA", File: "pkg/a_test.go", Line: 10},
+			{Kind: "func", Name: "TestB", File: "pkg/b_test.go", Line: 10},
+			{Kind: "func", Name: "FixtureC", File: "testdata/c.go", Line: 10},
+		},
+		Calls: map[string][]index.CallEdge{
+			"TestA":    {{Target: "TestB", Confidence: index.ConfidenceHigh}},
+			"TestB":    {{Target: "TestA", Confidence: index.ConfidenceHigh}},
+			"FixtureC": {{Target: "TestA", Confidence: index.ConfidenceHigh}},
+		},
+	}
+	if hubs := Hubs(ix, 10); len(hubs) != 0 {
+		t.Fatalf("expected zero hubs for an all-test index, got %+v", hubs)
+	}
+	if hubs := Hubs(ix, 0); len(hubs) != 0 {
+		t.Fatalf("expected zero hubs for an all-test index with limit<=0, got %+v", hubs)
+	}
+}

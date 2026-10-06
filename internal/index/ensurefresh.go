@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -108,9 +109,13 @@ func BuildPersistedForce(root string) (*Index, error) {
 	return ix, nil
 }
 
-// StatusReport reports the cached index's health for root without mutating
-// anything (read-only, CI-safe). strict selects a full content re-hash
-// freshness proof over the fast git tree-OID compare.
+// StatusReport reports the cached index's health for root. It is read-only
+// with one narrow exception: when the index is content-fresh but HEAD has
+// advanced past the build-time commit, the recorded git_commit provenance
+// label is refreshed in the persisted meta (a cheap single-row write, never
+// a rebuild) so the label self-heals on any `kern index --status`. strict
+// selects a full content re-hash freshness proof over the fast git tree-OID
+// compare.
 func StatusReport(root string, strict bool) (*IndexStatus, error) {
 	root = defaultRoot(root)
 	status := &IndexStatus{
@@ -150,6 +155,20 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 		proof = ix.FreshnessProofStrict(root)
 	} else {
 		proof = ix.FreshnessProof(root)
+	}
+	// Opportunistic label self-heal (no rebuild): when the content is fresh
+	// but HEAD has advanced past the build-time commit (a seal-only commit),
+	// refresh the recorded git_commit label in the persisted meta so every
+	// surface shows the current commit while the content proof still says
+	// fresh. This is provenance, not a staleness decision, and it reuses the
+	// proof computed above — no second tree walk. A stale index is left for
+	// the normal rebuild path.
+	if !proof.Stale() {
+		if changed, err := refreshCommitLabelIfFresh(root, ix, true); err == nil && changed {
+			// proof.Recorded was copied from ix.Identity before the refresh;
+			// keep the emitted proof consistent with the refreshed label.
+			proof.Recorded.GitCommit = ix.Identity.GitCommit
+		}
 	}
 	status.FreshnessProof = proof
 	status.Stale = len(ix.FileHashes) == 0 || proof.Stale()
@@ -195,22 +214,32 @@ func EnsureFresh(root string) (*EnsureFreshResult, error) {
 		// index --update`).
 		prev, lerr := Load(root)
 
-		// 2. Tri-state git tree-OID probe (no content walk). Git hashes
+		// 2. Cheap git tree-OID fast path (no content walk). Git hashes
 		// content, so an mtime-preserving edit (git apply) flips the OID
 		// too.
-		//   - fresh=true, decided=true → the recorded TreeOID matches:
+		//   - fresh=true → the recorded TreeOID matches the current tree:
 		//     return "fresh" immediately — no walk, no rebuild.
-		//   - fresh=false, decided=true → recorded TreeOID exists and
-		//     differs: DECISIVELY stale → the rebuild path below.
-		//   - decided=false → no baseline (nil index/Identity, empty/legacy
-		//     TreeOID) or current OID unavailable (non-git worktree, git
-		//     unavailable): inconclusive. Run the LOOSE content proof first;
-		//     a content match proves the index is current, so it returns
-		//     "fresh" without rebuilding. Only a loose "stale" falls through
-		//     to rebuild.
+		//   - fresh=false (decided or not) → the tree OID differs or is
+		//     unprovable. The tree-OID probe is a fast path, NOT a verdict:
+		//     a commit that only seals already-indexed content (or touches
+		//     a .kernignore'd / non-indexed file) flips the git tree OID
+		//     without changing any indexed file's content. The LOOSE
+		//     content proof is authoritative — it re-hashes the indexed
+		//     files and only reports stale when the content root moved. A
+		//     content match proves the index is current, so it returns
+		//     "fresh" without rebuilding. Only a loose "stale" falls
+		//     through to the rebuild path below.
 		if lerr == nil && prev != nil {
-			fresh, decided, _ := prev.TreeOIDProbe(root)
+			fresh, _, _ := prev.TreeOIDProbe(root)
 			if fresh {
+				// A seal-only commit can advance HEAD without changing any
+				// indexed file's content (the recorded tree OID still matches
+				// the current tree): refresh the recorded git_commit label so
+				// this surface names the current commit too. Provenance only
+				// — no rebuild, and the no-op case is a single git query.
+				if _, err := RefreshCommitLabel(root, prev); err != nil {
+					log.Printf("kern index: refresh git_commit label for %s: %v", root, err)
+				}
 				st := indexStatusFromIndex(root, prev, FreshnessProof{
 					Verdict:   FreshnessFresh,
 					Recorded:  *prev.Identity,
@@ -218,17 +247,17 @@ func EnsureFresh(root string) (*EnsureFreshResult, error) {
 				})
 				return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, true
 			}
-			if !decided {
-				// Inconclusive → the loose content proof decides. This
-				// restores the warm path for legacy indexes (empty recorded
-				// TreeOID) and repos where git cannot compute the OID: it
-				// costs one walk, not a rebuild.
-				if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
-					return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, true
-				}
+			// The tree probe is not fresh — a decisive mismatch, or an
+			// inconclusive one (legacy index without a TreeOID, non-git
+			// worktree, git unavailable). The loose content proof decides,
+			// exactly as `kern index --status` and the disk view do, so all
+			// surfaces agree after a seal-only commit. Costs one walk, not
+			// a rebuild.
+			if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
+				return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, true
 			}
-			// Decisively stale (or inconclusive with a stale loose proof):
-			// fall through to the rebuild path.
+			// Stale content proof (or no loadable status): fall through to
+			// the rebuild path.
 		}
 		return nil, false
 	}

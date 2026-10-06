@@ -297,6 +297,110 @@ func TestWhatTestsCoverScoped(t *testing.T) {
 	}
 }
 
+// TestWhatTestsCoverRanked pins the tiered coverage contract (bug-hunter
+// remediation Fix 1): a fixture with a file-paired test, a name-matched test,
+// a direct-caller test, and unrelated same-package tests must rank the first
+// three as the list and relegate the unrelated same-package tests to the
+// remainder — the impact render then shows the remainder as a count-only
+// line instead of pretending the whole package covers the symbol.
+func TestWhatTestsCoverRanked(t *testing.T) {
+	ix := &index.Index{
+		Root: "/ranked",
+		Symbols: []index.Symbol{
+			sym("func", "runTaint", "cmd/kern/cmd_security.go", 202),
+			sym("func", "TestParseTaintRange", "cmd/kern/cmd_security_test.go", 5),
+			sym("func", "TestTaintHelper", "cmd/kern/cmd_taint_test.go", 12),
+			sym("func", "TestUnrelated", "cmd/kern/cmd_unrelated_test.go", 3),
+			sym("func", "TestDirectCaller", "t/direct_test.go", 9),
+		},
+		Calls: map[string][]index.CallEdge{
+			"TestDirectCaller": {{Target: "runTaint", Confidence: index.ConfidenceHigh}},
+		},
+		Callers: map[string][]string{
+			"runTaint": {"TestDirectCaller"},
+		},
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	g := FromIndex(ix)
+	ranked, rest := g.WhatTestsCoverRanked("runTaint", false)
+
+	// Tier 1: file-paired (cmd_security_test.go). Tier 2: name-matched
+	// ("taint" token). Tier 3: direct caller. In that order.
+	wantRanked := []string{"cmd/kern.TestParseTaintRange", "cmd/kern.TestTaintHelper", "t.TestDirectCaller"}
+	if got := names(ranked); len(got) != len(wantRanked) {
+		t.Fatalf("WhatTestsCoverRanked ranked = %v, want %v", got, wantRanked)
+	}
+	for i, want := range wantRanked {
+		if got := names(ranked); got[i] != want {
+			t.Fatalf("WhatTestsCoverRanked ranked = %v, want tier order %v", got, wantRanked)
+		}
+	}
+	// Tier 4: the unrelated same-package test is the remainder — a count, not
+	// a list entry.
+	if got := names(rest); len(got) != 1 || got[0] != "cmd/kern.TestUnrelated" {
+		t.Fatalf("WhatTestsCoverRanked rest = %v, want [cmd/kern.TestUnrelated]", got)
+	}
+	// The legacy view still returns the full bounded set sorted by ID.
+	if got := names(g.WhatTestsCover("runTaint")); len(got) != 4 {
+		t.Fatalf("WhatTestsCover(runTaint) = %v, want all 4 covering tests (bounded set unchanged)", got)
+	}
+}
+
+// TestWhatTestsCoverRankedFilePairedBeatsNameMatched pins the tier precedence:
+// a test that is BOTH in the symbol's _test.go twin AND name-matched lands in
+// the file-paired tier (one entry, best tier), not duplicated.
+func TestWhatTestsCoverRankedFilePairedBeatsNameMatched(t *testing.T) {
+	ix := &index.Index{
+		Root: "/ranked2",
+		Symbols: []index.Symbol{
+			sym("func", "runTaint", "cmd/kern/cmd_security.go", 202),
+			sym("func", "TestParseTaintRange", "cmd/kern/cmd_security_test.go", 5),
+			sym("func", "TestUnrelated", "cmd/kern/cmd_unrelated_test.go", 3),
+		},
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	g := FromIndex(ix)
+	ranked, rest := g.WhatTestsCoverRanked("runTaint", false)
+	if got := names(ranked); len(got) != 1 || got[0] != "cmd/kern.TestParseTaintRange" {
+		t.Fatalf("WhatTestsCoverRanked ranked = %v, want [cmd/kern.TestParseTaintRange] (file-paired wins, no duplicate)", got)
+	}
+	if got := names(rest); len(got) != 1 || got[0] != "cmd/kern.TestUnrelated" {
+		t.Fatalf("WhatTestsCoverRanked rest = %v, want [cmd/kern.TestUnrelated]", got)
+	}
+}
+
+// TestWhatTestsCoverPython pins F7 (campaign 2026-10-04): pytest functions
+// that directly call a symbol must be reported as covering tests — the
+// live defect was `kern impact run_live` listing pytest functions as
+// direct callers yet reporting "Tests that cover it: 0".
+func TestWhatTestsCoverPython(t *testing.T) {
+	ix := &index.Index{
+		Root: "/pyrepo",
+		Symbols: []index.Symbol{
+			sym("func", "run_live", "log_checker.py", 1),
+			sym("func", "TestNotPytest", "log_checker.py", 1),
+			sym("func", "test_run_live", "test_log_checker.py", 1),
+			sym("func", "test_load_config", "test_config.py", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"test_run_live":    {{Target: "run_live", Confidence: index.ConfidenceHigh}},
+			"test_load_config": {{Target: "run_live", Confidence: index.ConfidenceHigh}},
+		},
+		Callers: map[string][]string{
+			"run_live": {"test_run_live", "test_load_config"},
+		},
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	g := FromIndex(ix)
+	// Direct pytest callers count (test_run_live, test_load_config); the
+	// Go-style TestNotPytest name in a non-test .py file does not.
+	ids := names(g.WhatTestsCover("run_live"))
+	want := []string{"test_load_config", "test_run_live"}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("WhatTestsCover(run_live) = %v, want %v (pytest callers recognized)", ids, want)
+	}
+}
+
 // fakeIndex2 returns a graph with an entry point that is itself a handler and
 // a test that calls it, used to keep entry/service assertions isolated.
 func fakeIndex2() *index.Index {

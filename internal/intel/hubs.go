@@ -68,6 +68,16 @@ func hubSet(ix *index.Index) map[string]bool {
 // its community's symbol count. Indexes without community labels (or symbols
 // with none) keep their raw score — ranking then falls back to raw weight.
 // limit<=0 means "top 10%".
+//
+// Phase 5 (2026-10-07): test symbols and testdata fixtures are excluded by
+// default — a defining file that is a test file (IsTestFile) or a testdata/
+// fixture (IsFixtureFile) never ranks as a hub, so T.Fatalf-style test noise
+// cannot dominate hub surfaces (buddy digest, kern hubs, web dashboards).
+// No current caller needs the unfiltered set (fragility/hotspot analyses
+// read ix.Callers directly), so there is no opt-in. An index whose symbols
+// are ALL test/fixture files yields zero hubs (no unfiltered fallback): hub
+// sections render empty, which is honest — there are no production hotspots —
+// and keeps the exclusion absolute.
 func Hubs(ix *index.Index, limit int) []Hub {
 	var hubs []Hub
 	local := localNames(ix)
@@ -80,7 +90,7 @@ func Hubs(ix *index.Index, limit int) []Hub {
 	splits := map[string]map[string][]string{}
 	commSize := communitySizes(ix)
 	for _, u := range units {
-		if IsTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
+		if IsTestFile(u.file) || IsFixtureFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
 			continue
 		}
 		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)

@@ -189,13 +189,13 @@ func main() {
 
 func TestCheckDraftJavaUnresolvedCall(t *testing.T) {
 	ix, root := build(t, map[string]string{
-		"com/inn/rcp/RealClass.java": "package com.inn.rcp;\npublic class RealClass {\n    public static void real() {}\n}\n",
+		"com/example/service/UserService.java": "package com.example.service;\npublic class UserService {\n    public static void process() {}\n}\n",
 	})
-	code := `package com.inn.rcp;
+	code := `package com.example.service;
 
 public class MyDraft {
     public void execute() {
-        com.inn.rcp.does.not.Exist.doSomething();
+        com.example.service.does.not.Exist.doSomething();
     }
 }
 `
@@ -210,7 +210,7 @@ public class MyDraft {
 	if f.Line != 5 {
 		t.Errorf("expected line 5, got %d", f.Line)
 	}
-	if !strings.Contains(f.Message, "com.inn.rcp.does.not.Exist.doSomething") {
+	if !strings.Contains(f.Message, "com.example.service.does.not.Exist.doSomething") {
 		t.Errorf("message should mention target: %q", f.Message)
 	}
 
@@ -223,9 +223,9 @@ public class MyDraft {
 
 func TestCheckDraftJavaCleanCall(t *testing.T) {
 	ix, root := build(t, map[string]string{
-		"com/inn/rcp/RealService.java": "package com.inn.rcp;\npublic class RealService {\n    public static void serve() {}\n}\n",
+		"com/example/service/UserService.java": "package com.example.service;\npublic class UserService {\n    public static void serve() {}\n}\n",
 	})
-	code := `package com.inn.rcp;
+	code := `package com.example.service;
 
 import java.util.List;
 
@@ -233,7 +233,7 @@ public class MyDraft {
     private void localHelper() {}
 
     public void execute() {
-        RealService.serve();
+        UserService.serve();
         localHelper();
         System.out.println("done");
     }

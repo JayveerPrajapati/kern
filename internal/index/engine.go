@@ -20,6 +20,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
+	"github.com/JayveerPrajapati/kern/internal/tokstats"
 )
 
 // indexVersion is bumped whenever the persisted index schema changes, so
@@ -952,8 +953,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
 		if r, ok := reuseByMtime(cfg.prior, rel, mtime); ok {
 			cfg.reused.Add(1)
-			ix.applyFileResult(r)
-			return nil
+			return ix.applyFileResult(r)
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
@@ -964,8 +964,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 		if !isIndexable(rel, src) {
 			return nil
 		}
-		ix.applyFileResult(reuseOrCompute(cfg.prior, rel, src, mtime, &cfg.reused))
-		return nil
+		return ix.applyFileResult(reuseOrCompute(cfg.prior, rel, src, mtime, &cfg.reused))
 	})
 	if err != nil {
 		return nil, err
@@ -1068,7 +1067,9 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 		for _, j := range jobs {
 			if r, ok := reuseByMtime(cfg.prior, j.rel, j.mtime); ok {
 				cfg.reused.Add(1)
-				ix.applyFileResult(r)
+				if err := ix.applyFileResult(r); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			src, serr := os.ReadFile(j.path)
@@ -1078,7 +1079,9 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			if !isIndexable(j.rel, src) {
 				continue
 			}
-			ix.applyFileResult(reuseOrCompute(cfg.prior, j.rel, src, j.mtime, &cfg.reused))
+			if err := ix.applyFileResult(reuseOrCompute(cfg.prior, j.rel, src, j.mtime, &cfg.reused)); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		workers := t.workers
@@ -1145,6 +1148,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 		// the append order that makes the merged index byte-identical to serial.
 		pending := map[int]fileResult{}
 		nextSeq := 0
+		var firstErr error
 		for r := range results {
 			pending[r.seq] = r
 			for {
@@ -1153,12 +1157,17 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 					break
 				}
 				if !r2.readErr && !r2.skip {
-					ix.applyFileResult(r2)
+					if err := ix.applyFileResult(r2); err != nil && firstErr == nil {
+						firstErr = err
+					}
 				}
 				delete(pending, nextSeq)
 				nextSeq++
 			}
 			applied.Store(int64(nextSeq))
+		}
+		if firstErr != nil {
+			return nil, firstErr
 		}
 	}
 	ix.UpdatedAt = time.Now().UTC()
@@ -1265,7 +1274,13 @@ func computeFileResult(rel string, src []byte, mtime int64) fileResult {
 // called strictly in lexical file order — from the serial build's walk and
 // from the parallel build's ordered merge loop — which is what keeps the
 // merged index byte-identical across the two paths.
-func (ix *Index) applyFileResult(r fileResult) {
+func (ix *Index) applyFileResult(r fileResult) error {
+	// Same-identity duplicate guard: the graph keys nodes by FullName, so a
+	// same-(name, kind, receiver) duplicate on a different line would
+	// silently collapse into one node. Fail loudly.
+	if err := checkFileSymbolConflicts(r.rel, r.syms); err != nil {
+		return err
+	}
 	if r.mtime > ix.MaxMtime {
 		ix.MaxMtime = r.mtime
 	}
@@ -1281,7 +1296,7 @@ func (ix *Index) applyFileResult(r fileResult) {
 	// from a broken file must never pollute the index. Mirrors addFile's early
 	// return on parse error.
 	if r.parseErr {
-		return
+		return nil
 	}
 	if ix.GeneratedFiles == nil {
 		ix.GeneratedFiles = map[string]bool{}
@@ -1370,6 +1385,52 @@ func (ix *Index) applyFileResult(r fileResult) {
 			ix.ImportsByFile[file] = append([]ImportEdge{}, r.pkg.Imports...)
 		}
 	}
+	return nil
+}
+
+// symbolConflictKinds are kinds treated as declared entities; "entry" and
+// "heading" markers legitimately repeat and are exempt.
+var symbolConflictKinds = map[string]bool{
+	"func": true, "method": true, "type": true, "struct": true,
+	"interface": true, "class": true, "enum": true, "trait": true,
+	"module": true, "union": true, "impl": true, // "prop" intentionally absent: JSON/YAML data-file keys legitimately repeat on different lines
+	"const": true, "var": true, "doc": true,
+}
+
+// checkFileSymbolConflicts fails loudly when one file's extracted symbols
+// collide: the graph keys nodes by FullName, so two symbols sharing (name,
+// kind, receiver) on different lines are the SAME node defined twice.
+// Different receivers (A.list vs B.list) are distinct nodes, left to the
+// ambiguity machinery. Sorts indices — never the symbol slice — O(n log n). Only type kinds and receiver-bearing symbols fail loud: scoped locals (const/var/func, empty receiver), shell re-assignment, data-file props and Go's `_` legitimately repeat.
+func checkFileSymbolConflicts(rel string, syms []Symbol) error {
+	if len(syms) < 2 {
+		return nil
+	}
+	order := make([]int, len(syms))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		x, y := syms[a], syms[b]
+		switch {
+		case x.Name != y.Name:
+			return strings.Compare(x.Name, y.Name)
+		case x.Kind != y.Kind:
+			return strings.Compare(x.Kind, y.Kind)
+		case x.Receiver != y.Receiver:
+			return strings.Compare(x.Receiver, y.Receiver)
+		default:
+			return x.Line - y.Line
+		}
+	})
+	for i := 1; i < len(order); i++ {
+		p, c := syms[order[i-1]], syms[order[i]]
+		if p.Name == c.Name && p.Kind == c.Kind && p.Receiver == c.Receiver &&
+			(p.Line != c.Line || p.End != c.End) && symbolConflictKinds[c.Kind] && (c.Receiver != "" || typeKinds[c.Kind] || c.Kind == "type") {
+			return fmt.Errorf("index: duplicate symbol conflict in %s: %q (%s) at lines %d and %d — the same identity was extracted twice; refusing to index (fail-loud; report an extractor bug)", rel, c.Name, c.Kind, p.Line, c.Line)
+		}
+	}
+	return nil
 }
 
 // CallResStats counts distinct call targets and how many are unresolved.
@@ -1398,7 +1459,60 @@ func (ix *Index) measureCallResolution() {
 	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: unres}
 }
 
+// methodLangFromFile resolves the language a method symbol's file must have
+// when the mapping is unambiguous from the file path alone — the language of
+// a .go file can only be "go" (goast is the sole Go extractor), a .py file
+// only "python", and so on, mirroring detectLang's extension mapping.
+// Content-dependent languages (.vue/.svelte script lang), .astro, and
+// extensionless shebang scripts cannot be recovered from the path alone, so
+// they return "" and the caller treats them as ambiguous.
+func methodLangFromFile(rel string) string {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".vue", ".svelte", ".astro", "":
+		return "" // content-dependent or extensionless: ambiguous without src
+	}
+	return detectLang(rel, nil)
+}
+
+// enforceMethodLangInvariant guards the A5 bare-callee-never-methods rule's
+// Go scoping (internal/intel/queries.go calleeIsTarget drops a bare callee
+// only when the resolved method's Language == "go"): the rule is trustworthy
+// only while every method symbol carries its language. goast stamps
+// Lang:"go" on every Go symbol (goast.go) and the foreign extractors stamp
+// the detected language, so Receiver != "" && Lang == "" can only come from a
+// hand-built index or a broken extractor — which would silently re-open the
+// over-attribution bug (a Go method missing its "go" tag escapes the guard
+// and pools bare-reference callers). Unambiguous file-language fixup (.go ⇒
+// "go", .py ⇒ "python", …) repairs the symbol; an ambiguous case (unknown
+// extension, content-dependent language) fails loudly with a count rather
+// than guessing. Runs once per finalize, at the head of computeCallers,
+// before any pass reads Lang (computePrecisionByLang, the graph guard).
+func (ix *Index) enforceMethodLangInvariant() {
+	var offenders []string
+	for i := range ix.Symbols {
+		s := &ix.Symbols[i]
+		if s.Receiver == "" || s.Lang != "" {
+			continue
+		}
+		if lang := methodLangFromFile(s.File); lang != "" {
+			s.Lang = lang
+			continue
+		}
+		offenders = append(offenders, s.FullName()+" @ "+s.File)
+	}
+	if len(offenders) > 0 {
+		panic(fmt.Sprintf("index invariant: %d method symbol(s) have Receiver != \"\" but no Lang (the A5 bare-callee guard needs every method's language); fix the extractor or set Lang explicitly: %s",
+			len(offenders), strings.Join(offenders, "; ")))
+	}
+}
+
 func (ix *Index) computeCallers() {
+	// Load-bearing invariant (A5): every method symbol must carry its
+	// language — the intel bare-callee-never-methods guard is scoped on
+	// Lang == "go", so a method with Receiver != "" and Lang == "" would
+	// silently re-open the over-attribution bug. Fixes up unambiguous
+	// file-language cases; fails loudly on ambiguous ones.
+	ix.enforceMethodLangInvariant()
 	// Resolve constructor-inferred callee qualifiers now that the full
 	// package symbol set is merged (per-file extraction cannot see
 	// cross-file constructors): "New.M" -> "Index.M" and
@@ -1407,6 +1521,26 @@ func (ix *Index) computeCallers() {
 	ix.rewriteConstructorCallees()
 	ix.Callers = map[string][]string{}
 	ix.AliasCallers = map[string][]string{}
+	// Project package directory bases (e.g. "lock", "memory") vs foreign
+	// import bases ("fmt", "time"): the receiver-qualified merge below must
+	// never attribute a foreign package's callee ("fmt.Println") to a local
+	// symbol, even when the simple name is unique project-wide.
+	foreignImportBases := ix.foreignImportBases()
+	// Names the project itself defines — types, receivers and constructors —
+	// used to tell a receiver-qualified single-dot key ("Client.Code") from an
+	// unresolvable-variable key ("mystery.M") whose receiver is defined
+	// nowhere: the latter must never merge onto a local symbol's canonical
+	// bucket (CallersIncludingAliases still finds it via the alias layer).
+	definedQualifierNames := map[string]bool{}
+	for _, s := range ix.Symbols {
+		if s.Receiver != "" {
+			definedQualifierNames[s.Receiver] = true
+		}
+		switch s.Kind {
+		case "type", "struct", "interface", "class", "record", "enum", "func", "method", "function":
+			definedQualifierNames[s.Name] = true
+		}
+	}
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
 			c := ce.Target
@@ -1417,9 +1551,79 @@ func (ix *Index) computeCallers() {
 			ix.Callers[c] = append(ix.Callers[c], caller)
 			// Merge package-qualified local calls ("db.Open") onto the local
 			// symbol when the qualifier names its package dir; foreign and
-			// unresolved targets never merge (avoids forging callers).
-			if d, ok := qualifiedCalleeSymbol(ix, c); ok && d.FullName() != c {
+			// unresolved targets never merge (avoids forging callers). The
+			// merge is restricted to buckets that cannot mis-attribute: a
+			// UNIQUE bare name owns its bare bucket outright (CallersFor
+			// returns it without package filtering — the graph resolves any
+			// qualifier for a unique simple name, so these callers must land
+			// here or impact over-reports), while a SHARED bare name merges
+			// only SAME-PACKAGE qualified callers — the bare-bucket
+			// attribution (CallersFor) checks only the CALLER's package, so
+			// a cross-package qualified caller ("learning.New" from
+			// internal/app) would otherwise be mis-attributed to a
+			// same-named symbol in the caller's package (app.New) even
+			// though the recorded callee is learning.New — the caller
+			// already sits under the canonical "learning.New" key, which
+			// CallersFor's qualified-key loop attributes to the correct
+			// symbol.
+			if d, ok := qualifiedCalleeSymbol(ix, c); ok && d.FullName() != c && d.FullName() != caller {
+				if len(ix.symbolsFor(d.FullName())) == 1 || callerInPackage(ix, caller, filepath.Dir(d.File)) {
+					ix.Callers[d.FullName()] = append(ix.Callers[d.FullName()], caller)
+				}
+			}
+			// Merge receiver/type/variable-qualified callee keys
+			// ("Client.Code", "s.govSnapshot.Access.Authorize",
+			// "NewGovernance.Access.CanRead") onto the unique same-named symbol
+			// when the simple name identifies exactly one definition
+			// project-wide. The graph's raw-edge collector resolves any qualifier
+			// for a unique simple name (resolveNodeID case 1), so explore's
+			// caller buckets must report those callers too or impact
+			// over-reports. Keys whose qualifier is a foreign package import
+			// base ("fmt.Println", "time.Date.Add") never merge: the callee is
+			// not a local symbol, and a local same-named definition is never the
+			// recorded target. A merge that would add the caller to its OWN
+			// bucket (a stdlib chain rewritten onto the caller's own type, e.g.
+			// Duration.String -> time.Duration.String landing on
+			// "Duration.String") is a self-edge, never a caller — skipped.
+			if d, ok := uniqueReceiverQualifiedSymbol(ix, c, foreignImportBases, definedQualifierNames); ok && d.FullName() != c && d.FullName() != caller {
 				ix.Callers[d.FullName()] = append(ix.Callers[d.FullName()], caller)
+			}
+			// Merge receiver-chain callee keys whose bare name is SHARED
+			// across receivers ("NewFirewall.WithAgents.AuditLog.All",
+			// "f.AuditLog.All", "e.Confidence.String"): the qualifier's LAST
+			// segment names the receiver type, mirroring the graph's
+			// receiver match (resolveNodeID's booleanNested / exact-receiver
+			// cases), which attributes such edges even when the simple name
+			// is ambiguous. The merge only fires when the receiver+name
+			// combination is UNIQUE project-wide: the method FullName bucket
+			// ("Store.Save") is shared by every same-named method and
+			// CallersFor returns it wholesale, so a chained caller would
+			// otherwise be mis-attributed to all of them (the graph
+			// attributes a chained receiver key to its first same-receiver
+			// match only). Package-qualified keys ("learning.New") never
+			// match a receiver named "learning" and stay untouched — the
+			// shared-bare-bucket protection above still holds.
+			if i := strings.LastIndexByte(c, '.'); i > 0 && i+1 < len(c) {
+				qual, bare := c[:i], c[i+1:]
+				recv := qual
+				if j := strings.LastIndexByte(qual, '.'); j >= 0 {
+					recv = qual[j+1:]
+				}
+				if recv != "" {
+					var match Symbol
+					matches := 0
+					for _, d := range ix.symbolsFor(bare) {
+						if d.Receiver == recv && d.FullName() != c {
+							match = d
+							matches++
+						}
+					}
+					if matches == 1 {
+						if match.FullName() != caller {
+							ix.Callers[match.FullName()] = append(ix.Callers[match.FullName()], caller)
+						}
+					}
+				}
 			}
 			// Also record a dotted callee under its bare name so simple-name
 			// lookups find foreign or unresolved targets. Aliases stay in a
@@ -1483,6 +1687,16 @@ func (ix *Index) computeCallers() {
 				}
 			}
 		}
+	}
+
+	// The implements: edges above were appended in ifaceDir/concreteDir
+	// MAP-ITERATION order (nondeterministic), so the Inherits values carry the
+	// same nondeterminism class the InheritedBy reverse map had — that map is
+	// dedupeSorted below, but the forward values were never sorted (finding
+	// A1). Sort + dedupe them in the same finalize pass so the persisted
+	// index is byte-deterministic regardless of map iteration order.
+	for k := range ix.Inherits {
+		ix.Inherits[k] = dedupeSorted(ix.Inherits[k])
 	}
 
 	// Reverse inheritance map: base name (and bare name) -> subtypes.
@@ -1857,26 +2071,613 @@ func simpleKey(c string) string {
 // symbol whose package directory matches the qualifier. It returns ok=false
 // for foreign targets ("fmt.Println") and unresolved receiver calls ("v.M"),
 // whose callers must never be attributed to a local symbol of the same name.
+// A package-qualified reference names a package-level symbol: when the
+// package defines the name receiver-less, that func is the target — a
+// same-named METHOD in the same package must not win ("tokenize.Count" is the
+// func Count's form; BPECounter.Count is receiver-qualified and bpe.go sorts
+// before tokenize.go, so the first same-base match used to pool the func's
+// callers onto the method).
 func qualifiedCalleeSymbol(ix *Index, c string) (Symbol, bool) {
 	i := strings.LastIndexByte(c, '.')
 	if i <= 0 || i+1 >= len(c) {
 		return Symbol{}, false
 	}
 	qualifier, bare := c[:i], c[i+1:]
+	var methodFallback Symbol
+	haveMethodFallback := false
 	for _, d := range ix.symbolsFor(bare) {
-		if filepath.Base(filepath.Dir(d.File)) == qualifier {
+		if filepath.Base(filepath.Dir(d.File)) != qualifier {
+			continue
+		}
+		if d.Receiver == "" {
 			return d, true
 		}
+		if !haveMethodFallback {
+			methodFallback, haveMethodFallback = d, true
+		}
 	}
-	return Symbol{}, false
+	return methodFallback, haveMethodFallback
 }
 
-// CallersFor returns deduplicated callers attributable to a local symbol. Only
-// the exact key ("Type.Method" for methods, the plain name otherwise) is
-// consulted: bare-name aliases are never merged in, since a simple name can
-// name many symbols (Alpha.Save vs Beta.Save) or a foreign target.
+// uniqueReceiverQualifiedSymbol returns the single project symbol whose
+// simple name is the final segment of a receiver/type/variable-qualified
+// callee key ("Client.Code", "s.Access.Authorize"), when that simple name
+// identifies exactly one definition project-wide. The graph resolves any
+// qualifier for a unique simple name, so these callers must land in the
+// explore bucket of that one symbol. A qualifier chain (≥2 dots) is never a
+// package-qualified reference in Go source (a package selector cannot carry
+// further selectors), so chains resolve whenever the simple name is unique
+// and the chain does not start at a foreign package import base
+// ("time.Now.UTC.Add"). A single-dot key resolves only when its qualifier
+// is a name the project itself defines — a type, receiver or constructor
+// ("Client.Code") — never a foreign package ("fmt.Println",
+// "json.Unmarshal") or an unresolvable variable ("mystery.M"): those callers
+// stay in the canonical bucket under their own key and in the alias layer,
+// never merged into a local symbol's canonical bucket (the
+// TestCallersIncludingAliases contract).
+func uniqueReceiverQualifiedSymbol(ix *Index, c string, foreignImportBases, definedQualifierNames map[string]bool) (Symbol, bool) {
+	i := strings.LastIndexByte(c, '.')
+	if i <= 0 || i+1 >= len(c) {
+		return Symbol{}, false
+	}
+	matches := ix.symbolsFor(c[i+1:])
+	if len(matches) != 1 {
+		return Symbol{}, false
+	}
+	first := c[:strings.IndexByte(c, '.')]
+	if foreignImportBases[first] {
+		return Symbol{}, false
+	}
+	if !strings.Contains(c[strings.IndexByte(c, '.')+1:], ".") && !definedQualifierNames[first] {
+		// Single-dot key whose qualifier is not a project-defined
+		// name: a foreign package or an unresolvable variable — never
+		// a local symbol's receiver. The canonical map must stay
+		// resolved-only; CallersFor's unique-name path still surfaces
+		// these callers (the graph resolves any qualifier for a unique
+		// name), so parity holds without polluting the canonical map.
+		return Symbol{}, false
+	}
+	return matches[0], true
+}
+
+// CallersFor returns deduplicated callers attributable to a local symbol.
+// Attribution is package-aware. Methods key under the unique "Type.Method"
+// full name, and a package-level symbol whose bare name is unambiguous owns
+// its bare bucket outright — both keep the exact recorded callers,
+// byte-identical to before. When two or more packages define the same simple
+// name, the shared bare bucket mixes every same-named symbol's callers, so a
+// bare edge is attributed to s only when the caller side resolves to a symbol
+// in s's own package directory, and package-qualified keys
+// ("governance.AuthorizeContext") are attributed only to the exact symbol
+// they resolve to (mirroring qualifiedCalleeSymbol's dir match). A bare edge
+// whose caller lives in a different package is never attributed to a
+// same-named symbol — that is the merge bug this guards against.
 func (ix *Index) CallersFor(s Symbol) []string {
-	return dedupeSorted(ix.Callers[s.FullName()])
+	exact := ix.Callers[s.FullName()]
+	if s.Receiver != "" || len(ix.symbolsFor(s.Name)) == 1 || s.File == "" {
+		out := dedupeSorted(exact)
+		// Unique simple name: the graph resolves ANY qualifier for a unique
+		// name (resolveNodeID case 1), so every dotted callee key ending in
+		// the name ("g.WhatDependsOn" — a variable receiver,
+		// "kdiff.IndexSpanResolver" — an import alias, "mystery.M" — an
+		// unresolvable variable) attributes its callers to the one symbol.
+		// Keys whose first qualifier is a foreign package import base
+		// ("fmt.Println") never attribute to a local symbol (the
+		// TestForeignCalleeNeverAliasesLocalSymbol contract); the canonical
+		// map stays resolved-only — this path only widens the RENDERED
+		// caller set, matching the graph.
+		if len(ix.symbolsFor(s.Name)) == 1 {
+			foreign := ix.foreignImportBases()
+			for k, callers := range ix.Callers {
+				if k == s.FullName() || simpleKey(k) != s.Name {
+					continue
+				}
+				i := strings.IndexByte(k, '.')
+				if i <= 0 || foreign[k[:i]] {
+					continue
+				}
+				for _, c := range callers {
+					// A caller that IS this symbol is the symbol's own
+					// chained self-edge ("Schema.Properties.check" ->
+					// "Schema.check" recorded by Schema.check itself) —
+					// never a caller (computeCallers skips self-edges on
+					// the direct path; the widened render must too).
+					if c == s.FullName() {
+						continue
+					}
+					out = append(out, c)
+				}
+			}
+		}
+		// A METHOD's bare-name bucket is not its own: a bare edge lives under
+		// the bare key ("check"), and the graph's caller-package fallback
+		// resolves a same-package bare reference to the method when it is the
+		// package's only definition of the name. Mirror that — same-package
+		// bare callers join the method's callers. Bare FUNCS already own
+		// their bare bucket via exact above; a method never does (methods are
+		// not bare-callable, so its receiver-qualified bucket holds only
+		// qualified callers).
+		if s.Receiver != "" {
+			dir := filepath.Dir(s.File)
+			// Package-qualified keys ("metrics.Load") whose qualifier names
+			// the package: the graph resolves a RESOLVABLE caller's
+			// qualifier through its own imports (landing only where the
+			// imports point — a blueprint caller of "metrics.Load" hits
+			// internal/bpreceipt/metrics, not this method), and falls back
+			// to a last-segment package heuristic ONLY when the caller is
+			// unresolvable (a pooled bare caller bucket like "runMetrics",
+			// shared by two packages). Mirror that: only the key's
+			// UNRESOLVABLE callers join here — attributing a resolvable
+			// caller by directory base alone would over-attribute
+			// (internal/metrics and internal/bpreceipt/metrics share the
+			// "metrics" base). A package-qualified key ("tokenize.Count")
+			// names the package's RECEIVER-LESS symbol: when the package
+			// defines the simple name as a func, the key is the func's form
+			// and its callers belong to the func, never to a same-named
+			// method (the graph's import-qualified resolution lands on the
+			// func too — BPECounter.Count/Estimator.Count must not inherit
+			// the func Count's callers).
+			hasLocalFunc := false
+			for _, d := range ix.symbolsFor(s.Name) {
+				if d.Receiver == "" && filepath.Dir(d.File) == dir {
+					hasLocalFunc = true
+					break
+				}
+			}
+			if !hasLocalFunc {
+				for k, callers := range ix.Callers {
+					if k == s.FullName() || simpleKey(k) != s.Name {
+						continue
+					}
+					i := strings.LastIndexByte(k, '.')
+					if i <= 0 || i+1 >= len(k) {
+						continue
+					}
+					if k[:i] != filepath.Base(dir) {
+						continue
+					}
+					for _, c := range callers {
+						if len(ix.symbolsFor(c)) != 1 {
+							out = append(out, c)
+						}
+					}
+				}
+			}
+			// Bare-name bucket: a method named with a Go predeclared
+			// identifier ("append", "len") is never bare-callable — a bare
+			// reference binds to the builtin (Go scoping) or to a
+			// package-level func that shadows it, so the bucket holds only
+			// builtin calls and must not widen the method's callers.
+			if !isPredeclared(s.Name) && exactlyOneLocalDef(ix, s.Name, dir) {
+				for _, c := range ix.Callers[s.Name] {
+					// Mirror the graph's callee-side resolution of a bare
+					// callee (resolveEndpointPackageAware anchored on the
+					// caller), which depends on the CALLER's form:
+					//  - a receiver-qualified caller ("Client.audit", pooled
+					//    by the Python and TS SDKs) is resolved by trying
+					//    every receiver-matched candidate — the same-package
+					//    def wins, so a caller with ANY def in this package
+					//    is attributed (callerHasLocalDef);
+					//  - a bare caller ("List") needs an unambiguous
+					//    resolution — every def must live here
+					//    (callerInPackage; the orgapprovals List that drives
+					//    the bare func loadLocked must not leak onto
+					//    ArtifactStore.loadLocked just because
+					//    internal/tasklife also defines a List);
+					//  - either form is additionally attributed when the
+					//    caller's package imports this def's package (the
+					//    internal/web rate-limit test drives the SDK's
+					//    Client.do through an HTTP client).
+					if ix.callerAttributedBare(c, s, dir) {
+						out = append(out, c)
+					}
+				}
+			}
+		}
+		return dedupeSorted(out)
+	}
+	dir := filepath.Dir(s.File)
+	var out []string
+	// Package-qualified keys ("db.Open", "lock.Acquire") whose qualifier names
+	// a directory holding a definition of s: the bucket is attributed to every
+	// same-directory candidate, not just the first the qualifier happens to
+	// match — two packages can share a directory base ("memory" ->
+	// internal/memory and internal/mcp/memory) and build-tagged duplicates can
+	// share one package ("lock.Acquire" -> lock_unix.go and lock_windows.go),
+	// and impact attributes the qualified endpoint to each same-named
+	// definition whose package the qualifier names. A RESOLVABLE caller
+	// (unique simple name) is attributed only when its package actually
+	// imports this definition's package under the qualifier — the graph
+	// resolves the qualified callee through the CALLER's imports, so a
+	// caller of "governance.AuthorizeContext" (the core, imported as
+	// "governance") must not be base-matched onto the MCP wrapper in
+	// internal/mcp/governance just because both packages end in
+	// "governance". Unresolvable callers join via the graph's last-segment
+	// package fallback, which fires only when the caller cannot be
+	// attributed.
+	for k, callers := range ix.Callers {
+		if k == s.FullName() || simpleKey(k) != s.Name {
+			continue
+		}
+		i := strings.LastIndexByte(k, '.')
+		if i <= 0 || i+1 >= len(k) {
+			continue
+		}
+		qual := k[:i]
+		for _, d := range ix.symbolsFor(s.Name) {
+			if filepath.Base(filepath.Dir(d.File)) == qual && filepath.Dir(d.File) == dir {
+				for _, c := range callers {
+					if len(ix.symbolsFor(c)) != 1 || ix.callerImportsDef(c, d, qual) {
+						out = append(out, c)
+					}
+				}
+				break
+			}
+		}
+	}
+	// Bare-name bucket: same-package callers only, gated by exactlyOneLocalDef
+	// (methods included — the graph's caller-package fallback ambiguity). Two
+	// graph paths are mirrored: (a) when the bare name has a UNIQUE receiver-less
+	// definition project-wide (resolveNodeID's qualified-match — methods never
+	// match a bare reference), every bare edge calls that one definition, so an
+	// ambiguous caller name is still attributed when it has a definition in the
+	// package (the graph resolves the callee via the unique match and the caller
+	// via its same-package preference); (b) otherwise a shared bare name needs a
+	// caller wholly in the package (the graph needs a unique caller to
+	// disambiguate). The strict all-matches callerInPackage stays in force for
+	// the computeCallers merge guard, which must not let a cross-package
+	// qualified caller enter a shared bare bucket.
+	for _, c := range exact {
+		if uniqueReceiverLessDef(ix, s.Name) {
+			// Path (a): the bare name resolves to the unique receiver-less
+			// definition regardless of local methods or the caller's
+			// ambiguity; the caller is attributed via same-package
+			// preference.
+			if callerHasLocalDef(ix, c, dir) {
+				out = append(out, c)
+			}
+		} else if exactlyOneLocalDef(ix, s.Name, dir) && ix.callerAttributedBare(c, s, dir) {
+			// Path (b): shared bare name — the graph's caller-package
+			// fallback needs an unambiguous local resolution (methods
+			// included) and a caller resolved into the package: the
+			// same-package def for a receiver-qualified caller (any
+			// local def wins — Check.Run is shared by several packages
+			// but the blueprint Check.Run calls the blueprint
+			// normalizePath), every def local for a bare caller, or an
+			// import-linked caller.
+			out = append(out, c)
+		}
+	}
+	return dedupeSorted(out)
+}
+
+// uniqueReceiverLessDef reports whether name has exactly ONE receiver-less
+// definition project-wide — the graph's resolveNodeID qualified-match: a
+// bare reference resolves to the unique receiver-less definition (a method's
+// Qualified is receiver-qualified and never equals the bare reference). When
+// this holds, every bare edge on the name calls that one definition, so the
+// caller-side attribution can use the graph's same-package preference even
+// for an ambiguous caller name.
+func uniqueReceiverLessDef(ix *Index, name string) bool {
+	n := 0
+	for _, d := range ix.symbolsFor(name) {
+		if d.Receiver == "" {
+			n++
+		}
+	}
+	return n == 1
+}
+
+// exactlyOneLocalDef reports whether the package at dir defines the bare
+// name exactly once — methods included. A single local definition owns its
+// bare edges; two or more (a func and a same-named method, or build-tagged
+// duplicates like Acquire in lock_unix.go/lock_windows.go) leave a bare
+// reference ambiguous within the package and attribute nothing — the same
+// ambiguity the graph's caller-package fallback (resolveEndpointPackageAware)
+// hits when several same-named local candidates block the resolution. (The
+// bare-bucket loop still attributes the caller when the name has a UNIQUE
+// receiver-less definition project-wide — the graph's resolveNodeID
+// qualified-match path, which ignores methods entirely.)
+func exactlyOneLocalDef(ix *Index, name, dir string) bool {
+	n := 0
+	for _, d := range ix.symbolsFor(name) {
+		if filepath.Dir(d.File) == dir {
+			n++
+		}
+	}
+	return n == 1
+}
+
+// foreignImportBases returns the set of foreign package import bases ("fmt",
+// "time") — import path bases that are not project package directory bases —
+// used to keep a foreign qualified callee ("fmt.Println") from ever
+// attributing its callers to a local same-named symbol. Computed per call
+// (the maps are small); deliberately not persisted on the index.
+func (ix *Index) foreignImportBases() map[string]bool {
+	pkgDirBases := map[string]bool{}
+	for path := range ix.Pkgs {
+		if base := filepath.Base(path); base != "" {
+			pkgDirBases[base] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, p := range ix.Pkgs {
+		for _, imp := range p.Imports {
+			if base := filepath.Base(imp.Path); base != "" && !pkgDirBases[base] {
+				out[base] = true
+			}
+		}
+	}
+	return out
+}
+
+// callerInPackage reports whether a caller endpoint resolves to a symbol whose
+// file lives in dir. An unresolvable or multi-package caller name is never
+// attributed: a bare edge whose caller could be a different package's
+// same-named symbol must not merge into this symbol's callers.
+func callerInPackage(ix *Index, caller, dir string) bool {
+	matches := ix.symbolsFor(caller)
+	if len(matches) == 0 {
+		return false
+	}
+	for _, m := range matches {
+		if filepath.Dir(m.File) != dir {
+			return false
+		}
+	}
+	return true
+}
+
+// callerHasLocalDef reports whether a caller endpoint has AT LEAST ONE
+// definition in dir — the graph's same-package preference for an ambiguous
+// caller name (resolveEndpointPackageAware attributes the caller to the
+// same-package candidate when several packages share the name). Used by
+// CallersFor's bare-bucket attribution; the strict all-matches
+// callerInPackage remains the gate for the computeCallers merge guard so a
+// cross-package qualified caller can never enter a shared bare bucket.
+func callerHasLocalDef(ix *Index, caller, dir string) bool {
+	for _, m := range ix.symbolsFor(caller) {
+		if filepath.Dir(m.File) == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// filePkgIndex maps a source file to its package path via the Pkgs file
+// lists. Cheap (O(pkgs x files)); used only in the rendered-caller widening
+// paths, never per-edge in a hot loop.
+func (ix *Index) filePkgIndex() map[string]string {
+	out := map[string]string{}
+	for path, p := range ix.Pkgs {
+		for _, f := range p.Files {
+			if _, dup := out[f]; !dup {
+				out[f] = path
+			}
+		}
+	}
+	return out
+}
+
+// callerImportsDef reports whether a RESOLVABLE caller's package imports the
+// def's package under qual (the callee's recorded qualifier), mirroring the
+// graph's import-based resolution of a qualified callee through the caller's
+// own imports (resolveImportQualified). A caller in a package that does not
+// import the def's package is not a caller of this def: the base-name match
+// alone would let "governance.AuthorizeContext" callers of the core
+// internal/governance leak onto the MCP wrapper in internal/mcp/governance,
+// which merely shares the final path segment.
+func (ix *Index) callerImportsDef(caller string, d Symbol, qual string) bool {
+	defs := ix.symbolsFor(caller)
+	if len(defs) != 1 {
+		return false // unresolvable callers join via the graph's fallback instead
+	}
+	filePkg := ix.filePkgIndex()
+	callerPkg := filePkg[defs[0].File]
+	if callerPkg == "" {
+		return false
+	}
+	p := ix.Pkgs[callerPkg]
+	if p == nil {
+		return false
+	}
+	defPkg := filePkg[d.File]
+	if defPkg == "" {
+		return false
+	}
+	for _, imp := range p.Imports {
+		path := strings.Trim(imp.Path, `"' `)
+		if path == "" {
+			continue
+		}
+		seg := path[strings.LastIndexByte(path, '/')+1:]
+		if seg != qual {
+			continue
+		}
+		if path == defPkg || strings.HasSuffix(path, "/"+defPkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// callerAttributedBare mirrors the graph's callee-side resolution of a bare
+// callee (CallersFor's bare-bucket gate, shared by the method branch and the
+// shared-name func path):
+//   - a receiver-qualified caller ("Client.audit") is resolved package-aware
+//     over every receiver-matched candidate, so the same-package def wins
+//     (callerHasLocalDef);
+//   - a bare caller needs an unambiguous resolution — every def must live in
+//     this package (callerInPackage);
+//   - either form is additionally attributed when the caller's package
+//     imports this def's package (callerImportsDefPkg);
+//   - a caller that IS the def itself (a self-edge recorded through a
+//     chained/receiver form — "Schema.check" -> "Schema.check") is never a
+//     caller.
+func (ix *Index) callerAttributedBare(caller string, s Symbol, dir string) bool {
+	if caller == s.FullName() {
+		return false
+	}
+	if strings.Contains(caller, ".") {
+		return callerHasLocalDef(ix, caller, dir) || ix.callerImportsDefPkg(caller, s)
+	}
+	// A bare caller whose name has a UNIQUE receiver-less definition
+	// project-wide resolves to that definition — the graph's resolveNodeID
+	// qualified-match (a receiver-less func's Qualified IS the bare name, so
+	// it wins even when methods share the simple name; e.g. tokenize.Count
+	// with five Count methods beside the func). Mirror the graph's
+	// caller-anchored callee resolution (resolveEndpointPackageAware): the
+	// bare callee resolves with the same-package preference anchored on the
+	// CALLER's unique definition, so the edge is s only when s lives in that
+	// definition's package. callerHasLocalDef would be wrong here — it counts
+	// any same-named def (methods included) in dir, while the graph resolves
+	// the caller to its unique receiver-less definition alone. Without this
+	// branch, a shared caller name dropped real same-package callers (Phase 5
+	// Part C: tokenize.Default's caller Count — Count() literally calls
+	// Default()); and without the receiver-less-only check it would
+	// over-attribute (mcp/etag's Registry.Count method must not make the
+	// tokenize Count a caller of mcp/etag.Default). The import-based
+	// attribution is anchored the same way (ADV-4): only the unique
+	// receiver-less definition's package imports may attribute the edge —
+	// a same-named method's package imports must not (callerImportsDefPkg
+	// consults every same-named def, methods included, so the branch uses
+	// the anchored form).
+	if uniqueReceiverLessDef(ix, caller) {
+		for _, cd := range ix.symbolsFor(caller) {
+			if cd.Receiver == "" {
+				if filepath.Dir(cd.File) == dir {
+					return true
+				}
+				return ix.callerImportsDefPkgAnchored(cd, s)
+			}
+		}
+		return false
+	}
+	return callerInPackage(ix, caller, dir) || ix.callerImportsDefPkg(caller, s)
+}
+
+// callerImportsDefPkg mirrors the graph's import-based resolution of a BARE
+// callee (resolveEndpointPackageAware's import branch): a caller in a package
+// that does NOT itself define the bare name still calls this def when its
+// package imports the def's package (the internal/web rate-limit test drives
+// the SDK's Client.do through an HTTP client). Same-package callers are
+// handled by callerHasLocalDef.
+func (ix *Index) callerImportsDefPkg(caller string, s Symbol) bool {
+	// A bare callee with a predeclared identifier's name ("append", "len")
+	// is the builtin unless the caller's package shadows it with a
+	// package-level definition — never an import of a package defining a
+	// same-named symbol (Go scoping; methods are not bare-callable).
+	if isPredeclared(s.Name) {
+		return false
+	}
+	// A bare callee can never name a METHOD: a bare reference resolves to a
+	// package-level func or the builtin (Go scoping) — an import of the
+	// method's package must not capture the call (a local closure named
+	// "do" in internal/web is not the SDK's Client.do).
+	if s.Receiver != "" {
+		return false
+	}
+	callerDefs := ix.symbolsFor(caller)
+	if len(callerDefs) == 0 {
+		return false
+	}
+	// The caller's package must not define the bare name itself: the graph's
+	// same-package preference resolves the bare callee to that local
+	// definition, never to s.
+	for _, cd := range callerDefs {
+		cdir := filepath.Dir(cd.File)
+		for _, d := range ix.symbolsFor(s.Name) {
+			if filepath.Dir(d.File) == cdir {
+				return false
+			}
+		}
+	}
+	filePkg := ix.filePkgIndex()
+	defPkg := filePkg[s.File]
+	if defPkg == "" {
+		return false
+	}
+	for _, cd := range callerDefs {
+		callerPkg := filePkg[cd.File]
+		if callerPkg == "" || callerPkg == defPkg {
+			continue
+		}
+		p := ix.Pkgs[callerPkg]
+		if p == nil {
+			continue
+		}
+		if pkgImportsDef(p, defPkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// pkgImportsDef reports whether a package's import list contains the def's
+// package (exact import path or repo-relative suffix), mirroring the graph's
+// importMatchesQualifier.
+func pkgImportsDef(p *Pkg, defPkg string) bool {
+	for _, imp := range p.Imports {
+		path := strings.Trim(imp.Path, `"' `)
+		if path == "" {
+			continue
+		}
+		if path == defPkg || strings.HasSuffix(path, "/"+defPkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// callerImportsDefPkgAnchored is callerImportsDefPkg anchored on ONE caller
+// definition (ADV-4): the import attribution runs only against the caller's
+// unique receiver-less definition, never against its same-named methods. The
+// graph resolves a bare caller with a unique receiver-less definition to that
+// definition alone (resolveNodeID's qualified-match), so only ITS package's
+// imports may attribute a bare edge to s — and only ITS package's local
+// definitions may shadow the bare callee (Go same-package preference). The
+// unanchored callerImportsDefPkg keeps the all-defs semantics for callers
+// that remain ambiguous.
+func (ix *Index) callerImportsDefPkgAnchored(callerDef Symbol, s Symbol) bool {
+	// A bare callee with a predeclared identifier's name ("append", "len")
+	// is the builtin unless the caller's package shadows it with a
+	// package-level definition — never an import of a package defining a
+	// same-named symbol (Go scoping; methods are not bare-callable).
+	if isPredeclared(s.Name) {
+		return false
+	}
+	// A bare callee can never name a METHOD: a bare reference resolves to a
+	// package-level func or the builtin (Go scoping) — an import of the
+	// method's package must not capture the call (a local closure named
+	// "do" in internal/web is not the SDK's Client.do).
+	if s.Receiver != "" {
+		return false
+	}
+	// The caller's package must not define the bare name itself: the graph's
+	// same-package preference resolves the bare callee to that local
+	// definition, never to s. Checked for the anchored definition's package
+	// alone — a same-named method's package cannot shadow the anchored
+	// caller's bare reference.
+	cdir := filepath.Dir(callerDef.File)
+	for _, d := range ix.symbolsFor(s.Name) {
+		if filepath.Dir(d.File) == cdir {
+			return false
+		}
+	}
+	filePkg := ix.filePkgIndex()
+	defPkg := filePkg[s.File]
+	if defPkg == "" {
+		return false
+	}
+	callerPkg := filePkg[callerDef.File]
+	if callerPkg == "" || callerPkg == defPkg {
+		return false
+	}
+	p := ix.Pkgs[callerPkg]
+	if p == nil {
+		return false
+	}
+	return pkgImportsDef(p, defPkg)
 }
 
 // CallersOfName returns callers for a possibly-unknown name (a foreign target
@@ -1894,8 +2695,99 @@ func (ix *Index) CallersOfName(name string) []string {
 }
 
 // CallsFor returns deduplicated callees recorded under the exact key of s.
+// Methods and unambiguous package-level symbols keep the recorded bucket
+// byte-identical. When two or more packages define the same simple name, the
+// shared caller bucket mixes every same-named symbol's callees, so each edge
+// is attributed to s only when the callee could have been recorded from s's
+// own file: a bare callee that resolves into s's package (or stays foreign),
+// or a qualified callee whose qualifier names an import of s's file or a type
+// declared in s's package. A package-qualified callee naming s's own package
+// ("governance.NewFirewall") was recorded by a same-named symbol in another
+// file — s never qualifies its own package — and never leaks into s's list.
 func (ix *Index) CallsFor(s Symbol) []string {
-	return dedupeSorted(CallEdgeTargets(ix.Calls[s.FullName()]))
+	edges := ix.Calls[s.FullName()]
+	if s.Receiver != "" || len(ix.symbolsFor(s.Name)) == 1 || s.File == "" {
+		return dedupeSorted(CallEdgeTargets(edges))
+	}
+	var out []string
+	for _, e := range edges {
+		if calleeAttributable(ix, e.Target, s) {
+			out = append(out, e.Target)
+		}
+	}
+	return dedupeSorted(out)
+}
+
+// calleeAttributable reports whether a recorded callee target belongs to s.
+func calleeAttributable(ix *Index, c string, s Symbol) bool {
+	i := strings.LastIndexByte(c, '.')
+	if i <= 0 || i+1 >= len(c) {
+		// Bare callee: keep when it resolves into s's package, or when it is
+		// foreign — builtins and stdlib — which s's source can reference
+		// without a qualifier. A bare name with no same-package declaration
+		// resolves to the predeclared identifier (Go scoping), so a local
+		// symbol of the same name in an unrelated package is never the
+		// recorded callee.
+		matches := ix.symbolsFor(c)
+		if len(matches) == 0 {
+			return true
+		}
+		dir := filepath.Dir(s.File)
+		for _, m := range matches {
+			if filepath.Dir(m.File) == dir {
+				return true
+			}
+		}
+		return isPredeclared(c)
+	}
+	qualifier := c[:i]
+	// Package-qualified call from s's own file: the qualifier must name one
+	// of s's imports ("fmt.Errorf", "domain.X"). A qualifier matching no
+	// import of s's file was recorded from a different package's file (the
+	// same-named twin), never from s.
+	if ix.ImportsByFile != nil {
+		for _, imp := range ix.ImportsByFile[s.File] {
+			if filepath.Base(imp.Path) == qualifier {
+				return true
+			}
+		}
+	}
+	// Receiver-qualified call on a type declared in s's package
+	// ("Hooks.LoadIndex" from the wrapper, "Firewall.Check" from the core).
+	if q0 := qualifier[0]; q0 >= 'A' && q0 <= 'Z' {
+		dir := filepath.Dir(s.File)
+		for _, t := range ix.symbolsFor(qualifier) {
+			if filepath.Dir(t.File) == dir {
+				return true
+			}
+		}
+		return false
+	}
+	// Lowercase qualifier naming s's own package dir: a same-package call
+	// recorded with a qualifier can only come from another file that imports
+	// s's package — never from s itself — so it is the twin's edge.
+	if d, ok := qualifiedCalleeSymbol(ix, c); ok && filepath.Dir(d.File) == filepath.Dir(s.File) {
+		return false
+	}
+	return false
+}
+
+// isPredeclared reports whether name is a Go predeclared identifier (builtin
+// function, type, constant or nil). A bare callee with that name and no
+// same-package declaration is the builtin, never an unrelated package's
+// same-named symbol (cross-package references always carry a qualifier).
+func isPredeclared(name string) bool {
+	switch name {
+	case "append", "cap", "clear", "close", "complex", "copy", "delete",
+		"imag", "len", "make", "max", "min", "new", "panic", "print",
+		"println", "real", "recover",
+		"bool", "byte", "complex64", "complex128", "error", "float32",
+		"float64", "int", "int8", "int16", "int32", "int64", "rune",
+		"string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+		"true", "false", "iota", "nil":
+		return true
+	}
+	return false
 }
 
 // edgeKeys returns the map keys under which a symbol's inheritance edges may
@@ -1944,6 +2836,16 @@ func (ix *Index) Graph(symbol string) string {
 		}
 	}
 	root := defs[0]
+	// The graph text names definitions, callers and callees across several
+	// files; the savings denominator must cover ALL of those node sources
+	// (finding V1), so collect the distinct files backing the rendered nodes
+	// — the definitions' own files plus each resolved caller/callee's file.
+	nodeFiles := map[string]bool{}
+	for _, d := range defs {
+		if d.File != "" {
+			nodeFiles[d.File] = true
+		}
+	}
 	for _, d := range defs {
 		b.WriteString("def ")
 		b.WriteString(d.Kind)
@@ -1961,7 +2863,11 @@ func (ix *Index) Graph(symbol string) string {
 		for _, c := range callers {
 			b.WriteString("  ")
 			b.WriteString(c)
-			if _, ok := resolveName(ix, c); !ok {
+			if d, ok := resolveName(ix, c); ok {
+				if d.File != "" {
+					nodeFiles[d.File] = true
+				}
+			} else {
 				b.WriteString("  (unresolved)")
 			}
 			b.WriteString("\n")
@@ -1973,14 +2879,23 @@ func (ix *Index) Graph(symbol string) string {
 		for _, c := range callees {
 			b.WriteString("  ")
 			b.WriteString(c)
-			if _, ok := resolveName(ix, c); !ok {
+			if d, ok := resolveName(ix, c); ok {
+				if d.File != "" {
+					nodeFiles[d.File] = true
+				}
+			} else {
 				b.WriteString("  (unresolved)")
 			}
 			b.WriteString("\n")
 		}
 	}
 	result := strings.TrimSuffix(b.String(), "\n")
-	stats := ix.TokenSavingsForGraph(root.File, result)
+	files := make([]string, 0, len(nodeFiles))
+	for f := range nodeFiles {
+		files = append(files, f)
+	}
+	slices.Sort(files)
+	stats := tokstats.TokenSavingsForGraph(ix.Root, files, result)
 	if summary := stats.Summary(); summary != "" {
 		result += "\n\n" + summary
 	}
@@ -2052,7 +2967,7 @@ func (ix *Index) ContextDef(d Symbol, linesAround int) string {
 		b.WriteString("\n")
 	}
 	result := strings.TrimSuffix(b.String(), "\n")
-	stats := ix.TokenSavingsForContext(d.File, result)
+	stats := tokstats.TokenSavingsForContext(ix.Root, d.File, result)
 	if summary := stats.Summary(); summary != "" {
 		result += "\n\n" + summary
 	}
@@ -2078,7 +2993,7 @@ func contextCallerLabels(ix *Index, callers []string) []string {
 	out := make([]string, 0, len(shown)+1)
 	for _, c := range shown {
 		label := c
-		if d, ok := ix.ResolveName(c); ok && d.File != "" {
+		if d, ok := ix.ResolveName(c); ok && d.File != "" && !ambiguousDef(ix, c) {
 			label = fmt.Sprintf("%s (%s:%d)", c, d.File, d.Line)
 		}
 		out = append(out, label)
@@ -2108,6 +3023,7 @@ func (ix *Index) rewriteConstructorCallees() {
 		return
 	}
 	ctorRet := map[string]string{} // func name -> first return type
+	ctorDup := map[string]bool{}   // shared bare constructor names skip the rewrite
 	methodRet := map[string]string{}
 	methodDup := map[string]bool{}
 	types := map[string]bool{}
@@ -2116,8 +3032,16 @@ func (ix *Index) rewriteConstructorCallees() {
 		case "func":
 			// The FIRST return is the constructed value; Go convention puts
 			// the error last ("gov, err := ..."). The types[] check at
-			// rewrite time keeps this honest.
+			// rewrite time keeps this honest. A shared bare constructor name
+			// (two packages both declaring "New") is marked ambiguous and
+			// skips the rewrite — the same guard the methodRet map has
+			// (finding A6): last-write-wins over ix.Symbols order attributed
+			// a bare "New.M" to an arbitrary package's type.
 			if len(s.Returns) >= 1 {
+				if _, dup := ctorRet[s.Name]; dup {
+					ctorDup[s.Name] = true
+					continue
+				}
 				ctorRet[s.Name] = s.Returns[0]
 			}
 		case "method":
@@ -2133,9 +3057,30 @@ func (ix *Index) rewriteConstructorCallees() {
 		}
 	}
 	// Package-merged struct field types ("App.taskSvc" -> "TaskService"),
-	// collected from every file of every package.
+	// collected from every file of every package. Both the project-wide map
+	// and the per-package maps merge in SORTED package-path order: a field
+	// key shared by two packages ("Client.http" — internal/mcpclient's
+	// *httpClient vs the Go SDK's *http.Client) previously resolved by
+	// first-write-wins over random ix.Pkgs map iteration, which made the
+	// final index nondeterministic and occasionally forged a self-edge
+	// ("Client.http.roundTrip" rewritten against the wrong package's field
+	// type became "Client.roundTrip").
+	paths := make([]string, 0, len(ix.Pkgs))
+	for p := range ix.Pkgs {
+		paths = append(paths, p)
+	}
+	slices.Sort(paths)
 	fieldTypes := map[string]string{}
-	for _, p := range ix.Pkgs {
+	pkgFieldTypes := map[string]map[string]string{}
+	filePkg := map[string]string{}
+	for _, path := range paths {
+		p := ix.Pkgs[path]
+		pkgFieldTypes[path] = p.StructFields
+		for _, f := range p.Files {
+			if _, dup := filePkg[f]; !dup {
+				filePkg[f] = path
+			}
+		}
 		for k, v := range p.StructFields {
 			if _, dup := fieldTypes[k]; !dup {
 				fieldTypes[k] = v
@@ -2145,9 +3090,11 @@ func (ix *Index) rewriteConstructorCallees() {
 	// Package-merged constructor return types ("api.NewHandlers" ->
 	// "Handlers"), keyed by both the package name and the import-path base
 	// so calls resolve whether the source alias matched the package name
-	// or the directory.
+	// or the directory. Sorted package iteration keeps the first-wins
+	// resolution deterministic (same collision class as the field types).
 	ctorQual := map[string]string{}
-	for _, p := range ix.Pkgs {
+	for _, path := range paths {
+		p := ix.Pkgs[path]
 		for k, v := range p.Constructors {
 			if _, dup := ctorQual[p.Name+"."+k]; !dup {
 				ctorQual[p.Name+"."+k] = v
@@ -2159,14 +3106,44 @@ func (ix *Index) rewriteConstructorCallees() {
 			}
 		}
 	}
-	rewrite := func(c string) string {
+	// ownerPkg resolves a caller/owner key to its package so the
+	// receiver-field chain rewrites against the OWNER's package's field map
+	// first: the chain's first segment is the owner's receiver type
+	// (resolveCallee at extract time resolved the receiver variable), so the
+	// field belongs to that type in that package — the project-wide map must
+	// not let a same-named field in another package win the rewrite.
+	ownerPkg := func(owner string) string {
+		defs := ix.symbolsFor(owner)
+		if len(defs) != 1 {
+			return ""
+		}
+		return filePkg[defs[0].File]
+	}
+	// fieldOf resolves a "Struct.field" prefix against the owner's package
+	// first, then the deterministic sorted-merge project-wide map — the
+	// fallback for chains whose struct lives in another package.
+	fieldOf := func(owner, key string) (string, bool) {
+		if pkg := ownerPkg(owner); pkg != "" {
+			if pm := pkgFieldTypes[pkg]; pm != nil {
+				if r, ok := pm[key]; ok && types[r] {
+					return r, true
+				}
+			}
+		}
+		r, ok := fieldTypes[key]
+		if !ok || !types[r] {
+			return "", false
+		}
+		return r, true
+	}
+	rewrite := func(c, owner string) string {
 		i := strings.LastIndexByte(c, '.')
 		if i <= 0 || i == len(c)-1 {
 			return c
 		}
 		q, m := c[:i], c[i+1:]
 		// Func constructor: "New.M".
-		if r, ok := ctorRet[q]; ok && types[r] {
+		if r, ok := ctorRet[q]; ok && !ctorDup[q] && types[r] {
 			return r + "." + m
 		}
 		// Cross-package constructor-assigned receiver: "api.NewHandlers.Routes"
@@ -2202,7 +3179,7 @@ func (ix *Index) rewriteConstructorCallees() {
 			rewritten := false
 			for k := 1; k < len(segs)-1; k++ {
 				key := strings.Join(segs[:k+1], ".")
-				if r, ok := fieldTypes[key]; ok && types[r] {
+				if r, ok := fieldOf(owner, key); ok {
 					c = r + "." + strings.Join(segs[k+1:], ".")
 					rewritten = true
 					break
@@ -2216,7 +3193,7 @@ func (ix *Index) rewriteConstructorCallees() {
 	}
 	for caller, callees := range ix.Calls {
 		for i, ce := range callees {
-			ix.Calls[caller][i].Target = rewrite(ce.Target)
+			ix.Calls[caller][i].Target = rewrite(ce.Target, caller)
 		}
 	}
 }
