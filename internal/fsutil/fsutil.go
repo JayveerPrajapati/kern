@@ -142,3 +142,72 @@ func WithinRoot(root, file string) (string, error) {
 	}
 	return abs, nil
 }
+
+// EvalSymlinksNearest resolves p to its canonical absolute path, walking up
+// to the nearest EXISTING ancestor when EvalSymlinks fails (the target may
+// not exist yet) and re-appending the unresolved remainder, so symlinks that
+// DO exist still resolve. On total failure the cleaned lexical path returns.
+func EvalSymlinksNearest(p string) string {
+	cur := filepath.Clean(p)
+	var tail []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, filepath.Join(tail...))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur { // reached the filesystem root
+			return filepath.Join(cur, filepath.Join(tail...))
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
+}
+
+// NearestExisting resolves the real location of the nearest existing ancestor
+// of abs (walking up until EvalSymlinks succeeds) and re-appends the remaining
+// components. errPrefix is prepended to the failure error.
+func NearestExisting(abs string, errPrefix string) (string, error) {
+	var rem []string
+	probe := abs
+	for {
+		real, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			return filepath.Join(append([]string{real}, rem...)...), nil
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", fmt.Errorf("%s: cannot resolve %q", errPrefix, abs)
+		}
+		rem = append([]string{filepath.Base(probe)}, rem...)
+		probe = parent
+	}
+}
+
+// ConfinePath resolves p against root (a relative candidate is joined to root
+// first) and rejects any path that escapes root — "..", absolute paths outside
+// the root, and symlinked parents (root/link -> /etc). It returns the absolute
+// cleaned path on success. errPrefix is prepended to both failure messages.
+func ConfinePath(root, p, errPrefix string) (string, error) {
+	if root == "" {
+		if root, _ = os.Getwd(); root == "" {
+			root = "."
+		}
+	}
+	abs := filepath.Clean(p)
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, abs)
+	}
+	real, err := NearestExisting(abs, errPrefix)
+	if err != nil {
+		return "", err
+	}
+	rr, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		rr = root
+	}
+	rel, err := filepath.Rel(rr, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%s: file %q escapes workspace root", errPrefix, p)
+	}
+	return abs, nil
+}

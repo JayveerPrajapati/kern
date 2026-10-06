@@ -17,7 +17,7 @@ import (
 // TestDiffGateServiceVerdicts builds the diff-gate check set on a tiny
 // t.TempDir() repo and asserts structured verdicts plus the advisory exit
 // semantics: WARN findings must NOT change the exit code (0), and
-// --blocking elevation must flip the aggregate to BLOCK (exit 1).
+// --blocking elevation must flip the aggregate to BLOCK (exit 3 — a denial).
 func TestDiffGateServiceVerdicts(t *testing.T) {
 	// internal/blueprint/cli cannot import internal/mcp (import cycle), so
 	// the mcp-provided catalog is not injected in this package's tests.
@@ -95,10 +95,10 @@ func TestDiffGateServiceVerdicts(t *testing.T) {
 		t.Errorf("no per-check results emitted")
 	}
 
-	// --blocking elevation: WARN → BLOCK, exit 1.
+	// --blocking elevation: WARN → BLOCK, exit 3.
 	blocked := applyBlocking(result, true)
-	if blocked.Status != domain.StatusBlock || blocked.ExitCode != 1 {
-		t.Errorf("blocking elevation = %s/%d, want BLOCK/1", blocked.Status, blocked.ExitCode)
+	if blocked.Status != domain.StatusBlock || blocked.ExitCode != 3 {
+		t.Errorf("blocking elevation = %s/%d, want BLOCK/3", blocked.Status, blocked.ExitCode)
 	}
 
 	// Non-blocking leaves the advisory verdict untouched.

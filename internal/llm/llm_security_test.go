@@ -168,6 +168,80 @@ func TestMaskRequired_RemoteOllamaHost(t *testing.T) {
 	}
 }
 
+// --- Ollama egress guard (deep-dive C5) -------------------------------------
+
+func TestValidateOllamaHost_AcceptsLocal(t *testing.T) {
+	for _, host := range []string{"", "http://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434", "http://0.0.0.0:11434"} {
+		if err := ValidateOllamaHost(host); err != nil {
+			t.Errorf("ValidateOllamaHost(%q) = %v, want nil", host, err)
+		}
+	}
+}
+
+func TestValidateOllamaHost_RejectsNonLocalWithoutOptIn(t *testing.T) {
+	for _, host := range []string{
+		"http://10.0.0.5:11434",         // LAN remote
+		"http://llm.lan:11434",          // remote hostname
+		"http://169.254.169.254/latest", // cloud metadata endpoint (SSRF)
+		"gopher://localhost:11434",      // bad scheme
+		"notaurl",                       // unparseable
+	} {
+		if err := ValidateOllamaHost(host); err == nil {
+			t.Errorf("ValidateOllamaHost(%q) = nil, want rejection", host)
+		}
+	}
+}
+
+func TestValidateOllamaHost_RemoteWithOptIn(t *testing.T) {
+	t.Setenv("KERN_ALLOW_REMOTE_OLLAMA", "1")
+	if err := ValidateOllamaHost("http://10.0.0.5:11434"); err != nil {
+		t.Errorf("opt-in remote host rejected: %v", err)
+	}
+	// Opt-in does not excuse a bad scheme.
+	if err := ValidateOllamaHost("gopher://10.0.0.5:11434"); err == nil {
+		t.Error("bad scheme accepted under opt-in")
+	}
+}
+
+func TestClientRefusesRemoteOllamaHost(t *testing.T) {
+	t.Setenv("OLLAMA_HOST", "http://10.0.0.5:11434")
+	t.Setenv("KERN_ALLOW_REMOTE_OLLAMA", "")
+	c := New("")
+	if c.Available() {
+		t.Error("Available() = true for a refused remote host, want false")
+	}
+	_, err := c.Compress("prompt")
+	if err == nil || !strings.Contains(err.Error(), "KERN_ALLOW_REMOTE_OLLAMA") {
+		t.Fatalf("Compress error = %v, want the remote-host egress refusal", err)
+	}
+	_, err = c.EmbedTexts(context.Background(), []string{"x"})
+	if err == nil || !strings.Contains(err.Error(), "KERN_ALLOW_REMOTE_OLLAMA") {
+		t.Fatalf("EmbedTexts error = %v, want the remote-host egress refusal", err)
+	}
+}
+
+func TestProviderRefusesRemoteOllamaHost(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://10.0.0.5:11434")
+	t.Setenv("KERN_ALLOW_REMOTE_OLLAMA", "")
+	p, err := NewProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o, ok := p.(*OllamaProvider); ok {
+		_, err := o.Generate(context.Background(), "sys", "user", Options{})
+		if err == nil || !strings.Contains(err.Error(), "KERN_ALLOW_REMOTE_OLLAMA") {
+			t.Fatalf("Generate error = %v, want the remote-host egress refusal", err)
+		}
+		_, serr := o.Stream(context.Background(), "sys", "user", Options{})
+		if serr == nil || !strings.Contains(serr.Error(), "KERN_ALLOW_REMOTE_OLLAMA") {
+			t.Fatalf("Stream error = %v, want the remote-host egress refusal", serr)
+		}
+	} else {
+		t.Fatalf("provider = %T, want *OllamaProvider", p)
+	}
+}
+
 // --- Client embedding endpoints -------------------------------------------
 
 func TestClientEmbedText(t *testing.T) {

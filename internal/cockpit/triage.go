@@ -64,6 +64,18 @@ type TriageReport struct {
 	Error              string       `json:"error,omitempty"`
 }
 
+// squeezedLogsLine renders the "[KERNOPS TRIAGE] Squeezed logs: X -> Y tokens"
+// accounting line. The line is a savings claim (F11): it appears only on a
+// genuine reduction — equal or inflated results stay silent, so a zero or
+// negative "reduction" is never reported as if compression happened.
+func squeezedLogsLine(report *TriageReport) string {
+	if report.CompressedTokens >= report.OriginalTokens {
+		return ""
+	}
+	return fmt.Sprintf("[KERNOPS TRIAGE] Squeezed logs: %d -> %d tokens (%.1f%% reduction)\n",
+		report.OriginalTokens, report.CompressedTokens, report.TokensSavedPct)
+}
+
 // RunTriage drives the Auto-SRE triage and self-healing lifecycle:
 // 1. Compresses the raw log (-60% tokens) with optimize.Log.
 // 2. Extracts panic / stack frames and correlates with AST symbols.
@@ -105,8 +117,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 	}
 
 	if cfg.NonInteractive {
-		_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Squeezed logs: %d -> %d tokens (%.1f%% reduction)\n",
-			report.OriginalTokens, report.CompressedTokens, report.TokensSavedPct)
+		_, _ = fmt.Fprint(cfg.Output, squeezedLogsLine(report))
 	}
 
 	// 2. Correlate stack trace and AST symbols

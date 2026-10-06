@@ -85,12 +85,19 @@ func compress(text string) string {
 	if err != nil || res.Output == "" || res.Output == text {
 		return ""
 	}
-	if len(text)-len(res.Output) < 100 {
-		// Sub-100-char savings are noise, not context relief (F-5): return
-		// the compressed text without the footer.
-		return res.Output
+	return compressedFooter(len(text), len(res.Output)) + res.Output
+}
+
+// compressedFooter renders the "[kern] compressed X -> Y chars" banner for a
+// compaction result. The banner is a savings claim (F11): it appears only on
+// a genuine reduction of at least 100 chars (F-5 floor) — equal or inflated
+// output never earns it.
+func compressedFooter(before, after int) string {
+	if before-after < 100 {
+		// Sub-100-char savings are noise, not context relief (F-5): no banner.
+		return ""
 	}
-	return "[kern] compressed " + compact(len(text)) + " -> " + compact(len(res.Output)) + " chars\n" + res.Output
+	return "[kern] compressed " + compact(before) + " -> " + compact(after) + " chars\n"
 }
 
 func compact(n int) string {

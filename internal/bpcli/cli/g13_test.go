@@ -339,7 +339,7 @@ func testMCPGatePath(allowed []string, p string) error {
 	return fmt.Errorf("path %q is outside the allowed workspace roots %v", resolved, allowed)
 }
 
-// testMCPWithinRoot mirrors internal/mcp.RootContains: the root is
+// testMCPWithinRoot mirrors internal/mcpgate.RootContains: the root is
 // symlink-resolved before containment is judged.
 func testMCPWithinRoot(root, resolved string) bool {
 	r, err := filepath.EvalSymlinks(root)

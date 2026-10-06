@@ -189,3 +189,28 @@ func TestClaudePromptSkipsTrivia(t *testing.T) {
 		t.Fatalf("trivia should not be remembered: %+v", memory.List(dir))
 	}
 }
+
+// TestCompressedFooterOnlyOnRealSavings pins F11: the "[kern] compressed"
+// banner is a savings claim — a genuine reduction earns it, equal or
+// inflated output never does (and the F-5 100-char floor still applies).
+func TestCompressedFooterOnlyOnRealSavings(t *testing.T) {
+	cases := []struct {
+		name          string
+		before, after int
+		wantBanner    bool
+	}{
+		{"reduced prints", 20000, 5000, true},
+		{"equal silent", 20000, 20000, false},
+		{"inflated silent", 20000, 21000, false},
+		{"sub-floor savings silent", 20000, 19950, false},
+	}
+	for _, c := range cases {
+		got := compressedFooter(c.before, c.after)
+		if c.wantBanner && !strings.Contains(got, "[kern] compressed") {
+			t.Errorf("%s: expected banner, got %q", c.name, got)
+		}
+		if !c.wantBanner && got != "" {
+			t.Errorf("%s: expected silence, got %q", c.name, got)
+		}
+	}
+}

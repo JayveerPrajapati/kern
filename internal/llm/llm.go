@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -54,8 +55,39 @@ func New(model string) *Client {
 	}
 }
 
+// ValidateOllamaHost enforces the egress contract for the default LLM
+// provider (deep-dive C5, 2026-10-03): Ollama is local-first, so a non-local
+// OLLAMA_HOST (LAN remote, tunnel, or an SSRF target such as a link-local
+// metadata endpoint) requires the explicit KERN_ALLOW_REMOTE_OLLAMA=1 opt-in
+// — the same opt-in pattern as KERN_ALLOW_EXEC. Local hosts
+// (localhost/127.0.0.1/::1/0.0.0.0) always pass; any scheme other than
+// http/https is rejected outright. Prompts to an opted-in remote host remain
+// PII-masked (MaskRequired already classifies it as remote).
+func ValidateOllamaHost(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil // default host is local
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("llm: invalid OLLAMA_HOST %q", raw)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("llm: OLLAMA_HOST %q must use http or https", raw)
+	}
+	if isLocalHost(raw) {
+		return nil
+	}
+	if os.Getenv("KERN_ALLOW_REMOTE_OLLAMA") == "1" {
+		return nil
+	}
+	return fmt.Errorf("llm: refusing to send prompts to non-local OLLAMA_HOST %q — set KERN_ALLOW_REMOTE_OLLAMA=1 to opt in (prompts are PII-masked)", raw)
+}
+
 // Available reports whether a local Ollama answers at Base.
 func (c *Client) Available() bool {
+	if ValidateOllamaHost(c.Base) != nil {
+		return false
+	}
 	req, err := http.NewRequest(http.MethodGet, c.Base+"/api/tags", nil)
 	if err != nil {
 		return false
@@ -76,6 +108,9 @@ const instruction = "You are a context optimizer for an AI coding assistant. Com
 // decode-body flow of Compress and Complete, including the reachability guard
 // and the empty-response error.
 func (c *Client) postGenerate(prompt string) (string, error) {
+	if err := ValidateOllamaHost(c.Base); err != nil {
+		return "", err
+	}
 	if !c.Available() {
 		return "", fmt.Errorf("ollama not reachable at %s", c.Base)
 	}
@@ -152,6 +187,9 @@ func (c *Client) HasEmbeddingModel() bool {
 // when Ollama is unreachable or the model is missing — callers keep their
 // deterministic fallback in that case.
 func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+	if err := ValidateOllamaHost(c.Base); err != nil {
+		return nil, err
+	}
 	model := EmbedModel()
 	payload, err := json.Marshal(map[string]any{
 		"model": model,
@@ -198,6 +236,9 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 }
 
 func (c *Client) tags() ([]string, error) {
+	if err := ValidateOllamaHost(c.Base); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(http.MethodGet, c.Base+"/api/tags", nil)
 	if err != nil {
 		return nil, err

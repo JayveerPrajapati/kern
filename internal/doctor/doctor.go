@@ -652,11 +652,12 @@ func indexVerdict(root string, ix *index.Index) (fresh bool, verdict string) {
 	if ix == nil {
 		return false, "unknown"
 	}
-	if fresh, decided, _ := ix.TreeOIDProbe(root); decided {
-		if fresh {
-			return true, "fresh"
-		}
-		return false, "stale"
+	// Tree-OID probe is a fast path, not a verdict: a decided match proves
+	// fresh, but a decided mismatch (a seal-only commit moved HEAD^{tree})
+	// falls through to the loose content proof before ever declaring stale
+	// (V7 parity with diskview and EnsureFresh).
+	if fresh, decided, _ := ix.TreeOIDProbe(root); decided && fresh {
+		return true, "fresh"
 	}
 	if ix.FreshnessProof(root).Verdict == index.FreshnessFresh {
 		return true, "fresh"

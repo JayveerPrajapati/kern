@@ -6,6 +6,7 @@
 package docsearch
 
 import (
+	"errors"
 	"hash/fnv"
 	"io/fs"
 	"math"
@@ -94,8 +95,20 @@ func CacheKey(root string) string {
 	return "docs/" + cache.Hash([]byte(abs))
 }
 
+// errRootRequired guards every index entry point against an empty project
+// root. Resolving "" via filepath.Abs falls back to the PROCESS working
+// directory — for a server launched from a directory that contains several
+// projects (or whose cwd differs from the project it serves), IndexDir
+// would walk every project under that cwd into ONE cross-project doc index,
+// and kern_doc search would return hits from other repos (F11). Doc indexes
+// are scoped to an explicit project root only.
+var errRootRequired = errors.New("docsearch: project root is required — doc indexes are scoped to one project")
+
 // Load reads a previously persisted index for root. Returns nil when absent.
 func Load(root string) *Index {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
 	ix := &Index{}
 	if err := cache.Load(CacheKey(root), ix); err != nil {
 		return nil
@@ -106,6 +119,9 @@ func Load(root string) *Index {
 // IndexDir walks root and chunks + embeds every document file. It returns the
 // in-memory index (callers may persist it with Save).
 func IndexDir(root string) (*Index, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, errRootRequired
+	}
 	ix := &Index{Root: root}
 	seen := map[string]int{}
 	fileCount := 0
@@ -181,6 +197,9 @@ func IndexDir(root string) (*Index, error) {
 // failures for individual chunks are skipped (the deterministic Vec is always
 // present), so a partially-available model still yields a usable index.
 func IndexDirSemantic(root string, e Embedder) (*Index, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, errRootRequired
+	}
 	ix, err := IndexDir(root)
 	if err != nil {
 		return nil, err
@@ -272,6 +291,9 @@ func MergeFetched(root, name, text string) (int, error) {
 	// heap.
 	if len(text) > maxFetchedSize {
 		return 0, nil
+	}
+	if strings.TrimSpace(root) == "" {
+		return 0, errRootRequired
 	}
 	// Persist the raw page in the global docs-fetch cache so a later full
 	// re-index (IndexDir) can re-merge it. Callers that already wrote the

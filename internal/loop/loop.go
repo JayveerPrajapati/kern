@@ -507,7 +507,7 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 			// no diff, so they keep the full informational advisory.
 			// Dependent-package regressions remain CI's full tier's job.
 			eng := verification.NewEngine(wt.Dir()).WithTestPackages(changedGoPackages(res.Diff))
-			v := eng.Verify([]string{"build", "test", "security", "architecture", "dependency"})
+			v := eng.Verify([]string{"build", "test", "security", "architecture", "dependency", "reuse"})
 			out = v.Summary
 			if v.Verdict != verdict.VerdictPass {
 				// L0/L1 are read-only (autonomy.go): the loop makes no code

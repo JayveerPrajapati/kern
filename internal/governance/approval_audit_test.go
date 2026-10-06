@@ -2,11 +2,13 @@ package governance
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/flock"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -136,5 +138,39 @@ func TestFileStoreRejectRecordsApprovalDecision(t *testing.T) {
 	}
 	if found.TaskID != "t-7" || found.AgentID != "human-2" {
 		t.Errorf("entry TaskID/AgentID = %q/%q, want t-7/human-2", found.TaskID, found.AgentID)
+	}
+}
+
+// TestFileStoreDecideDoesNotHangWhenAuditLockHeld covers the real-world hang
+// this batch fixed: the approve/reject decision must persist and return
+// promptly even when the audit chain is contended. The audit append
+// (recordAudit → AppendExternal) is best-effort AND bounded — a held lock
+// makes it fail loudly within the retry budget, never block the decision.
+func TestFileStoreDecideDoesNotHangWhenAuditLockHeld(t *testing.T) {
+	root := t.TempDir()
+	auditDir := filepath.Join(root, ".kern", "audit")
+	if err := os.MkdirAll(auditDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	holder, err := flock.TryLock(filepath.Join(auditDir, ".lock"))
+	if err != nil {
+		t.Fatalf("hold audit lock: %v", err)
+	}
+	defer func() { _ = flock.Release(holder) }()
+
+	store := NewFileStore(root)
+	if err := store.AddPending(domain.Approval{ID: "apr-lock", Status: "pending"}); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+	start := time.Now()
+	decided, err := store.Decide("apr-lock", "human", true, "test")
+	if err != nil {
+		t.Fatalf("Decide must not fail when only the audit chain is contended: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Decide blocked for %s — must return promptly when the audit lock is held", elapsed)
+	}
+	if decided.Status != "approved" {
+		t.Errorf("decided.Status = %q, want approved", decided.Status)
 	}
 }

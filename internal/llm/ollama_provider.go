@@ -86,6 +86,9 @@ func (o *OllamaProvider) Capabilities() Capabilities {
 // Stream implements Provider via /api/generate with stream=true, yielding
 // NDJSON "response" tokens.
 func (o *OllamaProvider) Stream(ctx context.Context, system, user string, opts Options) (*Stream, error) {
+	if err := ValidateOllamaHost(o.client.Base); err != nil {
+		return nil, err
+	}
 	payload := map[string]any{
 		"model":  o.model(opts),
 		"prompt": joinPrompt(system, user),
@@ -141,6 +144,9 @@ func (o *OllamaProvider) Stream(ctx context.Context, system, user string, opts O
 }
 
 func (o *OllamaProvider) post(ctx context.Context, path string, payload map[string]any) (*http.Response, error) {
+	if err := ValidateOllamaHost(o.client.Base); err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err

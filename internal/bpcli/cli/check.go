@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/scanners/jscpd"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
+	"github.com/mattn/go-isatty"
 )
 
 // runCheck executes the `blueprint check` command.
@@ -112,13 +114,8 @@ func RunCheckAndReport(args []string) (code int, failedCheck string, root string
 	if o.ciMode {
 		emitCIVerdict(*o.result)
 		if o.result.ExitCode != 0 {
-			if bypassed, reason := IsEmergencyBypassActive(); bypassed {
-				fc := failedChecks(*o.result)
-				emitBypassNotice(fc, reason)
-				recordBypassAudit(o.root, reason, fc, o.result.ExitCode)
-				return 0, firstFailedCheck(*o.result), o.root
-			}
-			return 1, firstFailedCheck(*o.result), o.root
+			code, failedCheck = applyBypassGate(o, failedChecks(*o.result))
+			return code, failedCheck, o.root
 		}
 		return 0, "", o.root
 	}
@@ -128,14 +125,31 @@ func RunCheckAndReport(args []string) (code int, failedCheck string, root string
 		emitText(*o.result)
 	}
 	if o.result.ExitCode != 0 {
-		if bypassed, reason := IsEmergencyBypassActive(); bypassed {
-			fc := failedChecks(*o.result)
-			emitBypassNotice(fc, reason)
-			recordBypassAudit(o.root, reason, fc, o.result.ExitCode)
-			return 0, firstFailedCheck(*o.result), o.root
-		}
+		code, failedCheck = applyBypassGate(o, failedChecks(*o.result))
+		return code, failedCheck, o.root
 	}
 	return o.result.ExitCode, firstFailedCheck(*o.result), o.root
+}
+
+// applyBypassGate decides a failing run's outcome under the human-confirmed
+// bypass gate (audit-table-2 B): the env vars are honored ONLY when a human
+// confirms at a terminal. A refusal keeps the real failing exit code and is
+// audited (doctor counts attempts); a confirmed bypass exits 0 and is audited
+// as bypassed. Returns the exit code and the first failed check's name.
+func applyBypassGate(o runCheckOutcome, fc []string) (int, string) {
+	bypassed, reason, mode := humanBypassDecision()
+	if bypassed {
+		emitBypassNotice(fc, reason)
+		recordBypassAudit(o.root, reason, fc, o.result.ExitCode, "bypassed")
+		return 0, firstFailedCheck(*o.result)
+	}
+	if mode != "" {
+		// Env WAS set but no human confirmed: the gates enforce and the
+		// refusal is audited so kern doctor can report bypass attempts.
+		fmt.Fprintf(os.Stderr, "kern check: bypass env ignored (no human confirmation: %s) — gates enforced\n", mode)
+		recordBypassAudit(o.root, reason, fc, o.result.ExitCode, "refused:"+mode)
+	}
+	return o.result.ExitCode, firstFailedCheck(*o.result)
 }
 
 // IsEmergencyBypassActive reports whether an emergency break-glass environment variable
@@ -149,6 +163,65 @@ func IsEmergencyBypassActive() (bool, string) {
 		return true, reason
 	}
 	return false, ""
+}
+
+// terminalProbe reports whether stdin is an interactive terminal (a real
+// human at a terminal, not a pipe/agent/CI). Test-injectable. Uses the proper
+// ioctl (go-isatty), NOT the ModeCharDevice trick: /dev/null is a char
+// device, and stdin=</dev/null is exactly the agent-daemon case that must not
+// be treated as a human.
+var terminalProbe = func() bool { return isatty.IsTerminal(os.Stdin.Fd()) }
+
+// bypassConfirmTimeout bounds the typed confirmation read so a hung prompt
+// refuses instead of blocking. Test-injectable.
+var bypassConfirmTimeout = 15 * time.Second
+
+// readBypassConfirmation reads one line of typed confirmation from r within
+// bypassConfirmTimeout. Test-injectable so the honored path is testable
+// without a real terminal.
+var readBypassConfirmation = func(r io.Reader) (string, error) {
+	ch := make(chan string, 1)
+	go func() {
+		var buf [64]byte
+		n, _ := r.Read(buf[:])
+		ch <- string(buf[:n])
+	}()
+	select {
+	case s := <-ch:
+		return s, nil
+	case <-time.After(bypassConfirmTimeout):
+		return "", errors.New("bypass confirmation timed out")
+	}
+}
+
+// humanBypassDecision implements the audit-table-2 B bypass gate: the env vars
+// are honored ONLY when a human can be confirmed at a terminal. It returns
+// (active, reason, refusalMode) where refusalMode ∈ {"", "no-terminal",
+// "declined", "timeout"} — "" means the bypass is active (or the env was never
+// set), and a non-empty refusalMode means the env WAS set but the bypass was
+// refused. A refusal must be audited by the caller (doctor counts attempts).
+func humanBypassDecision() (bool, string, string) {
+	if os.Getenv("KERN_BYPASS") != "1" && os.Getenv("KERN_ENFORCE") != "0" {
+		return false, "", ""
+	}
+	reason := os.Getenv("KERN_BYPASS_REASON")
+	if reason == "" {
+		reason = "Emergency override active via env (KERN_BYPASS=1 / KERN_ENFORCE=0)"
+	}
+	if !terminalProbe() {
+		// No interactive terminal (agent/CI pipe): the env vars are ignored
+		// and the gates enforce. There is no human to confirm.
+		return false, reason, "no-terminal"
+	}
+	fmt.Fprintf(os.Stderr, "\nkern: emergency bypass requested (%s) — type YES to confirm: ", reason)
+	typed, err := readBypassConfirmation(os.Stdin)
+	if err != nil {
+		return false, reason, "timeout"
+	}
+	if strings.TrimSpace(strings.ToUpper(typed)) != "YES" {
+		return false, reason, "declined"
+	}
+	return true, reason, ""
 }
 
 func emitBypassNotice(failedChecks []string, reason string) {
@@ -193,15 +266,16 @@ func buildBypassAuditRecord(absRoot, reason, failedCheck string, wouldBeExitCode
 	}
 }
 
-// recordBypassAudit appends the emergency-bypass audit trail for a bypassed
-// check run: the "bypass" record in .blueprint/audit/audit.jsonl (via the
-// shared writeApprovalAudit best-effort writer) AND a tamper-evident entry in
-// the project's .kern/audit governance chain (mirroring recordDecisionAudit's
-// shape — Action bypass, Policy emergency-bypass, Result bypassed), so `kern
-// audit` sees the override next to approval decisions. Both writes are
-// best-effort: a failure must never change the bypassed run's exit code, at
-// most a one-line stderr warning.
-func recordBypassAudit(absRoot, reason string, failedChecks []string, wouldBeExitCode int) {
+// recordBypassAudit appends the emergency-bypass audit trail for a bypassed OR
+// refused bypass attempt: the "bypass" record in .blueprint/audit/audit.jsonl
+// (via the shared writeApprovalAudit best-effort writer) AND a tamper-evident
+// entry in the project's .kern/audit governance chain (mirroring
+// recordDecisionAudit's shape — Action bypass, Policy emergency-bypass,
+// Result bypassed | refused:<mode>), so `kern audit` sees the override next
+// to approval decisions and `kern doctor` can count attempts. Both writes are
+// best-effort: a failure must never change the run's exit code, at most a
+// one-line stderr warning.
+func recordBypassAudit(absRoot, reason string, failedChecks []string, wouldBeExitCode int, result string) {
 	writeApprovalAudit(absRoot, buildBypassAuditRecord(absRoot, reason, "", wouldBeExitCode))
 
 	resource := "pre-commit"
@@ -216,7 +290,7 @@ func recordBypassAudit(absRoot, reason string, failedChecks []string, wouldBeExi
 		Action:    "bypass",
 		Resource:  resource,
 		Approved:  true,
-		Result:    "bypassed",
+		Result:    result,
 		Policy:    "emergency-bypass",
 		Reason:    reason,
 		Timestamp: time.Now(),

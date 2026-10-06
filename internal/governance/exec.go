@@ -110,25 +110,52 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 		return nil
 	}
 	if ap != nil {
+		// Surface WHY the command was gated: a dangerous-class match
+		// (audit-table-2 A) is the reason when the classifier fired.
+		classNote := ""
+		if class, why := ClassifyDangerousCommand(command); class != DangerNone {
+			classNote = fmt.Sprintf(" (dangerous class %s: %s)", class, why)
+		}
 		if root == "" {
 			// R6: in-memory approval — no other process can resolve it, so
 			// the `kern approve <id>` hint would be a dead end. Give honest
 			// guidance instead.
-			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); no persistent approval store for this call — allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score)
+			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; no persistent approval store for this call — allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score, classNote)
 		}
 		if serr := stampExecApproval(root, ap); serr != nil {
 			return fmt.Errorf("governance: command execution requires human approval, but the approval could not be integrity-protected: %w", serr)
 		}
 		// The firewall already requested (and persisted) the command-bound
 		// approval. Surface it with the resolution hint so the caller can
-		// route it to a human (`kern approve <id>`).
-		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); approval %s pending — resolve with: kern approve %s", risk.Level, risk.Score, ap.ID, ap.ID)
+		// route it to a human (`kern approve <id>`): the grant is bound to
+		// the exact command's SHA-256, so a retry MUST send the byte-
+		// identical command text (any change mints a new approval), and the
+		// calling agent can await the human decision with `kern approval
+		// wait <id>` instead of manual relay. The retry clause echoes the
+		// exact command so the caller never has to reconstruct it — live
+		// evidence (twice, this agent): agents naturally append output-
+		// shaping (| tail, && version-checks) to retries and mint fresh
+		// approvals instead of consuming the granted one.
+		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; approval %s pending — resolve with: kern approve %s; the grant is bound to this command's SHA-256, so the retry MUST be byte-identical (appending pipes, redirects, or extra && segments mints a NEW approval) — retry exactly: %s; the calling agent can await the decision with `kern approval wait %s`%s", risk.Level, risk.Score, classNote, ap.ID, ap.ID, command, ap.ID, compoundPreExecNote(command))
 	}
 	if RequiresApproval(risk.Level) {
 		// Approval-required but no approval could be surfaced: fail closed.
 		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f) but no approval could be created; failing closed", risk.Level, risk.Score)
 	}
 	return errors.New("governance: exec firewall denied command execution")
+}
+
+// compoundPreExecNote returns the compound-semantics honesty sentence for a
+// denial message. Governance checks the WHOLE command before any execution
+// (verified live: a denied compound's prefix never runs — no marker file was
+// created), so a denied compound runs NO segment. Only compounds (shell
+// operators && / || / ;) get the sentence — a single command has no segments
+// to clarify, and the sentence would be noise there.
+func compoundPreExecNote(command string) string {
+	if strings.Contains(command, "&&") || strings.Contains(command, "||") || strings.Contains(command, ";") {
+		return "; the denial is pre-execution — no segment of the compound has run"
+	}
+	return ""
 }
 
 // execAllowlistGate enforces the KERN_TOOLS allowlist (gates 1 and 2 above).
@@ -162,9 +189,11 @@ func execAllowlistGate(tool string) error {
 // returns whether it is allowed, the assessed risk, and — when the action is
 // approval-gated — the pending approval from the firewall's own ephemeral
 // workflow. Callers that want a real, externally-reviewable approval should
-// use RequestExecApproval / CheckExecCommand instead.
-func execFirewallCheck() (allowed bool, risk domain.Risk, approval *domain.Approval, err error) {
-	fw := NewFirewall().WithPolicies(execPolicies())
+// use RequestExecApproval / CheckExecCommand instead. The command text is
+// threaded into the policies so dangerous classes escalate to HIGH regardless
+// of KERN_EXEC_RISK (audit-table-2 A).
+func execFirewallCheck(command string) (allowed bool, risk domain.Risk, approval *domain.Approval, err error) {
+	fw := NewFirewall().WithPolicies(execPolicies(command))
 	agent := NewAgent(execAgentID, "mcp-exec", "application", []Permission{{Resource: "command", Action: "execute"}})
 	allowed, risk, approval, err = fw.WithAgents(agent).Check(execAgentID, "command", "execute")
 	return allowed, risk, approval, err
@@ -183,7 +212,7 @@ func newExecFirewall(root, command string) *Firewall {
 	} else {
 		fw = NewFirewall()
 	}
-	fw = fw.WithPolicies(execPolicies())
+	fw = fw.WithPolicies(execPolicies(command))
 	fw = fw.WithAgents(NewAgent(execAgentID, "mcp-exec", "application", []Permission{{Resource: "command", Action: "execute"}}))
 	if command != "" {
 		fw = fw.WithExecCommand(command)
@@ -225,7 +254,7 @@ func RequestExecApproval(wf *ApprovalWorkflow, command string, toolName ...strin
 	if err := execAllowlistGate(tool); err != nil {
 		return nil, domain.Risk{}, err
 	}
-	allowed, risk, _, err := execFirewallCheck()
+	allowed, risk, _, err := execFirewallCheck(command)
 	if err != nil {
 		return nil, risk, fmt.Errorf("governance: exec firewall denied: %w", err)
 	}
@@ -304,7 +333,40 @@ func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 // KERN_EXEC_RISK (or exec.risk in .kern/config.json; default MEDIUM; HIGH or
 // CRITICAL makes command.execute require human approval). An unrecognized
 // value defaults to MEDIUM.
-func execPolicies() []domain.Policy {
+//
+// Independent of the configured level, a command that ClassifyDangerousCommand
+// marks destructive/pipe-install/installer is escalated to HIGH (approval
+// required) unless the operator explicitly set KERN_EXEC_RISK=LOW — the
+// documented opt-out that disables class escalation. KERN_TOOLS/KERN_ALLOW_EXEC
+// make exec possible at all; they do NOT exempt dangerous classes from
+// approval (audit-table-2 A).
+func execPolicies(command string) []domain.Policy {
+	level := configuredExecLevel()
+	classNote := ""
+	if level != "LOW" {
+		if class, why := ClassifyDangerousCommand(command); class != DangerNone {
+			level = "HIGH"
+			classNote = fmt.Sprintf(" matched dangerous class %s: %s — approval required regardless of KERN_TOOLS/KERN_ALLOW_EXEC; KERN_EXEC_RISK=LOW disables class escalation", class, why)
+		}
+	}
+	desc := "Arbitrary host command execution (operator-configurable risk)."
+	if classNote != "" {
+		desc += " " + classNote
+	}
+	return append(DefaultPolicies(), domain.Policy{
+		ID:          "pol-command-execute",
+		Name:        "command_execute",
+		Description: desc,
+		Rule:        level + " command.execute",
+		Scope:       "command",
+		Enabled:     true,
+	})
+}
+
+// configuredExecLevel resolves the operator-configurable exec risk level
+// (KERN_EXEC_RISK or exec.risk in .kern/config.json; default MEDIUM). An
+// unrecognized value defaults to MEDIUM.
+func configuredExecLevel() string {
 	level := "MEDIUM"
 	if v := strings.ToUpper(strings.TrimSpace(config.String("", "KERN_EXEC_RISK", "exec.risk", ""))); v != "" {
 		switch v {
@@ -312,14 +374,7 @@ func execPolicies() []domain.Policy {
 			level = v
 		}
 	}
-	return append(DefaultPolicies(), domain.Policy{
-		ID:          "pol-command-execute",
-		Name:        "command_execute",
-		Description: "Arbitrary host command execution (operator-configurable risk).",
-		Rule:        level + " command.execute",
-		Scope:       "command",
-		Enabled:     true,
-	})
+	return level
 }
 
 // parseToolAllowlist parses a comma-separated tool allowlist (KERN_TOOLS),

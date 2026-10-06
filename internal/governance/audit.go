@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/flock"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -221,8 +222,14 @@ func auditSeq(id string) (int, bool) {
 }
 
 // Advisory-lock retry policy (L-e): the audit lock is best-effort, but a
-// bounded retry keeps the unlocked window small. Liveness wins — a failed
-// lock must never drop an audit write — so we proceed unlocked and warn.
+// bounded retry keeps the unlocked window small. The lock acquisition is
+// NON-BLOCKING — a contended lock resolves within this budget instead of
+// blocking a governance write forever. On exhaustion the two write paths
+// differ deliberately: AppendExternal FAILS loudly (external callers must
+// know the chain link was not written; the decision they record is already
+// durable elsewhere and the gap is repairable via `kern audit repair`),
+// while the Record path keeps liveness — a failed lock must never drop an
+// audit write, so it proceeds unlocked and warns.
 const (
 	auditLockRetries    = 3
 	auditLockRetrySleep = 75 * time.Millisecond
@@ -232,11 +239,43 @@ const (
 // advisory audit lock could not be taken after auditLockRetries.
 var auditLockWarnOnce sync.Once
 
+// auditWriterMu serializes in-process audit writers that take the
+// cross-process advisory flock. flock(2) semantics differ per platform for
+// two fds of the same file within one process (independent owners on Linux,
+// one process-wide lock on macOS/BSD), so concurrent goroutines in the SAME
+// process can interfere with each other's lock lifecycle and emit spurious
+// "could not be acquired" warnings — sequential calls must never contend
+// with themselves. Holding this mutex for the whole flock lifecycle
+// (acquisition → release) makes same-process writers mutually exclusive;
+// the advisory flock still serializes genuinely separate processes.
+var auditWriterMu sync.Mutex
+
+// auditLockWithWriterMu takes the cross-process audit flock while holding
+// auditWriterMu for the whole flock lifecycle. The returned unlock releases
+// the flock AND the in-process writer mutex; it returns an error (mutex
+// already released) when the lock cannot be taken, so callers can bound the
+// acquisition instead of blocking on a contended lock.
+func auditLockWithWriterMu(path string) (func(), error) {
+	auditWriterMu.Lock()
+	unlock, err := lockAuditFile(path)
+	if err != nil {
+		auditWriterMu.Unlock()
+		return nil, err
+	}
+	release := unlock
+	return func() {
+		release()
+		auditWriterMu.Unlock()
+	}, nil
+}
+
 // refreshTailLocked re-reads the TRUE persisted tail under the cross-process
 // lock (when configured) and refreshes the in-memory chain head + sequence so
 // the next write chains from its actual predecessor whoever wrote it. Returns
-// the unlock func (nil when no lock is configured or it could not be taken);
-// callers must invoke it after their write completes. Must hold l.mu.
+// the unlock func (nil when no lock is configured) and an error when the
+// cross-process lock could not be acquired within the bounded retry budget —
+// the caller decides whether to fail loudly (AppendExternal) or proceed
+// unlocked with a warning (the Record path's liveness posture). Must hold l.mu.
 //
 // When the store implements storage.TailReader (an append-only log), the tail
 // is read from its single last entry in O(1) instead of re-listing every
@@ -244,31 +283,49 @@ var auditLockWarnOnce sync.Once
 // its "audit-N" ID continues the sequence, preserving ID semantics exactly
 // across the legacy per-key → chain.jsonl boundary. Stores without the fast
 // path fall back to the full re-list.
-func (l *AuditLog) refreshTailLocked() func() {
+func (l *AuditLog) refreshTailLocked() (func(), error) {
 	if l.store == nil {
-		return nil
+		return nil, nil
 	}
 	var unlock func()
 	if l.lockPath != "" {
-		// The lock is advisory and failure-tolerant: liveness of the audit
-		// write wins, so we never fail closed. A bounded retry narrows the
-		// unlocked window in which concurrent processes could fork the
-		// tamper chain; if it still fails, proceed unlocked and warn once.
-		var err error
+		// The acquisition is non-blocking and bounded: a contended lock must
+		// resolve (fail loudly, or degrade unlocked on the Record path)
+		// within auditLockRetries × auditLockRetrySleep instead of blocking a
+		// governance write forever — the approval decision is already durable
+		// in .kern/approvals.json, and a skipped chain link is repairable via
+		// `kern audit repair`. Only genuine contention (flock.ErrLocked) is
+		// the hang risk: an open failure (missing parent dir, permissions)
+		// keeps the legacy liveness posture (proceed unlocked and warn — the
+		// store write itself creates the directory). auditLockWithWriterMu
+		// serializes in-process writers on the flock lifecycle so sequential
+		// same-process calls never contend with themselves.
+		var lockErr error
 		for attempt := 1; attempt <= auditLockRetries; attempt++ {
-			unlock, err = lockAuditFile(l.lockPath)
-			if err == nil {
+			unlock, lockErr = auditLockWithWriterMu(l.lockPath)
+			if lockErr == nil {
 				break
 			}
-			if attempt < auditLockRetries {
+			if errors.Is(lockErr, flock.ErrLocked) && attempt < auditLockRetries {
 				time.Sleep(auditLockRetrySleep)
 			}
 		}
-		if err != nil {
-			unlock = nil
+		if unlock == nil {
+			if errors.Is(lockErr, flock.ErrLocked) {
+				// Contention exhausted: fail loudly — the caller's decision
+				// is already durable elsewhere and the skipped chain link is
+				// repairable via `kern audit repair`.
+				auditLockWarnOnce.Do(func() {
+					log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); audit writes will fail or proceed unlocked — chain gaps are repairable via `kern audit repair`", l.lockPath, auditLockRetries, lockErr)
+				})
+				return nil, fmt.Errorf("audit lock %s could not be acquired after %d attempts (last error: %v)", l.lockPath, auditLockRetries, lockErr)
+			}
+			// Open failure (not contention): keep liveness — proceed
+			// unlocked and warn once, exactly like the legacy behavior.
 			auditLockWarnOnce.Do(func() {
-				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts; proceeding unlocked — concurrent writers may fork the tamper-evident chain", l.lockPath, auditLockRetries)
+				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); proceeding unlocked — concurrent writers may fork the tamper-evident chain", l.lockPath, auditLockRetries, lockErr)
 			})
+			return nil, nil
 		}
 	}
 	// Fast path: an append-only store reports its tail directly, so a write
@@ -283,7 +340,7 @@ func (l *AuditLog) refreshTailLocked() func() {
 				if id, ok := auditSeq(tail.ID); ok && id > int(l.seq.Load()) {
 					l.seq.Store(int64(id))
 				}
-				return unlock
+				return unlock, nil
 			}
 		}
 	}
@@ -294,7 +351,7 @@ func (l *AuditLog) refreshTailLocked() func() {
 	if maxSeq > int(l.seq.Load()) {
 		l.seq.Store(int64(maxSeq))
 	}
-	return unlock
+	return unlock, nil
 }
 
 // Record adds an entry to the audit log. If the entry has no ID or timestamp,
@@ -376,8 +433,14 @@ func (l *AuditLog) OverridesCount() int64 {
 // and the chain head is always re-read from the true persisted tail first so
 // the entry chains from its actual predecessor whoever wrote it.
 func (l *AuditLog) persist(entry AuditEntry) {
-	unlock := l.refreshTailLocked()
-	if unlock != nil {
+	unlock, lockErr := l.refreshTailLocked()
+	if lockErr != nil {
+		// Liveness posture preserved for the Record path: a contended lock
+		// must never drop the audit write, so the entry is still persisted
+		// (unlocked) and the failure is logged loudly — the chain gap is
+		// repairable via `kern audit repair`.
+		log.Printf("kern governance: audit write proceeding WITHOUT the cross-process lock (concurrent writers may fork the tamper-evident chain): %v", lockErr)
+	} else if unlock != nil {
 		defer unlock()
 	}
 
@@ -427,7 +490,16 @@ func (l *AuditLog) AppendExternal(entry AuditEntry) error {
 	}
 
 	if l.store != nil {
-		unlock := l.refreshTailLocked()
+		unlock, err := l.refreshTailLocked()
+		if err != nil {
+			// Fail loudly instead of hanging: the cross-process lock could
+			// not be acquired within the bounded retry budget. The caller's
+			// decision is already durable elsewhere (e.g. the approval is
+			// persisted in .kern/approvals.json before this append runs), so
+			// a missing chain link is repairable via `kern audit repair` —
+			// an indefinite block is never acceptable.
+			return fmt.Errorf("acquire audit lock: %w", err)
+		}
 		if unlock != nil {
 			defer unlock()
 		}
@@ -470,13 +542,12 @@ func (l *AuditLog) RepairChain() (int, error) {
 
 	var unlock func()
 	if l.lockPath != "" {
-		var err error
-		unlock, err = lockAuditFile(l.lockPath)
-		if err != nil {
-			// Lock is advisory and failure-tolerant: repair without it is
-			// best-effort rather than a hard failure.
-			unlock = nil
-		}
+		// Lock is advisory and failure-tolerant: repair without it is
+		// best-effort rather than a hard failure. auditLockWithWriterMu
+		// keeps repair serialized with concurrent same-process writers; a
+		// contended lock is logged via the lock error and repair proceeds
+		// unlocked (refusing to repair would be worse than racing).
+		unlock, _ = auditLockWithWriterMu(l.lockPath)
 	}
 	if unlock != nil {
 		defer unlock()

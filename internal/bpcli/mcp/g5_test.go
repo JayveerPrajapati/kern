@@ -633,7 +633,7 @@ func g5GatePath(allowed []string, p string) error {
 	return fmt.Errorf("path %q is outside the allowed workspace roots %v", resolved, allowed)
 }
 
-// g5WithinRoot mirrors internal/mcp.RootContains: the root is symlink-resolved
+// g5WithinRoot mirrors internal/mcpgate.RootContains: the root is symlink-resolved
 // before containment is judged.
 func g5WithinRoot(root, resolved string) bool {
 	r, err := filepath.EvalSymlinks(root)

@@ -183,7 +183,7 @@ func parseDiffGateFlags(args []string) (diffGateFlags, int) {
 	fs.SetOutput(os.Stderr)
 	root := fs.String("root", ".", "repository root (default: .)")
 	timeoutSec := fs.Int("timeout", 0, "max runtime in seconds for the whole validation (0 = use .blueprint/config.yaml execution.timeout_seconds, else 120)")
-	blocking := fs.Bool("blocking", false, "elevate WARN findings to BLOCK (exit 1) for protected CI")
+	blocking := fs.Bool("blocking", false, "elevate WARN findings to BLOCK (exit 3) for protected CI")
 	jsonOut := fs.Bool("json", false, "emit structured JSON verdicts")
 	initBaseline := fs.Bool("init-baseline", false, "write the MCP tool-schema baseline and report PASS")
 	noTests := fs.Bool("no-tests", false, "skip the expensive tests:build-test check (fast advisory runs)")
@@ -257,13 +257,14 @@ func buildDiffGateCheckList(absRoot string, cfg *policy.LoadedConfig, initBaseli
 	return checks
 }
 
-// applyBlocking elevates an advisory WARN verdict to BLOCK (exit 1) when
-// --blocking is set for protected CI. PASS/BLOCK/ERROR/SKIP verdicts are
+// applyBlocking elevates an advisory WARN verdict to BLOCK (exit 3) when
+// --blocking is set for protected CI — a blocking gate is a denial, so it
+// uses the denied/blocked exit tier. PASS/BLOCK/ERROR/SKIP verdicts are
 // untouched; advisory WARNs never change the exit code otherwise.
 func applyBlocking(result domain.ValidationResult, blocking bool) domain.ValidationResult {
 	if blocking && result.Status == domain.StatusWarn {
 		result.Status = domain.StatusBlock
-		result.ExitCode = 1
+		result.ExitCode = 3
 	}
 	return result
 }

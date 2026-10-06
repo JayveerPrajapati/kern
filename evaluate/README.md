@@ -12,6 +12,8 @@ measurable.
 go run ./evaluate/bench              # report against this repo's docs
 go run ./evaluate/bench -root ../some-project
 go run ./evaluate/calibration        # risk-scale calibration + impact F1 (see calibration/README.md)
+go run ./evaluate/agentic run       # agentic benchmark: same tasks with/without kern (see agentic/README.md)
+go run ./evaluate/agentic rescore <run-dir>   # recompute kept runs with zero API spend
 make bench                           # gate tests + report
 ```
 
@@ -48,3 +50,6 @@ flaky downloads, byte-for-byte reproducible across machines.
 
 - `bench/main.go` — harness: deterministic corpora, metrics, recall test, report
 - `bench/main_test.go` — gate + degeneracy guards wired into `go test ./...`
+- `agentic/` — agentic benchmark: real headless-agent runs with and without
+  kern's tools (opencode `--pure` is the knob), deterministic scoring, and a
+  rescore-from-artifacts mode; deliberately stdlib-only and product-surface-free

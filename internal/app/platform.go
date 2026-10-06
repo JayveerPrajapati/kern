@@ -520,6 +520,24 @@ func (p *Platform) resolveSymbol(change string) (string, bool, error) {
 		if p.graph == nil || p.graph.Resolvable(change) {
 			return change, false, nil
 		}
+		// intel.Resolve — the resolver explore and context use — accepts
+		// references the graph resolver alone rejects, notably a bare
+		// method name shared by several receivers ("dispatch" ->
+		// "Server.dispatch"). Map its answer to a form the graph accepts:
+		// the FullName, its bare name, or the package-scoped node ID.
+		// An answer identical to the query adds nothing (the graph already
+		// rejected it, and mapping it via the node ID would silently pick
+		// one side of an ambiguous bare name), so the ambiguity error
+		// below stays intact for those.
+		if p.ix != nil {
+			if full, ok := intel.Resolve(p.ix, change); ok && full != change {
+				for _, cand := range []string{full, symbolBareName(full), p.packageScopedID(full, change)} {
+					if cand != "" && cand != change && p.graph.Resolvable(cand) {
+						return cand, true, nil
+					}
+				}
+			}
+		}
 		// If single-token symbol not directly resolvable, find the closest
 		// candidate via ranked search. Only a match that covers EVERY query
 		// word counts: a partial segment hit (e.g. "NoSuchSymbolXYZ" sharing
@@ -543,16 +561,43 @@ func (p *Platform) resolveSymbol(change string) (string, bool, error) {
 			}
 		}
 		// Try high-confidence ranked search match for approximate phrases.
+		// Test symbols (_test.go files, Test*/Benchmark* names) and testdata
+		// fixtures must not outrank production symbols: a request like "what
+		// breaks if I change dispatch" matched TestWhatIfRequiresChange before
+		// the real production symbols (I2), and "dispatch" matched the testdata
+		// stub before the production definition (Fix 3). Prefer the first
+		// resolvable production hit; use a test/testdata symbol only when no
+		// production symbol resolved. This mirrors the tasklife copy of
+		// resolveSymbol (internal/tasklife/platform_api.go, I2/Fix 3
+		// refinement) — the two copies must stay aligned.
 		if p.ix != nil {
+			var testFallback string
 			for _, h := range intel.RankedSearchScored(p.ix, change, 5) {
-				if h.Score >= 150 {
-					if p.graph.Resolvable(h.Symbol.FullName()) {
-						return h.Symbol.FullName(), true, nil
-					}
-					if p.graph.Resolvable(h.Symbol.Name) {
-						return h.Symbol.Name, true, nil
-					}
+				if h.Score < 150 {
+					continue
 				}
+				if intel.IsTestFile(h.Symbol.File) ||
+					intel.IsFixtureFile(h.Symbol.File) ||
+					strings.HasPrefix(h.Symbol.Name, "Test") ||
+					strings.HasPrefix(h.Symbol.Name, "Benchmark") {
+					if testFallback == "" {
+						if p.graph.Resolvable(h.Symbol.FullName()) {
+							testFallback = h.Symbol.FullName()
+						} else if p.graph.Resolvable(h.Symbol.Name) {
+							testFallback = h.Symbol.Name
+						}
+					}
+					continue
+				}
+				if p.graph.Resolvable(h.Symbol.FullName()) {
+					return h.Symbol.FullName(), true, nil
+				}
+				if p.graph.Resolvable(h.Symbol.Name) {
+					return h.Symbol.Name, true, nil
+				}
+			}
+			if testFallback != "" {
+				return testFallback, true, nil
 			}
 		}
 		if len(cands) == 0 {
@@ -733,6 +778,88 @@ func codeContextMaxTokens() int {
 		return 0
 	}
 	return n
+}
+
+// symbolBareName returns the part of a qualified name after the last '.'
+// ("Server.dispatch" -> "dispatch"; a plain name is returned unchanged).
+func symbolBareName(full string) string {
+	if i := strings.LastIndexByte(full, '.'); i >= 0 {
+		return full[i+1:]
+	}
+	return full
+}
+
+// packageScopedID derives the graph's package-scoped node ID
+// ("<pkg>.<FullName>", bare FullName for the root package) for a symbol
+// carrying the given FullName, mirroring FromIndex's node ID derivation. It
+// lets a name the plain graph resolver rejects (a same-named symbol in
+// several packages, qualified by the user) still reach its defining node.
+// When the original query is path-qualified ("bpcli/mcp.NewServer"), the
+// first symbol defined under a matching path suffix wins, so the user's
+// qualifier — not index order — picks the package.
+func (p *Platform) packageScopedID(full, query string) string {
+	if p.ix == nil {
+		return ""
+	}
+	pkgByFile := make(map[string]string, len(p.ix.Pkgs))
+	for path, pk := range p.ix.Pkgs {
+		for _, f := range pk.Files {
+			pkgByFile[f] = path
+		}
+	}
+	// dirPrefix is the query's qualifier before its last separator
+	// ("bpcli/mcp" in "bpcli/mcp.NewServer"); "" for a bare name.
+	dirPrefix := ""
+	if i := strings.LastIndexByte(query, '.'); i >= 0 {
+		dirPrefix = query[:i]
+	} else if i := strings.LastIndexByte(query, '/'); i >= 0 {
+		dirPrefix = query[:i]
+	}
+	var firstID string
+	for _, s := range p.ix.Symbols {
+		if s.FullName() != full {
+			continue
+		}
+		pkg := pkgByFile[s.File]
+		if pkg == "" {
+			pkg = filepath.Dir(s.File)
+		}
+		id := full
+		if pkg != "" && pkg != "." {
+			id = pkg + "." + full
+		}
+		if firstID == "" {
+			firstID = id
+		}
+		if dirPrefix != "" && fileMatchesPathPrefix(s.File, dirPrefix) {
+			return id
+		}
+	}
+	return firstID
+}
+
+// fileMatchesPathPrefix reports whether the directory part of file ends
+// with the '/'-separated segments of prefix ("internal/bpcli/mcp/server.go"
+// carries the prefix "bpcli/mcp").
+func fileMatchesPathPrefix(file, prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	segs := strings.Split(strings.Trim(prefix, "/"), "/")
+	if len(segs) == 0 {
+		return true
+	}
+	fsegs := strings.Split(strings.Trim(filepath.Dir(file), "/"), "/")
+	if len(fsegs) < len(segs) {
+		return false
+	}
+	off := len(fsegs) - len(segs)
+	for i, s := range segs {
+		if fsegs[off+i] != s {
+			return false
+		}
+	}
+	return true
 }
 
 // graphNodeFile returns the defining file of the graph node for the given

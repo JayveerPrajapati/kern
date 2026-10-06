@@ -18,6 +18,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/blueprint/audit"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 	"github.com/JayveerPrajapati/kern/internal/gates"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
 // runDoctor implements `blueprint doctor` — a preflight diagnostic that finds
@@ -221,7 +223,84 @@ func runDoctorChecks(ctx context.Context, repoRoot string) []doctorCheck {
 	// hash and is a hard config-class error (exit 3).
 	checks = append(checks, checkAuditChain(repoRoot))
 
+	// 9. bypass history (env) — how many emergency bypasses were honored vs
+	// refused (audit-table-2 B). A non-zero honored count is a WARN (never an
+	// error — bypasses are exceptional and must be reviewable, not fatal).
+	checks = append(checks, checkBypassHistory(repoRoot))
+
 	return checks
+}
+
+// checkBypassHistory reports emergency-bypass usage: how many bypasses were
+// honored vs refused (audit-table-2 B). It counts two sources: the
+// machine-wide ~/.kern/audit/bypass.jsonl guard-hook trail (mode field
+// confirmed/tty-present = honored, refused:* = refused; legacy no-field
+// records count as honored) and the project's .kern/audit governance chain
+// (Action=bypass entries with Result bypassed vs refused:*). A non-zero
+// honored count is a WARN — bypasses are exceptional and must be reviewable —
+// never an error, so it cannot flip the doctor exit code.
+func checkBypassHistory(repoRoot string) doctorCheck {
+	honored, refused := 0, 0
+
+	// Machine-wide guard hook trail.
+	if home, err := os.UserHomeDir(); err == nil {
+		p := filepath.Join(home, ".kern", "audit", "bypass.jsonl")
+		if data, rerr := os.ReadFile(p); rerr == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				var rec struct {
+					Mode string `json:"mode"`
+				}
+				if json.Unmarshal([]byte(line), &rec) != nil {
+					continue
+				}
+				switch {
+				case rec.Mode == "" || rec.Mode == "confirmed" || rec.Mode == "tty-present":
+					honored++
+				case strings.HasPrefix(rec.Mode, "refused"):
+					refused++
+				}
+			}
+		}
+	}
+
+	// Project governance chain (Action=bypass entries).
+	auditDir := filepath.Join(repoRoot, ".kern", "audit")
+	l := governance.NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock"))
+	if _, err := l.Replay(); err == nil {
+		for i := range l.All() {
+			e := l.All()[i]
+			if e.Action != "bypass" {
+				continue
+			}
+			if e.Result == "bypassed" {
+				honored++
+			} else if strings.HasPrefix(e.Result, "refused") {
+				refused++
+			}
+		}
+	}
+
+	detail := fmt.Sprintf("%d bypasses honored, %d refused", honored, refused)
+	if honored > 0 {
+		return doctorCheck{
+			Name:     "bypass-history",
+			Status:   statusWarn,
+			Category: catEnv,
+			Detail:   detail + " — review ~/.kern/audit/bypass.jsonl and .kern/audit",
+		}
+	}
+	return doctorCheck{
+		Name:     "bypass-history",
+		Status:   statusOK,
+		Category: catEnv,
+		Detail:   detail,
+	}
 }
 
 // checkAuditChain verifies the P1.4 hash chain in .blueprint/audit/audit.jsonl
