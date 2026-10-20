@@ -23,6 +23,11 @@ type ProbeAnchor struct {
 	Callers  []string `json:"callers,omitempty"`
 	Callees  []string `json:"callees,omitempty"`
 	Tests    []string `json:"tests,omitempty"`
+	// Fuzzy marks an anchor that came from the fuzzy fallback (keyword or
+	// camelCase partial match), not an exact index resolution: prose-noise
+	// anchors (the word "test" matching Test* functions) must never read as
+	// confident identifications. B2, QA 2026-10-15.
+	Fuzzy bool `json:"fuzzy,omitempty"`
 }
 
 // ProbeReport is the assembled micro-context bundle for a task: every symbol
@@ -61,15 +66,34 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	if maxTokens <= 0 {
 		maxTokens = 4000
 	}
+	yamlish := isYAMLishTask(task)
+	// kindByFull maps each symbol's canonical FullName to its kind, so the
+	// anchor filter below can drop non-code symbols (data-file props, docs
+	// headings) before they become anchors or path endpoints.
+	kindByFull := map[string]string{}
+	for _, s := range ix.Symbols {
+		if _, ok := kindByFull[s.FullName()]; !ok {
+			kindByFull[s.FullName()] = s.Kind
+		}
+	}
 	candidates := map[string]bool{}
+	exact := map[string]bool{}
+	fuzzyHits := map[string]bool{}
 	for _, w := range identRe.FindAllString(task, -1) {
 		// Consult the index FIRST: a token that resolves (case-sensitively)
 		// to a real symbol wins over the stopword filter, so a symbol whose
 		// name collides with a common English/change verb (Add, Get, Run,
 		// Set, Make, Call, Fix, ...) is never dropped. Stopword filtering
-		// applies only to tokens that do NOT resolve to an index symbol.
+		// applies only to tokens that do NOT resolve to an index symbol —
+		// and, QA 5.6(a), to ALL-LOWERCASE stopword tokens even when they
+		// resolve: "on"/"to"/"body" in task prose must not anchor a YAML
+		// workflow property that merely shares the spelling.
 		if r, ok := Resolve(ix, w); ok {
+			if !anchorableCandidate(kindByFull[r], yamlish) {
+				continue
+			}
 			candidates[r] = true
+			exact[r] = true
 			continue
 		}
 	}
@@ -82,7 +106,11 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	for _, m := range hyphenPairRe.FindAllStringSubmatch(task, -1) {
 		for _, j := range joinVariants(m[1], m[2]) {
 			if r, ok := Resolve(ix, j); ok {
+				if !anchorableCandidate(kindByFull[r], yamlish) {
+					continue
+				}
 				candidates[r] = true
+				exact[r] = true
 				break
 			}
 		}
@@ -94,7 +122,11 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 		keywords := extractKeywords(task)
 		for _, kw := range keywords {
 			for _, match := range fuzzyMatchSymbols(ix, kw, 5) {
+				if !anchorableCandidate(kindByFull[match], yamlish) {
+					continue
+				}
 				candidates[match] = true
+				fuzzyHits[match] = true
 			}
 		}
 	} else {
@@ -113,7 +145,33 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 				continue // already anchored exactly
 			}
 			for _, match := range fuzzyMatchSymbols(ix, tok, 2) {
+				if !anchorableCandidate(kindByFull[match], yamlish) {
+					continue
+				}
 				candidates[match] = true
+				fuzzyHits[match] = true
+			}
+		}
+		// F5 (QA 2026-10-19 campaign): the F4 recovery only reaches
+		// camelCase-shaped tokens, so an all-prose task like "exec approval
+		// TTL bug" anchored just the `approval` struct while
+		// CheckExecCommand / execRejectionTTLText stayed unfound. Run the
+		// stopword-filtered keywords through a ranked fuzzy pass — a symbol
+		// whose name covers MULTIPLE task keywords is a precise
+		// identification and anchors unconditionally; a single-keyword match
+		// anchors only the most-connected one. Anchors stay labeled Fuzzy
+		// (low confidence). A keyword that already anchored exactly is
+		// skipped.
+		for _, kw := range extractKeywords(task) {
+			if r, ok := Resolve(ix, kw); ok && candidates[r] {
+				continue
+			}
+			for _, match := range fuzzyKeywordMatches(ix, kw, task) {
+				if !anchorableCandidate(kindByFull[match], yamlish) {
+					continue
+				}
+				candidates[match] = true
+				fuzzyHits[match] = true
 			}
 		}
 	}
@@ -137,7 +195,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 
 	var anchors []ProbeAnchor
 	for _, r := range resolved {
-		a := ProbeAnchor{Name: simpleName(r), Resolved: r}
+		a := ProbeAnchor{Name: simpleName(r), Resolved: r, Fuzzy: fuzzyHits[r] && !exact[r]}
 		if s, ok := meta[r]; ok {
 			a.Kind = s.Kind
 			a.File = s.File
@@ -225,9 +283,23 @@ func RenderProbe(r *ProbeReport) string {
 		b.WriteString("  (no task symbols resolved against the index — try naming a function or type)\n")
 		return b.String()
 	}
+	allFuzzy := true
+	for _, a := range r.Anchors {
+		if !a.Fuzzy {
+			allFuzzy = false
+			break
+		}
+	}
+	if allFuzzy {
+		b.WriteString("warning: no exact symbol matches — anchors below are fuzzy (low confidence, may be unrelated)\n\n")
+	}
 	fmt.Fprintf(&b, "anchors: %d\n", len(r.Anchors))
 	for _, a := range r.Anchors {
-		fmt.Fprintf(&b, "\n%s  (%s)  %s:%d\n", a.Name, a.Kind, a.File, a.Line)
+		label := ""
+		if a.Fuzzy {
+			label = "  [fuzzy match — low confidence]"
+		}
+		fmt.Fprintf(&b, "\n%s  (%s)  %s:%d%s\n", a.Name, a.Kind, a.File, a.Line, label)
 		if len(a.Callers) > 0 {
 			fmt.Fprintf(&b, "  callers: %s\n", strings.Join(a.Callers, ", "))
 		}
@@ -296,6 +368,33 @@ func isCamelCase(s string) bool {
 	return hasLower && hasUpperAfterLower
 }
 
+// isYAMLishTask reports whether a task text names YAML/yml artifacts, in
+// which case data-file property keys ("on:", "runs-on:") are legitimate
+// anchors for the task. Anything else treats prop-kind symbols as non-code.
+func isYAMLishTask(task string) bool {
+	low := strings.ToLower(task)
+	return strings.Contains(low, "yaml") || strings.Contains(low, ".yml")
+}
+
+// anchorableCandidate is the probe anchor filter (QA 5.6(a)): a resolved
+// symbol can anchor a probe — and therefore appear in its "connecting paths"
+// — only when it is real code for this task. Data-file property keys
+// (JSON/YAML kind "prop": "on", "to", "body" in a GitHub workflow) and docs
+// headings (kind "heading") are excluded unless the task is YAML-ish. Code
+// symbols whose names collide with stopwords (Add, Get, Run, find) keep their
+// documented precedence — the index consult precedes the stopword filter
+// (pinned by TestProbeFiltersStopwords); the stopword filter keeps applying
+// to tokens that do NOT resolve.
+func anchorableCandidate(kind string, yamlish bool) bool {
+	switch kind {
+	case "prop":
+		return yamlish
+	case "heading":
+		return false
+	}
+	return true
+}
+
 // extractKeywords pulls meaningful keywords from a natural-language task
 // string, filtering stop words and short tokens. Keywords are lowercased
 // and deduped. For example, "decommission a network service" yields
@@ -347,6 +446,51 @@ func fuzzyMatchSymbols(ix *index.Index, keyword string, limit int) []string {
 		}
 	}
 	return matches
+}
+
+// fuzzyKeywordMatches returns the symbols matching one prose keyword of the
+// task, ranked for a tight cut instead of raw scan order: every symbol whose
+// name covers MULTIPLE task keywords (execRejectionTTL covers "exec" and
+// "ttl") anchors — that is a precise identification, not noise — capped at 4
+// to bound a pathological task; among single-keyword matches only the most
+// connected one anchors (a call-graph hub like CheckExecCommand outranks an
+// incidental substring), ties broken lexicographically for determinism.
+func fuzzyKeywordMatches(ix *index.Index, kw, task string) []string {
+	kws := extractKeywords(task)
+	lower := strings.ToLower(kw)
+	var multi, single []string
+	for _, s := range ix.Symbols {
+		full := s.FullName()
+		lf := strings.ToLower(full)
+		if !strings.Contains(lf, lower) {
+			continue
+		}
+		cov := 0
+		for _, k := range kws {
+			if k != kw && strings.Contains(lf, k) {
+				cov++
+			}
+		}
+		if cov > 0 {
+			multi = append(multi, full)
+		} else {
+			single = append(single, full)
+		}
+	}
+	if len(multi) > 4 {
+		multi = multi[:4]
+	}
+	if len(single) > 1 {
+		sort.Slice(single, func(i, j int) bool {
+			ci, cj := len(ix.Callers[single[i]]), len(ix.Callers[single[j]])
+			if ci != cj {
+				return ci > cj
+			}
+			return single[i] < single[j]
+		})
+		single = single[:1]
+	}
+	return append(multi, single...)
 }
 
 // splitCamelCase breaks a CamelCase or PascalCase identifier into lowercase

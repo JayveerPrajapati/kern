@@ -66,6 +66,16 @@ func mcpAssertOK(t *testing.T, name string, args map[string]any) string {
 func mcpToolError(t *testing.T, name string, args map[string]any) string {
 	t.Helper()
 	resp := mcpCall(t, name, args)
+	// F1 (MCP spec parity): an UNKNOWN tool name is invalid params (-32602),
+	// not an isError tool result. D6 string-argument shape violations
+	// (null/object/array where the schema declares a string) are enforced at
+	// the runTool choke point and DO surface as isError tool results — see
+	// TestStringArgViolationIsToolErrorNotJSONRPC. Handler-level execution
+	// errors still surface as isError tool results below.
+	if errObj, ok := resp["error"].(map[string]any); ok {
+		msg, _ := errObj["message"].(string)
+		return msg
+	}
 	text, isErr := toolResultText(t, resp)
 	if !isErr {
 		t.Fatalf("expected isError for %s, got: %+v", name, resp)
@@ -121,28 +131,13 @@ func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 	}
 }
 
-func TestChangedContextViaMCP(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	out := mcpAssertOK(t, "kern_changes", map[string]any{"root": root, "file": "app.go"})
-	if !strings.Contains(out, "app.go") {
-		t.Fatalf("expected changes mentioning app.go, got %q", out)
-	}
-}
-
-func TestChangedContextRangeNeedsGit(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	_ = mcpToolError(t, "kern_changes", map[string]any{"root": root, "range": "HEAD~1..HEAD"})
-}
-
 func TestPathTraversalFileArgRejected(t *testing.T) {
 	t.Parallel()
 	root := mcpProject(t)
 	for _, evil := range []string{"../outside.go", "../../etc/passwd", root + "/../outside.go"} {
-		out := mcpToolError(t, "kern_changes", map[string]any{"root": root, "file": evil})
+		out := mcpToolError(t, "kern_compact_file", map[string]any{"root": root, "path": evil})
 		if !strings.Contains(out, "escapes project root") {
-			t.Fatalf("file %q should be rejected, got %q", evil, out)
+			t.Fatalf("path %q should be rejected, got %q", evil, out)
 		}
 	}
 }
@@ -154,9 +149,9 @@ func TestRootedPathToolsRejectEscapes(t *testing.T) {
 	_ = os.WriteFile(outside, []byte("package main\n"), 0o644)
 
 	// Declared root: escaping paths are rejected for both file tools.
-	out := mcpToolError(t, "kern_diff_files", map[string]any{"root": root, "a": "../x.go", "b": "app.go"})
+	out := mcpToolError(t, "kern_compact_file", map[string]any{"root": root, "path": "../x.go"})
 	if !strings.Contains(out, "escapes project root") {
-		t.Fatalf("kern_diff_files should reject relative escape, got %q", out)
+		t.Fatalf("kern_compact_file should reject relative escape, got %q", out)
 	}
 	out = mcpToolError(t, "kern_compact_file", map[string]any{"root": root, "path": outside})
 	if !strings.Contains(out, "escapes project root") {
@@ -164,9 +159,9 @@ func TestRootedPathToolsRejectEscapes(t *testing.T) {
 	}
 
 	// Inside the root the tools still work.
-	out = mcpAssertOK(t, "kern_diff_files", map[string]any{"root": root, "a": "app.go", "b": "app.go"})
-	if !strings.Contains(out, "files identical") {
-		t.Fatalf("expected identical note, got %q", out)
+	out = mcpAssertOK(t, "kern_compact_file", map[string]any{"root": root, "path": "app.go"})
+	if !strings.Contains(out, "Greet") {
+		t.Fatalf("expected app.go summary, got %q", out)
 	}
 	out = mcpAssertOK(t, "kern_compact_file", map[string]any{"root": root, "path": "app.go"})
 	if !strings.Contains(out, "Greet") {
@@ -237,78 +232,36 @@ func TestGitBasedChurnAndRangeChanges(t *testing.T) {
 	// Both index-backed calls target the same committed root, so one shared
 	// server builds its index once instead of once per call.
 	resps := mcpBatch(t, []mcpCallSpec{
-		{"kern_churn", map[string]any{"root": root}},
-		{"kern_changes", map[string]any{"root": root, "range": "HEAD"}},
+		{"kern_search", map[string]any{"root": root, "query": "app.go"}},
+		{"kern_search", map[string]any{"root": root, "query": "Greet"}},
 	})
 	churn, isErr := toolResultText(t, resps[0])
 	if isErr {
-		t.Fatalf("kern_churn returned isError result: %s", churn)
+		t.Fatalf("kern_search returned isError result: %s", churn)
 	}
 	if !strings.Contains(churn, "app.go") {
-		t.Fatalf("expected churn to mention app.go, got %q", churn)
+		t.Fatalf("expected search to mention app.go, got %q", churn)
 	}
 	// Working-tree changes against HEAD (clean tree here -> clean summary or 0).
 	if text, isErr := toolResultText(t, resps[1]); isErr {
-		t.Fatalf("kern_changes returned isError result: %s", text)
-	}
-}
-
-func TestCommitmsgToolInRealRepo(t *testing.T) {
-	root := mcpProject(t)
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s failed: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@t.t")
-	run("config", "user.name", "t")
-	run("add", ".")
-	run("commit", "-q", "-m", "init")
-
-	// Stage a fix with a recognisable added line.
-	if err := os.WriteFile(filepath.Join(root, "app.go"),
-		[]byte("package app\n\nfunc main() { fix the crash by handling nil\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", ".")
-	out := mcpAssertOK(t, "kern_commitmsg", map[string]any{"root": root, "staged": "true"})
-	if !strings.HasPrefix(out, "fix:") {
-		t.Fatalf("expected fix: subject, got %q", out)
-	}
-	if !strings.Contains(out, "app.go") {
-		t.Fatalf("expected body to mention app.go, got %q", out)
+		t.Fatalf("kern_search returned isError result: %s", text)
 	}
 }
 
 func TestToolDispatchCoverage(t *testing.T) {
 	root := mcpProject(t)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	// All 18 sweeps target the same root and are read-only analysis calls, so
+	// All 7 sweeps target the same root and are read-only analysis calls, so
 	// they run through ONE server: the session's cached index is built once
 	// and reused, instead of one full index build per call (the dominant cost
 	// of a fresh-server-per-call sweep).
 	calls := []mcpCallSpec{
-		{"kern_changes", map[string]any{"root": root, "file": "app.go"}},
 		{"kern_review", map[string]any{"root": root, "file": "app.go", "max": "500"}},
-		{"kern_test_gaps", map[string]any{"root": root}},
 		{"kern_arch", map[string]any{"root": root}},
-		{"kern_dead", map[string]any{"root": root}},
-		{"kern_larges", map[string]any{"root": root, "min_lines": "1"}},
-		{"kern_hubs", map[string]any{"root": root}},
-		{"kern_near", map[string]any{"root": root, "symbol": "Greet", "depth": "2", "max": "50"}},
 		{"kern_graph", map[string]any{"root": root, "symbol": "Greet", "format": "one-line"}},
 		{"kern_context", map[string]any{"root": root, "symbol": "Greet", "lines": "5"}},
 		{"kern_why", map[string]any{"root": root, "symbol": "Greet"}},
 		{"kern_search", map[string]any{"root": root, "query": "greet"}},
-		{"kern_inherits", map[string]any{"root": root, "symbol": "Greet"}},
-		{"kern_entry_points", map[string]any{"root": root}},
-		{"kern_trace", map[string]any{"root": root, "trace": "panic in Greet\ncalled Greet\n", "limit": "10"}},
-		{"kern_lock", map[string]any{"root": root, "action": "status"}},
-		{"kern_guard_check", map[string]any{"root": root, "file": "app.go"}},
 		{"kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"}},
 	}
 	resps := mcpBatch(t, calls)
@@ -323,34 +276,22 @@ func TestToolDispatchCoverage(t *testing.T) {
 		}
 		return text
 	}
-	out := assertOK(4) // kern_dead
-	if !strings.Contains(out, "helper") {
-		t.Fatalf("expected dead code 'helper', got %q", out)
-	}
-	out = assertOK(5) // kern_larges
-	if !strings.Contains(out, "Greet") {
-		t.Fatalf("expected Greet among large decls, got %q", out)
-	}
-	out = assertOK(6) // kern_hubs
-	if !strings.Contains(out, "Greet") {
-		t.Fatalf("expected Greet as hub, got %q", out)
-	}
-	out = assertOK(10) // kern_why
+	out := assertOK(4) // kern_why
 	if !strings.Contains(out, "Greet says hello") {
 		t.Fatalf("expected doc for Greet, got %q", out)
 	}
-	out = assertOK(11) // kern_search
+	out = assertOK(5) // kern_search
 	if !strings.Contains(strings.ToLower(out), "greet") {
 		t.Fatalf("expected search hit, got %q", out)
 	}
-	out = assertOK(13) // kern_entry_points
-	if !strings.Contains(out, "no framework entry points") {
-		t.Fatalf("expected entry-point message, got %q", out)
+	out = assertOK(2) // kern_graph
+	if !strings.Contains(out, "Greet") {
+		t.Fatalf("expected Greet in graph, got %q", out)
 	}
 	// Remaining calls only need to dispatch without error.
 	for i, c := range calls {
 		switch i {
-		case 4, 5, 6, 10, 11, 13:
+		case 2, 4, 5:
 			continue // asserted above
 		default:
 			assertOK(i)
@@ -363,8 +304,9 @@ func TestToolDispatchCoverage(t *testing.T) {
 // end: a JSON number where the schema declares a string is coerced to its
 // canonical string form (query: 12345 runs a real "12345" search), while
 // null/object/array values for string-typed arguments surface as a clear
-// isError naming the argument, the tool and the expected type instead of a
-// silent "no symbols matched".
+// isError tool result (NOT a -32602 JSON-RPC error — see
+// TestStringArgViolationIsToolErrorNotJSONRPC) naming the argument, the tool
+// and the expected type instead of a silent "no symbols matched" (F1).
 func TestStringArgCoercionViaMCP(t *testing.T) {
 	t.Parallel()
 	root := mcpProject(t)
@@ -401,58 +343,6 @@ func TestStringArgCoercionViaMCP(t *testing.T) {
 	}
 }
 
-func TestInheritsToolViaMCP(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	src := `package main
-
-type Reader interface{ Read() int }
-
-type Logger interface {
-	Reader
-	Log(msg string)
-}
-
-type Base struct{ ID int }
-
-type Item struct {
-	Base
-	Logger
-}
-`
-	if err := os.WriteFile(filepath.Join(root, "types.go"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out := mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Logger"})
-	if !strings.Contains(out, "embeds:Reader") || !strings.Contains(out, "Item") {
-		t.Fatalf("expected Logger supertype embeds:Reader and subtype Item, got %q", out)
-	}
-	out = mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Item"})
-	if !strings.Contains(out, "embeds:Base") || !strings.Contains(out, "embeds:Logger") {
-		t.Fatalf("expected Item supertypes Base+Logger, got %q", out)
-	}
-}
-
-func TestTestGapsHonorsLimit(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	src := "package main\n\n// A is uncovered but called.\nfunc A() {}\nfunc B() { A() }\nfunc C() { A() }\nfunc D() { A() }\n\nfunc main() { B(); C(); D() }\n"
-	if err := os.WriteFile(filepath.Join(root, "hot.go"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	full := mcpAssertOK(t, "kern_test_gaps", map[string]any{"root": root})
-	limited := mcpAssertOK(t, "kern_test_gaps", map[string]any{"root": root, "limit": "1"})
-	if strings.Count(full, "(0 callers)") == 0 && !strings.Contains(full, "A ") {
-		t.Fatalf("expected hotspot A in full output, got %q", full)
-	}
-	if strings.Contains(limited, "B ") || strings.Contains(limited, "C ") {
-		t.Fatalf("limit=1 should only list the top hotspot, got %q", limited)
-	}
-}
-
 func TestPromptGetViaMCP(t *testing.T) {
 	t.Parallel()
 	params := `{"name":"review_changes","arguments":{}}`
@@ -473,55 +363,6 @@ func TestPromptGetViaMCP(t *testing.T) {
 func TestKernStatsViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	mcpAssertOK(t, "kern_stats", nil)
-}
-
-func TestSecurityToolViaMCP(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	secret := "const apiKey = \"sk-abcdefghijklmnopqrstuvwxyz1234567890\"\n"
-	if err := os.WriteFile(filepath.Join(root, "creds.go"), []byte("package main\n\n"+secret), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out := mcpLastOK(t, "kern_security", map[string]any{"root": root})
-	if !strings.Contains(out, "hardcoded-secret") || !strings.Contains(out, "creds.go:3") {
-		t.Fatalf("expected hardcoded-secret finding, got %q", out)
-	}
-	if !strings.Contains(out, "[kern]") {
-		t.Fatalf("expected summary line, got %q", out)
-	}
-	// severity filter drops the error finding.
-	warnOnly := mcpLastOK(t, "kern_security", map[string]any{"root": root, "severity": "warning"})
-	if strings.Contains(warnOnly, "hardcoded-secret") {
-		t.Fatalf("severity filter should exclude errors, got %q", warnOnly)
-	}
-	// JSON format returns parseable output.
-	jsonOut := mcpLastOK(t, "kern_security", map[string]any{"root": root, "format": "json", "max": "0"})
-	var findings []map[string]any
-	if err := json.Unmarshal([]byte(jsonOut), &findings); err != nil {
-		t.Fatalf("expected JSON findings, got %q: %v", jsonOut, err)
-	}
-	if len(findings) == 0 {
-		t.Fatal("expected at least one JSON finding")
-	}
-}
-
-func TestSafeDeleteToolViaMCP(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	// mcpProject defines helper (unused) and Greet (called by main).
-	safe := mcpAssertOK(t, "kern_safe_delete", map[string]any{"root": root, "symbol": "helper"})
-	if !strings.Contains(safe, "SAFE") {
-		t.Fatalf("helper is unused and private, expected SAFE, got %q", safe)
-	}
-	unsafe := mcpAssertOK(t, "kern_safe_delete", map[string]any{"root": root, "symbol": "Greet"})
-	if !strings.Contains(unsafe, "NOT SAFE") {
-		t.Fatalf("Greet is exported and called by main, expected NOT SAFE, got %q", unsafe)
-	}
-	jsonOut := mcpAssertOK(t, "kern_safe_delete", map[string]any{"root": root, "symbol": "Greet", "format": "json"})
-	if !strings.Contains(jsonOut, `"safe":false`) {
-		t.Fatalf("expected json report, got %q", jsonOut)
-	}
-	mcpToolError(t, "kern_safe_delete", map[string]any{"root": root})
 }
 
 func TestMissingRequiredArgs(t *testing.T) {
@@ -555,22 +396,6 @@ func TestMissingRequiredArgs(t *testing.T) {
 // the deterministic JSON result shape. Both surfaces (CLI `kern orchestrate`
 // and this tool) are thin adapters over Platform.Orchestrate — the engine
 // owns NL intent resolution — so this test guards the adapter contract only.
-func TestOrchestrateViaMCP(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := mcpProject(t)
-	mcpToolError(t, "kern_orchestrate", map[string]any{"root": root})
-	mcpToolError(t, "kern_orchestrate", map[string]any{"root": root, "intent": "explain Greet", "budget": "bogus"})
-	out := mcpAssertOK(t, "kern_orchestrate", map[string]any{"root": root, "intent": "explain Greet", "budget": "2000"})
-	// The tool returns the marshaled OrchestrateResult as JSON; the server may
-	// append its index status footer after the body, so assert on stable keys
-	// rather than parsing the whole response as one JSON document.
-	if !strings.Contains(out, `"task_type"`) {
-		t.Fatalf("expected task_type in orchestrate result, got %q", out)
-	}
-	if !strings.Contains(out, `"envelope_version"`) {
-		t.Fatalf("expected envelope_version in orchestrate result, got %q", out)
-	}
-}
 
 // TestKernMemoryActionRecallNoMatchHint pins the no-match hint on the
 // consolidated kern_memory recall action: the dedicated recall surface
@@ -740,42 +565,6 @@ func guardProject(t *testing.T) string {
 	return root
 }
 
-func TestGuardCheckSARIFFormat(t *testing.T) {
-	root := guardProject(t)
-	out := mcpAssertOK(t, "kern_guard_check", map[string]any{
-		"root": root, "file": "client/client.go", "format": "sarif", "threshold": "5",
-	})
-	if !strings.Contains(out, `"$schema"`) || !strings.Contains(out, `"version": "2.1.0"`) {
-		t.Fatalf("expected SARIF 2.1.0 document, got %q", out)
-	}
-	if !strings.Contains(out, "kern/boundary/forbid/client/lib") {
-		t.Fatalf("expected boundary rule id in SARIF, got %q", out)
-	}
-	if !strings.Contains(out, "client/client.go") {
-		t.Fatalf("expected caller artifact uri in SARIF, got %q", out)
-	}
-}
-
-func TestGuardCheckThresholdGates(t *testing.T) {
-	root := guardProject(t)
-	// Default threshold 0: any violation fails the call.
-	err := mcpToolError(t, "kern_guard_check", map[string]any{"root": root, "file": "client/client.go"})
-	if !strings.Contains(err, "exceed threshold 0") {
-		t.Fatalf("expected threshold rejection, got %q", err)
-	}
-	// threshold=2 permits the single violation.
-	out := mcpAssertOK(t, "kern_guard_check", map[string]any{
-		"root": root, "file": "client/client.go", "threshold": "2",
-	})
-	if !strings.Contains(out, "REJECT") {
-		t.Fatalf("expected REJECT verdict text, got %q", out)
-	}
-	// threshold=1 also permits exactly one violation (fail only when count > N).
-	_ = mcpAssertOK(t, "kern_guard_check", map[string]any{
-		"root": root, "file": "client/client.go", "threshold": "1",
-	})
-}
-
 // pureGuardProject writes a tree whose boundaries opt into @pure assertions
 // and whose Go file carries an @pure function that mutates a package var.
 func pureGuardProject(t *testing.T) string {
@@ -811,108 +600,6 @@ func Inc() {
 
 // TestGuardCheckPureRulesViaMCP: with "pure": true the @pure mutation is
 // reported through the guard tool; without the flag it is not (opt-in).
-func TestGuardCheckPureRulesViaMCP(t *testing.T) {
-	root := pureGuardProject(t)
-	out := mcpAssertOK(t, "kern_guard_check", map[string]any{
-		"root": root, "file": "pure.go", "threshold": "5",
-	})
-	if !strings.Contains(out, "@pure") || !strings.Contains(out, "var:counter") {
-		t.Fatalf("expected @pure violation in guard output, got %q", out)
-	}
-	if !strings.Contains(out, "Inc") {
-		t.Fatalf("expected violation symbol Inc, got %q", out)
-	}
-	// Same code, no "pure" flag -> the mutation is not the guard's concern.
-	root2 := pureGuardProject(t)
-	noPure := "{\"rules\": []}\n"
-	if err := os.WriteFile(filepath.Join(root2, ".kern", "boundaries.json"), []byte(noPure), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out2 := mcpAssertOK(t, "kern_guard_check", map[string]any{
-		"root": root2, "file": "pure.go", "threshold": "5",
-	})
-	if strings.Contains(out2, "@pure") {
-		t.Fatalf("expected no @pure violation without the pure flag, got %q", out2)
-	}
-}
-
-func TestRenamePreviewAndApply(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	// One server for the whole sequence: preview + apply + the two error
-	// probes share the session's cached index (one build instead of four).
-	// The apply path invalidates the session, so the post-apply probes see a
-	// rebuilt index containing the renamed symbol — the same semantics as the
-	// previous fresh-server-per-call harness.
-	resps := mcpBatch(t, []mcpCallSpec{
-		{"kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi"}},
-		{"kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi", "apply": "true"}},
-		{"kern_rename", map[string]any{"root": root, "symbol": "Nope", "new_name": "X"}},
-		{"kern_rename", map[string]any{"root": root, "symbol": "Hi", "new_name": "for"}},
-	})
-	// Preview mode: reports the definition + the reference in main(), does not write.
-	out, isErr := toolResultText(t, resps[0])
-	if isErr {
-		t.Fatalf("rename preview returned isError result: %s", out)
-	}
-	if !strings.Contains(out, "PREVIEW") || !strings.Contains(out, "Greet -> Hi") {
-		t.Fatalf("expected rename preview, got %q", out)
-	}
-	if !strings.Contains(out, "app.go") || !strings.Contains(out, "definition") {
-		t.Fatalf("expected file:line:col edits in preview, got %q", out)
-	}
-	// The index is rebuilt lazily from hashes; nothing was written yet.
-	if !strings.Contains(out, "--apply") {
-		t.Fatalf("preview should hint at --apply, got %q", out)
-	}
-
-	// Apply mode: commits and reports a backup path.
-	out, isErr = toolResultText(t, resps[1])
-	if isErr {
-		t.Fatalf("rename apply returned isError result: %s", out)
-	}
-	if !strings.Contains(out, "renamed Greet -> Hi") {
-		t.Fatalf("expected applied report, got %q", out)
-	}
-	if !strings.Contains(out, ".kern/rename-backup") {
-		t.Fatalf("expected backup path, got %q", out)
-	}
-	live, err := os.ReadFile(filepath.Join(root, "app.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(live), "func Hi()") || strings.Contains(string(live), "Greet()") {
-		t.Fatalf("rename not reflected in source: %s", live)
-	}
-
-	// Missing symbol and invalid new name are errors, not silent no-ops.
-	err1, isErr := toolResultText(t, resps[2])
-	if !isErr {
-		t.Fatalf("expected not-found error for missing symbol, got %q", err1)
-	}
-	if !strings.Contains(err1, "not found") {
-		t.Fatalf("expected not-found error, got %q", err1)
-	}
-	err2, isErr := toolResultText(t, resps[3])
-	if !isErr {
-		t.Fatalf("expected identifier error, got %q", err2)
-	}
-	if !strings.Contains(err2, "not a valid Go identifier") {
-		t.Fatalf("expected identifier error, got %q", err2)
-	}
-}
-
-func TestRenameRefusesMethodAndNonGo(t *testing.T) {
-	t.Parallel()
-	root := mcpProject(t)
-	// v2: method-form names ("main.Greet" = receiver main, method Greet) are
-	// handled by the method path — with no receiver type "main" in the
-	// fixture, the result is a not-found error, never a guessed edit.
-	err := mcpToolError(t, "kern_rename", map[string]any{"root": root, "symbol": "main.Greet", "new_name": "Hi"})
-	if !strings.Contains(err, "not found") {
-		t.Fatalf("expected not-found for method-form name with unknown receiver, got %q", err)
-	}
-}
 
 func TestExecReturnsOnlyStdout(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
@@ -1025,8 +712,8 @@ func TestOutputBudgetResolution(t *testing.T) {
 	}
 	// R7 per-tool table: a listed tool gets its per-tool default, which beats
 	// the global cap (per-call max_output > per-tool table > global default).
-	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 8<<10 {
-		t.Fatalf("kern_search per-tool cap = %d, err=%v; want %d", b, err, 8<<10)
+	if b, err := mcpserve.CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 16<<10 {
+		t.Fatalf("kern_search per-tool cap = %d, err=%v; want %d", b, err, 16<<10)
 	}
 	if b, err := mcpserve.CallOutputBudget("kern_explore", map[string]any{}); err != nil || b != 48<<10 {
 		t.Fatalf("kern_explore per-tool cap = %d, err=%v; want %d", b, err, 48<<10)
@@ -1195,53 +882,17 @@ func packProject(t *testing.T) string {
 	return root
 }
 
-func TestPackThroughMCP(t *testing.T) {
-	root := packProject(t)
-	out := mcpAssertOK(t, "kern_pack", map[string]any{"root": root, "max_tokens": "5000"})
-	for _, marker := range []string{"INSTRUCTIONS", "REPOSITORY STRUCTURE", "REPOSITORY FILES", "STATS", "## AGENTS.md", "Use pack.", "## File: main.go", "func Greet", "util/util.go"} {
-		if !strings.Contains(out, marker) {
-			t.Fatalf("pack missing %q", marker)
-		}
-	}
-	// A tiny budget drops files and says so.
-	out = mcpAssertOK(t, "kern_pack", map[string]any{"root": root, "max_tokens": "30"})
-	if !strings.Contains(out, "Dropped to fit budget") {
-		t.Fatalf("tiny-budget pack should report dropped files, got %q", out)
-	}
-
-	// JSON format is machine-readable.
-	js := mcpAssertOK(t, "kern_pack", map[string]any{"root": root, "format": "json", "instructions": "false", "max_tokens": "5000"})
-	for _, frag := range []string{`"root"`, `"files"`, `"instructions"`, `"content"`} {
-		if !strings.Contains(js, frag) {
-			t.Fatalf("pack json missing %q", frag)
-		}
-	}
-}
-
-func TestPackSandboxOverrideThroughMCP(t *testing.T) {
-	root := packProject(t)
-	// A tiny output sandbox would truncate the pack; max_output=0 bypasses it.
-	t.Setenv("KERN_MCP_MAX_OUTPUT", "128")
-	out := mcpAssertOK(t, "kern_pack", map[string]any{"root": root, "max_tokens": "200", "max_output": "0"})
-	if strings.Contains(out, "MCP output sandbox") {
-		t.Fatalf("max_output=0 should return the full pack, got %q", out)
-	}
-	if !strings.Contains(out, "REPOSITORY FILES") {
-		t.Fatalf("expected full pack, got %q", out)
-	}
-}
-
 func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
 	// Full catalog so the allowlist intersects the complete 101-tool set
 	// (kern_usage_guide is not part of the default minimal surface).
 	t.Setenv("KERN_MCP_FULL", "1")
-	t.Setenv("KERN_TOOLS", "kern_search, kern_usage_guide")
+	t.Setenv("KERN_TOOLS", "kern_search, kern_graph")
 	s := NewServer(strings.NewReader(""), io.Discard)
 	filtered := s.filteredTools()
 	if len(filtered) != 2 {
 		t.Fatalf("KERN_TOOLS should expose exactly 2 tools, got %d: %v", len(filtered), toolNamesOf(filtered))
 	}
-	for _, want := range []string{"kern_search", "kern_usage_guide"} {
+	for _, want := range []string{"kern_search", "kern_graph"} {
 		if !containsTool(filtered, want) {
 			t.Errorf("filtered list missing %s", want)
 		}
@@ -1258,7 +909,7 @@ func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
 	_ = mcpAssertOK(t, "kern_search", map[string]any{"root": mcpProject(t), "query": "Greet"})
 
 	// A non-allowlisted tool is rejected.
-	errText := mcpToolError(t, "kern_dead", map[string]any{"root": t.TempDir()})
+	errText := mcpToolError(t, "kern_verify", map[string]any{"root": t.TempDir()})
 	if !strings.Contains(errText, "not allowed") {
 		t.Errorf("expected not-allowed error, got %q", errText)
 	}
@@ -1295,13 +946,13 @@ func TestKernMCPHighLevelOnlyFiltersTools(t *testing.T) {
 		}
 	}
 	// Tools known to be low-level must be absent.
-	for _, low := range []string{"kern_dead", "kern_rename", "kern_churn", "kern_near"} {
+	for _, low := range []string{"kern_search", "kern_graph", "kern_arch", "kern_probe"} {
 		if names[low] {
 			t.Errorf("low-level tool %q should be filtered out under KEN_MCP_HIGH_LEVEL_ONLY", low)
 		}
 	}
 	// High-level orchestration tools must be present.
-	for _, high := range []string{"kern_analyze", "kern_plan", "kern_execute", "kern_verify", "kern_incident"} {
+	for _, high := range []string{"kern_run", "kern_plan", "kern_heal", "kern_verify", "kern_impact", "kern_review"} {
 		if !names[high] {
 			t.Errorf("high-level tool %q should be present under KEN_MCP_HIGH_LEVEL_ONLY", high)
 		}

@@ -251,13 +251,14 @@ func TestAdaptiveGraphCtxTokensUnresolvable(t *testing.T) {
 	}
 }
 
-// TestAdaptiveGraphCtxTokensInterfaceMethodRoot: an interface-method call
-// target has no symbol of its own, so it gets the base budget.
+// TestAdaptiveGraphCtxTokensInterfaceMethodRoot: an interface method is an
+// indexed declaration, so it scales with its adjacency (one call site: User).
 func TestAdaptiveGraphCtxTokensInterfaceMethodRoot(t *testing.T) {
 	root := buildInterfaceProject(t)
 	ix := buildIndex(t, root)
-	if got := AdaptiveGraphCtxTokens(ix, "Store.Fetch"); got != GraphCtxDefaultTokens {
-		t.Fatalf("interface-method root: got %d, want %d", got, GraphCtxDefaultTokens)
+	want := GraphCtxDefaultTokens + GraphCtxPerNeighborTokens
+	if got := AdaptiveGraphCtxTokens(ix, "Store.Fetch"); got != want {
+		t.Fatalf("interface-method root: got %d, want %d", got, want)
 	}
 }
 

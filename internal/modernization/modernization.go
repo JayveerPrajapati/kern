@@ -15,6 +15,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // maxPhases caps the number of extraction phases in a generated plan. A plan
@@ -261,7 +262,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 
 	// 1. Communities -> candidate bounded contexts (intel reuses label
 	// propagation; no reimplementation here).
-	communities := intel.Communities(ix)
+	communities := topology.Communities(ix)
 
 	// symbol full-name -> owning community ID, and community ID -> display name.
 	symToCtx := map[string]string{}
@@ -285,7 +286,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	// level. bridgeLimit() resolves KERN_BRIDGES_LIMIT (default 10000, 0 =
 	// unlimited), so a repo with more bridges than the default cannot silently
 	// undercount coupling and misrate phase risk.
-	bridges := a.mapBridges(intel.Bridges(ix, bridgeLimit()), symToCtx, idToName)
+	bridges := a.mapBridges(topology.Bridges(ix, bridgeLimit()), symToCtx, idToName)
 
 	// Per-context bridge count -> phase risk level.
 	bridgeCount := map[string]int{}
@@ -426,7 +427,7 @@ func safetyScore(ctx BoundedContext, churn map[string]float64) float64 {
 }
 
 // buildContext computes the metrics of one bounded context from its community.
-func buildContext(ix *index.Index, c intel.Community, name string) BoundedContext {
+func buildContext(ix *index.Index, c topology.Community, name string) BoundedContext {
 	set := map[string]bool{}
 	for _, s := range c.Symbols {
 		set[s] = true
@@ -498,7 +499,7 @@ func contextOutDeps(ix *index.Index, set map[string]bool) []string {
 // deriveContextNames computes unique, descriptive names for all communities.
 // When multiple communities share the same base package name (e.g. "wrapper" or "impl"),
 // it disambiguates them using parent package directory and community hub symbol.
-func deriveContextNames(communities []intel.Community) map[string]string {
+func deriveContextNames(communities []topology.Community) map[string]string {
 	result := make(map[string]string, len(communities))
 	if len(communities) == 0 {
 		return result
@@ -555,7 +556,7 @@ func deriveContextNames(communities []intel.Community) map[string]string {
 }
 
 // defaultContextName derives a candidate name from the dominant package directory.
-func defaultContextName(c intel.Community) string {
+func defaultContextName(c topology.Community) string {
 	if len(c.Packages) > 0 {
 		base := c.Packages[0]
 		if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
@@ -646,7 +647,7 @@ func churnScores(ix *index.Index) map[string]float64 {
 	}
 	fileOf := fileOfSymbol(ix)
 	ctxChurn := map[string]float64{}
-	for _, c := range intel.Communities(ix) {
+	for _, c := range topology.Communities(ix) {
 		seen := map[string]bool{}
 		for _, s := range c.Symbols {
 			if f := fileOf[s]; f != "" && !seen[f] {
@@ -662,7 +663,7 @@ func churnScores(ix *index.Index) map[string]float64 {
 // mapping each bridge symbol to its owning context (From) and the distinct
 // contexts that call into it (To). Risk levels: high for 3+ contexts, medium
 // for 2, low for 1.
-func (a *Analyzer) mapBridges(raw []intel.Bridge, symToCtx map[string]string, idToName map[string]string) []Bridge {
+func (a *Analyzer) mapBridges(raw []topology.Bridge, symToCtx map[string]string, idToName map[string]string) []Bridge {
 	var out []Bridge
 	for _, rb := range raw {
 		fromCtxID := symToCtx[rb.Symbol]

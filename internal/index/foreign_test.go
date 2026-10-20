@@ -3,16 +3,25 @@ package index
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 )
 
+func findSym(syms []Symbol, name string) *Symbol {
+	for i := range syms {
+		if syms[i].FullName() == name {
+			return &syms[i]
+		}
+	}
+	return nil
+}
+
 func symsIn(lang string, src string) []Symbol {
-	syms, calls, _, _, _ := extractForeign("file."+extFor(lang), []byte(src), lang)
+	syms, calls, _, _, _ := langparse.ExtractForeign("file."+extFor(lang), []byte(src), lang, tsExtract)
 	_ = calls
 	return syms
 }
-
 func extFor(lang string) string {
 	switch lang {
 	case "python":
@@ -35,79 +44,6 @@ func extFor(lang string) string {
 	return lang
 }
 
-func findSym(syms []Symbol, name string) *Symbol {
-	for i := range syms {
-		if syms[i].FullName() == name {
-			return &syms[i]
-		}
-	}
-	return nil
-}
-
-func TestStripLineBlockMarkerInsideString(t *testing.T) {
-	// ix-1: a `/*` inside a string literal or line comment must not open a
-	// block comment that poisons every following line.
-	src := `var s = "/*"
-function real() {
-  return helper()
-}
-function helper() {
-  return 1
-}
-// still /* open
-function after() {
-  return real()
-}
-`
-	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if s := findSym(syms, "real"); s == nil {
-		t.Fatalf("expected function real after string containing /*, got %+v", syms)
-	}
-	if s := findSym(syms, "after"); s == nil {
-		t.Fatalf("expected function after after line comment containing /*, got %+v", syms)
-	}
-	if !contains(CallEdgeTargets(calls["real"]), "helper") {
-		t.Fatalf("expected real to call helper, got %v", calls["real"])
-	}
-	if !contains(CallEdgeTargets(calls["after"]), "real") {
-		t.Fatalf("expected after to call real, got %v", calls["after"])
-	}
-}
-
-func TestStripLineTripleOrdering(t *testing.T) {
-	// ix-2: with both delimiters on one line, the FIRST one wins; an inner
-	// `"""` inside an outer `'''...'''` must not open its own span.
-	src := `x = '''hello """world'''
-def work():
-    return helper()
-def helper():
-    return 1
-`
-	syms, calls, _, _, _ := extractForeign("app.py", []byte(src), "python")
-	if s := findSym(syms, "work"); s == nil {
-		t.Fatalf("expected func work after mixed-delimiter line, got %+v", syms)
-	}
-	if !contains(CallEdgeTargets(calls["work"]), "helper") {
-		t.Fatalf("expected work to call helper, got %v", calls["work"])
-	}
-}
-
-func TestStripLineCommentMarkerInsideString(t *testing.T) {
-	// A `//` inside a string must not truncate the line.
-	src := `const url = "http://example.com/x"
-function fetch() {
-  return load(url)
-}
-function load(u) {
-  return u
-}
-`
-	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if !contains(CallEdgeTargets(calls["fetch"]), "load") {
-		t.Fatalf("expected fetch to call load, got %v", calls["fetch"])
-	}
-}
-
 const pySrc = `import os
 
 def greet(name):
@@ -124,57 +60,6 @@ def main():
     u = User("x")
     return greet(u.name)
 `
-
-func TestPythonExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("app.py", []byte(pySrc), "python")
-	if s := findSym(syms, "greet"); s == nil || s.Kind != "func" || s.Lang != "python" {
-		t.Fatalf("expected func greet, got %+v", s)
-	}
-	if s := findSym(syms, "User"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class User, got %+v", s)
-	}
-	if s := findSym(syms, "User.login"); s == nil || s.Kind != "method" || s.Receiver != "User" {
-		t.Fatalf("expected method User.login, got %+v", s)
-	}
-	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func main, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["User.login"]), "validate") {
-		t.Fatalf("expected User.login to call validate, got %v", calls["User.login"])
-	}
-	if !contains(CallEdgeTargets(calls["main"]), "greet") {
-		t.Fatalf("expected main to call greet, got %v", calls["main"])
-	}
-	if !contains(CallEdgeTargets(calls["main"]), "User") {
-		t.Fatalf("expected main to reference User, got %v", calls["main"])
-	}
-}
-
-func TestPythonTripleDelimiterIsolation(t *testing.T) {
-	// A ''' docstring spanning lines must not be closed by a """ that appears
-	// inside it, and code after the docstring must still be analysed.
-	src := `'''first line
-inner """quote"""
-still docstring
-'''
-
-def work():
-    return helper()
-
-def helper():
-    return 1
-`
-	syms, calls, _, _, _ := extractForeign("app.py", []byte(src), "python")
-	if s := findSym(syms, "work"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func work after ''' docstring, got %+v", syms)
-	}
-	if s := findSym(syms, "helper"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func helper, got %+v", syms)
-	}
-	if !contains(CallEdgeTargets(calls["work"]), "helper") {
-		t.Fatalf("expected work to call helper, got %v", calls["work"])
-	}
-}
 
 const jsSrc = `import { x } from "./x.js"
 
@@ -205,138 +90,6 @@ function helper() {
   return square(s.total)
 }
 `
-
-func TestJavascriptExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("store.js", []byte(jsSrc), "javascript")
-	if s := findSym(syms, "MAX"); s == nil || s.Kind != "const" {
-		t.Fatalf("expected const MAX, got %+v", s)
-	}
-	if s := findSym(syms, "add"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func add, got %+v", s)
-	}
-	if s := findSym(syms, "square"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func square, got %+v", s)
-	}
-	if s := findSym(syms, "Store"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class Store, got %+v", s)
-	}
-	if s := findSym(syms, "Store.constructor"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Store.constructor, got %+v", s)
-	}
-	if s := findSym(syms, "Store.total"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Store.total, got %+v", s)
-	}
-	if s := findSym(syms, "Store.push"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Store.push, got %+v", s)
-	}
-	if s := findSym(syms, "helper"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func helper, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Store.total"]), "items") {
-		t.Fatalf("expected Store.total to call items, got %v", calls["Store.total"])
-	}
-	if !contains(CallEdgeTargets(calls["Store.push"]), "add") {
-		t.Fatalf("expected Store.push to call add, got %v", calls["Store.push"])
-	}
-	if !contains(CallEdgeTargets(calls["helper"]), "Store") || !contains(CallEdgeTargets(calls["helper"]), "square") {
-		t.Fatalf("expected helper to call Store and square, got %v", calls["helper"])
-	}
-}
-
-const tsSrc = `export interface Shape {
-  area(): number
-}
-
-export enum Color {
-  Red,
-  Blue,
-}
-
-type Id = number
-
-export const createId = (): Id => 1
-
-export function render(s: Shape): string {
-  return compute(s.area())
-}
-
-export class Circle implements Shape {
-  area(): number {
-    return this.radius()
-  }
-  radius(): number {
-    return 3
-  }
-}
-`
-
-func TestTypescriptExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("shape.ts", []byte(tsSrc), "typescript")
-	if s := findSym(syms, "Shape"); s == nil || s.Kind != "interface" {
-		t.Fatalf("expected interface Shape, got %+v", s)
-	}
-	if s := findSym(syms, "Color"); s == nil || s.Kind != "enum" {
-		t.Fatalf("expected enum Color, got %+v", s)
-	}
-	if s := findSym(syms, "Id"); s == nil || s.Kind != "type" {
-		t.Fatalf("expected type Id, got %+v", s)
-	}
-	if s := findSym(syms, "createId"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func createId, got %+v", s)
-	}
-	if s := findSym(syms, "Circle"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class Circle, got %+v", s)
-	}
-	if s := findSym(syms, "Circle.area"); s == nil || s.Kind != "method" || s.Receiver != "Circle" {
-		t.Fatalf("expected method Circle.area, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Circle.area"]), "radius") {
-		t.Fatalf("expected Circle.area to call radius, got %v", calls["Circle.area"])
-	}
-}
-
-// TestTypescriptGenericCallEdge is a regression test for generic calls like
-// useInfiniteData<UserDto>(fn): the <...> type arguments must not leak into
-// the extracted callee name, or the edge fails to resolve to the generic
-// function declaration.
-func TestTypescriptGenericCallEdge(t *testing.T) {
-	src := `function useInfiniteData<T>(fn: () => Promise<T>) {}
-function App() {
-const { items, loadMore } = useInfiniteData<UserDto>(fetchUsersPage)
-return items
-}
-`
-	syms, calls, _, _, err := extractForeign("app.tsx", []byte(src), "typescript")
-	if err != nil {
-		t.Fatalf("extractForeign: %v", err)
-	}
-	if s := findSym(syms, "useInfiniteData"); s == nil {
-		t.Fatalf("expected func useInfiniteData, got %v", findSym(syms, "useInfiniteData"))
-	}
-	if s := findSym(syms, "App"); s == nil {
-		t.Fatalf("expected func App, got %v", findSym(syms, "App"))
-	}
-	if !contains(CallEdgeTargets(calls["App"]), "useInfiniteData") {
-		t.Fatalf("expected App to call useInfiniteData, got %v", calls["App"])
-	}
-	if contains(CallEdgeTargets(calls["App"]), "UserDto") {
-		t.Fatalf("generic type argument must not be recorded as the callee, got %v", calls["App"])
-	}
-	// JavaScript shares the same call matcher, so it inherits the fix.
-	jsSrc := `function useInfiniteData() {}
-function App() {
-const r = useInfiniteData(fetchUsersPage)
-return r
-}
-`
-	_, jsCalls, _, _, err := extractForeign("app.js", []byte(jsSrc), "javascript")
-	if err != nil {
-		t.Fatalf("extractForeign(js): %v", err)
-	}
-	if !contains(CallEdgeTargets(jsCalls["App"]), "useInfiniteData") {
-		t.Fatalf("expected js App to call useInfiniteData, got %v", jsCalls["App"])
-	}
-}
 
 const rsSrc = `pub struct Point {
     x: i32,
@@ -369,31 +122,6 @@ fn main() {
 }
 `
 
-func TestRustExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("point.rs", []byte(rsSrc), "rust")
-	if s := findSym(syms, "Point"); s == nil || s.Kind != "struct" {
-		t.Fatalf("expected struct Point, got %+v", s)
-	}
-	if s := findSym(syms, "Shape"); s == nil || s.Kind != "enum" {
-		t.Fatalf("expected enum Shape, got %+v", s)
-	}
-	if s := findSym(syms, "Area"); s == nil || s.Kind != "trait" {
-		t.Fatalf("expected trait Area, got %+v", s)
-	}
-	if s := findSym(syms, "Area.area"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Area.area, got %+v", s)
-	}
-	if s := findSym(syms, "Point.new"); s == nil || s.Kind != "method" || s.Receiver != "Point" {
-		t.Fatalf("expected method Point.new, got %+v", s)
-	}
-	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func main, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Point.dist"]), "new") {
-		t.Fatalf("expected Point.dist to call new, got %v", calls["Point.dist"])
-	}
-}
-
 const cppSrc = `#include <vector>
 
 struct Point {
@@ -425,34 +153,6 @@ int main(int argc, char** argv) {
 }
 `
 
-func TestCppExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("shape.cpp", []byte(cppSrc), "cpp")
-	if s := findSym(syms, "Point"); s == nil || s.Kind != "struct" {
-		t.Fatalf("expected struct Point, got %+v", s)
-	}
-	if s := findSym(syms, "Shape"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class Shape, got %+v", s)
-	}
-	if s := findSym(syms, "Shape.Shape"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Shape.Shape (ctor), got %+v", s)
-	}
-	if s := findSym(syms, "Shape.area"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Shape.area, got %+v", s)
-	}
-	if s := findSym(syms, "Shape.draw"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Shape.draw, got %+v", s)
-	}
-	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func main, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Shape.area"]), "calc") {
-		t.Fatalf("expected Shape.area to call calc, got %v", calls["Shape.area"])
-	}
-	if !contains(CallEdgeTargets(calls["main"]), "s.draw") {
-		t.Fatalf("expected main to call s.draw, got %v", calls["main"])
-	}
-}
-
 const javaSrc = `package com.example;
 
 import java.util.List;
@@ -481,34 +181,6 @@ class Helper {
 }
 `
 
-func TestJavaExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("App.java", []byte(javaSrc), "java")
-	if s := findSym(syms, "App"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class App, got %+v", s)
-	}
-	if s := findSym(syms, "App.App"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method App.App (ctor), got %+v", s)
-	}
-	if s := findSym(syms, "App.add"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method App.add, got %+v", s)
-	}
-	if s := findSym(syms, "App.main"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method App.main, got %+v", s)
-	}
-	if s := findSym(syms, "Helper"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class Helper, got %+v", s)
-	}
-	if s := findSym(syms, "Helper.run"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Helper.run, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["App.main"]), "App") || !contains(CallEdgeTargets(calls["App.main"]), "System.out.println") {
-		t.Fatalf("expected App.main calls, got %v", calls["App.main"])
-	}
-	if !contains(CallEdgeTargets(calls["Helper.run"]), "util.log") {
-		t.Fatalf("expected Helper.run to call util.log, got %v", calls["Helper.run"])
-	}
-}
-
 const rbSrc = `module Util
   def self.log(msg)
     puts msg
@@ -530,69 +202,6 @@ def main
   log = Util.log("hi")
 end
 `
-
-func TestRubyExtract(t *testing.T) {
-	syms, calls, _, _, _ := extractForeign("app.rb", []byte(rbSrc), "ruby")
-	if s := findSym(syms, "Util"); s == nil || s.Kind != "module" {
-		t.Fatalf("expected module Util, got %+v", s)
-	}
-	if s := findSym(syms, "Util.log"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method Util.log, got %+v", s)
-	}
-	if s := findSym(syms, "User"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class User, got %+v", s)
-	}
-	if s := findSym(syms, "User.initialize"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method User.initialize, got %+v", s)
-	}
-	if s := findSym(syms, "User.validate"); s == nil || s.Kind != "method" {
-		t.Fatalf("expected method User.validate, got %+v", s)
-	}
-	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func main, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["User.validate"]), "check") {
-		t.Fatalf("expected User.validate to call check, got %v", calls["User.validate"])
-	}
-	if !contains(CallEdgeTargets(calls["main"]), "User.new") || !contains(CallEdgeTargets(calls["main"]), "Util.log") {
-		t.Fatalf("expected main calls, got %v", calls["main"])
-	}
-}
-
-func TestLanguageDetection(t *testing.T) {
-	extCases := map[string]string{
-		"a.go": "go", "a.py": "python", "a.js": "javascript", "a.tsx": "typescript",
-		"a.vue": "javascript", "a.svelte": "javascript", "a.astro": "typescript",
-		"a.css": "css", "a.scss": "css", "a.less": "css",
-		"a.html": "html", "a.htm": "html",
-		"a.md": "markdown", "a.mdx": "markdown", "a.markdown": "markdown",
-		"a.json": "json", "a.jsonc": "json",
-		"a.yml": "yaml", "a.yaml": "yaml",
-		"a.rs": "rust", "a.c": "c", "a.cpp": "cpp", "a.cs": "csharp",
-		"a.java": "java", "a.rb": "ruby", "a.php": "php", "a.sh": "shell",
-		"a.txt": "",
-	}
-	for rel, want := range extCases {
-		if got := detectLang(rel, nil); got != want {
-			t.Fatalf("detectLang(%s) = %q, want %q", rel, got, want)
-		}
-	}
-	shebangCases := []struct {
-		src  string
-		want string
-	}{
-		{"#!/usr/bin/env python3\nprint(1)\n", "python"},
-		{"#!/bin/bash\necho hi\n", "shell"},
-		{"#!/usr/bin/env node\nconsole.log(1)\n", "javascript"},
-		{"#!/usr/bin/env ruby\nputs 1\n", "ruby"},
-		{"no shebang here\n", ""},
-	}
-	for _, c := range shebangCases {
-		if got := detectLang("script", []byte(c.src)); got != c.want {
-			t.Fatalf("detectLang(shebang) = %q, want %q", got, c.want)
-		}
-	}
-}
 
 func TestBuildMixedProject(t *testing.T) {
 	dir := writeTree(t, map[string]string{
@@ -649,505 +258,28 @@ func TestSearchKindPrefixes(t *testing.T) {
 	}
 }
 
-func TestSfcExtractVue(t *testing.T) {
-	src := `<template>
-  <div class="card" id="main">{{ count }}</div>
-</template>
-
-<script setup lang="ts">
-import { ref } from "vue"
-const count = ref(0)
-export function bump(): number {
-  return count.value + 1
-}
-</script>
-
-<style scoped>
-.card { color: red; }
-</style>
-`
-	syms, _, _, _, _ := extractForeign("components/Counter.vue", []byte(src), "typescript")
-	if s := findSym(syms, "bump"); s == nil {
-		t.Fatalf("expected func bump from vue script, got %v", syms)
-	}
-	if s := findSym(syms, "count"); s == nil || s.Kind != "const" {
-		t.Fatalf("expected const count from vue script, got %v", s)
-	}
-	for _, bad := range []string{"ref", "card"} {
-		if findSym(syms, bad) != nil {
-			t.Fatalf("template/style symbol %q should not leak into the index", bad)
-		}
-	}
-	if s := findSym(syms, "main"); s != nil {
-		t.Fatalf("html id %q from template must not be indexed as a script symbol", "main")
-	}
-}
-
-func TestSfcExtractSvelte(t *testing.T) {
-	src := `<script>
-  export let name = "world"
-  function greet() {
-    return "hello " + name
-  }
-</script>
-
-<h1 id="title">Hello {name}</h1>
-`
-	syms, _, _, _, _ := extractForeign("widget.svelte", []byte(src), "javascript")
-	if s := findSym(syms, "greet"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func greet from svelte script, got %v", s)
-	}
-	if s := findSym(syms, "name"); s == nil {
-		t.Fatalf("expected let name from svelte script, got %v", s)
-	}
-}
-
-func TestCssExtract(t *testing.T) {
-	src := `.card {
-  color: #fff;
-  padding: 1rem;
-}
-
-#app-root {
-  --gap: 1rem;
-}
-
-:root { --gap2: 2rem; }
-
-@keyframes slide-in {
-  from { opacity: 0; }
-}
-`
-	syms := symsIn("css", src)
-	if s := findSym(syms, "card"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class card, got %v", s)
-	}
-	if s := findSym(syms, "app-root"); s == nil || s.Kind != "const" {
-		t.Fatalf("expected const app-root, got %v", s)
-	}
-	if s := findSym(syms, "slide-in"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func slide-in (keyframes), got %v", s)
-	}
-	if s := findSym(syms, "--gap"); s == nil || s.Kind != "prop" {
-		t.Fatalf("expected prop --gap, got %v", s)
-	}
-	if s := findSym(syms, "--gap2"); s == nil || s.Kind != "prop" {
-		t.Fatalf("expected inline prop --gap2, got %v", s)
-	}
-	for _, bad := range []string{"fff", "color"} {
-		if findSym(syms, bad) != nil {
-			t.Fatalf("declaration value %q should not be a symbol", bad)
-		}
-	}
-}
-
-func TestHtmlExtract(t *testing.T) {
-	src := `<!doctype html>
-<html>
+func TestDocFilesDoNotOwnCallEdges(t *testing.T) {
+	// An HTML page whose script/template text mentions the code symbol
+	// "runReport" (the same shape that used to over-match in kern's own
+	// web/*.html templates).
+	src := []byte(`<html>
+<head><title>dashboard</title></head>
 <body>
-  <!-- commented out: <div id="hidden"></div> -->
-  <nav id="navbar"><a href="/">home</a></nav>
-  <main id="content"></main>
+  <button onclick="runReport()">Go</button>
 </body>
 </html>
-`
-	syms := symsIn("html", src)
-	if s := findSym(syms, "navbar"); s == nil || s.Kind != "const" {
-		t.Fatalf("expected const navbar, got %v", s)
+`)
+	_, calls, _, _, _ := langparse.ExtractForeign("dashboard.html", src, "html", tsExtract)
+	if got := calls["file:dashboard.html"]; len(got) != 0 {
+		t.Fatalf("html file owns call edges %v, want none (doc files are not callers)", got)
 	}
-	if s := findSym(syms, "content"); s == nil {
-		t.Fatalf("expected const content, got %v", s)
-	}
-	if findSym(syms, "hidden") != nil {
-		t.Fatal("html comment ids must not be indexed")
-	}
-}
-
-func TestSfcDetection(t *testing.T) {
-	if got := detectLang("a.vue", []byte(`<script setup lang="ts">`)); got != "typescript" {
-		t.Fatalf("expected typescript for vue ts, got %q", got)
-	}
-	if got := detectLang("a.vue", []byte(`<script>`)); got != "javascript" {
-		t.Fatalf("expected javascript for plain vue, got %q", got)
-	}
-	if got := detectLang("a.svelte", []byte(`<script lang="ts">`)); got != "typescript" {
-		t.Fatalf("expected typescript for svelte ts, got %q", got)
-	}
-	if got := detectLang("a.astro", nil); got != "typescript" {
-		t.Fatalf("expected typescript for astro, got %q", got)
-	}
-	if got := detectLang("style.less", nil); got != "css" {
-		t.Fatalf("expected css for less, got %q", got)
-	}
-	if got := detectLang("README.md", nil); got != "markdown" {
-		t.Fatalf("expected markdown, got %q", got)
-	}
-	if got := detectLang("pkg.json", nil); got != "json" {
-		t.Fatalf("expected json, got %q", got)
-	}
-	if got := detectLang("config.yaml", nil); got != "yaml" {
-		t.Fatalf("expected yaml, got %q", got)
-	}
-	if got := detectLang("style.css", nil); got != "css" {
-		t.Fatalf("expected css, got %q", got)
-	}
-	if got := detectLang("index.html", nil); got != "html" {
-		t.Fatalf("expected html, got %q", got)
-	}
-	if got := detectLang("notes.txt", nil); got != "" {
-		t.Fatalf("expected unsupported, got %q", got)
+	// Markdown mentioning a code symbol must not own calls either.
+	_, calls, _, _, _ = langparse.ExtractForeign("README.md", []byte("# Public\n\nCall add() from the docs.\n"), "markdown", tsExtract)
+	if got := calls["file:README.md"]; len(got) != 0 {
+		t.Fatalf("markdown file owns call edges %v, want none (doc files are not callers)", got)
 	}
 }
 
-func TestAstroExtract(t *testing.T) {
-	src := `---
-import Layout from "../layouts/Layout.astro";
-interface Props {
-  title: string;
-}
-const title = "Home";
----
-<Layout>
-  <main id="hero"><h1>{title}</h1></main>
-</Layout>
-<script>
-  document.title = "hi";
-</script>
-`
-	syms, _, _, _, _ := extractForeign("pages/Index.astro", []byte(src), "typescript")
-	if s := findSym(syms, "Props"); s == nil || s.Kind != "interface" {
-		t.Fatalf("expected interface Props from astro frontmatter, got %v", s)
-	}
-	if s := findSym(syms, "title"); s == nil || s.Kind != "const" {
-		t.Fatalf("expected const title from astro frontmatter, got %v", s)
-	}
-	if findSym(syms, "hero") != nil {
-		t.Fatal("astro markup id must not leak into the index")
-	}
-}
-
-func TestMarkdownExtract(t *testing.T) {
-	src := `# kern
-
-## Install
-
-Quick start with one line:
-
-### CLI reference
-
-## Contributing
-`
-	syms := symsIn("markdown", src)
-	for _, h := range []string{"kern", "Install", "CLI reference", "Contributing"} {
-		if s := findSym(syms, h); s == nil || s.Kind != "heading" {
-			t.Fatalf("expected heading %q, got %v", h, s)
-		}
-	}
-	for _, bad := range []string{"Quick start with one line:"} {
-		if findSym(syms, bad) != nil {
-			t.Fatalf("paragraph %q must not be a heading", bad)
-		}
-	}
-}
-
-func TestJsonExtract(t *testing.T) {
-	src := `{
-  "name": "kern",
-  "scripts": {
-    "build": "go build"
-  },
-  "// comment": {"x": 1}
-}
-`
-	syms := symsIn("json", src)
-	if s := findSym(syms, "name"); s == nil || s.Kind != "prop" {
-		t.Fatalf("expected prop name, got %v", s)
-	}
-	if s := findSym(syms, "scripts"); s == nil || s.Kind != "prop" {
-		t.Fatalf("expected prop scripts, got %v", s)
-	}
-	if findSym(syms, "build") == nil {
-		t.Fatal("expected nested prop build (line-start key)")
-	}
-}
-
-func TestJsonLockfilePropsSkipped(t *testing.T) {
-	src := `{"zzlockfileprop": 1, "dependencies": {"left-pad": "1.0.0"}}`
-	for _, name := range []string{
-		"package-lock.json", "npm-shrinkwrap.json", "composer.lock",
-		"yarn.lock", "pnpm-lock.yaml", "deno.lock",
-	} {
-		rel := "fixture/" + name
-		lang := detectLang(rel, []byte(src))
-		if syms := mustExtractForeign(t, rel, []byte(src), lang); len(syms) != 0 {
-			t.Fatalf("%s: expected no prop symbols from lockfile, got %v", name, syms)
-		}
-	}
-}
-
-func TestJsonLargeFilePropsSkipped(t *testing.T) {
-	src := []byte(`{"zzbigjsonprop": ` + strings.Repeat("1", 600*1024) + `}`)
-	if syms := mustExtractForeign(t, "results.json", src, "json"); len(syms) != 0 {
-		t.Fatalf("expected no prop symbols from oversized JSON, got %v", syms)
-	}
-}
-
-func TestJsonSmallConfigPropsKept(t *testing.T) {
-	src := `{
-  "zzsmallconfOK": true,
-  "compilerOptions": {"strict": true}
-}`
-	syms := mustExtractForeign(t, "tsconfig.json", []byte(src), "json")
-	if findSym(syms, "zzsmallconfOK") == nil || findSym(syms, "compilerOptions") == nil {
-		t.Fatalf("expected small-config props to stay indexed, got %v", syms)
-	}
-}
-
-func TestYamlExtract(t *testing.T) {
-	src := `name: kern
-version: 0.1.0
-tasks:
-  build: go build
-  # deploy: rsync (commented out)
-`
-	syms := symsIn("yaml", src)
-	for _, k := range []string{"name", "version", "tasks"} {
-		if s := findSym(syms, k); s == nil || s.Kind != "prop" {
-			t.Fatalf("expected prop %s, got %v", k, s)
-		}
-	}
-	for _, bad := range []string{"build", "deploy", "go build"} {
-		if findSym(syms, bad) != nil {
-			t.Fatalf("nested/comment key %q must not be a top-level symbol", bad)
-		}
-	}
-}
-
-func TestBraceOnDifferentLine(t *testing.T) {
-	// ix-6: when '{' is on a line after the declaration, bodyEndFor must
-	// skip through the header lines to find the body, not return immediately.
-	src := `class Foo
-extends Bar
-{
-  method() {
-    return helper()
-  }
-}
-function helper() {
-  return 1
-}
-`
-	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if s := findSym(syms, "Foo"); s == nil || s.Kind != "class" {
-		t.Fatalf("expected class Foo, got %+v", s)
-	}
-	if s := findSym(syms, "Foo.method"); s == nil || s.Kind != "method" || s.Receiver != "Foo" {
-		t.Fatalf("expected method Foo.method, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Foo.method"]), "helper") {
-		t.Fatalf("expected Foo.method to call helper, got %v", calls["Foo.method"])
-	}
-}
-
-func TestCppTrailingReturn(t *testing.T) {
-	// ix-8: trailing return types (auto name() -> T { }) must match func/method.
-	src := `#include <iostream>
-
-struct Shape {
-    auto area() const noexcept -> double {
-        return calc()
-    }
-};
-
-auto Shape::perimeter() const -> double {
-    return calc()
-}
-
-auto main() -> int {
-    return 0;
-}
-`
-	syms, calls, _, _, _ := extractForeign("shape.cpp", []byte(src), "cpp")
-	if s := findSym(syms, "Shape"); s == nil || s.Kind != "struct" {
-		t.Fatalf("expected struct Shape, got %+v", s)
-	}
-	if s := findSym(syms, "Shape.perimeter"); s == nil || s.Kind != "method" || s.Receiver != "Shape" {
-		t.Fatalf("expected method Shape.perimeter, got %+v", s)
-	}
-	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func main, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["Shape.perimeter"]), "calc") {
-		t.Fatalf("expected Shape.perimeter to call calc, got %v", calls["Shape.perimeter"])
-	}
-}
-
-func TestSameLineBodyCalls(t *testing.T) {
-	// ix-9 + ix-10: calls on the declaration line (same-line body) must be
-	// captured, even though the line matches a declaration rule.
-	src := `function foo() { return bar() }
-function bar() { return 1 }
-`
-	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if s := findSym(syms, "foo"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func foo, got %+v", s)
-	}
-	if s := findSym(syms, "bar"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func bar, got %+v", s)
-	}
-	if !contains(CallEdgeTargets(calls["foo"]), "bar") {
-		t.Fatalf("expected foo to call bar on same-line body, got %v", calls["foo"])
-	}
-}
-
-func TestCallsOnDeclLineNotDropped(t *testing.T) {
-	// ix-10: a line that matches a decl rule (function expression name)
-	// must still have its call edges scanned.
-	src := `function outer() {
-  inner(function cb() { used() })
-}
-function inner(cb) { cb() }
-function used() { return 1 }
-`
-	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if !contains(CallEdgeTargets(calls["outer"]), "inner") {
-		t.Fatalf("expected outer to call inner, got %v", calls["outer"])
-	}
-	if !contains(CallEdgeTargets(calls["outer"]), "used") {
-		t.Fatalf("expected outer to call used (on decl line), got %v", calls["outer"])
-	}
-}
-
-func TestRubyHeredocFakeCodeIgnored(t *testing.T) {
-	// ix-7: def/class lines inside a heredoc must not be indexed.
-	src := `x = <<~HEREDOC
-def fake
-  return 1
-end
-HEREDOC
-def real
-  helper()
-end
-def helper
-  return 1
-end
-`
-	syms, calls, _, _, _ := extractForeign("app.rb", []byte(src), "ruby")
-	if findSym(syms, "fake") != nil {
-		t.Fatal("fake code inside heredoc must not be indexed")
-	}
-	if s := findSym(syms, "real"); s == nil || s.Kind != "func" {
-		t.Fatalf("expected func real after heredoc, got %+v", syms)
-	}
-	if !contains(CallEdgeTargets(calls["real"]), "helper") {
-		t.Fatalf("expected real to call helper, got %v", calls["real"])
-	}
-}
-
-func TestForeignImportsJava(t *testing.T) {
-	src := `package com.example.service.config;
-
-import org.springframework.context.annotation.Configuration;
-import static com.example.service.common.auth.AuthUtil.login;
-import com.example.service.common.auth.*;
-import com.example.service.common.utils.Strings;
-
-@Configuration
-public class Config {
-}
-`
-	imports := foreignImports([]byte(src), "java")
-	want := []string{
-		"org.springframework.context.annotation",
-		"com.example.service.common.auth",
-		"com.example.service.common.auth",
-		"com.example.service.common.utils",
-	}
-	if len(imports) != len(want) {
-		t.Fatalf("expected %d imports, got %d: %v", len(want), len(imports), imports)
-	}
-	for i, w := range want {
-		if imports[i].Path != w {
-			t.Errorf("import[%d] = %q, want %q", i, imports[i].Path, w)
-		}
-	}
-}
-
-func TestForeignImportsNonJava(t *testing.T) {
-	// Import extraction currently covers Java only; other languages must
-	// return nil (no imports) so their existing behavior is unchanged.
-	if imports := foreignImports([]byte("import babel from '@babel/core'\n"), "javascript"); imports != nil {
-		t.Errorf("javascript should have no import extraction, got %v", imports)
-	}
-	if imports := foreignImports([]byte("import os\n"), "python"); imports != nil {
-		t.Errorf("python should have no import extraction, got %v", imports)
-	}
-}
-
-func TestExtractForeignPopulatesJavaImports(t *testing.T) {
-	src := `package com.example.service.config;
-import com.example.service.common.auth.IAuthService;
-public class Config {
-    IAuthService svc;
-}
-`
-	syms, _, _, pkg, err := extractForeign("Config.java", []byte(src), "java")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(syms) == 0 {
-		t.Fatal("expected symbols from java file")
-	}
-	if pkg == nil {
-		t.Fatal("expected a package")
-	}
-	if len(pkg.Imports) != 1 || pkg.Imports[0].Path != "com.example.service.common.auth" {
-		t.Errorf("pkg.Imports = %v, want the auth package", pkg.Imports)
-	}
-}
-
-func TestExtractForeignJavaInheritsGenerics(t *testing.T) {
-	src := `package com.example.model;
-
-public class AuditRecord<T> extends BaseRecord<T> implements Serializable, Comparable<AuditRecord<T>> {
-    private String id;
-}
-`
-	syms, _, inherits, _, err := extractForeign("AuditRecord.java", []byte(src), "java")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(syms) == 0 {
-		t.Fatal("expected symbols from java file")
-	}
-	edges := inherits["AuditRecord"]
-	if len(edges) != 3 {
-		t.Fatalf("expected 3 inheritance edges for AuditRecord, got %+v", edges)
-	}
-	foundExtends := false
-	foundSerializable := false
-	foundComparable := false
-	for _, e := range edges {
-		if e == "extends:BaseRecord" {
-			foundExtends = true
-		}
-		if e == "implements:Serializable" {
-			foundSerializable = true
-		}
-		if e == "implements:Comparable" {
-			foundComparable = true
-		}
-	}
-	if !foundExtends || !foundSerializable || !foundComparable {
-		t.Errorf("missing expected edges, got %v", edges)
-	}
-}
-
-// TestSingleLineFuncBodyDoesNotSwallowFile pins V8: a single-line JS/TS
-// function ("export function useAuth() { return {...} }") used to get the
-// whole file as its body range, attributing every later call to it and
-// producing spurious cross-edges (useAuth -> useInfiniteData). The body of
-// a self-contained decl line is the line itself.
 func TestSingleLineFuncBodyDoesNotSwallowFile(t *testing.T) {
 	dir := t.TempDir()
 	src := `export function useAuth() { return { user: 1 } }
@@ -1175,55 +307,5 @@ export function Page() {
 	}
 	if got := ix.Calls["useAuth"]; len(got) != 0 {
 		t.Fatalf("useAuth callees = %v, want none (spurious cross-edges)", got)
-	}
-}
-
-func TestTopLevelCallbackCallsAttributedToFile(t *testing.T) {
-	// e2e round 2, P0-2: a handler wired only via an anonymous event
-	// callback had NO caller edge, so what-if called removing it "isolated:
-	// safe to proceed". Top-level calls must be attributed to the file
-	// node ("file:<rel>" caller key) so caller traversals resolve.
-	src := []byte(`const btn = document.getElementById("go");
-btn.addEventListener("click", () => {
-runReport();
-});
-function runReport() { fetch("/api"); }
-`)
-	_, calls, _, _, _ := extractForeign("report.js", src, "javascript")
-	var found bool
-	for _, ce := range calls["file:report.js"] {
-		if ce.Target == "runReport" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected file:report.js -> runReport call edge, got %v", calls)
-	}
-}
-
-// TestDocFilesDoNotOwnCallEdges pins: markdown/HTML are documentation,
-// not code, so a doc page that merely MENTIONS a symbol name must never be
-// recorded as a caller of it. Without the guard, attributeTopLevelCalls
-// attributed every uncovered line of a doc page to the file node and dragged
-// export_graph.html / docs/adr/*.md into every blast-radius and WhoCalls set.
-func TestDocFilesDoNotOwnCallEdges(t *testing.T) {
-	// An HTML page whose script/template text mentions the code symbol
-	// "runReport" (the same shape that used to over-match in kern's own
-	// web/*.html templates).
-	src := []byte(`<html>
-<head><title>dashboard</title></head>
-<body>
-  <button onclick="runReport()">Go</button>
-</body>
-</html>
-`)
-	_, calls, _, _, _ := extractForeign("dashboard.html", src, "html")
-	if got := calls["file:dashboard.html"]; len(got) != 0 {
-		t.Fatalf("html file owns call edges %v, want none (doc files are not callers)", got)
-	}
-	// Markdown mentioning a code symbol must not own calls either.
-	_, calls, _, _, _ = extractForeign("README.md", []byte("# Public\n\nCall add() from the docs.\n"), "markdown")
-	if got := calls["file:README.md"]; len(got) != 0 {
-		t.Fatalf("markdown file owns call edges %v, want none (doc files are not callers)", got)
 	}
 }

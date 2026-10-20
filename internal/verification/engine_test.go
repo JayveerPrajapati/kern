@@ -278,7 +278,10 @@ func TestVerifyBuildCompileFailureSurfacesReason(t *testing.T) {
 // A skip here would require dropping the go-vet fallback, which would break
 // the pinned stray.go degradation (TestVerifyNoModuleDegradesNotFails); a
 // fail would violate F1. Only a directory with NO candidates at all skips
-// (TestVerifyBuildNoProjectTypeSkips).
+// (TestVerifyBuildNoProjectTypeSkips); the 6.1 exception is a step manifest
+// (package.json / Makefile) that declares no build step, which skips
+// honestly (TestVerifyBuildNpmNoScriptSkips) instead of degrading to an
+// unrelated check.
 func TestVerifyBuildTestOnlyProjectDegrades(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-execution verification in -short mode")
@@ -926,6 +929,35 @@ func TestVerifyTestsNpmNoScriptSkips(t *testing.T) {
 	}
 	if !strings.Contains(tr.Output, "no test script") {
 		t.Errorf("output should explain the skip: %s", trunc(tr.Output))
+	}
+}
+
+// TestVerifyBuildNpmNoScriptSkips guards the 6.1 false-PASS: a package.json
+// without a "build" script must report an honest skip — "build: no build
+// step detected (skipped)" — never a vacuous "build: OK" (the old
+// `node --check index.js` fallback passed for any project with an index.js
+// regardless of whether a build step exists).
+func TestVerifyBuildNpmNoScriptSkips(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name": "x", "scripts": {"test": "node test.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(root)
+	br := e.VerifyBuild()
+	if br == nil {
+		t.Fatal("nil build result")
+	}
+	if !br.OK {
+		t.Fatalf("absent build step must be a clean skip, not a FAIL: %s", trunc(br.Output))
+	}
+	if !strings.HasPrefix(br.Output, verdict.SkipPrefix) {
+		t.Errorf("absent build step must be stamped skipped, not OK: %s", trunc(br.Output))
+	}
+	if !strings.Contains(br.Output, "no build step detected") {
+		t.Errorf("output should explain the skip: %s", trunc(br.Output))
 	}
 }
 

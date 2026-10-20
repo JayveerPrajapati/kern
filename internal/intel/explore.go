@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
+	"github.com/JayveerPrajapati/kern/internal/calleefilter"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -31,11 +32,30 @@ type ExploreReport struct {
 	CalleeSynth  map[string]string    `json:"callee_synth,omitempty"` // callee → router:chi
 	CalleeSkels  []string             `json:"callee_skels,omitempty"` // folded callee bodies, budget-permitting
 	BlastRadius  []string             `json:"blast_radius"`
+	BlastSymbols []index.Symbol       `json:"-"`
 	BlastFiles   []string             `json:"blast_files"`
 	NearestDepth map[string]int       `json:"nearest_depth,omitempty"`
 	StaleBanner  string               `json:"stale_banner,omitempty"`
 	Stats        *tokstats.TokenStats `json:"stats,omitempty"`
 	Evidence     string               `json:"evidence,omitempty"` // P2 anchor: file:line + certificate for the subject
+}
+
+func (rep *ExploreReport) RetainBlastRadius(names []string) {
+	keep := make(map[string]bool, len(names))
+	for _, name := range names {
+		keep[name] = true
+	}
+	var radius []string
+	var symbols []index.Symbol
+	for position, name := range rep.BlastRadius {
+		if keep[name] {
+			radius = append(radius, name)
+			symbols = append(symbols, rep.BlastSymbols[position])
+		}
+	}
+	rep.BlastRadius = radius
+	rep.BlastSymbols = symbols
+	rep.BlastFiles = affectedFilesOf(symbols)
 }
 
 // Explore returns verbatim source, the direct call flow (callers and callees),
@@ -106,6 +126,15 @@ func ResolveEntry(ix *index.Index, query string) (resolved string, d *index.Symb
 			d, resolved = &prod, prod.FullName()
 		}
 	}
+	// C5 (QA 2026-10-15 finding 10): a bare name defined in several
+	// production packages picks the most central definition (package symbol
+	// count), not the alphabetical first. Ties keep the existing pick; the
+	// ambiguity note still lists every alternative.
+	if !strings.ContainsAny(query, "./") {
+		if best, found := largestFootprintNamed(ix, query, *d); found {
+			d, resolved = &best, best.FullName()
+		}
+	}
 
 	if q, found := qualifiedPackageDef(ix, query, *d); found {
 		d, resolved = &q, q.FullName()
@@ -149,7 +178,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 		// re-resolves a bare name and could slice a different symbol (e.g.
 		// TS interface definition + Go method source for "dispatch").
 		Source:   ix.ContextDef(*d, 0),
-		Evidence: AnchorLine(ix, resolved),
+		Evidence: AnchorDefinition(ix, *d),
 	}
 	passes := MinConfidenceFilter(minConf)
 	seenCallers := map[string]bool{}
@@ -188,37 +217,64 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	}
 	sort.Strings(rep.Callers)
 	seenCallees := map[string]bool{}
+	rawBySimple := map[string]string{} // simple name -> first raw endpoint
+	collides := map[string]bool{}      // simple name shared by several endpoints
 	var calleeSyms []index.Symbol
 	for _, c := range ix.CallsFor(*d) {
 		label := EdgeConfidenceLabel(ix, resolved, c)
 		if !passes(label) {
 			continue
 		}
-		name := simpleName(c)
-		if seenCallees[name] {
+		simple := simpleName(c)
+		if seenCallees[simple] {
+			collides[simple] = true
 			continue
 		}
-		seenCallees[name] = true
-		rep.Callees = append(rep.Callees, name)
+		seenCallees[simple] = true
+		rawBySimple[simple] = c
+		rep.Callees = append(rep.Callees, simple)
 		if rep.CalleeConf == nil {
 			rep.CalleeConf = map[string]string{}
 		}
-		rep.CalleeConf[name] = label
+		rep.CalleeConf[simple] = label
 		if synth := EdgeSynthLabel(ix, resolved, c); synth != "" {
 			if rep.CalleeSynth == nil {
 				rep.CalleeSynth = map[string]string{}
 			}
-			rep.CalleeSynth[name] = synth
+			rep.CalleeSynth[simple] = synth
 		}
 		if cs, ok := findCalleeDef(ix, c, *d); ok {
 			calleeSyms = append(calleeSyms, cs)
+		}
+	}
+	// Qualifier disclosure (deep-verify L3 F3-7): a simple name carried by
+	// exactly one raw endpoint keeps its qualified form in the rendered list —
+	// "strings.TrimSpace" stays qualified, because the bare "TrimSpace" loses
+	// the package context (stdlib vs a local same-named helper). A name
+	// shared by several endpoints collapses to the bare form exactly as
+	// before (virtual dispatch: FileStore.fetch + Store.fetch -> one "fetch"
+	// row whose label names the tier that won). The conf/synth maps are
+	// rekeyed so every rendered row keeps its label.
+	for i, name := range rep.Callees {
+		raw, ok := rawBySimple[name]
+		if !ok || collides[name] || raw == name {
+			continue
+		}
+		rep.Callees[i] = raw
+		if l, ok := rep.CalleeConf[name]; ok {
+			delete(rep.CalleeConf, name)
+			rep.CalleeConf[raw] = l
+		}
+		if s, ok := rep.CalleeSynth[name]; ok {
+			delete(rep.CalleeSynth, name)
+			rep.CalleeSynth[raw] = s
 		}
 	}
 	sort.Strings(rep.Callees)
 
 	rep.fitBudget(ix, maxTokens, calleeSyms)
 
-	radius, radiusSyms, dist, _ := blastRadiusWalk(ix, []string{resolved}, false)
+	radius, radiusSyms, dist, _ := blastRadiusWalk(ix, []string{resolved}, false, *d)
 	rep.NearestDepth = dist
 
 	if depth > 0 {
@@ -242,6 +298,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	// bare name like "Generate" is shared by several packages, and a
 	// first-match name→file map would attribute it to the wrong file
 	// (receipt.go instead of evidence/bundle.go).
+	rep.BlastSymbols = radiusSyms
 	rep.BlastFiles = affectedFilesOf(radiusSyms)
 	rep.StaleBanner = ix.StalenessBanner(append(append([]string{}, rep.Definition.File), rep.BlastFiles...))
 	return rep, nil
@@ -510,18 +567,28 @@ func ResolveFuzzy(ix *index.Index, query string) (string, bool) {
 // maxAlternatives caps how many other definitions an ambiguity note lists.
 const maxAlternatives = 5
 
-// ambiguousAlternatives lists the other production definitions a BARE query
-// also matches, so the single definition explore picked is never presented as
-// the only candidate. Qualified queries ("Type.Method", "pkg/dir.Symbol") name
-// their target and return nil, as do test and heading symbols. The result is
-// sorted and capped at maxAlternatives, with a trailing "+N more" entry.
+// ambiguousAlternatives lists the other production definitions a query also
+// matches, so the single definition explore picked is never presented as the
+// only candidate. Bare queries match on the simple name; qualified queries
+// ("Type.Method", "dir/pkg.Symbol") name their target and only list
+// alternatives when the FULL name itself collides — two Server types each
+// defining dispatch are as ambiguous as a bare NewServer (deep-verify L3
+// F3-7). Test and heading symbols never qualify. The result is sorted and
+// capped at maxAlternatives, with a trailing "+N more" entry.
 func ambiguousAlternatives(ix *index.Index, query string, picked index.Symbol) []string {
-	if ix == nil || query == "" || strings.ContainsAny(query, "./") {
+	if ix == nil || query == "" {
 		return nil
 	}
+	qualified := strings.ContainsAny(query, "./")
 	var alts []string
 	for _, s := range ix.Symbols {
-		if s.Name != query || s.Kind == "heading" || IsNonProduction(s) {
+		if qualified && s.FullName() != query {
+			continue
+		}
+		if !qualified && s.Name != query {
+			continue
+		}
+		if s.Kind == "heading" || IsNonProduction(s) {
 			continue
 		}
 		if s.File == picked.File && s.Line == picked.Line {
@@ -579,6 +646,39 @@ func firstProductionNamed(ix *index.Index, name string) (index.Symbol, bool) {
 	return index.Symbol{}, false
 }
 
+// largestFootprintNamed re-points a bare name that has multiple production
+// definitions at the one whose defining package carries the most symbols
+// (C5): index order is alphabetical by file, which surfaced a stub-sized
+// package's Server ahead of the central internal/mcp Server. A best that is
+// not strictly larger than the first-index-order pick is a no-op; ties keep
+// the existing pick, and test/fixture defs were already demoted upstream.
+func largestFootprintNamed(ix *index.Index, name string, current index.Symbol) (index.Symbol, bool) {
+	if ix == nil || name == "" {
+		return index.Symbol{}, false
+	}
+	var defs []index.Symbol
+	pkgSizes := map[string]int{}
+	for _, s := range ix.Symbols {
+		pkgSizes[filepath.Dir(s.File)]++
+		if s.Name == name && s.Kind != "heading" && !IsNonProduction(s) {
+			defs = append(defs, s)
+		}
+	}
+	if len(defs) < 2 {
+		return index.Symbol{}, false
+	}
+	best := defs[0]
+	for _, d := range defs[1:] {
+		if pkgSizes[filepath.Dir(d.File)] > pkgSizes[filepath.Dir(best.File)] {
+			best = d
+		}
+	}
+	if best.File == current.File && best.Line == current.Line {
+		return index.Symbol{}, false
+	}
+	return best, true
+}
+
 // isTestSymbol reports whether a symbol is test-only: defined in a test file
 // (IsTestFile) or named with a Go test-function prefix (Test*/Benchmark*).
 func isTestSymbol(s index.Symbol) bool {
@@ -611,8 +711,8 @@ func qualifiedPackageDef(ix *index.Index, symbol string, d index.Symbol) (index.
 }
 
 // pathSuffixMatch reports whether the directory part of file ends with the
-// '/'-separated segments of prefix ("internal/bpcli/mcp/server.go" carries
-// the prefix "bpcli/mcp"). An empty prefix matches every file.
+// '/'-separated segments of prefix ("internal/mcp/context/server.go" carries
+// the prefix "mcp/context"). An empty prefix matches every file.
 func pathSuffixMatch(file, prefix string) bool {
 	if prefix == "" {
 		return true
@@ -657,8 +757,16 @@ func RenderExplore(r *ExploreReport) string {
 		fmt.Fprintf(&b, "resolved %s -> %s (%s)\n", r.Symbol, r.Resolved, how)
 	}
 	if len(r.Alternatives) > 0 {
-		fmt.Fprintf(&b, "note: %q is ambiguous — showing %s; other definitions: %s. Pass a qualified name (Type.Method or dir/pkg.Symbol) to choose.\n",
-			r.Symbol, r.Resolved, strings.Join(r.Alternatives, ", "))
+		// The disambiguation advice must match the query form: an already-
+		// qualified query (Type.Method) that still collides needs the
+		// package-qualified form, not the advice it just followed
+		// (deep-verify L3 F3-7).
+		advice := "Pass a qualified name (Type.Method or dir/pkg.Symbol) to choose."
+		if strings.ContainsAny(r.Symbol, "./") {
+			advice = "Pass a package-qualified name (dir/pkg.Symbol) to choose."
+		}
+		fmt.Fprintf(&b, "note: %q is ambiguous — showing %s; other definitions: %s. %s\n",
+			r.Symbol, r.Resolved, strings.Join(r.Alternatives, ", "), advice)
 	}
 	fmt.Fprintf(&b, "symbol: %s (%s %s:%d)\n\n",
 		r.Resolved, r.Definition.Kind, r.Definition.File, r.Definition.Line)
@@ -669,8 +777,27 @@ func RenderExplore(r *ExploreReport) string {
 	// graph-node caller count, which counts a different universe (P2).
 	b.WriteString("== callers (" + strconv.Itoa(len(r.Callers)) + ", unique simple names of direct callers) ==\n")
 	b.WriteString(joinLinesConf(r.Callers, r.CallerConf, r.CallerSynth, r.CallerLocs))
-	b.WriteString("== callees (" + strconv.Itoa(len(r.Callees)) + ") ==\n")
-	b.WriteString(joinLinesConf(r.Callees, r.CalleeConf, r.CalleeSynth, nil))
+	// Render-layer belt-and-braces: hide builtin/builder-chain callee names
+	// (len, append, logger.Info.Int.Dur.Msg) even when the index predates the
+	// record-time filter — fresh indexes never contain them, stale ones are
+	// protected here. Two-segment qualified forms (db.Do) stay visible. The
+	// ≥2-dot chain rule is a Go builder-chain heuristic only (L5-5):
+	// TS/Python member chains (this.service.router.navigate) are ordinary
+	// property access and stay visible; empty Lang (stale index) stays
+	// conservative and keeps the chain rule.
+	goChain := r.Definition.Lang == "" || r.Definition.Lang == "go"
+	callees := r.Callees
+	if len(callees) > 0 {
+		filtered := make([]string, 0, len(callees))
+		for _, c := range callees {
+			if !calleefilter.IsNoiseCalleeFor(c, goChain, r.Definition.File) {
+				filtered = append(filtered, c)
+			}
+		}
+		callees = filtered
+	}
+	b.WriteString("== callees (" + strconv.Itoa(len(callees)) + ") ==\n")
+	b.WriteString(joinLinesConf(callees, r.CalleeConf, r.CalleeSynth, nil))
 	b.WriteString("== blast radius (" + strconv.Itoa(len(r.BlastRadius)) + " symbols, " + strconv.Itoa(len(r.BlastFiles)) + " files) ==\n")
 	b.WriteString(joinLines(r.BlastRadius))
 	if len(r.BlastFiles) > 0 {
@@ -702,9 +829,12 @@ func RenderExplore(r *ExploreReport) string {
 
 // RenderExploreExplain renders the report plus the why-rationale section —
 // what the symbol is, who depends on it and why (see FormatWhy). One call
-// answers what touches this, how, and why it exists (P2-8 --explain).
+// answers what touches this, how, and why it exists (P2-8 --explain). The
+// symbol's doc comment is rendered exactly once: the == source == block
+// carries it verbatim, so the why section references it instead of repeating
+// it (QA 2026-10-19 item 1). Budgeted renders live in internal/explorebudget.
 func RenderExploreExplain(r *ExploreReport, info WhyInfo) string {
-	return RenderExplore(r) + "\n\n== why ==\n" + FormatWhy(info)
+	return RenderExplore(r) + "\n\n== why ==\n" + formatWhy(info, r.Source, 0)
 }
 
 func joinLines(in []string) string {

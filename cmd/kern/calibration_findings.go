@@ -5,11 +5,6 @@ package main
 // as doctor findings, mirroring archDriftFindings. It is non-fatal: the
 // section reports "ok" whenever the health text renders; only a failure to
 // compute it (unreadable store, missing platform) is a warn.
-//
-// The check lives here (cmd/kern) rather than inside internal/doctor so the
-// app/calibrate dependency stays off internal/doctor's documented allowed-deps
-// set — cmd/kern is not a row in the ARCHITECTURE.md table, so no table
-// change is required.
 
 import (
 	"fmt"

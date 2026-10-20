@@ -2,16 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
-	"github.com/JayveerPrajapati/kern/internal/transform"
+	"github.com/JayveerPrajapati/kern/internal/mcpcli"
 )
 
 func runMCPTool(toolName string, args map[string]any) {
@@ -29,260 +27,47 @@ func callTool(toolName string, args map[string]any) (string, error) {
 	return srv.CallTool(context.Background(), toolName, args)
 }
 
-func readStdinIfPipe() string {
-	fi, err := os.Stdin.Stat()
-	if err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-		data, _ := io.ReadAll(os.Stdin)
-		return string(data)
-	}
-	return ""
+func runComposeCore(rest []string) int {
+	mcpcli.ComposeRunner = composeCLIRunner
+	return mcpcli.RunCompose(rest)
 }
 
-func runHealth(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("usage: kern health [--root ROOT] [--json]\nflags: %v", err)
-	}
-	// Resolve the root like every other CLI command: the
-	// disk-index freshness probe in DiskIndexView needs a real root — an
-	// empty root made it report stale=true / verdict:"unknown" / root:""
-	// even on a fresh index, contradicting doctor and index --status.
-	root := projectRoot(f)
-	// --json is accepted for CLI compatibility (pinned by
-	// TestRunHealthIndexBlockIsDiskAuthoritative) but intentionally ignored:
-	// health output is always JSON regardless of the flag.
-	out, err := callTool("kern_health", map[string]any{"root": root})
-	if err != nil {
-		fatal("health: %v — see kern doctor for diagnostics", err)
-	}
-	// The MCP kern_health "index" block reflects the in-process server's
-	// session cache, which a fresh CLI invocation NEVER loads: on a fresh
-	// process it always reports fresh=false / symbols=0 / files=0 even when
-	// the on-disk index is healthy, misleading users into rebuilding. Make
-	// the DISK index the authoritative "index" block and relabel the
-	// in-memory view so nobody mistakes it for the persisted state.
-	var snap map[string]any
-	if err := json.Unmarshal([]byte(out), &snap); err == nil {
-		if memIdx, ok := snap["index"].(map[string]any); ok {
-			memIdx["note"] = "in-memory MCP server session index (not loaded by the CLI; see the disk 'index' block)"
-			snap["mcp_memory_index"] = memIdx
-		}
-		disk := index.DiskIndexView(root)
-		if disk == nil {
-			// No persisted index yet: say so explicitly instead of zeroes.
-			disk = map[string]any{
-				"root":    root,
-				"built":   false,
-				"fresh":   false,
-				"symbols": 0,
-				"files":   0,
-				"note":    "no persisted index — run `kern index` to build one",
-			}
-		}
-		snap["index"] = disk
-		snap["version"] = version
-		data, err := json.MarshalIndent(snap, "", "  ")
-		if err == nil {
-			fmt.Println(string(data))
-			return
-		}
-	}
-	fmt.Println(out)
+// composeCLIRunner executes a compose pipeline step through the same loopback
+// server the MCP-mirror commands use (the mcpcli package cannot construct
+// the server itself — the mcp package imports the leaves it calls).
+func composeCLIRunner(ctx context.Context, id, name string, args map[string]any) (string, error) {
+	return callTool(name, args)
 }
 
-func runCompose(rest []string) {
-	// `kern compose` is a thin wrapper over `kern meta --pipeline` (surface
-	// consolidation T2b): the wrapper injects the --pipeline marker so
-	// runMeta routes here, and runComposeCore accepts every input form the
-	// compose command historically did (--pipeline flag, positional JSON,
-	// stdin).
-	runComposeCore(rest)
+// runComposeCore is the thin CLI shell for the compose pipeline engine
+// (workstream 3.6-A — MCP-mirror extraction): the business logic lives in
+// internal/mcpcli, and runMeta (`kern meta --pipeline`) delegates here.
+// The loopback tool runner stays in cmd/kern — see composeCLIRunner.
+//
+// runPreEdit, runPromptFill, runSemanticDiff, runEvidenceAnchor,
+// runContextWatch, runAstTransform and runSemanticMerge are likewise thin
+// delegates of the entry points in internal/mcpcli (a top-level sibling of
+// the mcp subtree — the monolith's 19,000 LOC ratchet forbids landing the
+// mirrors inside internal/mcp/<leaf>).
+
+func runPreEdit(rest []string) int {
+	return mcpcli.RunPreEdit(rest)
 }
 
-// runComposeCore is the deterministic multi-tool pipeline engine shared by
-// `kern compose` and `kern meta --pipeline`: parse --pipeline JSON (or
-// positional JSON / stdin), validate it, and execute it step by step through
-// the MCP tool runner (runMCPTool over kern_compose).
-func runComposeCore(rest []string) {
-	f, pos := parseFlagsOrDie(rest)
-	root := f.root
-	pipelineJSON := f.pipeline
-	timeout := "60"
-	if f.timeoutSet {
-		timeout = strconv.Itoa(f.timeout)
-	}
-
-	raw := pipelineJSON
-	if raw == "" && len(pos) > 0 {
-		raw = strings.Join(pos, " ")
-	}
-	if raw == "" {
-		raw = readStdinIfPipe()
-	}
-	if raw == "" {
-		fatalUsage("usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"Index.Search\"}}]'")
-	}
-	var steps any
-	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
-		fatal("compose: invalid pipeline JSON: %v", err)
-	}
-	runMCPTool("kern_compose", map[string]any{
-		"root":     root,
-		"pipeline": steps,
-		"timeout":  timeout,
-	})
+func runPromptFill(rest []string) int {
+	return mcpcli.RunPromptFill(rest)
 }
 
-func runPreEdit(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("usage: kern pre-edit [--file <file>] [--lines N] [--symbol NAME] [--root ROOT] [--json]")
-	}
-
-	file := f.file
-	if file == "" && len(pos) > 0 {
-		file = pos[0]
-	}
-	// L1: a bare `kern pre-edit` (no file, no symbol, no positionals) is a
-	// usage error (exit 2), not a runtime failure (exit 1): there is nothing
-	// to assess. The documented usage requires at least one of --file or
-	// --symbol.
-	if file == "" && f.symbol == "" && len(pos) == 0 {
-		fatalUsage("usage: kern pre-edit [--file <file>] [--lines N] [--symbol NAME] [--root ROOT] [--json]\n  at least one of --file or --symbol is required")
-	}
-	// Never bless a path that does not exist: a nonexistent -file must fail
-	// loudly (rc=1) instead of producing a LOW-risk "Safe to proceed" report.
-	if file != "" {
-		if _, err := os.Stat(file); err != nil {
-			fatal("pre-edit: file not found: %s", file)
-		}
-	}
-	args := map[string]any{"root": f.root}
-	if file != "" {
-		args["file"] = file
-	}
-	if f.lines > 0 {
-		args["lines"] = strconv.Itoa(f.lines)
-	}
-	if f.symbol != "" {
-		args["symbol"] = f.symbol
-	} else if len(pos) > 1 {
-		args["symbol"] = pos[1]
-	}
-	out, err := callTool("kern_pre_edit", args)
-	if err != nil {
-		fatal("pre-edit: %v — see kern doctor for diagnostics", err)
-	}
-	if f.json {
-		risk := "UNKNOWN"
-		if i := strings.Index(out, "[Risk: "); i >= 0 {
-			restStr := out[i+len("[Risk: "):]
-			if j := strings.Index(restStr, "]"); j >= 0 {
-				risk = restStr[:j]
-			}
-		}
-		data, merr := json.MarshalIndent(map[string]any{
-			"risk":   risk,
-			"report": out,
-		}, "", "  ")
-		if merr == nil {
-			fmt.Println(string(data))
-			return
-		}
-	}
-	fmt.Println(out)
+func runSemanticDiff(rest []string) int {
+	return mcpcli.RunSemanticDiff(rest)
 }
 
-func runPromptFill(rest []string) {
-	f, pos := parseFlagsOrDie(rest)
-
-	t := f.template
-	if t == "" && len(pos) > 0 {
-		t = pos[0]
-	}
-	desc := f.task
-	if desc == "" && len(pos) > 1 {
-		desc = strings.Join(pos[1:], " ")
-	}
-	if t == "" {
-		fatalUsage("usage: kern prompt-fill --template <name> [--task <desc>] [--file <file>]")
-	}
-	args := map[string]any{
-		"template":      t,
-		"task":          desc,
-		"inject_memory": f.injectMemory,
-		"root":          f.root,
-	}
-	if f.file != "" {
-		args["file"] = f.file
-	}
-	runMCPTool("kern_prompt_fill", args)
+func runEvidenceAnchor(rest []string) int {
+	return mcpcli.RunEvidenceAnchor(rest)
 }
 
-func runSemanticDiff(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v\nusage: kern semantic-diff [--from REV] [--to REV] [--range A..B] [--root ROOT]", err)
-	}
-
-	args := map[string]any{"root": f.root, "action": "diff"}
-	if f.from != "" {
-		args["from"] = f.from
-	}
-	if f.to != "" {
-		args["to"] = f.to
-	}
-	if f.range_ != "" {
-		args["range"] = f.range_
-	} else if len(pos) > 0 {
-		args["range"] = pos[0]
-	}
-	runMCPTool("kern_semantic", args)
-}
-
-func runEvidenceAnchor(rest []string) {
-	f, pos := parseFlagsOrDie(rest)
-
-	c := f.claim
-	if c == "" && len(pos) > 0 {
-		c = strings.Join(pos, " ")
-	}
-	args := map[string]any{"root": f.root, "claim": c, "action": "anchor"}
-	if f.file != "" {
-		args["file"] = f.file
-	}
-	if f.lineRaw != "" {
-		args["line"] = f.lineRaw
-	}
-	if f.symbol != "" {
-		args["symbol"] = f.symbol
-	}
-	runMCPTool("kern_evidence", args)
-}
-
-func runContextWatch(rest []string) {
-	f, pos := parseFlagsOrDie(rest)
-
-	budget := "32000"
-	if f.budgetSet {
-		budget = strconv.Itoa(f.budget)
-	}
-	format := f.format
-	raw := f.text
-	if raw == "" && len(pos) > 0 {
-		raw = strings.Join(pos, " ")
-	}
-	if raw == "" {
-		raw = readStdinIfPipe()
-	}
-	if raw == "" {
-		fatalUsage("usage: kern context-watch [--budget NUM] [--format text|json] <text>")
-	}
-	runMCPTool("kern_context_watch", map[string]any{
-		"text":   raw,
-		"budget": budget,
-		"format": format,
-	})
+func runContextWatch(rest []string) int {
+	return mcpcli.RunContextWatch(rest)
 }
 
 func runAgentFingerprint(rest []string) {
@@ -438,11 +223,20 @@ func runAgentRoleRBAC(rest []string) {
 	}
 
 	act := f.action
-	if act == "" {
-		act = "evaluate"
-	}
 	if len(pos) > 0 {
 		act = pos[0]
+	}
+	if act == "" {
+		// Mirrors the MCP tool's resolution: a -tool with no action means
+		// evaluate. No action AND no tool is a usage error (exit 2, the
+		// documented contract — QA 2026-10-15 finding 9) — previously the
+		// forced "evaluate" default failed at the tool boundary with a
+		// vague error and exit 1.
+		if f.tool != "" {
+			act = "evaluate"
+		} else {
+			fatalUsage("usage: kern agent-role-rbac -tool <name> [-action evaluate] [-agent ID] [-role R]  (or -action roles|assign)")
+		}
 	}
 	args := map[string]any{
 		"action":       "rbac",
@@ -477,94 +271,41 @@ func runStream(rest []string) {
 	runMCPTool("kern_stream", args)
 }
 
-func runAstTransform(rest []string) {
-	f, pos := parseFlagsOrDie(rest)
-
-	act := f.action
-	if act == "" {
-		act = "implement_interface"
-	}
-	if len(pos) > 0 {
-		act = pos[0]
-	}
-
-	// Run the transformation in-process instead of through the loopback
-	// MCP server. The loopback path spawns a fresh server whose own index
-	// build races the tool call, so interface lookups against the project
-	// index always miss ("unknown interface") on the first invocation.
-	// Loading the index directly (the same loadOrBuild every other CLI
-	// command uses) makes implement_interface resolve real interfaces.
-	ix, err := loadOrBuild(f.root)
-	if err != nil {
-		fatal("ast-transform: %v", err)
-	}
-	req := transform.Request{
-		Action:          act,
-		File:            f.file,
-		Root:            f.root,
-		TargetSymbol:    f.target,
-		InterfaceName:   f.iface,
-		FieldName:       f.field,
-		FieldType:       f.fieldType,
-		FieldTag:        f.tag,
-		MethodSignature: f.sig,
-		MethodBody:      f.body,
-		Apply:           f.apply,
-		Index:           ix,
-	}
-	res, err := transform.Transform(req)
-	if err != nil {
-		fatal("ast-transform: %v", err)
-	}
-	fmt.Printf("# AST Transform Report: %s\n\n", res.Action)
-	fmt.Printf("- **Target Symbol**: `%s`\n", res.TargetSymbol)
-	if res.File != "" {
-		fmt.Printf("- **File**: `%s`\n", res.File)
-	}
-	fmt.Printf("- **Applied to Disk**: `%v`\n", res.Applied)
-	if len(res.Added) > 0 {
-		fmt.Printf("- **Added Symbols**: %s\n\n", strings.Join(res.Added, ", "))
-	}
-	if res.Diff != "" {
-		fmt.Printf("### Proposed AST Diff\n```diff\n%s\n```\n", res.Diff)
-	} else {
-		fmt.Println("\n*No modifications needed (declarations already satisfy contract).*")
-	}
+func runAstTransform(rest []string) int {
+	return mcpcli.RunAstTransform(rest)
 }
 
-func runSemanticMerge(rest []string) {
-	f, _ := parseFlagsOrDie(rest)
-
-	format := "text"
-	if f.json {
-		format = "json"
-	}
-
-	args := map[string]any{
-		"action": "merge",
-		"file":   f.file,
-		"base":   f.base,
-		"local":  f.local,
-		"remote": f.remote,
-		"apply":  f.apply,
-		"format": format,
-		"root":   f.root,
-	}
-	runMCPTool("kern_semantic", args)
+func runSemanticMerge(rest []string) int {
+	return mcpcli.RunSemanticMerge(rest)
 }
 
 func runSynthesizeTest(rest []string) {
 	f, pos, err := parseFlags(rest)
 	if err != nil {
-		// stdlibFlagErr keeps the pinned "flag provided but not defined"
+		// cliflags.StdlibFlagErr keeps the pinned "flag provided but not defined"
 		// wording (TestRunSynthesizeTestBadFlagExits2); the parse itself is
 		// the unified parseFlags.
-		fatalUsage("flags: %v\nusage: kern synthesize-test [--target NAME] [--file <file>] [--auto-gap] [--apply] [--json] [--root ROOT]", stdlibFlagErr(err))
+		fatalUsage("flags: %v\nusage: kern synthesize-test [<file>] [--target NAME] [--auto-gap] [--apply] [--json] [--root ROOT]\n  a source is required: a positional file, or use --file or --auto-gap\n  (--target alone does not select a source file)", cliflags.StdlibFlagErr(err))
 	}
 
 	tgt := f.target
-	if tgt == "" && len(pos) > 0 {
-		tgt = pos[0]
+	file := f.file
+	if len(pos) > 0 {
+		// The positional used to map only to --target, which alone never
+		// selects a source — every documented positional-file invocation
+		// failed with "must be provided". Disambiguate by existence: a
+		// positional naming an existing file is the source form (the
+		// engine resolves it against root); anything else stays a target
+		// symbol for backwards compatibility.
+		if file == "" {
+			if posNamesFile(pos[0], f.root) {
+				file = pos[0]
+			} else if tgt == "" {
+				tgt = pos[0]
+			}
+		} else if tgt == "" {
+			tgt = pos[0]
+		}
 	}
 
 	format := "text"
@@ -574,7 +315,7 @@ func runSynthesizeTest(rest []string) {
 
 	args := map[string]any{
 		"target":   tgt,
-		"file":     f.file,
+		"file":     file,
 		"auto_gap": f.autoGap,
 		"apply":    f.apply,
 		"format":   format,
@@ -585,7 +326,7 @@ func runSynthesizeTest(rest []string) {
 	}
 	out, err := callTool("kern_synthesize_test", args)
 	if err != nil {
-		fatal("kern_synthesize_test: %v — see kern doctor for diagnostics", err)
+		fatal("kern_synthesize_test: %v", err)
 	}
 	fmt.Println(out)
 	// a REFUSED apply (generated test fails at runtime, or
@@ -596,6 +337,22 @@ func runSynthesizeTest(rest []string) {
 	if f.apply && strings.Contains(out, "apply refused") {
 		fatalPolicy("synthesize-test: apply refused — generated test did not pass validation (see report above)")
 	}
+}
+
+// posNamesFile reports whether a positional argument names an existing file,
+// either as given (CWD-relative) or joined to the project root — the
+// synthesize-test engine resolves file paths against root, so both
+// spellings count as the source form.
+func posNamesFile(p, root string) bool {
+	if _, err := os.Stat(p); err == nil {
+		return true
+	}
+	if root != "" && !filepath.IsAbs(p) {
+		if _, err := os.Stat(filepath.Join(root, p)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func runFetchRawAnchor(rest []string) int {

@@ -180,6 +180,20 @@ var envAllowlist = map[string]bool{
 	"CXX":              true,
 	"MAKEFLAGS":        true,
 	"npm_config_cache": true,
+	// Governance policy vars (the set governance.CheckExecCommand reads):
+	// the operator's exec/tool/risk policy must behave identically under
+	// `kern verify`'s sandboxed go build/test children and in an interactive
+	// shell. A test fixture that shells out to `kern` (or git's machine-wide
+	// pre-commit hook, which runs `kern verify --staged` from inside the
+	// child) inherits this environment; stripping it would silently change
+	// the machine's governance policy mid-run. None of these carry
+	// credentials, so the secrets-hygiene rationale of the minimal allowlist
+	// is unaffected.
+	"KERN_ALLOW_EXEC": true,
+	"KERN_TOOLS":      true,
+	"KERN_BYPASS":     true,
+	"KERN_ENFORCE":    true,
+	"KERN_EXEC_RISK":  true,
 }
 
 // goURLEnvVars are allowlisted Go environment variables whose values are

@@ -2,7 +2,9 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -49,7 +51,7 @@ func indexableMaxMtime(root string, ign *ignore.Matcher) (int64, int, error) {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !quickExt(rel) {
+		if rerr != nil || !langparse.QuickExt(rel) {
 			return nil
 		}
 		// Honor .gitignore/.kernignore file patterns, as Build does.
@@ -88,14 +90,14 @@ func HasIndexableSources(root string) bool {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !quickExt(rel) {
+		if rerr != nil || !langparse.QuickExt(rel) {
 			return nil
 		}
 		data, derr := readFile(path)
 		if derr != nil {
 			return nil
 		}
-		if isIndexable(rel, data) {
+		if langparse.IsIndexable(rel, data) {
 			found = true
 		}
 		return nil
@@ -120,22 +122,36 @@ func HasIndexableSources(root string) bool {
 // hash accepted files. Any read error aborts the hash set (first error wins,
 // same contract as the sequential version).
 func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error) {
-	cur, _, err := indexableHashesObserved(root, ign)
-	return cur, err
+	obs, err := indexableHashesObserved(root, ign)
+	return obs.hashes, err
 }
 
-// indexableHashesObserved is indexableHashes plus the per-file mtime (Unix
-// nanos) observed in the SAME walk that produced each hash. The mtimes let a
-// later consumer (UpdateWithSnapshot) re-validate the recorded hashes against
-// the live tree with a cheap stat instead of re-reading file contents: a file
-// whose mtime is unchanged since this walk provably (same trust model as
-// reuseByMtime) still has the recorded content. The mtime is captured from
-// the walk's DirEntry BEFORE the worker reads the file, so an edit landing
-// between the stat and the read bumps the on-disk mtime past the recorded
-// one and the consumer re-reads. Both returned maps are nil on error.
-func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]string, map[string]int64, error) {
-	cur := map[string]string{}
-	mtimes := map[string]int64{}
+// walkObservation is what one indexable-walk learned about the tree.
+type walkObservation struct {
+	hashes    map[string]string // content-indexable files → SHA-256
+	mtimes    map[string]int64  // same files → mtime (Unix nanos)
+	sizes     map[string]int64  // same files → size in bytes
+	walkCount int               // files the walk VISITED (quickExt+ignore filter)
+}
+
+// indexableHashesObserved is indexableHashes plus the per-file mtime and
+// size observed in the SAME walk that produced each hash, plus the count of
+// files the walk visited. The mtimes/sizes let a later consumer
+// (UpdateWithSnapshot, and the staleness stat-gate) re-validate the
+// recorded hashes against the live tree with a cheap stat instead of
+// re-reading file contents: a file whose mtime AND size are unchanged
+// since this walk provably (same trust model as reuseByMtime, plus the
+// size leg to catch mtime-preserving edits like git apply) still has the
+// recorded content. The mtime is captured from the walk's DirEntry BEFORE
+// the worker reads the file, so an edit landing between the stat and the
+// read bumps the on-disk mtime past the recorded one and the consumer
+// re-reads. The maps are nil on error; walkCount is valid only on nil err.
+func indexableHashesObserved(root string, ign *ignore.Matcher) (walkObservation, error) {
+	obs := walkObservation{
+		hashes: map[string]string{},
+		mtimes: map[string]int64{},
+		sizes:  map[string]int64{},
+	}
 	var (
 		mu   sync.Mutex
 		ferr error
@@ -150,6 +166,7 @@ func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]strin
 	type job struct {
 		path, rel string
 		mtime     int64
+		size      int64
 	}
 	jobs := make(chan job)
 	var wg sync.WaitGroup
@@ -167,18 +184,78 @@ func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]strin
 					mu.Unlock()
 					continue
 				}
-				if !isIndexable(j.rel, data) {
+				if !langparse.IsIndexable(j.rel, data) {
 					continue
 				}
 				h := cache.Hash(data)
 				mu.Lock()
-				cur[j.rel] = h
-				mtimes[j.rel] = j.mtime
+				obs.hashes[j.rel] = h
+				obs.mtimes[j.rel] = j.mtime
+				obs.sizes[j.rel] = j.size
 				mu.Unlock()
 			}
 		}()
 	}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := walkQuickExt(root, ign, func(rel, path string, info fs.FileInfo) error {
+		obs.walkCount++
+		jobs <- job{path: path, rel: rel, mtime: info.ModTime().UnixNano(), size: info.Size()}
+		return nil
+	})
+	close(jobs)
+	wg.Wait()
+	if err != nil {
+		return walkObservation{}, err
+	}
+	if ferr != nil {
+		return walkObservation{}, ferr
+	}
+	return obs, nil
+}
+
+// errSnapshotMismatch signals snapshotStillCurrent's walk that a recorded
+// file's stat no longer matches; any non-nil error means "gate failed".
+var errSnapshotMismatch = errors.New("snapshot stat mismatch")
+
+// snapshotStillCurrent re-validates a retained observation with a STAT-ONLY
+// walk — no file content is read. Every file the snapshot recorded must
+// still exist with an identical mtime AND size, the snapshot's files must
+// all be covered, and the total walked count must match the count observed
+// by the walk that produced the snapshot (a new file forces the full
+// walk). This is the hot-path guard for repeated staleness checks on a
+// dirty tree (where the git tree-OID fast path cannot vouch): the first
+// check pays the full read+hash walk, every subsequent check pays only
+// stats as long as nothing changed. Trust model: mtime+size (never mtime
+// alone — a size-changing mtime-preserving edit, e.g. git apply, is caught
+// by the size leg; a same-size mtime-preserving edit evades the gate only
+// until gateTTL expires, which FreshnessProofStrict and the clean-tree git
+// OID path keep catching regardless).
+func snapshotStillCurrent(root string, ign *ignore.Matcher, snap *FreshnessSnapshot) bool {
+	if snap == nil || len(snap.Mtimes) == 0 {
+		return false
+	}
+	walked, seen := 0, 0
+	err := walkQuickExt(root, ign, func(rel, path string, info fs.FileInfo) error {
+		walked++
+		wantM, ok := snap.Mtimes[rel]
+		if !ok {
+			return nil
+		}
+		seen++
+		if wantM != info.ModTime().UnixNano() || snap.Sizes[rel] != info.Size() {
+			return errSnapshotMismatch
+		}
+		return nil
+	})
+	return err == nil && seen == len(snap.Mtimes) && walked == snap.WalkCount
+}
+
+// walkQuickExt walks root with exactly the filter set the content walk
+// (indexableHashesObserved) uses — ignoreDirs, .gitignore/.kernignore,
+// quickExt — and reports each surviving file's FileInfo. Shared by the
+// hashing walk and the stat-gate walk so the two counts are comparable.
+// fn runs on the walk goroutine: it must only enqueue work.
+func walkQuickExt(root string, ign *ignore.Matcher, fn func(rel, path string, info fs.FileInfo) error) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -195,7 +272,7 @@ func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]strin
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !quickExt(rel) {
+		if rerr != nil || !langparse.QuickExt(rel) {
 			return nil
 		}
 		// Honor .gitignore/.kernignore file patterns, as Build does.
@@ -206,18 +283,8 @@ func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]strin
 		if ierr != nil {
 			return ierr
 		}
-		jobs <- job{path: path, rel: rel, mtime: info.ModTime().UnixNano()}
-		return nil
+		return fn(rel, path, info)
 	})
-	close(jobs)
-	wg.Wait()
-	if err != nil {
-		return nil, nil, err
-	}
-	if ferr != nil {
-		return nil, nil, ferr
-	}
-	return cur, mtimes, nil
 }
 
 // ChangeKind describes a file change detected by the watcher.

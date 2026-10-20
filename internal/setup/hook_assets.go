@@ -9,6 +9,14 @@ import (
 //go:embed assets/hooks/kern-guard.sh
 var kernGuardScript string
 
+// GuardScriptAsset returns the embedded kern-guard.sh the installer ships.
+func GuardScriptAsset() []byte { return []byte(kernGuardScript) }
+
+// GlobalGuardPath is where the machine-wide guard script is installed.
+func GlobalGuardPath() string {
+	return filepath.Join(globalHomeDir(), ".kern", "hooks", "kern-guard.sh")
+}
+
 // writeGuardScriptTo writes the kern-guard hook script to <dir>/kern-guard.sh
 // and returns its absolute path. Agents' PreToolUse hooks call this script.
 func writeGuardScriptTo(dir string) (string, error) {

@@ -20,13 +20,16 @@ curated by hand. Run the generator after adding/removing docs files.
 - [architecture.md](architecture.md) — system architecture overview.
 - [architecture/ledger-details.md](architecture/ledger-details.md) — subsystem ledger: allowed deps + per-subsystem LOC caps (parity-enforced).
 - [gates.md](gates.md) — the verification gate catalog (G0–G39) behind `kern verify`.
-- [authorized-context.md](authorized-context.md) — authorized-context & governance proofs.
+- [governance-troubleshooting.md](governance-troubleshooting.md) — blocked actions, execution gates, path confinement, and audited break-glass.
 
 ## Decisions (ADRs)
 
 - [adr/0001-record-architecture-decisions.md](adr/0001-record-architecture-decisions.md) — ADR-0001: why we record decisions.
-- [adr/0006-deterministic-implementation-planning.md](adr/0006-deterministic-implementation-planning.md) — ADR-0006: deterministic implementation planning.
 - [adr/0009-production-intelligence-local-first.md](adr/0009-production-intelligence-local-first.md) — ADR-0009: local-first, zero-telemetry posture.
+- [adr/0010-org-governance-local-first.md](adr/0010-org-governance-local-first.md) — ADR-0010: org governance — local-first multi-repo, no SSO.
+- [adr/0011-universal-autonomous-interception.md](adr/0011-universal-autonomous-interception.md) — ADR-0011: universal autonomous interception.
+- [adr/0012-conditional-fetch-etags.md](adr/0012-conditional-fetch-etags.md) — ADR-0012: conditional-fetch etags for MCP read tools.
+- [adr/0013-audit-chain-append-only.md](adr/0013-audit-chain-append-only.md) — ADR-0013: the governance audit chain is append-only; archival is operator-managed.
 
 ## Benchmarks
 
@@ -35,12 +38,13 @@ curated by hand. Run the generator after adding/removing docs files.
 - [benchmarks/graph-latency.md](benchmarks/graph-latency.md) — cold/warm index + query latency methodology and honest verdict on "sub-millisecond graph".
 - [benchmarks/telemetry-audit.md](benchmarks/telemetry-audit.md) — zero network egress in core packages (CI-enforced).
 - [benchmarks/token-savings.md](benchmarks/token-savings.md) — compact-context vs naive full-file token savings report.
-- [duplication-benchmark.md](duplication-benchmark.md) — AST duplication detector confusion matrix & precision floors.
+- [duplication-benchmark.md](duplication-benchmark.md) — AST duplication detector confusion matrix & precision floors ([historical] — suite deleted in `a05c91c7`; scoring core survives in `internal/duplication`).
 
 ## Tooling reference
 
 - [cli-reference.md](cli-reference.md) — the complete CLI command reference (mirrors the dispatch table).
 - [tool-catalog.md](tool-catalog.md) — generated MCP tool catalog.
+- [tool-selection.md](tool-selection.md) — generated tool-selection guide, routing matrix, and risk levels.
 - [mcp/README.md](mcp/README.md) — MCP server overview.
 - [mcp/protocol.md](mcp/protocol.md) — MCP protocol integration details.
 - [mcp/tool-contracts.md](mcp/tool-contracts.md) — per-tool contracts (generated).
@@ -49,17 +53,23 @@ curated by hand. Run the generator after adding/removing docs files.
 
 ## SDKs
 
-- [sdk/go/kernsdk](../sdk/go/kernsdk) — Go client for the kern-server REST API (stdlib-only; `CallTool` full-catalog passthrough).
 - [sdk/python/kern_sdk](../sdk/python/kern_sdk) — Python client (stdlib-only; `call_tool`).
 - [sdk/typescript/src](../sdk/typescript/src) — TypeScript client (zero-dep; `callTool`).
 
-All three speak the same control plane: typed endpoints for the core workflows plus a
+Both SDKs speak the same control plane: typed endpoints for the core workflows plus a
 full-catalog passthrough through `POST /v1/tools/{name}` (the same governed dispatch MCP
 clients hit). Raw MCP JSON-RPC remains available over `kern mcp` stdio / `kern-mcp --http`.
+**Note:** the HTTP host for the `POST /v1/tools/{name}` route (the former enterprise web
+console, `kern serve`) is not part of this tree today; the SDKs target it for
+self-hosted/enterprise deployments, and the passthrough shape is exercised via the
+in-process governed dispatch.
 
 ## Configuration & operations
 
-- [configuration.md](configuration.md) — configuration, `.kern.yaml` profiles, environment variables.
+- [configuration.md](configuration.md) — configuration, `.kern/config.json` + `.kern/kern.yaml` profiles, environment variables.
+- [local-llm.md](local-llm.md) — LLM providers: the auto chain (host sampler → agent CLIs → Ollama), optional-by-default semantics, required mode, security posture.
+- [runtime-integrations.md](runtime-integrations.md) — runtime sources (Prometheus, OTel, Kubernetes, local snapshot): resolution, env-only credentials, offline doctor.
+- [setup-global.md](setup-global.md) — global wiring, the 13-agent detection matrix, and post-install alignment (`kern setup --global` / `--global-only` / `--all-agents` / `--global-rules`).
 - [examples/kern-gate.yml](examples/kern-gate.yml) — example gate policy file.
 
 ## Security & privacy
@@ -73,26 +83,32 @@ clients hit). Raw MCP JSON-RPC remains available over `kern mcp` stdio / `kern-m
 
 <!-- AUTO-GENERATED FILE TREE: docs (managed by `kern gen-docs --doc site`) -->
 - [adr/0001-record-architecture-decisions.md](adr/0001-record-architecture-decisions.md)
-- [adr/0006-deterministic-implementation-planning.md](adr/0006-deterministic-implementation-planning.md)
 - [adr/0009-production-intelligence-local-first.md](adr/0009-production-intelligence-local-first.md)
 - [adr/0010-org-governance-local-first.md](adr/0010-org-governance-local-first.md)
 - [adr/0011-universal-autonomous-interception.md](adr/0011-universal-autonomous-interception.md)
 - [adr/0012-conditional-fetch-etags.md](adr/0012-conditional-fetch-etags.md)
+- [adr/0013-audit-chain-append-only.md](adr/0013-audit-chain-append-only.md)
 - [agents-pipeline.md](agents-pipeline.md)
 - [architecture.md](architecture.md)
 - [architecture/ledger-details.md](architecture/ledger-details.md)
-- [authorized-context.md](authorized-context.md)
 - [benchmarks/README.md](benchmarks/README.md)
+- [benchmarks/accuracy.md](benchmarks/accuracy.md)
+- [benchmarks/agent-evals.md](benchmarks/agent-evals.md)
 - [benchmarks/cold-start.md](benchmarks/cold-start.md)
+- [benchmarks/command-qa-ledger.md](benchmarks/command-qa-ledger.md)
 - [benchmarks/fixtures/README.md](benchmarks/fixtures/README.md)
 - [benchmarks/graph-latency.md](benchmarks/graph-latency.md)
+- [benchmarks/multi-repo-latency.md](benchmarks/multi-repo-latency.md)
 - [benchmarks/semantic-retention.md](benchmarks/semantic-retention.md)
 - [benchmarks/telemetry-audit.md](benchmarks/telemetry-audit.md)
 - [benchmarks/token-savings.md](benchmarks/token-savings.md)
 - [cli-reference.md](cli-reference.md)
 - [configuration.md](configuration.md)
+- [contributing/architecture-tour.md](contributing/architecture-tour.md)
 - [duplication-benchmark.md](duplication-benchmark.md)
 - [gates.md](gates.md)
+- [governance-troubleshooting.md](governance-troubleshooting.md)
+- [local-llm.md](local-llm.md)
 - [mcp-client.md](mcp-client.md)
 - [mcp/README.md](mcp/README.md)
 - [mcp/protocol.md](mcp/protocol.md)
@@ -100,9 +116,12 @@ clients hit). Raw MCP JSON-RPC remains available over `kern mcp` stdio / `kern-m
 - [mcp/versioning.md](mcp/versioning.md)
 - [privacy.md](privacy.md)
 - [recipes.md](recipes.md)
+- [runtime-integrations.md](runtime-integrations.md)
 - [security/signed-releases.md](security/signed-releases.md)
 - [security/threat-model.md](security/threat-model.md)
+- [setup-global.md](setup-global.md)
 - [skills.md](skills.md)
+- [symbol-identity.md](symbol-identity.md)
 - [tool-catalog.md](tool-catalog.md)
 - [tool-selection.md](tool-selection.md)
 <!-- END AUTO-GENERATED -->

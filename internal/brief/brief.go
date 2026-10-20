@@ -20,6 +20,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // Options controls how the briefing is rendered.
@@ -28,6 +29,12 @@ type Options struct {
 	// instead of the compact project overview. Off by default so the
 	// digest stays short; the map is served on demand (`kern buddy --map`).
 	Map bool
+
+	// NoMemory skips the "Project memory" and "Recent session activity"
+	// sections (kern_buddy's no_memory param). Subagent lanes that already
+	// carry session context can request a memory-free digest so captures
+	// never re-enter the context.
+	NoMemory bool
 }
 
 // Build renders the concise briefing for root (the default `kern buddy`
@@ -66,75 +73,9 @@ func BuildWithOptions(root string, opts Options) (string, error) {
 		digest.WriteString(architectureSection(ix))
 		digest.WriteString(surprisingSection(ix))
 	}
-	statsSection(&digest)
-	// Project memory (from past sessions): read the TYPED store — the one
-	// the learn and capture paths write (loop learn, learning extractor,
-	// episodic lessons). Reading only the v1 lesson store here is what made
-	// "Project memory" render empty for repos whose v1 store holds just
-	// auto captures (P2-14): the typed store is where real lessons land.
-	mems, err := memory.NewMemoryStore(root).CurrentMemories("")
-	if err != nil {
-		mems = nil // best-effort: a broken typed store must not fail the digest
-	}
-	var lessons []domain.Memory
-	for _, m := range mems {
-		// Auto captures (raw prompts, tool outcomes) are session context,
-		// not project lessons — never inject them into a session digest.
-		// Typed entries from the learn paths carry Source "loop"/"learning"
-		// (never "auto"), so this is a defensive guard.
-		if m.Source == "auto" {
-			continue
-		}
-		lessons = append(lessons, m)
-	}
-	// Near-duplicate lessons (the same prompt, tool outcome or file edit
-	// recorded once per call) are noise, not signal: normalize each entry
-	// and keep only the most recent occurrence per normalized text, then
-	// cap the rendered list so the digest stays compact.
-	lessons = dedupeLessons(lessons)
-	if len(lessons) > 0 {
-		digest.WriteString("## Project memory (from past sessions)\n")
-		for i, m := range lessons {
-			if i >= projectMemoryMax {
-				fmt.Fprintf(&digest, "- … and %d more (full history via `kern memory`)\n", len(lessons)-projectMemoryMax)
-				break
-			}
-			text := m.Content
-			if len(text) > 400 {
-				text = text[:400] + "…"
-			}
-			fmt.Fprintf(&digest, "- %s: %s\n", m.CreatedAt.UTC().Format("2006-01-02"), strings.ReplaceAll(text, "\n", " "))
-		}
-		digest.WriteString("\n")
-	}
-
-	// Recent session activity: auto captures live in the v1 lesson store
-	// (hook/plugin conversation capture) — the cross-session trail (edited
-	// files, failed commands, user direction). Surfacing the most recent
-	// ones lets a fresh session or subagent lane see what just happened
-	// instead of re-deriving it — bounded so the digest stays compact and
-	// stale activity ages out of the window. memory.List is newest-first,
-	// so the head of the slice is the most recent activity.
-	const recentActivityMax = 10
-	var autos []memory.Entry
-	for _, e := range memory.List(root) {
-		if e.Source == "auto" {
-			autos = append(autos, e)
-		}
-	}
-	if len(autos) > recentActivityMax {
-		autos = autos[:recentActivityMax]
-	}
-	if len(autos) > 0 {
-		digest.WriteString("## Recent session activity (auto captures, newest first)\n")
-		for _, e := range autos {
-			text := strings.ReplaceAll(e.Text, "\n", " ")
-			if len(text) > 160 {
-				text = text[:160] + "…"
-			}
-			fmt.Fprintf(&digest, "- %s: %s\n", e.Time.UTC().Format("2006-01-02 15:04"), text)
-		}
-		digest.WriteString("\n")
+	digest.WriteString(statsSection(abs))
+	if !opts.NoMemory {
+		digest.WriteString(memorySections(root))
 	}
 	digest.WriteString(cheatsheet)
 
@@ -167,11 +108,88 @@ func ProjectMap(root string) (string, error) {
 	return renderProjectMap(p, fullMapBudget), nil
 }
 
+// memorySections renders the two memory sections of the digest: "Project
+// memory (from past sessions)" (the TYPED store — the one the learn and
+// capture paths write) and "Recent session activity" (v1 auto captures).
+// kern_buddy's no_memory option skips both via Options.NoMemory.
+func memorySections(root string) string {
+	var b strings.Builder
+	// Project memory: read the TYPED store. Reading only the v1 lesson
+	// store here is what made "Project memory" render empty for repos whose
+	// v1 store holds just auto captures (P2-14): the typed store is where
+	// real lessons land.
+	mems, err := memory.NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		mems = nil // best-effort: a broken typed store must not fail the digest
+	}
+	var lessons []domain.Memory
+	for _, m := range mems {
+		// Auto captures (raw prompts, tool outcomes) are session context,
+		// not project lessons — never inject them into a session digest.
+		// Typed entries from the learn paths carry Source "loop"/"learning"
+		// (never "auto"), so this is a defensive guard.
+		if m.Source == "auto" {
+			continue
+		}
+		lessons = append(lessons, m)
+	}
+	// Near-duplicate lessons (the same prompt, tool outcome or file edit
+	// recorded once per call) are noise, not signal: normalize each entry
+	// and keep only the most recent occurrence per normalized text, then
+	// cap the rendered list so the digest stays compact.
+	lessons = dedupeLessons(lessons)
+	if len(lessons) > 0 {
+		b.WriteString("## Project memory (from past sessions)\n")
+		for i, m := range lessons {
+			if i >= projectMemoryMax {
+				fmt.Fprintf(&b, "- … and %d more (full history via `kern memory`)\n", len(lessons)-projectMemoryMax)
+				break
+			}
+			text := m.Content
+			if len(text) > 400 {
+				text = text[:400] + "…"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", m.CreatedAt.UTC().Format("2006-01-02"), strings.ReplaceAll(text, "\n", " "))
+		}
+		b.WriteString("\n")
+	}
+
+	// Recent session activity: auto captures live in the v1 lesson store
+	// (hook/plugin conversation capture) — the cross-session trail (edited
+	// files, failed commands, user direction). Surfacing the most recent
+	// ones lets a fresh session or subagent lane see what just happened
+	// instead of re-deriving it — bounded so the digest stays compact and
+	// stale activity ages out of the window. memory.List is newest-first,
+	// so the head of the slice is the most recent activity.
+	const recentActivityMax = 10
+	var autos []memory.Entry
+	for _, e := range memory.List(root) {
+		if e.Source == "auto" {
+			autos = append(autos, e)
+		}
+	}
+	if len(autos) > recentActivityMax {
+		autos = autos[:recentActivityMax]
+	}
+	if len(autos) > 0 {
+		b.WriteString("## Recent session activity (auto captures, newest first)\n")
+		for _, e := range autos {
+			text := strings.ReplaceAll(e.Text, "\n", " ")
+			if len(text) > 160 {
+				text = text[:160] + "…"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", e.Time.UTC().Format("2006-01-02 15:04"), text)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // surprisingSection lists the top cross-community couplings that are not
 // known bridges — the "what should I look at" onboarding signal. Omitted
 // entirely when there is nothing surprising, to keep the digest budget.
 func surprisingSection(ix *index.Index) string {
-	edges := intel.SurprisingConnections(ix, 5)
+	edges := topology.SurprisingConnections(ix, 5)
 	if len(edges) == 0 {
 		return ""
 	}
@@ -303,6 +321,36 @@ func Warm(root string) error {
 	return ix.Save()
 }
 
+// digestHubs returns the digest's "Most-called (hubs)" list: the top hubs by
+// ACTUAL caller count (the section's own "(N callers)" measure), with
+// 0-caller symbols dropped (QA 5.6.b). The pool is the shared topology.Hubs
+// top-decile ranking (production symbols only); the digest re-ranks it by
+// Callers desc so a community-weighted fan-out symbol (main with 0 callers)
+// can never lead the list, then caps at the section's limit.
+func digestHubs(ix *index.Index, limit int) []topology.Hub {
+	pool := topology.Hubs(ix, 0)
+	var hubs []topology.Hub
+	for _, h := range pool {
+		if h.Callers == 0 {
+			continue // a symbol nothing calls is not "most-called"
+		}
+		hubs = append(hubs, h)
+	}
+	sort.Slice(hubs, func(i, j int) bool {
+		if hubs[i].Callers != hubs[j].Callers {
+			return hubs[i].Callers > hubs[j].Callers
+		}
+		if hubs[i].Calls != hubs[j].Calls {
+			return hubs[i].Calls > hubs[j].Calls
+		}
+		return hubs[i].Symbol < hubs[j].Symbol
+	})
+	if len(hubs) > limit {
+		hubs = hubs[:limit]
+	}
+	return hubs
+}
+
 // callEdges returns the total number of directed caller→callee edges in an
 // index. A symbol that calls three helpers contributes three edges, not
 // one row.
@@ -337,56 +385,27 @@ func indexSection(ix *index.Index) string {
 		b.WriteString("Kinds: " + strings.Join(kinds, " · ") + "\n")
 	}
 
-	// Phase 5 (2026-10-07): "Most-called (hubs)" must show the project's own
-	// production hubs, not raw call-target noise. Counting every ix.Callers
-	// target made EXTERNAL symbols — T.Fatalf, len, T.Errorf, strings.Contains,
-	// called mostly from _test.go files and undefined in this repo — dominate
-	// the digest. Rank like intel.Hubs instead: only targets DEFINED in the
-	// index whose preferred definition is a production file (not a test file,
-	// not a testdata/ fixture) count.
-	defFile := map[string]string{}
-	for _, s := range ix.Symbols {
-		if s.File == "" {
-			continue
-		}
-		full := s.FullName()
-		if cur, ok := defFile[full]; ok && !intel.IsTestFile(cur) && !intel.IsFixtureFile(cur) {
-			continue // a production definition is already recorded
-		}
-		defFile[full] = s.File
-	}
-	hubCount := map[string]int{}
-	for sym, callers := range ix.Callers {
-		if len(callers) <= 1 {
-			continue
-		}
-		f := defFile[sym]
-		if f == "" || intel.IsTestFile(f) || intel.IsFixtureFile(f) {
-			continue
-		}
-		hubCount[sym] = len(callers)
-	}
-	if len(hubCount) > 0 {
-		type hub struct {
-			name string
-			n    int
-		}
-		var hubs []hub
-		for sym, n := range hubCount {
-			hubs = append(hubs, hub{sym, n})
-		}
-		sort.Slice(hubs, func(i, j int) bool {
-			if hubs[i].n != hubs[j].n {
-				return hubs[i].n > hubs[j].n
-			}
-			return hubs[i].name < hubs[j].name
-		})
-		if len(hubs) > 8 {
-			hubs = hubs[:8]
-		}
+	// Phase 5 / F2 (2026-10-07): "Most-called (hubs)" must show the
+	// project's own production hubs, not raw call-target noise. intel.Hubs
+	// is the shared, authoritative ranking (kern hubs, web dashboards): it
+	// excludes test-file and testdata symbols entirely, counts only
+	// production callers (test-file callers of a production symbol do not
+	// inflate its hub weight — prodCallersWithFileMap), and normalizes by
+	// community size. Counting raw ix.Callers here previously let
+	// T.Fatalf-style test noise dominate the digest.
+	//
+	// QA 5.6(b): the digest ranks its hubs by ACTUAL caller count, not the
+	// community-weighted score. The weighted score can rank a 0-caller
+	// fan-out symbol (e.g. main — nobody calls it, it calls everything)
+	// above every real hub, which reads as "most-called: main (0 callers)".
+	// A symbol nothing calls is not "most-called", so 0-caller entries are
+	// dropped and the list is ordered by the same "(N callers)" measure the
+	// section prints.
+	hubs := digestHubs(ix, 8)
+	if len(hubs) > 0 {
 		b.WriteString("Most-called (hubs):\n")
 		for _, h := range hubs {
-			fmt.Fprintf(&b, "  %s (%d callers)\n", h.name, h.n)
+			fmt.Fprintf(&b, "  %s (%d callers)\n", h.Symbol, h.Callers)
 		}
 	}
 
@@ -401,10 +420,17 @@ func indexSection(ix *index.Index) string {
 		}
 	}
 	if len(entries) > 0 {
-		b.WriteString("Entry points: " + strings.Join(dedupe(entries), ", ") + "\n")
+		// QA 6.7(b): cap the entry-point line — a repo with many run/init
+		// symbols must not turn the digest's index section into a long list.
+		uniq := dedupe(entries)
+		if len(uniq) > 8 {
+			fmt.Fprintf(&b, "Entry points: %s, … (%d total)\n", strings.Join(uniq[:8], ", "), len(uniq))
+		} else {
+			b.WriteString("Entry points: " + strings.Join(uniq, ", ") + "\n")
+		}
 	}
 
-	fwEntries := frameworkEntries(ix)
+	fwEntries, fwTotal := frameworkEntries(ix)
 	if len(fwEntries) > 0 {
 		// The framework id comes from the indexer's entry-point heuristic
 		// and can claim a JS framework ("js-router") for routes that are
@@ -415,6 +441,9 @@ func indexSection(ix *index.Index) string {
 		b.WriteString("HTTP endpoints (handler → route):\n")
 		for _, e := range fwEntries {
 			fmt.Fprintf(&b, "  %-30s %-10s %s\n", e.name, httpEndpointLabel(ix, e.fw), e.route)
+		}
+		if fwTotal > len(fwEntries) {
+			fmt.Fprintf(&b, "  … and %d more endpoints (see `kern graph --entities`)\n", fwTotal-len(fwEntries))
 		}
 	}
 	b.WriteString("\n")
@@ -435,17 +464,19 @@ func httpEndpointLabel(ix *index.Index, fw string) string {
 	return fw
 }
 
-// goPrimary reports whether Go is the repo's dominant language (the
-// language with the most symbols in the index).
-func goPrimary(ix *index.Index) bool {
+// dominantLang returns the language with the most symbols in the index
+// ("" on an empty index). The endpoint section ranks entries in the
+// dominant language first: on a Go-primary repo the real server routes
+// (net-http) must take the capped slots before JS client fetch wrappers
+// (F3-1) — the old plain fw-alphabetical sort ("js-router" < "net-http")
+// filled every slot with the TS SDK's client routes and hid the Go
+// surface entirely.
+func dominantLang(ix *index.Index) string {
 	counts := map[string]int{}
 	for _, s := range ix.Symbols {
 		if s.Lang != "" {
 			counts[s.Lang]++
 		}
-	}
-	if len(counts) == 0 {
-		return false
 	}
 	best, bestN := "", -1
 	for l, n := range counts {
@@ -453,37 +484,73 @@ func goPrimary(ix *index.Index) bool {
 			best, bestN = l, n
 		}
 	}
-	return best == "go"
+	return best
 }
+
+// goPrimary reports whether Go is the repo's dominant language (the
+// language with the most symbols in the index).
+func goPrimary(ix *index.Index) bool { return dominantLang(ix) == "go" }
 
 type fwEntry struct {
 	name, fw, route string
+	primary         bool // language matches the repo's dominant language
 }
 
 // frameworkEntries collects enriched entry-point symbols (framework handlers,
-// controllers, route targets) ordered by framework then name.
-func frameworkEntries(ix *index.Index) []fwEntry {
+// controllers, route targets) ordered by dominant-language entries first,
+// then framework, then name. F2 (2026-10-07): entries defined in test files
+// (or testdata fixtures) are skipped — a test fixture mirroring a real
+// handler must not be presented as the digest's HTTP surface — and exact
+// (name, route) duplicates collapse to one entry (the indexer can register
+// the same handler twice with an unpopulated route, e.g. the live "/v1/memory"
+// duplicate; route was historically never copied on some paths). F3-1
+// (2026-10-08): returns the pre-cap total alongside the capped list so the
+// digest can disclose what the cap hid.
+func frameworkEntries(ix *index.Index) ([]fwEntry, int) {
+	dom := dominantLang(ix)
 	var out []fwEntry
 	for _, s := range ix.Symbols {
 		if !s.Entry || s.Framework == "" {
+			continue
+		}
+		if intel.IsTestFile(s.File) || intel.IsFixtureFile(s.File) {
 			continue
 		}
 		name := s.Name
 		if s.Receiver != "" {
 			name = s.Receiver + "." + name
 		}
-		out = append(out, fwEntry{name: name, fw: s.Framework, route: s.Route})
+		out = append(out, fwEntry{name: name, fw: s.Framework, route: s.Route, primary: s.Lang == dom})
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].primary != out[j].primary {
+			return out[i].primary
+		}
 		if out[i].fw != out[j].fw {
 			return out[i].fw < out[j].fw
 		}
-		return out[i].name < out[j].name
+		if out[i].name != out[j].name {
+			return out[i].name < out[j].name
+		}
+		return out[i].route < out[j].route
 	})
+	// Dedupe by (name, route), mirroring the dedupe() collapse semantics:
+	// keep the first occurrence of each pair after the sort.
+	seen := map[[2]string]bool{}
+	uniq := out[:0]
+	for _, e := range out {
+		key := [2]string{e.name, e.route}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		uniq = append(uniq, e)
+	}
+	out = uniq
 	if len(out) > 20 {
 		out = out[:20]
 	}
-	return out
+	return out, len(uniq)
 }
 
 // archGateSymbols and archGateEdges cap the architecture section: community
@@ -505,18 +572,39 @@ func architectureSection(ix *index.Index) string {
 	if len(ix.Symbols) > archGateSymbols || edges > archGateEdges {
 		return compactArchitectureFallback(ix, edges)
 	}
-	arch := intel.AnalyzeArchitecture(ix)
+	arch := topology.AnalyzeArchitecture(ix)
 	if len(arch.Communities) == 0 && len(arch.Coupling) == 0 {
 		// The graph has local calls but they did not coalesce into detected
 		// communities (e.g. very small or star-shaped graphs). Surface that
 		// call structure exists rather than reporting nothing.
 		return "## Architecture\n(call structure present but too small to cluster into communities)\n\n"
 	}
+	return renderArchitectureSection(&arch)
+}
+
+// renderArchitectureSection renders the community/coupling overview, with the
+// community list capped (QA 6.7(b)) so a large repo's many communities cannot
+// push the digest past its byte budget. Split from architectureSection so
+// tests can exercise the cap without re-running community detection.
+func renderArchitectureSection(arch *topology.Architecture) string {
 	var b strings.Builder
 	b.WriteString("## Architecture (communities + coupling)\n")
-	for _, c := range arch.Communities {
+	// QA 6.7(b): the community list was unbounded — on a large repo hundreds
+	// of communities (each with a joined package list) pushed the digest past
+	// ~25KB. Cap the rendered list at the top communities by size with a
+	// truncation pointer; the full graph stays one `kern graph` away.
+	const maxCommunities = 12
+	communities := arch.Communities
+	if len(communities) > maxCommunities {
+		communities = communities[:maxCommunities]
+	}
+	for _, c := range communities {
 		fmt.Fprintf(&b, "  %-24s size %-4d hub %-24s pkgs %s\n",
 			c.ID, c.Size, c.Hub, strings.Join(c.Packages, ", "))
+	}
+	if len(arch.Communities) > maxCommunities {
+		fmt.Fprintf(&b, "  … and %d more communities (full graph via `kern graph --html`)\n",
+			len(arch.Communities)-maxCommunities)
 	}
 	if len(arch.Coupling) > 0 {
 		b.WriteString("coupling warnings (cross-community call bundles):\n")
@@ -577,21 +665,21 @@ func compactArchitectureFallback(ix *index.Index, edges int) string {
 	return b.String()
 }
 
-func statsSection(b *strings.Builder) {
+func statsSection(root string) string {
 	rec, err := stats.NewRecorder()
 	if err != nil {
-		return
+		return "## kern savings\n(stats unavailable: " + err.Error() + ")\n\n"
 	}
-	s, err := rec.Summarize(7, "")
-	if err != nil {
-		return
+	sum, err := rec.SummarizeByRoot(30, "", root)
+	if err != nil || (sum.Operations == 0 && sum.ToolCalls == 0) {
+		return "## kern savings\n(no rooted project stats yet — run `kern stats` for the machine-wide view)\n\n"
 	}
-	// M9: the ops/tokens/$ numbers come from the machine-wide metrics
-	// recorder (persisted in the global cache, shared by every project on
-	// this machine) — never present them as project-scoped metrics. The
-	// prefix makes the scope unambiguous.
-	fmt.Fprintf(b, "## kern savings (last 7 days)\nmachine-wide (all projects): %d ops · %d tokens saved (%.1f%%) · ~$%.4f cost saved\n\n",
-		s.Operations, s.SavedTotal, s.SavedPct, s.CostSaved)
+	var b strings.Builder
+	b.WriteString("## kern savings (project, last 30 days)\n")
+	fmt.Fprintf(&b, "  %d tool calls · %d optimization events · %d tokens saved (%.1f%%)\n",
+		sum.ToolCalls, sum.Operations, sum.SavedTotal, sum.SavedPct)
+	b.WriteString("  machine-wide view: `kern stats`\n\n")
+	return b.String()
 }
 
 func dedupe(in []string) []string {

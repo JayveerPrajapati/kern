@@ -61,6 +61,12 @@ func LoadOrBuildContext(ctx context.Context, root string) (*Index, error) {
 		if !ix.Stale() {
 			return ix, nil
 		}
+	} else if reason := UnsafeAutoIndexRoot(root); reason != "" {
+		// No loadable index: this would be an AUTOMATIC first build. Refuse
+		// broad roots ($HOME, filesystem roots, documents folders) BEFORE the
+		// build lock creates .kern/ there. An existing (even stale) index is
+		// a deliberate earlier choice and refreshes normally.
+		return nil, &UnsafeRootError{Root: root, Reason: reason}
 	}
 	return debouncedRebuildContext(ctx, root,
 		func() (*Index, bool) {

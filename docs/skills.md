@@ -5,7 +5,7 @@ Kern ships workflow runbooks that agents can follow through the tool surface
 
 ## Bundled skills
 
-Four skills are embedded in the binary and installed by `kern skills install`:
+Five skills are embedded in the binary and installed by `kern skills install`:
 
 | Skill | Purpose |
 |---|---|
@@ -13,6 +13,7 @@ Four skills are embedded in the binary and installed by `kern skills install`:
 | `kern-safe-change` | Pre-edit blast radius, firewall gates, auto-repair workflow |
 | `kern-incident-triage` | Log compression → stack-to-symbol correlation → reproduction |
 | `kern-team-orchestration` | Orchestrate kern's 7-role specialist agent squad across the Explore, Plan, Edit, and Verify lifecycle. |
+| `kern-minimal-change` | Restraint ladder for any change: reuse what exists, stdlib before platform before a new dependency, a one-liner before an abstraction — stop at the first rung that solves the problem. |
 
 - `kern skills list` — catalog with descriptions.
 - `kern skills show <name>` — full runbook.

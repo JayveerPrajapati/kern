@@ -52,6 +52,17 @@ A task is a directory under `tasks/`:
 - `check.sh` — the deterministic gate (cwd = workspace, exit 0 = pass); it
   encodes correctness **and** safety **and** reuse expectations
 - `task.json` — optional, `{"timeout": "15m"}` per-task override
+- `solution/` — optional reference overlay (never copied into the agent's
+  workspace). When present, `TestTasksAreSolvableAndNotVacuous` requires
+  `check.sh` to fail on the pristine fixture and pass with the overlay, so a
+  task cannot be vacuous or unsolvable. Give it its own `go.mod` so the main
+  module's `./...` does not compile it.
+
+Shipped tasks: `fix-offbyone` and `validate-input` (single-package), plus
+`rename-scoped` (rename one package's `New` while another package's `New`
+and its callers must stay untouched — a same-name identity trap) and
+`add-param` (change a shared function's signature and update callers across
+three packages with different ceilings).
 
 ## Scoring (deterministic only)
 

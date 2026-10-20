@@ -12,17 +12,17 @@ import (
 // fast (default) for everything else.
 func TestCostHintForTiers(t *testing.T) {
 	t.Parallel()
-	if h := costHintFor("kern_sandbox"); h != costSlow {
+	if h := costHintFor("kern_verify"); h != costSlow {
 		t.Errorf("kern_sandbox = %+v, want slow tier", h)
 	}
-	if h := costHintFor("kern_analyze"); h != costSlow {
-		t.Errorf("kern_analyze = %+v, want slow tier (LLM-class)", h)
+	if h := costHintFor("kern_run"); h != costSlow {
+		t.Errorf("kern_run = %+v, want slow tier (LLM-class)", h)
 	}
 	if h := costHintFor("kern_search"); h != costMedium {
 		t.Errorf("kern_search = %+v, want medium tier", h)
 	}
-	if h := costHintFor("kern_health"); h != costFast {
-		t.Errorf("kern_health = %+v, want fast tier (default)", h)
+	if h := costHintFor("kern_stats"); h != costFast {
+		t.Errorf("kern_stats = %+v, want fast tier (default)", h)
 	}
 	// Unknown tools must never panic or mislead: deterministic fast default.
 	if h := costHintFor("kern_does_not_exist"); h != costFast {

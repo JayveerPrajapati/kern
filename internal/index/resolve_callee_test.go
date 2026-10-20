@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -39,7 +40,7 @@ func f(w interface{}) {
 		}
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
 			if ce, ok := n.(*ast.CallExpr); ok {
-				got = append(got, calleeName(ce.Fun))
+				got = append(got, langparse.CalleeName(ce.Fun))
 			}
 			return true
 		})
@@ -61,9 +62,11 @@ func f(w interface{}) {
 }
 
 // TestMeasureCallResolutionOnRealFixture builds a small two-package Go
-// project with a mix of resolvable and external call targets and pins the
-// honest resolution counters: same-package funcs and receiver-var methods
-// resolve; stdlib and chained external calls stay unresolved; no bare-dot
+// project with a mix of resolvable, external and in-repo-miss call targets
+// and pins the honest resolution counters: same-package funcs and
+// receiver-var methods resolve; stdlib calls stay unresolved and are
+// classified External; a receiver-var call to a never-defined method stays
+// unresolved and is classified InRepo (the actionable share); no bare-dot
 // targets are recorded.
 func TestMeasureCallResolutionOnRealFixture(t *testing.T) {
 	dir := t.TempDir()
@@ -82,6 +85,7 @@ import (
 	"fmt"
 	"example.com/app/api"
 )
+type Widget struct{}
 func helper() {}
 func main() {
 	helper()
@@ -89,6 +93,8 @@ func main() {
 	s.Do()
 	fmt.Println("external")
 	json.NewEncoder(nil).Encode("chained")
+	var w Widget
+	w.Missing()
 }
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -106,14 +112,23 @@ func main() {
 		}
 	}
 	// helper and Service.Do resolve (receiver var + same package);
-	// fmt.Println, json.NewEncoder and the chained json.NewEncoder.Encode
-	// are external and correctly stay unresolved.
+	// fmt.Println and json.NewEncoder are external and correctly stay
+	// unresolved; the chained json.NewEncoder.Encode form is filtered at
+	// record time (3-segment builder chain — see IsNoiseCallee), so it
+	// never reaches the index. Widget.Missing is an in-repo miss: the
+	// receiver type is defined in the project but the method never is.
 	stats := ix.CallResolution
 	if stats.Total != 5 {
 		t.Fatalf("CallResolution.Total = %d, want 5 (callees: %v)", stats.Total, collectTargets(ix))
 	}
 	if stats.Unresolved != 3 {
-		t.Fatalf("CallResolution.Unresolved = %d, want 3 (external stdlib targets)", stats.Unresolved)
+		t.Fatalf("CallResolution.Unresolved = %d, want 3", stats.Unresolved)
+	}
+	if stats.External != 2 {
+		t.Fatalf("CallResolution.External = %d, want 2 (fmt.Println, json.NewEncoder)", stats.External)
+	}
+	if stats.InRepo != 1 {
+		t.Fatalf("CallResolution.InRepo = %d, want 1 (Widget.Missing)", stats.InRepo)
 	}
 	if got := ix.Callers["Service.Do"]; len(got) != 1 || got[0] != "main" {
 		t.Fatalf("Callers[Service.Do] = %v, want [main]", got)

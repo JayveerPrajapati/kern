@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,21 +12,26 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // runBench implements `kern bench`: a deterministic, zero-network latency
 // harness for this repo. It measures the two load paths every kern command
 // pays — cold index build vs warm persisted-store load — plus a small fixed
 // set of query latencies (symbol search, ranked search, one-hop callers,
-// transitive blast radius, hub ranking), mirroring the G12 latency-test
-// methodology in internal/bpreceipt/metrics (cold-vs-warm p50 recording) and
-// the docs/benchmarks/graph-latency.md suite (median/min over repeated runs,
-// index build excluded from query timings).
+// transitive blast radius, hub ranking), mirroring the cold-vs-warm p50
+// methodology documented in docs/benchmarks/graph-latency.md (median/min
+// over repeated runs, index build excluded from query timings).
 //
 // Output: a human table on stdout AND a JSON document at <root>/.kern/bench.json
 // (the canonical path the web console's /benchmarks page reads). No network,
 // no LLM calls, no external tools — pure stdlib + the existing index/intel
 // query paths.
+//
+// With --check the run is additionally verified against the versioned
+// thresholds in bench_thresholds.json (embedded; KERN_BENCH_THRESHOLDS
+// overrides the path) and exits 1 on hard violations — the regression gate
+// behind `make bench-gate`.
 func runBench(rest []string) {
 	f, _ := parseFlagsOrDie(rest)
 	root := projectRoot(f)
@@ -61,20 +67,26 @@ func runBench(rest []string) {
 		name   string
 		kind   string
 		target string
-		run    func()
+		run    func() int
 	}{
-		{"search", "symbol-search", "main", func() { ix.Search("main", 20) }},
-		{"ranked", "ranked-search", "main", func() { intel.RankedSearch(ix, "main", 20) }},
-		{"callers", "one-hop-callers", hub, func() { ix.CallersOf(hub) }},
-		{"blast", "transitive-blast-radius", hub, func() { intel.BlastRadius(ix, []string{hub}) }},
-		{"hubs", "hub-ranking", "", func() { intel.Hubs(ix, 10) }},
+		{"search", "symbol-search", "main", func() int { return len(ix.Search("main", 20)) }},
+		{"ranked", "ranked-search", "main", func() int { return len(intel.RankedSearch(ix, "main", 20)) }},
+		{"callers", "one-hop-callers", hub, func() int { return len(ix.CallersOf(hub)) }},
+		{"blast", "transitive-blast-radius", hub, func() int {
+			r, _ := intel.BlastRadius(ix, []string{hub})
+			return len(r)
+		}},
+		{"hubs", "hub-ranking", "", func() int { return len(topology.Hubs(ix, 10)) }},
 	}
 	queryResults := make([]queryResult, 0, len(queries))
 	for _, q := range queries {
 		// Warm-up once so lazy maps/tables (e.g. buildSymbolIndex side
-		// effects on first query) are outside the timed runs.
-		q.run()
-		s := measure(5, q.run)
+		// effects on first query) are outside the timed runs. The warm-up
+		// run also captures the query's result count — the zero-result
+		// gate in `--check` reads it (a query that returns nothing is a
+		// wiring regression, not a latency finding).
+		n := q.run()
+		s := measure(5, func() { q.run() })
 		queryResults = append(queryResults, queryResult{
 			Name:     q.name,
 			Kind:     q.kind,
@@ -82,6 +94,7 @@ func runBench(rest []string) {
 			MedianMS: s.MedianMS,
 			MinMS:    s.MinMS,
 			Runs:     s.Runs,
+			Results:  n,
 		})
 	}
 
@@ -97,7 +110,7 @@ func runBench(rest []string) {
 		WarmLoadMS:     warm,
 		ColdVsWarm:     speedup(cold, warm.MedianMS),
 		Queries:        queryResults,
-		MethodologyRef: "docs/benchmarks/graph-latency.md + internal/bpreceipt/metrics G12 (cold-vs-warm, median/min over repeated runs)",
+		MethodologyRef: "docs/benchmarks/graph-latency.md (cold-vs-warm, median/min over repeated runs)",
 	}
 
 	// ---- Persist the canonical JSON the web page reads. ----
@@ -119,15 +132,38 @@ func runBench(rest []string) {
 	if f.json {
 		printJSON(res)
 	}
+	// ---- Optional regression gate (perfection plan B1): verify the run
+	// against the versioned thresholds and exit 1 on hard violations
+	// (findings tier, same as kern verify FAIL). ----
+	if f.check {
+		th := loadBenchThresholds()
+		violations := checkBenchThresholds(res, th)
+		fmt.Println()
+		fmt.Println("kern bench — threshold check (cmd/kern/bench_thresholds.json)")
+		if len(violations) == 0 {
+			fmt.Println("[ok] all thresholds satisfied")
+		}
+		for _, v := range violations {
+			fmt.Printf("[%s] %s: %s\n", v.Level, v.Check, v.Detail)
+		}
+		if f.json {
+			printJSON(map[string]any{"check": "bench-thresholds", "violations": violations})
+		}
+		for _, v := range violations {
+			if v.Level == "fail" {
+				os.Exit(1)
+			}
+		}
+	}
 	fmt.Printf("wrote %s (%d symbols, %d queries)\n", outPath, res.SymbolCount, len(res.Queries))
 }
 
 // benchResult is the schema of .kern/bench.json — the document the web
 // console's /benchmarks page renders. Field names are the page's contract;
-// change them in lockstep with internal/web/builders.go's benchReport AND
-// the golden fixture internal/web/testdata/bench.json (pinned by
-// internal/web/bench_schema_test.go's TestBenchReportGoldenFixture — a
-// renamed field here silently zeroes the /benchmarks page).
+// change them in lockstep with the golden fixture
+// cmd/kern/testdata/bench.json (pinned by
+// TestBenchResultRoundTripGoldenFixture — a renamed field here silently
+// zeroes the /benchmarks page).
 type benchResult struct {
 	Suite          string        `json:"suite"`
 	Date           string        `json:"date"`
@@ -151,7 +187,8 @@ type sample struct {
 }
 
 // queryResult is one fixed query's latency summary plus its target (the
-// symbol the graph queries resolved; empty for repo-wide scans).
+// symbol the graph queries resolved; empty for repo-wide scans) and result
+// count (the --check zero-result gate reads it).
 type queryResult struct {
 	Name     string  `json:"name"`
 	Kind     string  `json:"kind"`
@@ -159,6 +196,7 @@ type queryResult struct {
 	MedianMS float64 `json:"median_ms"`
 	MinMS    float64 `json:"min_ms"`
 	Runs     int     `json:"runs"`
+	Results  int     `json:"results"`
 }
 
 // machineInfo records the environment the numbers were measured on, so the
@@ -253,10 +291,95 @@ func printBenchTable(res benchResult) {
 	fmt.Printf("warm load (store)   %8.2f ms %8.2f ms %5d\n", res.WarmLoadMS.MedianMS, res.WarmLoadMS.MinMS, res.WarmLoadMS.Runs)
 	fmt.Printf("cold/warm speedup   %8.1fx\n", res.ColdVsWarm)
 	fmt.Println()
-	fmt.Println("query                kind                    target   median    min     runs")
+	fmt.Println("query                kind                    target   median    min     runs  results")
 	for _, q := range res.Queries {
-		fmt.Printf("%-20s %-22s %-8s %s %s %5d\n", q.Name, q.Kind, q.Target, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs)
+		fmt.Printf("%-20s %-22s %-8s %s %s %5d %7d\n", q.Name, q.Kind, q.Target, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs, q.Results)
 	}
 	fmt.Println()
 	fmt.Println("methodology: " + res.MethodologyRef)
+}
+
+// bench_thresholds.json is the versioned gate config for `kern bench
+// --check`: generous multipliers over the measured baseline so the gate
+// fails only on REGRESSIONS, never on machine noise. Embedded so the binary
+// is self-contained; KERN_BENCH_THRESHOLDS overrides the path for testing.
+//
+//go:embed bench_thresholds.json
+var benchThresholdsRaw []byte
+
+// benchThresholds is the gate configuration: hard ceilings for the warm
+// load and every query, a floor for the cold/warm speedup, a warn factor
+// (the fraction of a ceiling at which to warn without failing), and the
+// minimum result count every query must return (0 disables the
+// zero-result check).
+type benchThresholds struct {
+	WarmLoadMSMax float64 `json:"warm_load_ms_max"`
+	QueryMSMax    float64 `json:"query_ms_max"`
+	ColdVsWarmMin float64 `json:"cold_vs_warm_min"`
+	WarnFactor    float64 `json:"warn_factor"`
+	MinResults    int     `json:"min_results"`
+}
+
+// loadBenchThresholds decodes the versioned gate config. A malformed file
+// is fatal — the gate must fail loud, not silently skip.
+func loadBenchThresholds() benchThresholds {
+	raw := benchThresholdsRaw
+	if p := os.Getenv("KERN_BENCH_THRESHOLDS"); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fatal("Bench: read KERN_BENCH_THRESHOLDS %s: %v", p, err)
+		}
+		raw = b
+	}
+	var th benchThresholds
+	if err := json.Unmarshal(raw, &th); err != nil {
+		fatal("Bench: decode bench thresholds: %v", err)
+	}
+	return th
+}
+
+// benchViolation is one gate finding: a check name, a level ("fail" = exit
+// 1, "warn" = report only) and a human detail.
+type benchViolation struct {
+	Check  string `json:"check"`
+	Level  string `json:"level"`
+	Detail string `json:"detail"`
+}
+
+// checkBenchThresholds verifies a bench run against the gate config. Pure
+// function (no I/O) so the gate logic is table-testable. Failures: the
+// warm-load ceiling, per-query ceilings, the cold/warm speedup floor
+// (guards the persisted-store fast path — a Load that falls through to a
+// Build collapses the ratio to ~1x), and zero-result queries (a wiring
+// regression, not a latency). Warnings: any metric past warn_factor of its
+// ceiling. A ceiling of 0 (or an unmeasured 0 value) disables that check.
+func checkBenchThresholds(res benchResult, th benchThresholds) []benchViolation {
+	var out []benchViolation
+	check := func(name string, val, ceiling float64, unit string) {
+		if ceiling <= 0 || val <= 0 {
+			return
+		}
+		if val > ceiling {
+			out = append(out, benchViolation{Check: name, Level: "fail",
+				Detail: fmt.Sprintf("%.2f%s exceeds the %s ceiling %.2f%s", val, unit, name, ceiling, unit)})
+			return
+		}
+		if th.WarnFactor > 0 && val > ceiling*th.WarnFactor {
+			out = append(out, benchViolation{Check: name, Level: "warn",
+				Detail: fmt.Sprintf("%.2f%s is past %.0f%% of the %s ceiling %.2f%s", val, unit, th.WarnFactor*100, name, ceiling, unit)})
+		}
+	}
+	check("warm_load_ms", res.WarmLoadMS.MedianMS, th.WarmLoadMSMax, " ms")
+	for _, q := range res.Queries {
+		check(q.Name+"_ms", q.MedianMS, th.QueryMSMax, " ms")
+		if th.MinResults > 0 && q.Results < th.MinResults {
+			out = append(out, benchViolation{Check: q.Name + "_results", Level: "fail",
+				Detail: fmt.Sprintf("%d results (min %d) — the query wiring regressed, this is not a latency finding", q.Results, th.MinResults)})
+		}
+	}
+	if th.ColdVsWarmMin > 0 && res.ColdVsWarm < th.ColdVsWarmMin {
+		out = append(out, benchViolation{Check: "cold_vs_warm_speedup", Level: "fail",
+			Detail: fmt.Sprintf("%.1fx is under the %.1fx floor — the warm load may be falling through to a full build (the persisted-store fast path regressed)", res.ColdVsWarm, th.ColdVsWarmMin)})
+	}
+	return out
 }

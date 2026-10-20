@@ -28,6 +28,7 @@ func isExported(name string) bool {
 // field mapping.
 func FromIndexSymbol(s index.Symbol) Symbol {
 	return Symbol{
+		ID:        s.DeclarationID(),
 		Name:      s.Name,
 		Qualified: s.FullName(),
 		Kind:      s.Kind,

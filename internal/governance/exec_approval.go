@@ -278,6 +278,79 @@ func execApprovedFor(root, key string) *domain.Approval {
 	return nil
 }
 
+// defaultExecRejectionTTL is how long a human REJECTED exec approval keeps
+// blocking byte-identical retries of its command (rejection stickiness).
+// Rejections must be sticky — otherwise an agent can spam fresh approvals
+// for a command a human already refused — but "permanent until an operator
+// edits approvals.json by hand" converts a routine "not now" into a
+// file-surgery chore. The TTL bounds both: within it, retries are
+// hard-denied; after it, the rejection lapses and the next attempt mints a
+// fresh approval a human STILL has to decide (the gate re-arms, it does not
+// open). Operators can re-open a still-sticky command immediately with
+// `kern approval clear <id>`; KERN_REJECTION_TTL overrides the default.
+const defaultExecRejectionTTL = 7 * 24 * time.Hour
+
+// execRejectionTTL returns the rejection stickiness window: the
+// KERN_REJECTION_TTL duration override (e.g. "72h", "30m") when it parses
+// to a positive duration, else the 7-day default. An unparseable or
+// non-positive value falls back to the default rather than disabling
+// stickiness — expiry must never be accidentally switched off by a typo.
+func execRejectionTTL() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KERN_REJECTION_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultExecRejectionTTL
+}
+
+// execRejectionTTLText renders the rejection TTL for deny messages: whole
+// days as a compact "7d", anything else as the Go duration string ("72h0m0s"
+// stays exact for non-day-granular overrides).
+func execRejectionTTLText() string {
+	d := execRejectionTTL()
+	if d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+	return d.String()
+}
+
+// execRejectedFor returns the most recent persisted, MAC-verified approval
+// record for the given command key that was REJECTED by a human within the
+// rejection TTL (rejection stickiness), or nil when no unexpired rejection
+// blocks the key. Only records carrying a valid HMAC over their
+// decision-relevant content count, so a forged rejection cannot deny
+// execution. An unreadable store returns nil — the normal mint path below
+// still gates the command. A rejection older than the TTL is skipped
+// (auto-expiry): the deny side never outlives the human's decision by more
+// than the configured window, and the newest rejection wins when several
+// records exist for the same key.
+func execRejectedFor(root, key string) *domain.Approval {
+	if root == "" {
+		return nil
+	}
+	approvals, err := NewFileStore(root).Load()
+	if err != nil {
+		return nil
+	}
+	ttl := execRejectionTTL()
+	var match *domain.Approval
+	for i := range approvals {
+		a := approvals[i]
+		if a.TaskID != key || a.Status != "rejected" || !execApprovalMACValid(a) {
+			continue
+		}
+		decided := resolvedAt(a)
+		if time.Since(decided) > ttl {
+			continue
+		}
+		if match == nil || decided.After(resolvedAt(*match)) {
+			match = &a
+		}
+	}
+	return match
+}
+
 // execConsumedLedgerPath returns the path of the MAC'd consumed-approval
 // ledger, stored OUTSIDE the client-governed workspace next to the HMAC
 // secret. It is a package-level func so tests can redirect it.

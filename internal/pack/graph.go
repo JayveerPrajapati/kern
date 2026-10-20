@@ -25,10 +25,10 @@ type GraphBundle struct {
 	index.GraphSnapshot // embedded: SchemaVersion, Mode, Root, Identity, Graph, Files
 	// Symbol is the subgraph root symbol ("" = whole graph).
 	Symbol string `json:"symbol,omitempty"`
-	// Nodes holds the packed node fullnames, sorted. It is a subset of
+	// Nodes holds the packed node IDs, sorted. It is a subset of
 	// Graph.Nodes when maxTokens truncated the signature section.
 	Nodes []string `json:"nodes"`
-	// Signatures maps node fullname -> one-line signature.
+	// Signatures maps node ID -> one-line signature.
 	Signatures map[string]string `json:"signatures"`
 	// TotalTokens is the token count of the packed signature section
 	// (the dominant payload; header/edges/fingerprint add a small overhead).
@@ -56,6 +56,10 @@ func BuildGraph(root string, opts Options) (*GraphBundle, error) {
 		return nil, fmt.Errorf("graph pack: %w", err)
 	}
 	byID := make(map[string]index.GraphNode, len(snap.Graph.Nodes))
+	declarations := make(map[string]index.Symbol, len(ix.Symbols))
+	for _, symbol := range ix.Symbols {
+		declarations[symbol.DeclarationID()] = symbol
+	}
 	for _, n := range snap.Graph.Nodes {
 		byID[n.ID] = n
 	}
@@ -69,7 +73,7 @@ func BuildGraph(root string, opts Options) (*GraphBundle, error) {
 	var lines []string
 	used := 0
 	for _, id := range nodes {
-		line := signatureLine(ix, byID[id])
+		line := signatureLine(declarations, byID[id])
 		if opts.MaxTokens > 0 && used+tokenize.Count(line) > opts.MaxTokens {
 			break
 		}
@@ -104,8 +108,8 @@ func BuildGraph(root string, opts Options) (*GraphBundle, error) {
 // resolves to a recorded index.Symbol, the params/returns signature is used
 // (the closest thing to a recorded signature index.Symbol carries); otherwise
 // the "kind name — file:line" fallback.
-func signatureLine(ix *index.Index, n index.GraphNode) string {
-	if sym, ok := ix.FindSymbol(n.ID); ok {
+func signatureLine(declarations map[string]index.Symbol, n index.GraphNode) string {
+	if sym, ok := declarations[n.ID]; ok {
 		var b strings.Builder
 		b.WriteString(sym.Kind)
 		b.WriteString(" ")
@@ -121,9 +125,10 @@ func signatureLine(ix *index.Index, n index.GraphNode) string {
 		b.WriteString(sym.File)
 		b.WriteString(":")
 		b.WriteString(strconv.Itoa(sym.Line))
+		b.WriteString(" [" + n.ID + "]")
 		return b.String()
 	}
-	return fmt.Sprintf("%s %s — %s:%d", n.Kind, n.ID, n.File, n.Line)
+	return fmt.Sprintf("%s %s (binding: %s) [%s]", n.Kind, n.Name, n.Resolution, n.ID)
 }
 
 // Render returns the paste-ready graph pack: header (root, symbol|whole,
@@ -170,12 +175,16 @@ func (b *GraphBundle) Render() string {
 		return edges[i].ConfidenceLabel < edges[j].ConfidenceLabel
 	})
 	fmt.Fprintf(&out, "\n== edges (%d) ==\n", len(edges))
+	names := map[string]string{}
+	for _, node := range b.Graph.Nodes {
+		names[node.ID] = node.Name
+	}
 	for _, e := range edges {
 		conf := e.ConfidenceLabel
 		if conf == "" {
 			conf = e.Confidence
 		}
-		fmt.Fprintf(&out, "%s -> %s [%s]\n", e.From, e.To, conf)
+		fmt.Fprintf(&out, "%s -> %s [%s] (%s -> %s; binding: %s)\n", names[e.From], names[e.To], conf, e.From, e.To, e.Resolution)
 	}
 
 	paths := make([]string, 0, len(b.Files))

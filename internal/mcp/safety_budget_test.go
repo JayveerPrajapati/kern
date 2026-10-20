@@ -197,7 +197,7 @@ func TestSafetyBudgetPrecheckToolNoTrackingOnDeny(t *testing.T) {
 
 	// An allowlist-denied tool must fail at the allowlist gate BEFORE the
 	// budget gate, without consuming budget.
-	s.allowlist = []string{"kern_health"}
+	s.allowlist = []string{"kern_verify"}
 	if _, err := s.precheckTool("kern_compact_file", compactArgs); err == nil {
 		t.Fatal("allowlist-denied tool must fail precheck")
 	}

@@ -5,6 +5,7 @@ package validate
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,13 @@ import (
 // an actionable error. Callers use errors.Is to degrade a verification check
 // to a clean skip instead of a false FAIL (F1).
 var ErrNoProjectType = errors.New("no supported project type detected")
+
+// ErrNoKindCommand is returned by DetectKind when a project type IS detected
+// but it declares no command of the requested kind — e.g. a package.json
+// with no "build" script, or a Makefile with no build target. Absence of a
+// step is not a failure; callers degrade the check to an honest skip, never
+// a vacuous PASS or a false FAIL (6.1).
+var ErrNoKindCommand = errors.New("no command of that kind declared")
 
 // Command is a detected validation command.
 type Command struct {
@@ -83,10 +91,30 @@ func DetectKind(root, kind string) (*Command, error) {
 		c.Kind = kind
 		return c, nil
 	}
+	// Distinguish the outcomes so callers can degrade an ABSENT step to a
+	// skip while a PRESENT step with missing tooling stays an actionable
+	// error:
+	//   - zero candidates at all                  -> ErrNoProjectType
+	//   - a project type exists but declares no
+	//     <kind> step (e.g. no build script in
+	//     package.json, no build target in a
+	//     Makefile)                               -> ErrNoKindCommand
+	//   - a <kind> step exists but its tooling is
+	//     missing on PATH                         -> actionable error
+	kindSeen := false
+	for _, c := range candidates {
+		if kindOf(c) == kind {
+			kindSeen = true
+			break
+		}
+	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("%w in %s", ErrNoProjectType, root)
 	}
-	return nil, fmt.Errorf("no %s command detected in %s", kind, root)
+	if !kindSeen {
+		return nil, fmt.Errorf("%w (%s) in %s", ErrNoKindCommand, kind, root)
+	}
+	return nil, fmt.Errorf("required tooling not found in PATH for %s", root)
 }
 
 // kindOf classifies a candidate by its name label: test-suite runners are
@@ -171,8 +199,14 @@ func detectCandidates(root string) []*Command {
 		out = append(out,
 			&Command{Name: "npm test", Cmd: "npm", Args: []string{"test", "--silent"}},
 			&Command{Name: "npm run lint", Cmd: "npm", Args: []string{"run", "lint", "--silent"}},
-			&Command{Name: "node syntax check", Cmd: "node", Args: []string{"--check", filepath.Join(root, "index.js")}},
 		)
+		// The build step is the package.json "build" script. Without one
+		// there is nothing to build — the old `node --check index.js`
+		// fallback was a one-file syntax check that vacuously passed
+		// ("build: OK") for projects with no build step (6.1).
+		if pkgHasScript(root, "build") {
+			out = append(out, &Command{Name: "npm run build", Cmd: "npm", Args: []string{"run", "build", "--silent"}})
+		}
 	case has("pyproject.toml", "pytest.ini", "setup.py", "setup.cfg", "requirements.txt"):
 		out = append(out,
 			&Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}},
@@ -199,8 +233,13 @@ func detectCandidates(root string) []*Command {
 	case has("Makefile", "makefile"):
 		out = append(out,
 			&Command{Name: "make test", Cmd: "make", Args: []string{"test"}},
-			&Command{Name: "make build", Cmd: "make", Args: []string{"build"}},
 		)
+		// A "build" target is optional: `make build` on a Makefile without
+		// one fails ("No rule to make target") — a false FAIL for an absent
+		// step (6.1).
+		if makefileHasTarget(root, "build") {
+			out = append(out, &Command{Name: "make build", Cmd: "make", Args: []string{"build"}})
+		}
 	case has("Chart.yaml") || glob("*/Chart.yaml"):
 		// Helm chart repo: lint each chart directory containing Chart.yaml.
 		chartDirs := helmChartDirs(root)
@@ -231,6 +270,73 @@ func detectCandidates(root string) []*Command {
 		out = append(out, &Command{Name: "node syntax check", Cmd: "node", Args: []string{"--check"}})
 	}
 	return out
+}
+
+// DeclaresSteps reports whether root's own manifest declares discrete steps
+// (package.json scripts or Makefile targets). 6.1: when such a manifest
+// exists but declares no build step, verification reports an honest skip
+// instead of degrading to an unrelated check; for projects WITHOUT a step
+// manifest (e.g. stray *.go files) the Detect fallback stays the D1
+// degradation (go vet on the files present).
+func DeclaresSteps(root string) bool {
+	for _, n := range []string{"package.json", "Makefile", "makefile"} {
+		if _, err := os.Stat(filepath.Join(root, n)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// pkgHasScript reports whether the package.json at root declares the named
+// script. Deterministic; a missing or unparseable package.json reports false
+// — npm run <name> would fail non-zero, and detection prefers the honest
+// skip to a false FAIL (6.1).
+func pkgHasScript(root, name string) bool {
+	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false
+	}
+	return pkg.Scripts[name] != ""
+}
+
+// makefileHasTarget reports whether the Makefile (or makefile) at root
+// defines the named target: a non-comment, non-recipe line whose target list
+// (before the first ':') contains the name. Deterministic.
+func makefileHasTarget(root, name string) bool {
+	var data []byte
+	var err error
+	for _, mf := range []string{"Makefile", "makefile"} {
+		if data, err = os.ReadFile(filepath.Join(root, mf)); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		// Skip blank lines, comments, recipes (tab-indented), directive
+		// lines (.PHONY, include, ...) and variable assignments.
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ".") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		before, _, ok := strings.Cut(line, ":")
+		if !ok || strings.ContainsAny(before, "=$") {
+			continue
+		}
+		for _, t := range strings.Fields(before) {
+			if t == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasFilesRecursive reports whether any file with the given extension exists

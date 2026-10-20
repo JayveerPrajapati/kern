@@ -93,16 +93,6 @@ func TestFetchRequiresURL(t *testing.T) {
 	}
 }
 
-func TestCommitmsgRejectsLeadingDashRange(t *testing.T) {
-	// Fail-closed: a crafted range starting with "-" would be parsed by git
-	// as an option; it must be rejected before any exec.
-	if _, err := Commitmsg(context.Background(), map[string]any{"range": "--all"}); err == nil {
-		t.Error("Commitmsg with option-looking range: want error, got nil")
-	} else if !strings.Contains(err.Error(), "must not start with -") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
 // TestSearchEmptyDocsIndexExplains pins N3: a repo with NO documentation
 // indexed gets an explanatory message (with the `kern docs index` hint), not
 // a bare "no matching document fragments" that reads as a confident miss.
@@ -124,6 +114,48 @@ func TestSearchEmptyDocsIndexExplains(t *testing.T) {
 	}
 	if !strings.Contains(out, "no documentation indexed") || !strings.Contains(out, "kern docs index") {
 		t.Errorf("empty docs index must explain and hint at indexing, got: %q", out)
+	}
+}
+
+// TestSearchReloadsAfterIndex pins the end-to-end invalidation wiring: an
+// action=index (which persists a new index and calls
+// docsearch.InvalidateCache) must be visible to the very next Search — a
+// document written after the first search is found without any cache
+// staleness.
+func TestSearchReloadsAfterIndex(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Widget Guide\n\nThis guide describes widget configuration and deployment steps in detail.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := Hooks{
+		LoadIndex: func(ctx context.Context, root string) (*index.Index, error) { return nil, nil },
+	}
+
+	if _, err := Index(context.Background(), map[string]any{"root": root}); err != nil {
+		t.Fatalf("initial Index: %v", err)
+	}
+	out, err := Search(context.Background(), h, map[string]any{"query": "widget", "root": root})
+	if err != nil {
+		t.Fatalf("first Search: %v", err)
+	}
+	if !strings.Contains(out, "widget") {
+		t.Fatalf("first Search did not return the indexed doc: %q", out)
+	}
+
+	// Index a NEW document, then verify the next Search sees it.
+	if err := os.WriteFile(filepath.Join(root, "zephyr.md"), []byte("# Zephyr\n\nZephyrwidget reference: the zephyrwidget subsystem deployment and configuration notes for operators.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Index(context.Background(), map[string]any{"root": root}); err != nil {
+		t.Fatalf("re-Index: %v", err)
+	}
+	out, err = Search(context.Background(), h, map[string]any{"query": "zephyrwidget", "root": root})
+	if err != nil {
+		t.Fatalf("Search after index: %v", err)
+	}
+	if !strings.Contains(out, "zephyrwidget") {
+		t.Errorf("document indexed after the cached search is not visible to the next Search (invalidation wiring broken): %q", out)
 	}
 }
 

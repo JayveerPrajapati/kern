@@ -1,11 +1,11 @@
 ---
 name: kern-investigate
 description: >-
-Use for any 'how does X work', 'where is X', 'who calls X', 'what depends on X', or 'what breaks if I change X' question. Query kern's prebuilt symbol index and call graph - project map, symbol search, explore/graph, token-sized code slices, blast-radius simulation - instead of slow whole-file reads and grep loops.
+  Use for any 'how does X work', 'where is X', 'who calls X', 'what depends on X', or 'what breaks if I change X' question. Query kern's prebuilt symbol index and call graph - project map, symbol search, explore/graph, token-sized code slices, blast-radius simulation - instead of slow whole-file reads and grep loops.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-investigate/SKILL.md; copies must stay identical — run kern setup to sync -->
-<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-6 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
+<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-29 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
 
 # Kern Codebase Investigation Runbook
 
@@ -65,7 +65,7 @@ To read a whole file or a line window, call `kern_explore` with the file path as
 ## Phase 4: Blast Radius Simulation
 
 Before proposing modifications to any symbol:
-1. Run `kern_impact` or `kern_what_if`:
+1. Run `kern_impact`:
    ```json
    {"request": "what breaks if I change the signature of ProcessOrder?"}
    ```

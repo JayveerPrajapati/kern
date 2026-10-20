@@ -120,9 +120,9 @@ runs:
         FILE: '${{ inputs.file }}'
       run: |
         if [ -n "$FILE" ]; then
-          kern changes "$ROOT" --file "$FILE" > kern-changes.txt || true
+          kern review "$ROOT" --file "$FILE" --json > kern-changes.txt || true
         elif [ -n "$RANGE" ]; then
-          kern changes "$ROOT" --range "$RANGE" > kern-changes.txt || true
+          kern review "$ROOT" --range "$RANGE" --json > kern-changes.txt || true
         else
           echo "::warning::No git range or file list provided; skipping changes analysis."
           echo "" > kern-changes.txt

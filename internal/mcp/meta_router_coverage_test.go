@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
-	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpmeta"
 )
 
 // kern_meta is advertised (by both the server and the opencode plugin, whose
@@ -16,7 +16,7 @@ import (
 // tool — minus the router itself — must be dispatchable through the meta
 // router's route table (meta.RoutableTools, i.e. metaRoutedTools).
 //
-// How routing works today (internal/mcp/meta/meta.go): classifyMetaRequest
+// How routing works today (internal/mcpmeta/meta.go): classifyMetaRequest
 // maps the request to a tool name, then Handle rewrites any name that is NOT
 // in metaRoutedTools to the kern_search fallback before dispatch. So the
 // set of tools kern_meta can actually invoke is exactly metaRoutedTools —

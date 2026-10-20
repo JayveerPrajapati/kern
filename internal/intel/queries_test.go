@@ -267,20 +267,17 @@ func TestDirectCallersNamesAuthorizeContextScenario(t *testing.T) {
 // BFS must walk the same package-aware edges explore's direct-caller list
 // uses (ix.CallersFor + findCallerDef) instead of the raw bare-name
 // ix.Callers map. The wrapper "AuthorizeContext" is a real caller of the
-// core but collapses into the name-keyed visited root, so its own callers
-// (TestAuthorizeContextDenial) never enter the core's radius, and the
+// core and remains distinct from it, so its own callers
+// (TestAuthorizeContextDenial) enter the core's transitive radius, and the
 // "Generate" entry resolves to evidence's symbol (bundle.go), not the
 // first-match name→file mapping.
 func TestBlastRadiusPackageAware(t *testing.T) {
 	ix := authorizeContextIndex()
 	radius, radiusSyms, _, _ := blastRadiusWalk(ix, []string{"AuthorizeContext"}, false)
-	for _, want := range []string{"AuthorizeContext", "New", "Generate", "runAuthorizeContext", "guardAuthzVerdict"} {
+	for _, want := range []string{"internal/governance.AuthorizeContext", "internal/mcp/governance.AuthorizeContext", "TestAuthorizeContextDenial", "New", "Generate", "runAuthorizeContext", "guardAuthzVerdict"} {
 		if !containsID(radius, want) {
 			t.Errorf("BlastRadius(AuthorizeContext) = %v; missing %q", radius, want)
 		}
-	}
-	if containsID(radius, "TestAuthorizeContextDenial") {
-		t.Errorf("BlastRadius(AuthorizeContext) = %v; wrapper-only TestAuthorizeContextDenial must not be in the core's radius", radius)
 	}
 	// The resolved symbol behind the "Generate" name is evidence's
 	// (bundle.go), never the first same-named symbol in the index.

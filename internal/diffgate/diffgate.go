@@ -1,0 +1,799 @@
+// Package diffgate implements the deterministic local diff-gate checks
+// Each check is a service.Check that runs against the
+// working-tree diff (ChangeRequest.Files) and returns structured
+// verdicts. Every check is deterministic and stdlib-only: no network, no
+// external services, no LLM. The six checks here are numbered gates
+// G30-G35 (the registry that grouped them, internal/blueprint/gates/
+// registry.go, was deleted with the family in the P4 pivot; the checks
+// themselves survived as this package).
+package diffgate
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/JayveerPrajapati/kern/internal/secscan"
+)
+
+// ---------------------------------------------------------------------------
+// MCP catalog injection (dependency inversion)
+// ---------------------------------------------------------------------------
+//
+// The drift checks (schema:drift, catalog:drift) need the live MCP tool
+// catalog. internal/diffgate cannot import internal/mcp (mcp imports the
+// tool catalog, which imports diffgate — diffgate → mcp would be an import
+// cycle). Instead the catalog is injected EXPLICITLY: internal/mcp
+// calls catalog.WithDiffgateTools() at server construction and binary
+// startup (never from init()), and the checks receive the injected list as a
+// mandatory constructor argument. A wiring site that omits the list does not
+// compile, and a check constructed with an empty list fails loud
+// (StatusError) instead of silently skipping — the fail-loud standing rule.
+
+// ToolInfo is the minimal, neutral contract surface the drift checks read
+// from the MCP catalog: name, phase, risk level, the tool's input schema,
+// and its model-facing description.
+type ToolInfo struct {
+	Name        string
+	Phase       string
+	RiskLevel   string
+	InputSchema map[string]any
+	Description string
+}
+
+// catalogTools is the injected live MCP tool catalog. It is populated
+// explicitly at server construction via internal/mcpcatalog.WithDiffgateTools
+// — never from init(). cli (which cannot import mcp) reads it through
+// ToolInfos() to pass to the checks' constructors; tests inject fake
+// catalogs with SetToolInfos.
+var (
+	catalogTools   []ToolInfo
+	catalogToolsMu sync.Mutex
+)
+
+// ToolInfos returns the injected live MCP tool catalog as a defensive copy —
+// callers cannot mutate the shared catalog (gate BP-B follow-up).
+func ToolInfos() []ToolInfo {
+	catalogToolsMu.Lock()
+	defer catalogToolsMu.Unlock()
+	out := make([]ToolInfo, len(catalogTools))
+	copy(out, catalogTools)
+	return out
+}
+
+// SetToolInfos injects the live catalog. Called from
+// internal/mcpcatalog.WithDiffgateTools at server construction and from
+// tests with fake catalogs; never from init(). Mutex-guarded so parallel
+// tests injecting different fakes cannot race (gate BP-B follow-up).
+func SetToolInfos(tools []ToolInfo) {
+	catalogToolsMu.Lock()
+	catalogTools = tools
+	catalogToolsMu.Unlock()
+}
+
+// requireCatalogTools is the fail-loud guard: a check constructed without an
+// injected catalog must ERROR (a missing referent errors at the earliest
+// resolvable point), never silently SKIP.
+func requireCatalogTools(tools []ToolInfo) error {
+	if len(tools) == 0 {
+		return errors.New("no MCP tool catalog injected: call internal/mcpcatalog.WithDiffgateTools() at server construction")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// G30 — format:gofmt
+// ---------------------------------------------------------------------------
+
+// GofmtCheck (G30) runs `gofmt -l` over the changed .go files and reports
+// every unformatted file as an advisory WARN finding. The gofmt tool is
+// deterministic: its output is identical across machines, so the verdict is
+// reproducible. A gofmt tool failure (syntax error, missing binary) is a
+// check ERROR per the Check contract.
+type GofmtCheck struct{}
+
+// NewGofmtCheck constructs the gofmt diff-gate check.
+func NewGofmtCheck() *GofmtCheck { return &GofmtCheck{} }
+
+// Name is the stable check identifier used in CheckResult.Name and policy
+// routing.
+func (GofmtCheck) Name() string { return "format:gofmt" }
+
+// Run scans the changed .go files with `gofmt -l` and returns a WARN result
+// listing every unformatted file. Deleted files (not on disk) are skipped.
+func (c *GofmtCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	if req.RepositoryRoot == "" {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: "repository root required"}, nil
+	}
+	var goFiles []string
+	for _, fc := range req.Files {
+		if !strings.HasSuffix(fc.Path, ".go") {
+			continue
+		}
+		abs := filepath.Join(req.RepositoryRoot, filepath.FromSlash(fc.Path))
+		if _, err := os.Stat(abs); err != nil {
+			continue // deleted or not on disk
+		}
+		goFiles = append(goFiles, abs)
+	}
+	if len(goFiles) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	sort.Strings(goFiles) // deterministic output order
+	cmd := exec.CommandContext(ctx, "gofmt", "-l")
+	cmd.Args = append(cmd.Args, goFiles...)
+	out, err := cmd.Output()
+	if err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: fmt.Sprintf("gofmt -l failed: %v", err)}, nil
+	}
+	var findings []Finding
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		rel := line
+		if r, rerr := filepath.Rel(req.RepositoryRoot, line); rerr == nil {
+			rel = filepath.ToSlash(r)
+		}
+		findings = append(findings, Finding{
+			RuleID:       "format:gofmt",
+			Severity:     SeverityWarn,
+			Category:     CategoryBuild,
+			File:         rel,
+			Message:      "file is not gofmt-formatted (run gofmt -w)",
+			Explanation:  "Unformatted Go source is a deterministic, machine-checkable quality violation; gofmt output is stable, so this finding is reproducible.",
+			SuggestedFix: "gofmt -w " + rel,
+			RuleVersion:  "1",
+			Confidence:   1.0,
+			Scope:        "file",
+			Evidence: []Evidence{{
+				Kind:        "tool-output",
+				Description: "gofmt -l listed the file",
+				Location:    rel,
+			}},
+		})
+	}
+	if len(findings) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	return CheckResult{Name: c.Name(), Status: StatusWarn, Findings: findings}, nil
+}
+
+// ---------------------------------------------------------------------------
+// G31 — vulnerability:sec
+// ---------------------------------------------------------------------------
+
+// VulnCheck (G31) wraps the in-house deterministic vulnerability scanner
+// (internal/sec) scoped to the changed files. Sec severities are mapped to
+// Blueprint severities on the same ladder kern's secret adapter uses
+// (severityFromSec): error → BLOCK, warning → WARN, info → INFO. A BLOCK
+// finding (critical vulnerability) therefore fails the gate even in advisory
+// mode; warnings never do.
+type VulnCheck struct{}
+
+// NewVulnCheck constructs the vulnerability diff-gate check.
+func NewVulnCheck() *VulnCheck { return &VulnCheck{} }
+
+// Name is the stable check identifier.
+func (VulnCheck) Name() string { return "vulnerability:sec" }
+
+// Run scans each changed file on disk with secscan.ScanFile and maps the findings.
+// Test files are excluded, mirroring sec's own root-walk semantics (the
+// scanner skips _test/_spec files), so a change to a test file — whose
+// fixtures routinely contain flagged-looking strings — never trips the gate.
+func (c *VulnCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	if req.RepositoryRoot == "" {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: "repository root required"}, nil
+	}
+	var findings []Finding
+	for _, fc := range req.Files {
+		if fc.Op == OpDelete {
+			continue // deleted files have no content to scan
+		}
+		rel := filepath.ToSlash(fc.Path)
+		if isTestFilePath(rel) {
+			continue // sec's root walk skips test files; mirror that
+		}
+		abs := filepath.Join(req.RepositoryRoot, filepath.FromSlash(fc.Path))
+		src, err := os.ReadFile(abs)
+		if err != nil {
+			continue // not on disk (e.g. rename destination not yet written)
+		}
+		for _, sf := range secscan.ScanFile(rel, src) {
+			findings = append(findings, vulnFinding(sf))
+		}
+	}
+	if len(findings) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	status := StatusWarn
+	for _, f := range findings {
+		if f.Severity == SeverityBlock {
+			status = StatusBlock
+			break
+		}
+	}
+	return CheckResult{Name: c.Name(), Status: status, Findings: findings}, nil
+}
+
+// vulnFinding maps one sec finding to a Blueprint finding.
+func vulnFinding(sf secscan.Finding) Finding {
+	return Finding{
+		RuleID:       "vulnerability:" + sf.Rule,
+		Severity:     vulnSeverity(sf.Severity),
+		Category:     CategoryPolicy,
+		File:         sf.File,
+		Line:         sf.Line,
+		Message:      sf.Message,
+		Explanation:  "The deterministic in-house vulnerability scanner flagged this pattern in a changed file.",
+		SuggestedFix: "Remove or fix the flagged pattern, then re-run `kern diff-gate` to confirm.",
+		RuleVersion:  "1",
+		Confidence:   0.9,
+		Scope:        "file",
+		Evidence: []Evidence{{
+			Kind:        "pattern-match",
+			Description: fmt.Sprintf("sec rule: %s", sf.Rule),
+			Location:    fmt.Sprintf("%s:%d", sf.File, sf.Line),
+		}},
+	}
+}
+
+// vulnSeverity maps the sec severity vocabulary ("error"|"warning"|"info") to
+// Blueprint severities, mirroring severityFromSec in adapters/kern.
+func vulnSeverity(s string) Severity {
+	switch s {
+	case "error":
+		return SeverityBlock
+	case "warning":
+		return SeverityWarn
+	case "info":
+		return SeverityInfo
+	default:
+		return SeverityInfo
+	}
+}
+
+// ---------------------------------------------------------------------------
+// G32 — schema:drift
+// ---------------------------------------------------------------------------
+
+// schemaBaselineRelPath is the repo-relative path (slash-separated) of the
+// MCP tool-schema baseline file written by `kern diff-gate --init-baseline`.
+// schemaBaselineRelPath is where the tool-schema baseline lives. It MUST be
+// a git-tracked path: the whole point of the baseline is that a fresh clone
+// compares its catalog against the COMMITTED schemas (team + CI drift
+// detection). The original location (.kern/diff-gate/) was inside the
+// gitignored generated-files block — the baseline could never be committed,
+// so every clone re-warned and the check only compared a machine against
+// itself (live-caught closing F-DG5, 2026-09-23). The tracked docs/mcp/
+// directory already carries the committed tool-catalog and tool-contracts
+// artifacts — the baseline joins them.
+const schemaBaselineRelPath = "docs/mcp/tool-schemas.json"
+
+// toolSchemaEntry is one baseline entry: the deterministic fingerprint of one
+// MCP tool's contract (name, phase, risk, canonical InputSchema JSON).
+type toolSchemaEntry struct {
+	Name   string `json:"name"`
+	Phase  string `json:"phase"`
+	Risk   string `json:"risk"`
+	SHA256 string `json:"sha256"`
+}
+
+// schemaBaseline is the on-disk baseline file format (JSON, deterministic
+// ordering — entries sorted by tool name).
+type schemaBaseline struct {
+	SchemaVersion int               `json:"schema_version"`
+	Tools         []toolSchemaEntry `json:"tools"`
+}
+
+// schemaBaselineVersion is the format version of the baseline file.
+const schemaBaselineVersion = 1
+
+// SchemaDriftCheck (G32) fingerprints the MCP tool catalog and compares it
+// against a committed baseline at <root>/docs/mcp/tool-schemas.json.
+// Added/removed/changed tools are reported as WARN findings. With
+// initBaseline set, the baseline is written (or refreshed) and the check
+// reports PASS "baseline initialized".
+type SchemaDriftCheck struct {
+	root         string
+	initBaseline bool
+	tools        []ToolInfo
+}
+
+// NewSchemaDriftCheck constructs the schema-drift check bound to a repo root.
+// initBaseline selects write-mode: the check writes the baseline instead of
+// comparing against it. tools is the injected live MCP catalog — mandatory
+// (a wiring site that omits it fails to compile; an empty list fails loud at
+// Run).
+func NewSchemaDriftCheck(root string, initBaseline bool, tools []ToolInfo) *SchemaDriftCheck {
+	return &SchemaDriftCheck{root: root, initBaseline: initBaseline, tools: tools}
+}
+
+// Name is the stable check identifier.
+func (c *SchemaDriftCheck) Name() string { return "schema:drift" }
+
+// Run fingerprints the live MCP catalog and compares it with the baseline.
+func (c *SchemaDriftCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	if c.root == "" {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: "repository root required"}, nil
+	}
+	if err := requireCatalogTools(c.tools); err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: err.Error()}, nil
+	}
+	entries := fingerprintCatalog(c.tools)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	baselinePath := filepath.Join(c.root, filepath.FromSlash(schemaBaselineRelPath))
+
+	if c.initBaseline {
+		if err := writeSchemaBaseline(baselinePath, entries); err != nil {
+			return CheckResult{Name: c.Name(), Status: StatusError, Error: fmt.Sprintf("write schema baseline: %v", err)}, nil
+		}
+		return CheckResult{Name: c.Name(), Status: StatusPass, Findings: []Finding{{
+			RuleID:      "schema:drift",
+			Severity:    SeverityInfo,
+			Category:    CategoryPolicy,
+			Message:     fmt.Sprintf("schema baseline initialized (%d tools) at %s", len(entries), schemaBaselineRelPath),
+			RuleVersion: "1",
+			Confidence:  1.0,
+			Scope:       "repo",
+			Evidence:    []Evidence{{Kind: "baseline", Description: "baseline written from the live MCP catalog", Location: schemaBaselineRelPath}},
+		}}}, nil
+	}
+
+	baseline, err := loadSchemaBaseline(baselinePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return CheckResult{Name: c.Name(), Status: StatusWarn, Findings: []Finding{{
+				RuleID:      "schema:drift",
+				Severity:    SeverityWarn,
+				Category:    CategoryPolicy,
+				Message:     "no schema baseline found; run `kern diff-gate --init-baseline` to establish one",
+				Explanation: "Without a baseline the MCP tool-schema drift guard cannot compare anything. The baseline is a committed JSON file under docs/mcp/.",
+				RuleVersion: "1",
+				Confidence:  1.0,
+				Scope:       "repo",
+			}}}, nil
+		}
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: fmt.Sprintf("load schema baseline: %v", err)}, nil
+	}
+
+	findings := schemaDriftFindings(entries, baseline.Tools)
+	if len(findings) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	return CheckResult{Name: c.Name(), Status: StatusWarn, Findings: findings}, nil
+}
+
+// fingerprintCatalog fingerprints every tool in the catalog.
+func fingerprintCatalog(tools []ToolInfo) []toolSchemaEntry {
+	entries := make([]toolSchemaEntry, 0, len(tools))
+	for _, t := range tools {
+		entries = append(entries, toolSchemaEntry{
+			Name:   t.Name,
+			Phase:  t.Phase,
+			Risk:   t.RiskLevel,
+			SHA256: toolFingerprint(t),
+		})
+	}
+	return entries
+}
+
+// toolFingerprint computes the deterministic sha256 of a tool's contract:
+// name, phase, risk, and its InputSchema marshaled canonically (encoding/json
+// sorts map keys recursively, so the digest is stable across runs).
+func toolFingerprint(t ToolInfo) string {
+	schemaJSON, err := json.Marshal(t.InputSchema)
+	if err != nil {
+		schemaJSON = []byte("{}")
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", t.Name, t.Phase, t.RiskLevel, schemaJSON)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// schemaDriftFindings diffs the live catalog against the baseline, returning
+// one WARN finding per added/removed/changed tool in deterministic order
+// (sorted by message).
+func schemaDriftFindings(current, baseline []toolSchemaEntry) []Finding {
+	currentByName := make(map[string]toolSchemaEntry, len(current))
+	for _, e := range current {
+		currentByName[e.Name] = e
+	}
+	baselineByName := make(map[string]toolSchemaEntry, len(baseline))
+	for _, e := range baseline {
+		baselineByName[e.Name] = e
+	}
+	var findings []Finding
+	for _, e := range current {
+		b, ok := baselineByName[e.Name]
+		if !ok {
+			findings = append(findings, schemaDriftFinding(e.Name, "added", "", e.SHA256))
+			continue
+		}
+		if b.SHA256 != e.SHA256 {
+			findings = append(findings, schemaDriftFinding(e.Name, "changed", b.SHA256, e.SHA256))
+		}
+	}
+	for name := range baselineByName {
+		if _, ok := currentByName[name]; !ok {
+			findings = append(findings, schemaDriftFinding(name, "removed", "", ""))
+		}
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Message < findings[j].Message })
+	return findings
+}
+
+// schemaDriftFinding builds one drift finding (advisory WARN).
+func schemaDriftFinding(name, kind, oldHash, newHash string) Finding {
+	msg := fmt.Sprintf("MCP tool %s %s since baseline", name, kind)
+	if kind == "changed" {
+		msg = fmt.Sprintf("MCP tool %s schema changed (sha256 %s -> %s)", name, shortHash(oldHash), shortHash(newHash))
+	}
+	return Finding{
+		RuleID:       "schema:drift",
+		Severity:     SeverityWarn,
+		Category:     CategoryPolicy,
+		File:         schemaBaselineRelPath,
+		Message:      msg,
+		Explanation:  "The MCP tool catalog drifted from the committed schema baseline. Re-run `kern diff-gate --init-baseline` after intentionally changing tool contracts, and review unintended drift.",
+		SuggestedFix: "kern diff-gate --init-baseline (after review)",
+		RuleVersion:  "1",
+		Confidence:   1.0,
+		Scope:        "repo",
+		Evidence: []Evidence{{
+			Kind:        "fingerprint",
+			Description: fmt.Sprintf("tool %s drifted (%s)", name, kind),
+			Location:    name,
+		}},
+	}
+}
+
+// shortHash truncates a sha256 for readable messages.
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// WriteSchemaBaseline persists the live catalog fingerprints as the committed
+// docs/mcp/tool-schemas.json baseline. It is the regeneration entry point used
+// by `kern gen-docs --doc schemas` after an intentional MCP tool/schema change.
+func WriteSchemaBaseline(root string, tools []ToolInfo) (string, error) {
+	data, err := GenerateSchemaBaseline(tools)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(root, filepath.FromSlash(schemaBaselineRelPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// GenerateSchemaBaseline renders the committed baseline format without
+// writing it. `kern gen-docs --doc schemas --check` compares this byte-stable
+// rendering against the tracked JSON, so schema freshness can be gated in CI.
+func GenerateSchemaBaseline(tools []ToolInfo) ([]byte, error) {
+	if err := requireCatalogTools(tools); err != nil {
+		return nil, err
+	}
+	entries := fingerprintCatalog(tools)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	bl := schemaBaseline{SchemaVersion: schemaBaselineVersion, Tools: entries}
+	return json.MarshalIndent(bl, "", "  ")
+}
+
+// writeSchemaBaseline persists the baseline as pretty JSON, creating the
+// tracked docs/mcp directory (created if missing).
+func writeSchemaBaseline(path string, entries []toolSchemaEntry) error {
+	bl := schemaBaseline{SchemaVersion: schemaBaselineVersion, Tools: entries}
+	data, err := json.MarshalIndent(bl, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// loadSchemaBaseline reads and validates the baseline file.
+func loadSchemaBaseline(path string) (schemaBaseline, error) {
+	var bl schemaBaseline
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return bl, err
+	}
+	if err := json.Unmarshal(data, &bl); err != nil {
+		return bl, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if bl.SchemaVersion != schemaBaselineVersion {
+		return bl, fmt.Errorf("unsupported schema baseline version %d (want %d)", bl.SchemaVersion, schemaBaselineVersion)
+	}
+	return bl, nil
+}
+
+// ---------------------------------------------------------------------------
+// G33 — exec:unsafe
+// ---------------------------------------------------------------------------
+
+// ExecUnsafeCheck (G33) flags changed non-test .go files that import
+// os/exec, call exec.Command, or contain the "sh -c" shell-out literal. It is
+// a deterministic string scan (stdlib only): cheap, reproducible, and scoped
+// to the changed set.
+type ExecUnsafeCheck struct{}
+
+// NewExecUnsafeCheck constructs the unsafe-execution diff-gate check.
+func NewExecUnsafeCheck() *ExecUnsafeCheck { return &ExecUnsafeCheck{} }
+
+// Name is the stable check identifier.
+func (ExecUnsafeCheck) Name() string { return "exec:unsafe" }
+
+// Run flags every changed non-test .go file that exercises external
+// processes.
+func (c *ExecUnsafeCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	if req.RepositoryRoot == "" {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: "repository root required"}, nil
+	}
+	var findings []Finding
+	for _, fc := range req.Files {
+		rel := filepath.ToSlash(fc.Path)
+		if !strings.HasSuffix(rel, ".go") || isTestFilePath(rel) {
+			continue
+		}
+		abs := filepath.Join(req.RepositoryRoot, filepath.FromSlash(fc.Path))
+		src, err := os.ReadFile(abs)
+		if err != nil {
+			continue // deleted or not on disk
+		}
+		if bytes.Contains(src, []byte(`"os/exec"`)) || bytes.Contains(src, []byte("exec.Command")) || bytes.Contains(src, []byte("sh -c")) {
+			findings = append(findings, Finding{
+				RuleID:       "exec:unsafe",
+				Severity:     SeverityWarn,
+				Category:     CategoryPolicy,
+				File:         rel,
+				Message:      "changed file executes external processes (os/exec import, exec.Command call, or sh -c literal)",
+				Explanation:  "Executing external processes from source is a supply-chain and injection risk; every addition deserves human review. The diff gate is advisory: it flags the file, never blocks by default.",
+				SuggestedFix: "Review the exec usage; prefer library calls or validate every input before shelling out.",
+				RuleVersion:  "1",
+				Confidence:   1.0,
+				Scope:        "file",
+				Evidence: []Evidence{{
+					Kind:        "string-scan",
+					Description: "os/exec import, exec.Command call, or sh -c literal",
+					Location:    filepath.ToSlash(fc.Path),
+				}},
+			})
+		}
+	}
+	if len(findings) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	return CheckResult{Name: c.Name(), Status: StatusWarn, Findings: findings}, nil
+}
+
+// isTestFilePath reports whether a repo-relative path names a test file,
+// using the same substring conventions as internal/sec's isTestFile
+// (Go/Python/JS/TS `_test.`/`.test.`/`.spec.`, Java *Test.java/*IT.java, and
+// Rust `_test.rs`).
+func isTestFilePath(path string) bool {
+	base := filepath.Base(path)
+	if strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.") || strings.Contains(base, "_spec.") {
+		return true
+	}
+	for _, suffix := range []string{"Test.java", "Tests.java", "IT.java", "Spec.java", "_test.rs"} {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// G34 — changelog:missing
+// ---------------------------------------------------------------------------
+
+// ChangelogCheck (G34) warns when the changed set contains non-doc source
+// changes (anything that is not *.md, docs/, or *.json config) but no
+// CHANGELOG.md entry.
+type ChangelogCheck struct{}
+
+// NewChangelogCheck constructs the changelog diff-gate check.
+func NewChangelogCheck() *ChangelogCheck { return &ChangelogCheck{} }
+
+// Name is the stable check identifier.
+func (ChangelogCheck) Name() string { return "changelog:missing" }
+
+// Run returns a WARN finding when source changes lack a CHANGELOG.md entry.
+func (c *ChangelogCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	hasSource := false
+	hasChangelog := false
+	for _, fc := range req.Files {
+		p := filepath.ToSlash(fc.Path)
+		if isChangelogPath(p) {
+			hasChangelog = true
+			continue
+		}
+		if isDocOnlyPath(p) {
+			continue
+		}
+		hasSource = true
+	}
+	if !hasSource || hasChangelog {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	return CheckResult{Name: c.Name(), Status: StatusWarn, Findings: []Finding{{
+		RuleID:       "changelog:missing",
+		Severity:     SeverityWarn,
+		Category:     CategoryPolicy,
+		Message:      "changes without CHANGELOG.md entry",
+		Explanation:  "The changed set contains non-doc source changes but no CHANGELOG.md entry. The diff gate is advisory: it flags the omission, never blocks by default.",
+		SuggestedFix: "Add a CHANGELOG.md entry describing the user-visible change.",
+		RuleVersion:  "1",
+		Confidence:   1.0,
+		Scope:        "repo",
+		Evidence:     []Evidence{{Kind: "change-set", Description: "source changes present, CHANGELOG.md absent from the changed set"}},
+	}}}, nil
+}
+
+// isChangelogPath reports whether a path is a CHANGELOG.md (any directory).
+func isChangelogPath(p string) bool {
+	return filepath.Base(p) == "CHANGELOG.md"
+}
+
+// isDocOnlyPath reports whether a path is excluded from the "source change"
+// test: markdown docs, the docs/ tree, and JSON config files.
+func isDocOnlyPath(p string) bool {
+	return strings.HasSuffix(p, ".md") || strings.HasPrefix(p, "docs/") || strings.HasSuffix(p, ".json")
+}
+
+// ---------------------------------------------------------------------------
+// G35 — catalog:drift
+// ---------------------------------------------------------------------------
+
+// pluginToolRe extracts opencode plugin tool definitions (`kern_xxx: tool(`).
+// It mirrors the parity invariant in internal/setup/setup_test.go so the
+// diff-gate check and the parity test agree on the plugin surface.
+var pluginToolRe = regexp.MustCompile(`kern_[a-zA-Z0-9_]+:\s*tool\(`)
+
+// pluginPhaseRe extracts the plugin's TOOL_PHASES map entries
+// (`kern_xxx: "phase",`). It deliberately matches ONLY the phase metadata, so
+// the 121 tool definitions (`kern_xxx: tool(`) and the drift-gate tool-name
+// regex above never collide with it.
+var pluginPhaseRe = regexp.MustCompile(`kern_([a-zA-Z0-9_]+):\s*"(explore|plan|edit|verify|meta|cross)"`)
+
+// CatalogDriftCheck (G35) compares the MCP tool catalog (mcp.ToolNames())
+// with the tool set declared in the opencode plugin
+// (internal/agentwire/assets/plugin/kern.ts). A mismatch is a BLOCK: the plugin
+// surface silently lagging the universal catalog is the real drift guard.
+type CatalogDriftCheck struct {
+	root  string
+	tools []ToolInfo
+}
+
+// NewCatalogDriftCheck constructs the catalog-drift check bound to a repo
+// root (the plugin asset is read relative to it). tools is the injected live
+// MCP catalog — mandatory (a wiring site that omits it fails to compile; an
+// empty list fails loud at Run).
+func NewCatalogDriftCheck(root string, tools []ToolInfo) *CatalogDriftCheck {
+	return &CatalogDriftCheck{root: root, tools: tools}
+}
+
+// Name is the stable check identifier.
+func (c *CatalogDriftCheck) Name() string { return "catalog:drift" }
+
+// Run compares the live MCP catalog with the plugin's declared tool set.
+// When the plugin asset is absent (not a kern repo) the check SKIPs; a check
+// constructed without an injected catalog fails loud (StatusError).
+func (c *CatalogDriftCheck) Run(ctx context.Context, req ChangeRequest) (CheckResult, error) {
+	if c.root == "" {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: "repository root required"}, nil
+	}
+	if err := requireCatalogTools(c.tools); err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusError, Error: err.Error()}, nil
+	}
+	pluginPath := filepath.Join(c.root, filepath.FromSlash("internal/agentwire/assets/plugin/kern.ts"))
+	content, err := os.ReadFile(pluginPath)
+	if err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusSkip, Skipped: true}, nil
+	}
+	mcpSet := make(map[string]bool, len(c.tools))
+	for _, t := range c.tools {
+		mcpSet[t.Name] = true
+	}
+	findings := compareToolSets(mcpSet, string(content))
+	// Phase parity: a tool whose phase differs between the MCP catalog and
+	// the plugin's TOOL_PHASES map means the plugin would advertise the wrong
+	// surface for a given KERN_MCP_PHASE — a BLOCK, same as a name drift.
+	findings = append(findings, compareToolPhases(c.tools, string(content))...)
+	if len(findings) == 0 {
+		return CheckResult{Name: c.Name(), Status: StatusPass}, nil
+	}
+	return CheckResult{Name: c.Name(), Status: StatusBlock, Findings: findings}, nil
+}
+
+// compareToolSets returns BLOCK-severity findings for every tool present in
+// one surface but not the other (the MCP catalog is the source of truth).
+func compareToolSets(mcpSet map[string]bool, pluginContent string) []Finding {
+	pluginSet := make(map[string]bool)
+	for _, m := range pluginToolRe.FindAllString(pluginContent, -1) {
+		name := strings.TrimSuffix(m, ": tool(")
+		if strings.HasPrefix(name, "kern_") {
+			pluginSet[name] = true
+		}
+	}
+	var findings []Finding
+	for name := range mcpSet {
+		if !pluginSet[name] {
+			findings = append(findings, catalogDriftFinding(name, "missing from plugin (internal/agentwire/assets/plugin/kern.ts)"))
+		}
+	}
+	for name := range pluginSet {
+		if !mcpSet[name] {
+			findings = append(findings, catalogDriftFinding(name, "present in plugin but not in the MCP catalog"))
+		}
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Message < findings[j].Message })
+	return findings
+}
+
+// compareToolPhases returns BLOCK-severity findings for every tool whose phase
+// differs between the MCP catalog (source of truth) and the plugin's
+// TOOL_PHASES map. Tools present on only one side are ignored: name drift is
+// already covered by compareToolSets.
+func compareToolPhases(catalog []ToolInfo, pluginContent string) []Finding {
+	pluginPhase := make(map[string]string)
+	for _, m := range pluginPhaseRe.FindAllStringSubmatch(pluginContent, -1) {
+		pluginPhase["kern_"+m[1]] = m[2]
+	}
+	catalogPhase := make(map[string]string, len(catalog))
+	for _, t := range catalog {
+		catalogPhase[t.Name] = t.Phase
+	}
+	var findings []Finding
+	for name, cp := range catalogPhase {
+		pp, ok := pluginPhase[name]
+		if !ok {
+			continue // phase unknown in plugin: name drift covers it
+		}
+		if cp != pp {
+			findings = append(findings, catalogDriftFinding(name, fmt.Sprintf("phase mismatch: catalog=%s plugin=%s", cp, pp)))
+		}
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Message < findings[j].Message })
+	return findings
+}
+
+// catalogDriftFinding builds one BLOCK-severity catalog drift finding.
+func catalogDriftFinding(name, detail string) Finding {
+	return Finding{
+		RuleID:       "catalog:drift",
+		Severity:     SeverityBlock,
+		Category:     CategoryPolicy,
+		File:         "internal/agentwire/assets/plugin/kern.ts",
+		Message:      fmt.Sprintf("MCP catalog drift: tool %s %s", name, detail),
+		Explanation:  "Every agent consumes the MCP server via tools/list; the opencode plugin must expose exactly the same tool set so no surface silently lags the universal catalog. A mismatch blocks the diff gate.",
+		SuggestedFix: "Update internal/agentwire/assets/plugin/kern.ts to match the MCP catalog (and the on-disk .opencode copy via `kern setup`).",
+		RuleVersion:  "1",
+		Confidence:   1.0,
+		Scope:        "repo",
+		Evidence:     []Evidence{{Kind: "set-diff", Description: detail, Location: name}},
+	}
+}

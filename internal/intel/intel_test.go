@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-func writeTree(t *testing.T, files map[string]string) string {
+func writeTree(t testing.TB, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for rel, content := range files {
@@ -113,7 +114,7 @@ func TestAffectedFilesExcludesDocFiles(t *testing.T) {
 	// …but it must never surface in the blast-radius file set.
 	files := AffectedFiles(ix, []string{"Public", "inner"})
 	for _, f := range files {
-		if index.IsDocFile(f) {
+		if langparse.IsDocFile(f) {
 			t.Errorf("doc file %q leaked into affected files: %v", f, files)
 		}
 	}
@@ -203,46 +204,6 @@ func TestCoverageFindsGaps(t *testing.T) {
 	}
 }
 
-func TestHubsRankByCallers(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"lib/lib.go":       srcLib,
-		"client/client.go": srcClient,
-	})
-	ix, err := index.Build(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hubs := Hubs(ix, 5)
-	if len(hubs) == 0 {
-		t.Fatal("expected at least one hub")
-	}
-	if hubs[0].Symbol != "Public" && hubs[0].Score < 3 {
-		t.Errorf("expected Public to rank first, got %v", hubs[0])
-	}
-}
-
-func TestBridgesDetectCrossPackage(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"lib/lib.go":       srcLib,
-		"client/client.go": srcClient,
-	})
-	ix, err := index.Build(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bridges := Bridges(ix, 10)
-	found := false
-	for _, b := range bridges {
-		if b.Symbol == "Public" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected Public to be a cross-package bridge, got %+v", bridges)
-	}
-}
-
 func TestFlowsFromEntryPoints(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go":       srcLib,
@@ -295,68 +256,6 @@ func B() {
 			}
 			seen[n] = true
 		}
-	}
-}
-
-func TestCommunitiesCluster(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"lib/lib.go":       srcLib,
-		"client/client.go": srcClient,
-	})
-	ix, err := index.Build(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	comms := Communities(ix)
-	if len(comms) == 0 {
-		t.Fatal("expected at least one community")
-	}
-	big := comms[0]
-	if big.Size < 3 {
-		t.Errorf("expected the main cluster to span the call graph, got %+v", big)
-	}
-}
-
-func TestCommunitiesGatedLargeRepo(t *testing.T) {
-	ix := &index.Index{}
-	for i := 0; i < index.MaxCommunitySymbols+1; i++ {
-		ix.Symbols = append(ix.Symbols, index.Symbol{
-			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
-		})
-	}
-	if comms := Communities(ix); len(comms) != 0 {
-		t.Fatalf("expected no communities above the gate, got %d", len(comms))
-	}
-}
-
-func TestAnalyzeArchitectureGatedLargeRepo(t *testing.T) {
-	ix := &index.Index{Calls: map[string][]index.CallEdge{"main": {index.CallEdge{Target: "helper", Confidence: index.ConfidenceHigh}}}}
-	for i := 0; i < index.MaxCommunitySymbols+1; i++ {
-		ix.Symbols = append(ix.Symbols, index.Symbol{
-			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
-		})
-	}
-	a := AnalyzeArchitecture(ix)
-	if len(a.Communities) != 0 || len(a.Coupling) != 0 {
-		t.Fatalf("expected empty architecture above the gate, got %d communities %d coupling", len(a.Communities), len(a.Coupling))
-	}
-	if !a.Gated {
-		t.Errorf("expected Gated=true above the gate")
-	}
-	if a.SymbolCount != len(ix.Symbols) {
-		t.Errorf("SymbolCount: got %d, want %d", a.SymbolCount, len(ix.Symbols))
-	}
-	if a.EdgeCount != 1 {
-		t.Errorf("EdgeCount: got %d, want 1", a.EdgeCount)
-	}
-	// The render must surface a skip note, NOT the misleading
-	// "no project-local call structure detected" message.
-	out := RenderArch(a)
-	if !strings.Contains(out, "skipped") {
-		t.Errorf("expected skip note in render, got %q", out)
-	}
-	if strings.Contains(out, "no project-local call structure") {
-		t.Errorf("gated render must not claim 'no call structure', got %q", out)
 	}
 }
 

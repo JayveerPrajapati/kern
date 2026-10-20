@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/twin"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
@@ -52,7 +53,7 @@ func collectEntityHits(g *intel.Graph, symbols []string) []entityAgg {
 				agg = &entityAgg{kind: e.Kind, name: e.Name, file: file, symbols: map[string]bool{}}
 				byKey[key] = agg
 			}
-			agg.symbols[sym] = true
+			agg.symbols[nodeDisplayName(g, sym)] = true
 		}
 	}
 	out := make([]entityAgg, 0, len(byKey))
@@ -105,6 +106,66 @@ func attachImpactEntities(g *intel.Graph, symbols []string) []domain.EntityImpac
 			File:    h.file,
 			Symbols: sortedUnique(h.symbols),
 		})
+	}
+	return out
+}
+
+// nodeDisplayName maps a graph node ID to its readable label; names that are
+// not node IDs pass through unchanged. A declaration identity (decl:<sha>)
+// maps to the node's label (or symbol name) when the node is in the graph —
+// the hash itself must never reach rendered text (QA 6.6).
+func nodeDisplayName(g *intel.Graph, ref string) string {
+	if !strings.HasPrefix(ref, "decl:") {
+		return ref
+	}
+	if node, ok := g.NodeByID(ref); ok {
+		if node.Label != "" {
+			return node.Label
+		}
+		if node.Symbol != nil && node.Symbol.Name != "" {
+			return node.Symbol.Name
+		}
+	}
+	return ref
+}
+
+// displayName maps a declaration identity (decl:<sha>) to its agent-usable
+// name for rendered text: the graph node's label, then the index symbol's
+// full name. Non-decl refs pass through unchanged. The index fallback covers
+// graphs that lack the node (QA 6.6: rendered payloads must not carry decl
+// hashes).
+func displayName(g *intel.Graph, ix *index.Index, ref string) string {
+	if !strings.HasPrefix(ref, "decl:") {
+		return ref
+	}
+	if g != nil {
+		if node, ok := g.NodeByID(ref); ok {
+			if node.Label != "" {
+				return node.Label
+			}
+			if node.Symbol != nil && node.Symbol.Name != "" {
+				return node.Symbol.Name
+			}
+		}
+	}
+	if ix != nil {
+		for _, s := range ix.Symbols {
+			if s.DeclarationID() == ref {
+				return s.FullName()
+			}
+		}
+	}
+	return ref
+}
+
+// DisplayNames returns the labels for a list of node IDs, preserving order.
+func DisplayNames(g *intel.Graph, refs []string) []string {
+	if g == nil || len(refs) == 0 {
+		return refs
+	}
+	out := make([]string, len(refs))
+	for i, ref := range refs {
+		out[i] = nodeDisplayName(g, ref)
 	}
 	return out
 }

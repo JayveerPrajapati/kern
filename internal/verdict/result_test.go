@@ -1,6 +1,7 @@
 package verdict
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,28 @@ func TestRenderCompactStaticAnalysisSkipped(t *testing.T) {
 	}
 }
 
+// TestRenderCompactBuildSkippedNeverOK pins 6.1: a build that was NOT
+// executed (no build step declared — package.json without a "build" script,
+// Makefile without a build target) renders "build: SKIPPED <reason>", never a
+// vacuous "build: OK (…)".
+func TestRenderCompactBuildSkippedNeverOK(t *testing.T) {
+	v := VerificationResult{
+		Verdict: VerdictPass,
+		Build: &BuildResult{
+			OK:       true,
+			Duration: 85 * time.Millisecond,
+			Output:   "skipped: no build step detected (nothing to build)",
+		},
+	}
+	out := RenderCompact(v)
+	if !strings.Contains(out, "build: SKIPPED no build step detected") {
+		t.Errorf("a not-executed build must render SKIPPED with the reason:\n%s", out)
+	}
+	if strings.Contains(out, "build: OK") {
+		t.Errorf("a not-executed build must never claim OK:\n%s", out)
+	}
+}
+
 func TestRenderCompactSurfacesFailVerdict(t *testing.T) {
 	v := VerificationResult{
 		Verdict: VerdictFail,
@@ -115,6 +138,34 @@ func TestRenderCompactSecurityLiveFindingsWarnNotOK(t *testing.T) {
 	clean := VerificationResult{Verdict: VerdictPass, Security: &SecurityResult{OK: true}}
 	if out := RenderCompact(clean); !strings.Contains(out, "security: OK ") {
 		t.Errorf("clean scan must stay OK:\n%s", out)
+	}
+}
+
+// TestRenderCompactSecurityLiveFindingsBeforeSuppressed pins F6: when a
+// security scan yields more findings than the visible window, unsuppressed
+// (actionable) findings must render FIRST — the raw scan order used to let
+// [suppressed] entries crowd them out entirely behind "... and N more".
+func TestRenderCompactSecurityLiveFindingsBeforeSuppressed(t *testing.T) {
+	v := VerificationResult{Verdict: "FAIL"}
+	findings := []Finding{
+		{File: "s.go", Line: 1, Severity: "low", Rule: "r", Message: "suppressed one", Suppressed: true, SuppressionReason: "audit-only"},
+		{File: "s2.go", Line: 2, Severity: "low", Rule: "r", Message: "suppressed two", Suppressed: true, SuppressionReason: "audit-only"},
+	}
+	findings = append(findings, Finding{File: "a.go", Line: 1, Severity: "critical", Rule: "r", Message: "live finding"})
+	for i := 3; i <= 13; i++ {
+		findings = append(findings, Finding{File: fmt.Sprintf("s%d.go", i), Line: i, Severity: "low", Rule: "r", Message: fmt.Sprintf("suppressed %d", i), Suppressed: true, SuppressionReason: "audit-only"})
+	}
+	v.Security = &SecurityResult{Count: 14, Critical: 1, Suppressed: 13, Findings: findings}
+	out := RenderCompact(v)
+	if !strings.Contains(out, "live finding") {
+		t.Fatalf("actionable finding hidden behind suppressed entries:\n%s", out)
+	}
+	idxLive := strings.Index(out, "live finding")
+	if idxLive < 0 {
+		t.Fatal("unreachable")
+	}
+	if first := strings.Index(out, "[suppressed]"); first >= 0 && first < idxLive {
+		t.Fatalf("suppressed finding rendered before the live one:\n%s", out)
 	}
 }
 

@@ -103,16 +103,16 @@ func TestFilteredToolsKernToolsAllowlist(t *testing.T) {
 
 // TestCallToolResolvesUnadvertisedHandler is the correctness invariant for
 // the minimal default surface: kern_meta's NL router must still reach
-// sub-tool handlers that are NOT advertised. kern_inherits is not in
+// sub-tool handlers that are NOT advertised. kern_graph is not in
 // defaultTools, so with default env the tools/call dispatch must resolve it
 // to its real handler (which errors on a missing symbol arg) rather than
 // failing with "unknown tool".
 func TestCallToolResolvesUnadvertisedHandler(t *testing.T) {
 	clearMCPSurfaceEnv(t)
-	if defaultTools["kern_inherits"] {
-		t.Fatal("test premise broken: kern_inherits must not be in the default surface")
+	if defaultTools["kern_graph"] {
+		t.Fatal("test premise broken: kern_graph must not be in the default surface")
 	}
-	text := mcpToolError(t, "kern_inherits", map[string]any{})
+	text := mcpToolError(t, "kern_graph", map[string]any{})
 	if strings.Contains(text, "unknown tool") {
 		t.Fatalf("unadvertised tool was rejected as unknown: %q", text)
 	}
@@ -179,7 +179,7 @@ func TestFilteredTools_PhaseExplore(t *testing.T) {
 	t.Setenv("KERN_MCP_PHASE", "explore")
 	assertPhaseSurface(t, "explore",
 		[]string{"kern_search", "kern_meta"},
-		[]string{"kern_plan", "kern_verify", "kern_rename"})
+		[]string{"kern_plan", "kern_verify", "kern_graph"})
 }
 
 // TestFilteredTools_PhasePlan verifies KERN_MCP_PHASE=plan advertises only
@@ -189,7 +189,7 @@ func TestFilteredTools_PhasePlan(t *testing.T) {
 	t.Setenv("KERN_MCP_PHASE", "plan")
 	assertPhaseSurface(t, "plan",
 		[]string{"kern_impact", "kern_meta"},
-		[]string{"kern_rename", "kern_verify", "kern_probe"})
+		[]string{"kern_graph", "kern_verify", "kern_probe"})
 }
 
 // TestFilteredTools_PhaseEdit verifies KERN_MCP_PHASE=edit advertises only
@@ -209,7 +209,7 @@ func TestFilteredTools_PhaseVerify(t *testing.T) {
 	t.Setenv("KERN_MCP_PHASE", "verify")
 	assertPhaseSurface(t, "verify",
 		[]string{"kern_verify", "kern_meta"},
-		[]string{"kern_plan", "kern_rename", "kern_probe"})
+		[]string{"kern_plan", "kern_graph", "kern_probe"})
 }
 
 // TestFilteredTools_PhaseUnknown verifies an invalid KERN_MCP_PHASE falls
@@ -281,12 +281,12 @@ func TestFilteredTools_CategoryGraph(t *testing.T) {
 	if !names["kern_meta"] {
 		t.Error("category=graph surface missing always-on kern_meta router")
 	}
-	for _, want := range []string{"kern_search", "kern_near", "kern_explore"} {
+	for _, want := range []string{"kern_search", "kern_graph", "kern_explore"} {
 		if !names[want] {
 			t.Errorf("category=graph surface missing graph tool %q", want)
 		}
 	}
-	for _, notWant := range []string{"kern_plan", "kern_verify", "kern_rename", "kern_org"} {
+	for _, notWant := range []string{"kern_plan", "kern_verify", "kern_doc", "kern_memory"} {
 		if names[notWant] {
 			t.Errorf("category=graph surface should not advertise %q", notWant)
 		}
@@ -294,7 +294,7 @@ func TestFilteredTools_CategoryGraph(t *testing.T) {
 }
 
 // TestFilteredTools_CategoryMeta verifies KERN_MCP_CATEGORY=meta keeps the
-// meta family (kern_meta, kern_usage_guide, kern_buddy).
+// meta family (kern_meta, kern_buddy).
 func TestFilteredTools_CategoryMeta(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_FULL", "1")
@@ -304,7 +304,7 @@ func TestFilteredTools_CategoryMeta(t *testing.T) {
 	for _, tool := range s.filteredTools() {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"kern_meta", "kern_usage_guide", "kern_buddy"} {
+	for _, want := range []string{"kern_meta", "kern_buddy"} {
 		if !names[want] {
 			t.Errorf("category=meta surface missing %q", want)
 		}

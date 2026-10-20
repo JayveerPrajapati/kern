@@ -431,6 +431,21 @@ test("live cross-check: fixture cases against a real kern serve process (skips w
     return;
   }
 
+  // The REST control plane (`kern serve`) moved to the standalone kern_server
+  // repo in the P4 pivot (a05c91c7/9a578638 cut the web console + serve binary
+  // from kern); the kern binary no longer ships the serve command. Probe once
+  // and skip cleanly when unavailable instead of failing the optional check.
+  const serveProbe = spawnSync(cmd[0], [...cmd.slice(1), "--help"], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  if (serveProbe.status !== 0) {
+    t.skip(
+      "live cross-check skipped: kern serve is not available in this kern binary (the REST control plane lives in the standalone kern_server repo)"
+    );
+    return;
+  }
+
   const port = await findFreePort();
   const token = randomToken();
   const logPath = path.join(os.tmpdir(), `kern-live-${process.pid}-${Date.now()}.log`);

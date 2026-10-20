@@ -24,7 +24,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // ViaSemanticArg marks a semantic route inside ClassifyMetaRequest's args;
@@ -181,9 +181,7 @@ func SemanticMetaRoute(request string) (tool string, args map[string]any, score 
 func codeIntentTool(name string) bool {
 	switch name {
 	case "kern_explore", "kern_search", "kern_context", "kern_probe",
-		"kern_why", "kern_graph", "kern_path", "kern_inherits",
-		"kern_near", "kern_arch", "kern_callers", "kern_callees",
-		"kern_usage", "kern_health":
+		"kern_why", "kern_graph", "kern_path", "kern_arch":
 		return true
 	}
 	return false

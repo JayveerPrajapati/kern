@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 func errorResponse(id json.RawMessage, code int, msg string) map[string]any {
@@ -39,20 +40,36 @@ func idKey(id json.RawMessage) string {
 		return fmt.Sprintf("%v", v)
 	}
 }
+
+// toolCallParams is the decoded {name, arguments, _meta} body of a
+// tools/call request. dispatch decodes it ONCE per call and shares the
+// struct with the confinement-gate check and toolCallResponseDecoded, so the
+// params are JSON-decoded exactly once (the gate previously re-unmarshalled
+// what toolCallResponse had already decoded).
+type toolCallParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+	Meta      struct {
+		ProgressToken json.RawMessage `json:"progressToken"`
+	} `json:"_meta"`
+}
+
+// toolCallResponse decodes the tools/call params and delegates to
+// toolCallResponseDecoded. The production path (dispatch) decodes once for
+// the confinement gate and calls toolCallResponseDecoded directly; this
+// wrapper keeps direct callers (tests) on the same code path.
 func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) any {
-	// First real use: start background indexing (no-op if initialize already
-	// triggered it — indexOnce fires exactly once per server lifetime).
-	s.indexOnce.Do(func() { go s.preloadIndexes() })
-	var p struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-		Meta      struct {
-			ProgressToken json.RawMessage `json:"progressToken"`
-		} `json:"_meta"`
-	}
+	var p toolCallParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return errorResponse(id, -32602, "invalid params")
 	}
+	return s.toolCallResponseDecoded(id, p)
+}
+
+func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) any {
+	// First real use: start background indexing (no-op if initialize already
+	// triggered it — indexOnce fires exactly once per server lifetime).
+	s.indexOnce.Do(func() { go s.preloadIndexes() })
 	// MCP spec: progress notifications are only emitted when the client
 	// supplied a progressToken in the request's _meta — never unsolicited.
 	// Stringify the token the same way ids are canonicalized (string kept
@@ -74,9 +91,28 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 				"content": []any{map[string]any{"type": "text", "text": denied}},
 				"isError": true,
 			}
-			mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, denied)
+			mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, tokenize.Count(denied))
 			return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 		}
+	}
+	// F1 (MCP spec parity): tools/call with an unknown tool name is an
+	// "invalid params" JSON-RPC error (-32602) — matching the spec's
+	// tools/call example and this server's prompts/get handling — instead of
+	// an isError tool result. Handler-level EXECUTION errors (including a
+	// handler's own "X is required" checks) still surface as isError tool
+	// results; pre-dispatch governance denials (confinement/allowlist) keep
+	// the isError framing above so the agent sees why the call was blocked.
+	// String-argument shape violations (D6) are enforced ONCE at the runTool
+	// choke point (validateStringArgs) so the two pre-dispatch call sites
+	// cannot disagree — and they surface as isError tool results naming the
+	// argument, the tool and the expected type, never as the -32602 protocol
+	// error, which stays reserved for F1 unknown/empty tool names above
+	// (pinned by TestStringArgViolationIsToolErrorNotJSONRPC).
+	if p.Name == "" {
+		return errorResponse(id, -32602, "invalid arguments: missing tool name")
+	}
+	if !knownTool(p.Name) {
+		return errorResponse(id, -32602, "unknown tool: "+p.Name)
 	}
 	// A generous 30-minute per-call ceiling so a hung subprocess (an
 	// unresponsive Ollama during plan/analyze, or a slow index build) can
@@ -200,16 +236,27 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		if scope.unchanged {
 			result["unchanged"] = true
 		}
+		ident := ""
+		if scope.ix != nil && scope.ix.Identity != nil {
+			ident = indexIdentityString(scope.ix.Identity)
+		}
 		etag.Default.Record(argString(p.Arguments, "agent_id"), etag.Entry{
-			Tool:  p.Name,
-			Args:  etag.CanonicalArgsKey(p.Arguments),
-			ETag:  scope.etag,
-			Stamp: time.Now(),
+			Tool:     p.Name,
+			Args:     etag.CanonicalArgsKey(p.Arguments),
+			ETag:     scope.etag,
+			Stamp:    time.Now(),
+			Identity: ident,
+			View:     serveView(p.Name, p.Arguments),
 		})
 	}
 	// Structured token metadata: the request tokens were counted
 	// before processing; count the final response text (provenance summary
-	// included) after and stamp the ledger on the result.
+	// included) exactly ONCE after — tokenize.Count over the exact text the
+	// client sees — and share the count with both the per-tool ledger
+	// (RecordToolCall) and the response metadata (AttachTokenMetadata) so the
+	// full-text count never runs twice per call. SandboxOutput's own
+	// before/after counts (over text and text[:cut]) are separate substrings
+	// and stay inside the sandbox marker.
 	out := text
 	if content, ok := result["content"].([]any); ok && len(content) > 0 {
 		if first, ok := content[0].(map[string]any); ok {
@@ -218,12 +265,13 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 			}
 		}
 	}
+	tokensOut := tokenize.Count(out)
 	// Per-tool token ledger: one entry per executed tool call (never for
 	// pre-tool denials — they return before this point). The same final
 	// response text the client sees is what gets counted, so the ledger
 	// answers "which tools return the most tokens to my context".
-	mcpserve.RecordToolCall(p.Name, p.Arguments, out, s.clientNameFor())
-	mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, out)
+	mcpserve.RecordToolCall(p.Name, p.Arguments, tokensOut, s.clientNameFor())
+	mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, tokensOut)
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
 
@@ -285,6 +333,16 @@ func progressToken(ctx context.Context) string {
 	return ""
 }
 
+// knownTool reports whether name has a registered handler. The dispatch
+// table is the execution authority — runTool's dispatchTool resolves through
+// it, and test-only handlers register there without catalog rows — so table
+// membership (not catalog advertisement membership) is the correct boundary
+// test for the -32602 unknown-tool rejection (F1).
+func knownTool(name string) bool {
+	_, ok := dispatchTable[name]
+	return ok
+}
+
 // argString reads an optional scalar string tool argument. Missing or null
 // returns "". Accepted input shapes follow the documented coercion contract
 // (D6): strings verbatim (trimmed), JSON numbers to their canonical string
@@ -331,48 +389,47 @@ func atoiArg(v string, def int) (int, error) {
 // untouched — those already fail loud in their handlers (atoiArg's "invalid
 // integer", for example). Numeric-typed arguments keep their lenient parsing
 // and any existing bounds enforcement unchanged. Unknown tool names validate
-// nothing.
+// nothing. The tool's schema is resolved through the init-built toolByName
+// map (O(1)) instead of a linear scan of the ~140-tool catalog per call.
 func validateStringArgs(name string, args map[string]any) error {
-	for i := range tools {
-		if tools[i].Name != name {
+	t, ok := toolByName[name]
+	if !ok {
+		return nil // unknown tool: nothing to validate
+	}
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	for key, raw := range props {
+		prop, _ := raw.(map[string]any)
+		if prop["type"] != "string" {
 			continue
 		}
-		props, _ := tools[i].InputSchema["properties"].(map[string]any)
-		for key, raw := range props {
-			prop, _ := raw.(map[string]any)
-			if prop["type"] != "string" {
-				continue
-			}
-			v, ok := args[key]
-			if !ok {
-				continue // absent optional argument: nothing to coerce
-			}
-			switch v.(type) {
-			case string, float64, int, bool:
-				// Accepted scalar coercions (int covers Go-API callers; JSON
-				// numbers always decode to float64 in this server). The D6
-				// contract coerce numbers to canonical string form for genuine
-				// string args (plugin callers legitimately pass numeric strings)
-				// — but a JSON NUMBER for the path-typed "root" argument is a
-				// client bug, not a path: coercing it to "12345" would resolve
-				// silently relative to the workspace root.
-				if key == "root" {
-					switch v.(type) {
-					case float64, int:
-						return fmt.Errorf("argument %q for tool %s: expected a path string, got a number", key, name)
-					}
-				}
-			case nil:
-				return fmt.Errorf("argument %q for tool %s: expected a string, got null", key, name)
-			case []string, []any:
-				return fmt.Errorf("argument %q for tool %s: expected a string, got an array", key, name)
-			case map[string]any:
-				return fmt.Errorf("argument %q for tool %s: expected a string, got an object", key, name)
-			default:
-				return fmt.Errorf("argument %q for tool %s: expected a string, got %T", key, name, v)
-			}
+		v, ok := args[key]
+		if !ok {
+			continue // absent optional argument: nothing to coerce
 		}
-		return nil
+		switch v.(type) {
+		case string, float64, int, bool:
+			// Accepted scalar coercions (int covers Go-API callers; JSON
+			// numbers always decode to float64 in this server). The D6
+			// contract coerce numbers to canonical string form for genuine
+			// string args (plugin callers legitimately pass numeric strings)
+			// — but a JSON NUMBER for the path-typed "root" argument is a
+			// client bug, not a path: coercing it to "12345" would resolve
+			// silently relative to the workspace root.
+			if key == "root" {
+				switch v.(type) {
+				case float64, int:
+					return fmt.Errorf("argument %q for tool %s: expected a path string, got a number", key, name)
+				}
+			}
+		case nil:
+			return fmt.Errorf("argument %q for tool %s: expected a string, got null", key, name)
+		case []string, []any:
+			return fmt.Errorf("argument %q for tool %s: expected a string, got an array", key, name)
+		case map[string]any:
+			return fmt.Errorf("argument %q for tool %s: expected a string, got an object", key, name)
+		default:
+			return fmt.Errorf("argument %q for tool %s: expected a string, got %T", key, name, v)
+		}
 	}
 	return nil
 }

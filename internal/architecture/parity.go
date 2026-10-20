@@ -53,8 +53,7 @@ type ArchRow struct {
 }
 
 // archRowRe matches table rows whose dir cell is an internal or cmd path,
-// allowing nested dirs (internal/mcp/doc, internal/blueprint/checks/diffgate,
-// cmd/kern) — the `/` and `.` are legal in package paths and the nested rows
+// allowing nested dirs (internal/mcp/doc, internal/diffgate, cmd/kern) — the `/` and `.` are legal in package paths and the nested rows
 // must be parsed or their cap enforcement silently vanishes. Rows carry four
 // cells (dir | LOC baseline | cap); a trailing allowed-deps cell from the
 // pre-split single-file format is tolerated and ignored — deps now live in

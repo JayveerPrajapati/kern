@@ -3,6 +3,7 @@
 package index
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,5 +44,50 @@ func TestOpenSQLiteSelfHealsCorruptStore(t *testing.T) {
 	}
 	if !quarantined {
 		t.Fatalf("corrupt store was not quarantined next to the fresh one")
+	}
+}
+
+// TestOpenSQLiteAnnouncesCorruptQuarantine pins the corruption-message
+// honesty fix: a corrupt store used to be quarantined SILENTLY, so the next
+// load reported "no index found" and the user never learned their store was
+// corrupt (it looked like a fresh repo). The quarantine path must surface
+// "corrupt index store quarantined to X — rebuilding from source" on stderr,
+// in the same announce-gate style as the LoadOrBuild build announcement.
+func TestOpenSQLiteAnnouncesCorruptQuarantine(t *testing.T) {
+	prev := buildAnnounceOverride
+	buildAnnounceOverride = true
+	defer func() { buildAnnounceOverride = prev }()
+
+	root := t.TempDir()
+	storePath := sqliteDBPath(root)
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storePath, []byte("this is definitely not a sqlite database at all, nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	s, err := OpenSQLite(root)
+	_ = w.Close()
+	os.Stderr = old
+	stderr, _ := io.ReadAll(r)
+
+	if err != nil {
+		t.Fatalf("OpenSQLite must self-heal a corrupt store, got %v", err)
+	}
+	defer s.Close()
+
+	msg := string(stderr)
+	if !strings.Contains(msg, "corrupt index store quarantined to ") || !strings.Contains(msg, "rebuilding from source") {
+		t.Fatalf("expected the corrupt-quarantine announcement on stderr, got %q", msg)
+	}
+	if !strings.Contains(msg, ".corrupt-") {
+		t.Fatalf("announcement must name the quarantine path (index.sqlite.corrupt-<ts>), got %q", msg)
 	}
 }

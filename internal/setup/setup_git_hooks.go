@@ -2,8 +2,6 @@ package setup
 
 import (
 	"os/exec"
-
-	"github.com/JayveerPrajapati/kern/internal/bpcli/cli"
 )
 
 // wireGlobalGitHooks installs Kern's pre-commit and post-commit hooks globally
@@ -18,10 +16,10 @@ func wireGlobalGitHooks() Status {
 		}
 	}
 
-	if err := cli.InstallGlobalGitHooks(); err != nil {
+	if err := InstallGlobalGitHooks(); err != nil {
 		return Status{Agent: "global-git-hooks", Installed: false, Path: "~/.kern/git-hooks", Note: err.Error()}
 	}
-	dir, _ := cli.GlobalGitHooksDir()
+	dir, _ := GlobalGitHooksDir()
 	return Status{
 		Agent:     "global-git-hooks",
 		Installed: true,
@@ -31,7 +29,7 @@ func wireGlobalGitHooks() Status {
 		// --staged` (governance audit chain + .blueprint/audit) and
 		// post-commit stores the diff into project memory. Users must not
 		// discover this only after the first commit.
-		Note: "global git hooks installed & active across all repos (pre-commit gates + audits, post-commit stores diff into project memory on every commit)",
+		Note: "global git hooks installed & active across all repos (pre-commit gates + audits, pre-push blocks force-push/delete of main/master, post-commit stores diff into project memory; each repo's own hooks still run)",
 	}
 }
 
@@ -46,7 +44,7 @@ func checkGlobalGitHooks() Status {
 		}
 	}
 
-	installed, details := cli.IsGlobalGitHooksInstalled()
+	installed, details := IsGlobalGitHooksInstalled()
 	return Status{
 		Agent:     "global git hooks",
 		Installed: installed,

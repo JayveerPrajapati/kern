@@ -27,10 +27,6 @@ func (s *Server) handleDoc(ctx context.Context, args map[string]any) (string, er
 	}, args)
 }
 
-func (s *Server) handleCommitmsg(ctx context.Context, args map[string]any) (string, error) {
-	return doc.Commitmsg(ctx, args)
-}
-
 func (s *Server) handlePrecache(ctx context.Context, args map[string]any) (string, error) {
 	return doc.Precache(ctx, args)
 }

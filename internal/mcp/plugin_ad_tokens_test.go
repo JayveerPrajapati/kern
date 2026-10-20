@@ -35,7 +35,7 @@ const maxPluginDescBytes = 400
 // minPluginDescCount is a parser-drift guard: the plugin currently defines
 // 143 descriptions. If extraction suddenly finds far fewer, the parser (not
 // the plugin) broke, and a silent zero would make the budget gate vacuous.
-const minPluginDescCount = 100
+const minPluginDescCount = 30
 
 // TestPluginAdTokensBudget loads .opencode/plugins/kern.ts, extracts every
 // `description:` string literal from the tool({...}) definitions, sums their

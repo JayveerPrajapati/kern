@@ -6,11 +6,14 @@
 
 **Index · Graph · Guard · Audit · Optimize — One self-contained CLI binary. Local-first, no telemetry.**
 
+**Why teams pick kern:** surgical AST context instead of whole-file reads · deterministic blast radius before edits · governed execution and audit trails · project memory across sessions · zero telemetry.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Go](https://img.shields.io/badge/Language-Go_1.27+-blue.svg)](https://go.dev/)
 [![Telemetry: None](https://img.shields.io/badge/Telemetry-None-brightgreen.svg)](#traditional-agent-vs-agent--kern)
 [![Network: Zero](https://img.shields.io/badge/Network-100%25_Offline-brightgreen.svg)](#traditional-agent-vs-agent--kern)
-[![Dependencies: Minimal](https://img.shields.io/badge/Dependencies-Minimal_(stdlib%2Bsqlite%2Byaml)-brightgreen.svg)](#how-it-works)
+[![Dependencies: Lean](https://img.shields.io/badge/Dependencies-Lean_(local_only)-brightgreen.svg)](#how-it-works)
+[![Tree-sitter: Native prebuilts](https://img.shields.io/badge/Tree--sitter-native_prebuilts-blue.svg)](#1-install)
 
 [![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-ecosystem)
 [![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](#supported-ecosystem)
@@ -32,8 +35,8 @@
 
 <br>
 
-**18 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (6 high-level tools by default, 117 in full mode) · 100% Local**<br>
-**License:** MIT (see [LICENSE](LICENSE)) · one reviewed copyleft exception: `github.com/hashicorp/golang-lru/v2` is **MPL-2.0** (file-level copyleft, accepted — `kern verify` renders it `MPL-2.0 (accepted)`)
+**18 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (29 tools advertised by default, 31 in full mode) · 100% Local**<br>
+**License:** MIT (see [LICENSE](LICENSE)) — all Go dependencies are permissively licensed (no copyleft exceptions; the former `golang-lru/v2` MPL-2.0 exception was removed with that dependency)
 
 </div>
 
@@ -57,8 +60,8 @@ flowchart TD
 
     subgraph Kern_Agent["Agent Powered by kern (Deterministic Intelligence)"]
         A2["Task: 'Fix Server dispatch'"] --> B2["kern_meta / kern explore"]
-        B2 --> C2["Surgical AST context + callers/callees<br/>(1,198 tokens)"]
-        C2 --> D2["Sub-millisecond query, verified blast radius, zero leaks"]
+        B2 --> C2["Surgical AST context + callers/callees<br/>(1,198 tokens [illustrative])"]
+        C2 --> D2["Sub-millisecond query [illustrative], verified blast radius, zero leaks"]
     end
 ```
 
@@ -68,22 +71,32 @@ flowchart TD
 
 | Dimension | Traditional Agent (`grep` / `read` / `glob`) | Agent Powered by `kern` |
 |---|---|---|
-| **Token Consumption** | 50,000 – 150,000+ tokens per deep task | **500 – 2,500 tokens** (minimal surgical symbol slices) |
-| **Search Latency** | 2 – 15 seconds walking disk trees | **< 10ms** pre-indexed AST & symbol cache |
+| **Token Consumption** | 50,000 – 150,000+ tokens per deep task | **500 – 2,500 tokens [illustrative]** (minimal surgical symbol slices) |
+| **Search Latency** | 2 – 15 seconds walking disk trees | **< 10ms [illustrative]** pre-indexed AST & symbol cache |
 | **Code Understanding** | Flat string/regex pattern matching | **Precise AST call graphs, callers, callees & inheritance** |
 | **Blast Radius & Risk** | Agent guesses dependencies | **Deterministic change impact & test coverage gaps** |
 | **Security & Privacy** | Prompts send raw secrets to LLM | **100% local, automatic PII/secret masking, sandboxed execution** |
 | **Governance & Audit** | Zero auditability | **Tamper-evident SHA-256 hash chain & cryptographic proofs** |
 
-> **Illustrative vs measured.** The token and latency figures above are best-case
-> per-task numbers on well-indexed Go code. Across real mixed sessions, `kern stats`
-> reports roughly **20% fewer tokens overall** (see the `kern doctor` example below);
-> your own number is whatever `kern stats` prints. The reproducible benchmark
-> tables further down use synthetic fixtures and say so.
+> **Illustrative vs measured.** Headline numbers in this README carry explicit labels:
+> `[measured]` = reproducible protocol in docs/benchmarks/, `[synthetic]` = fixed
+> deterministic fixture, `[illustrative]` = anecdotal or best-case. The token and
+> latency figures above are best-case per-task numbers on well-indexed Go code. Across
+> real mixed sessions, `kern stats` reports roughly **20% fewer tokens overall** (see
+> the `kern doctor` example below); your own number is whatever `kern stats` prints.
+> The reproducible benchmark tables further down use synthetic fixtures and say so.
 
 ---
 
 ## Quickstart
+
+> ### The 60-second path
+>
+> 1. Run the installer below.
+> 2. Open a project and run `kern index .`.
+> 3. Ask your agent: **“What breaks if I change `Server.dispatch`?”**
+>
+> The installer wires your agents machine-wide; use `kern setup --dry-run` first if you prefer to preview every write.
 
 ### 1. Install
 
@@ -96,6 +109,11 @@ curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.ps1 | iex"
 ```
+
+Prefer to look before you install? After a download-only install
+(`KERN_AUTO_WIRE=0`), `kern doctor` reports install and index health and
+`kern setup --dry-run` previews exactly what wiring would be written —
+both read-only, nothing changed.
 
 The installer prints every step as it completes (platform detection → release
 resolution → download → checksum verification → install → macOS Gatekeeper
@@ -126,20 +144,41 @@ User PATH entry, `~/.config/kern` / `~/.cache/kern`, and the kern block from
 macOS/Linux and `install.ps1` via PowerShell on Windows automatically,
 including replacing a running `kern.exe` (renamed aside).
 
-> **Wiring writes into your repo.** `kern setup` — which `install`/`upgrade`
-> auto-run when your working directory is inside a git repo — writes
-> agent-config files directly INTO that repo: `AGENTS.md`, `.gitignore`,
-> `.mcp.json`, `opencode.json`, the opencode plugin, and bundled skills under
-> `.agents/skills/` (~17 paths in a typical repo; `.kern/` holds the index and
-> audit data). Your home `~/AGENTS.md` is backed up to
+> **Install once, every repo works.** The installer wires kern **machine-wide**
+> (`kern setup --global-only --global-rules`): user-level MCP registration, hooks
+> and rules for every supported agent, plus a global git ignore for `.kern/`.
+> **It writes no file in any repo.** The first time an agent works in a repo,
+> kern indexes it on demand (the global rules tell the agent to call
+> `kern_buddy` first). Your home `~/AGENTS.md` is backed up to
 > `~/AGENTS.md.bak.<timestamp>` before its kern block is rewritten.
 >
-> **Want no repo writes?** Preview exactly what would be written with
-> `kern setup --dry-run` (writes nothing), limit it with `--detect` or
-> `--agents claude,cursor` and `--agents-md thin`, or skip `setup` entirely and
-> register the MCP server by hand — e.g. `claude mcp add kern -- kern mcp`
-> (see [Connect to Your Agent](#connect-to-your-agent)); `kern setup` only adds
-> the kern-first instructions and hooks on top of the MCP server itself.
+> - **Look first, change nothing:** `kern doctor` verifies install health and
+>   `kern setup --dry-run` previews the files wiring would write — both
+>   read-only.
+> - **Git hooks, machine-wide:** pre-commit runs
+>   `kern verify --staged security,architecture`;
+>   pre-push refuses force-push and deletion of `main`/`master` (change with
+>   `KERN_PROTECTED_BRANCHES="main release"`); each repo's own hooks still run.
+>   Both fail open if kern is missing. Emergency override, audited to
+>   `~/.kern/audit/bypass.jsonl`: `KERN_BYPASS=1 KERN_BYPASS_REASON="..." git push`.
+> - **Opt out of machine-wide wiring:** install with `KERN_AUTO_WIRE=0`
+>   (`$env:KERN_AUTO_WIRE="0"` on Windows), then wire later with
+>   `kern setup --global-only` when you choose. Preview with `--dry-run`.
+> - **Undo:** `kern setup --remove` removes only kern's own entries and blocks
+>   from your user-level config (preview with `--dry-run`, limit with
+>   `--agents`; edited files are backed up first; `~/.kern` data is kept).
+> - **Safety rails:** kern will not auto-index your home directory, a
+>   filesystem root or a documents folder (override: `KERN_ALLOW_BROAD_INDEX=1`;
+>   `kern index <dir>` is always allowed). The global hook **fails open**: if
+>   kern is missing, or the repo has a `.kern/off` file, or `KERN_DISABLED=1`
+>   is set, built-in read/grep/bash are not redirected.
+> - **Share setup with a team:** run `kern setup` inside a repo to add the
+>   shared config files (`.mcp.json`, `AGENTS.md`, plugin, skills) for the
+>   agents it detects (`--all-agents` for every supported agent, `--plain` for
+>   non-interactive output; interactive runs show a plan and ask first).
+>   Skip `setup` entirely if you prefer to register the MCP server by hand —
+>   e.g. `claude mcp add kern -- kern mcp` (see
+>   [Connect to Your Agent](#connect-to-your-agent)).
 
 **Release channels** — `KERN_CHANNEL` selects which release `latest`
 resolves to (an explicit `KERN_VERSION=v1.2.3` pin always overrides it):
@@ -157,32 +196,30 @@ A channel that resolves to an OLDER tag than the installed version is
 refused by the same downgrade gate as today — only an explicit
 `--pin <tag>` consents.
 
-**Org governance** — `KERN_ORG_ROOT` turns on org mode (enterprise server +
-org-wide policy, approvals and RBAC):
+**Org governance** — `KERN_ORG_ROOT` turns on org mode (org-wide policy
+distribution):
 
 - `KERN_ORG_ROOT=/path/to/org-root` — the org root. Enables the org policy
-  document (`<root>/.kern/org-policy.json`), org-wins RBAC assignments
-  (`<root>/.kern/org-rbac.json`), and the org-wide approval store
-  (`/org/approvals`; deploy gates consume it).
-- `KERN_RBAC_DEFAULT_DENY=1` — **required with org mode.** `agent_id` is a
-  client-asserted label, not proof of identity, so org mode without
-  default-deny would let unassigned principals keep the legacy permit-all
-  trust — defeating org-wide governance. `kern serve --enterprise` (and
-  `enterprise.New`/`WithOrgRoot`) refuses to start without the pairing.
-- `KERN_ORG_ALLOW_WEAK_RBAC=1` — **unsafe escape hatch** that waives the
-  pairing requirement; documented-unsafe.
+  document (`<root>/.kern/org-policy.json`): org-wins policies that every
+  project firewall under the org root derives its rules from. Managed with
+  `kern policy set|get|apply` (see `docs/cli-reference.md`).
 
 See `docs/configuration.md` → "Org governance environment variables" for the
 full blast radius.
 
-The installer's prebuilt release binaries ship the **pure-Go** build
+Prebuilt installs now **prefer the tree-sitter-enabled build**: the release
+ships a `-full` asset per native platform (Linux amd64/arm64, macOS
+amd64/arm64, Windows amd64), compiled with CGO on a matching runner, and
+`install.sh` / `install.ps1` probe for it first. When no `-full` asset
+exists (Windows arm64 has no native build yet, or the release is missing
+one), the installer automatically falls back to the **pure-Go** build
 (SQLite + regex-heuristic extraction — compiled with `-tags sqlite,notreesitter`),
-because cross-compiled tarballs cannot include tree-sitter: its grammar
-bindings are hard-CGO, and each release target would need its own C
-toolchain. The default **from-source** build (`make build`) DOES include
-the tree-sitter indexer and requires CGO (a C compiler). Opt out to the
-pure-Go build with `make build-purego` / `make install-purego`, or set
-`KERN_PUREGO=1` when the installer falls back to `go install`.
+which is what the cross-compiled tarballs have always shipped. Set
+`KERN_FORCE_PUREGO=1` to skip the `-full` probe entirely. The default
+**from-source** build (`make build`) also includes the tree-sitter indexer
+and requires CGO (a C compiler). Opt out to the pure-Go build with
+`make build-purego` / `make install-purego`, or set `KERN_PUREGO=1` when
+the installer falls back to `go install`.
 
 <details>
 <summary><b>Other install options (Homebrew, Go install, Source)</b></summary>
@@ -196,10 +233,9 @@ brew install --build-from-source ./homebrew/kern.rb
 # KERN_PUREGO=1 when installing via install.sh/install.ps1)
 go install github.com/JayveerPrajapati/kern/cmd/kern@latest
 go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest
-go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest
 
 # Build from source (default = tree-sitter + CGO; make build-purego for pure-Go)
-make build  # Produces bin/kern, bin/kern-mcp, bin/kern-server
+make build  # Produces bin/kern, bin/kern-mcp
 ```
 </details>
 
@@ -217,7 +253,6 @@ kern setup --global  # Machine-wide: wires all agents + global git commit protec
 ```bash
 cd your-project
 kern index .        # Fast one-shot AST indexing
-kern watch .        # Auto-sync index on file changes
 ```
 
 ### 4. Ask Your Agent Anything
@@ -240,17 +275,17 @@ functions through the MCP tools):
 | **What depends on this symbol?** | `kern impact <symbol>` — transitive blast radius + risk |
 | **How do I review changes?** | `kern review` — token-optimized diff review against the index |
 | **How do I check everything works?** | `kern doctor` — binary, agent configs, and index health |
-| **How do I verify a change without the full suite?** | `kern verify --command "go test ./internal/foo/..." --output summary` — runs only what you name (a full `kern verify build,test` on a repo this size takes ~10 min; scope it to the packages you touched) |
+| **How do I verify a change without the full suite?** | `kern verify --command "go test ./internal/foo/..." --output summary` — runs only what you name (a full `kern verify build,test` on a repo this size takes ~10 min [illustrative]; scope it to the packages you touched) |
 
 Agents get the same answers via `kern_search`, `kern_optimize` (action=prompt|log),
-`kern_impact`, `kern_review`, `kern_doctor`.
+`kern_impact`, `kern_review`, and `kern doctor`.
 
 ### 6. Autonomous Interception & Emergency Break-Glass
 
 `kern` acts as a zero-intervention governance layer across all connected AI agents and Git repositories on your machine:
 
-* **Autonomous Pre-Tool Interceptor:** Naive tool calls (`view_file`, `read_file`, `grep`, `run_command`, `bash`) in **Antigravity (`agy`)**, **OpenCode**, **Cursor**, **Claude Code**, etc., are automatically intercepted and redirected to token-dense `kern_*` tools (`kern_compact_file`, `kern_search`, `kern_validate`).
-* **Machine-Wide Git Firewall:** Every `git commit` in any repository on disk runs fast staged validation (`kern check --staged --fast`) to prevent secret leaks and architectural boundary violations. `post-commit` automatically records diffs into project memory (`.kern/memory/`).
+* **Autonomous Pre-Tool Interceptor:** Naive tool calls (`view_file`, `read_file`, `grep`, `run_command`, `bash`) in **Antigravity (`agy`)**, **OpenCode**, **Cursor**, **Claude Code**, etc., are automatically intercepted and redirected to token-dense `kern_*` tools (`kern_compact_file`, `kern_search`).
+* **Machine-Wide Git Firewall:** Every `git commit` in any repository on disk runs fast staged validation (`kern verify --staged security,architecture`) to prevent secret leaks and architectural boundary violations. `post-commit` automatically records diffs into project memory (`.kern/memory/`).
 * **Emergency Break-Glass Override:** For P0 production incidents, bypass all gates instantly:
   ```bash
   # Single-command hotfix:
@@ -275,23 +310,22 @@ Reproducible on any machine — `go run ./evaluate/bench` (or `make bench`), fix
 | **Output Compression (Terse)** | 208 tokens | 193 tokens | **7.2%** | Strips conversational filler |
 | **Budget Fit (40 tok)** | 176 tokens | 32 tokens | **81.8%** | Delivers essential head + key lines |
 
-**Retrieval recall:** **100% (3/3)** at recall@5 on the index benchmark harness.
 
-**Query latency & cold start** — measured on this repo with `kern bench`
-(16,709 symbols · darwin/arm64, go1.27.1, 8 cpus · git `657fc43`; warm
+**Query latency & cold start** [measured] — measured on this repo with `kern bench`
+(16,531 symbols · darwin/arm64, go1.27.1, 8 cpus · git `98065fd4`; warm
 in-memory index unless noted; median of repeated runs):
 
 | Operation | Median | Note |
 |---|---|---|
-| **Cold index build** | 727 ms | fresh `index.Build` from source (1 run) |
-| **Warm index load** | 253 ms | persisted-store load — 2.9× faster than cold |
-| **Symbol search** | 0.77 ms | `main`, warm in-memory index |
-| **Ranked search** | 14.55 ms | `main`, warm in-memory index |
-| **One-hop callers** | <0.01 ms | top-hub symbol (`T.Fatalf`) |
-| **Transitive blast radius** | 1.40 ms | top-hub symbol, walks full caller graph |
-| **Hub ranking** | 31.25 ms | full-repo scan |
+| **Cold index build** | 904 ms | fresh `index.Build` from source (1 run) |
+| **Warm index load** | 178 ms | persisted-store load — 5.1× faster than cold |
+| **Symbol search** | 0.64 ms | `main`, warm in-memory index |
+| **Ranked search** | 12.36 ms | `main`, warm in-memory index |
+| **One-hop callers** | <0.01 ms | top-hub symbol (`strings.Contains`, 42 ns) |
+| **Transitive blast radius** | 6.07 ms | top-hub symbol, walks full caller graph |
+| **Hub ranking** | 91.55 ms | full-repo scan |
 
-**One-shot cold start vs `grep -rn`** — the question everyone asks,
+**One-shot cold start vs `grep -rn`** [measured] — the question everyone asks,
 measured honestly on real repos with a same-tree protocol (both tools scan
 identical copies stripped to kern's own ignore list — see
 [`docs/benchmarks/cold-start.md`](docs/benchmarks/cold-start.md);
@@ -301,7 +335,7 @@ median of runs, M1 Pro):
 |---|---|---|---|
 | 83 files | 92 ms | 86 ms | **70 ms** |
 | 189 files | 456 ms | **134 ms** | 496 ms |
-| 1,806 files (this repo) | 2.2 s | **575 ms** | 1.6 s |
+| 2,029 files (this repo) | 1.6 s | **463 ms** | 1.5 s |
 | 7,819 files / 2.2M LOC | 11.8 s | **872 ms** | 5.8 s |
 
 Grep wins only below ~200 files. Above that, a loaded kern index answers
@@ -309,7 +343,7 @@ Grep wins only below ~200 files. Above that, a loaded kern index answers
 grep pass, paid once) is amortized to query-only cost by the resident MCP
 server.
 
-**At 12,001 symbols / 240 files** (deterministic scaled fixture, median of
+**At 12,001 symbols / 240 files** [synthetic] (deterministic scaled fixture, median of
 5 runs): "what depends on X" blast-radius query **~3.1 ms**, full hub
 ranking **~21 ms** — see [`docs/benchmarks/graph-latency.md`](docs/benchmarks/graph-latency.md).
 
@@ -326,7 +360,7 @@ flowchart LR
     A["AI Coding Agent<br/>(Claude, Cursor, Gemini, Codex)"] -->|"1. Intent or kern_* MCP"| B["kern Engine<br/>(CLI & kern-mcp)"]
     
     subgraph Core_Engine["Deterministic Intelligence Pipeline"]
-        B -->|"2. Query Symbol Index"| C[("AST Symbol & Call Graph<br/>(16k+ symbols, 53k+ edges)")]
+         B -->|"2. Query Symbol Index"| C[("AST Symbol & Call Graph<br/>(16k+ symbols, 48k+ edges)")]
         B -->|"3. Mask PII & Secrets"| D["Safety Firewall & Policy Gates"]
         B -->|"4. Record Decision"| E["Tamper-Evident SHA-256 Audit Chain"]
     end
@@ -336,7 +370,7 @@ flowchart LR
 
 1. **Extraction & Indexing** — `go/ast` parses Go precisely; the default build compiles deep tree-sitter grammars for 13 languages (requires CGO); `-tags notreesitter` opts out to a zero-dependency regex-heuristic extractor that covers 16 languages. (18 languages are indexed in total; Dart is tree-sitter-only.)
 2. **Deterministic Storage** — Content-hash-verified index cached under `~/.cache/kern/`, with SQLite WAL + FTS5 full-text search compiled in by default.
-3. **Deep Graph Intelligence** — 200+ CLI commands and 117 MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
+3. **Deep Graph Intelligence** — 60+ CLI commands and 31 MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
 4. **Autonomous Auto-Sync** — File-event watchers (inotifywait/fswatch + polling fallback) update the index on save, backed by staleness checks on every read.
 
 ---
@@ -376,74 +410,86 @@ Run `kern setup` or check [`docs/mcp-client.md`](docs/mcp-client.md) for custom 
 
 ## MCP Tools & Routing
 
-By default, `kern` advertises a **focused 6-tool high-level surface** routed through the smart **`kern_meta`** natural-language dispatcher: `kern_meta`, `kern_search`, `kern_explore`, `kern_impact`, `kern_verify`, and `kern_buddy`. The other high-level tools below are reached through `kern_meta`'s internal router on a default install — they are advertised directly only with `KERN_MCP_FULL=1`.
+By default, `kern` advertises a **focused 29-tool default surface** routed through the smart **`kern_meta`** natural-language dispatcher: the original seven (`kern_meta`, `kern_search`, `kern_explore`, `kern_impact`, `kern_verify`, `kern_buddy`, and `kern_exec` — governed: execution fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry) plus 22 usage-curated additions (`kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`). The other tools below are reached through `kern_meta`'s internal router on a default install — they are advertised directly only with `KERN_MCP_FULL=1`.
 
 | Core Tool | Purpose | What it Replaces |
 |---|---|---|
 | **`kern_meta`** *(default)* | Single natural-language entry point — routes to the right tool automatically | Guessing tools |
-| **`kern_search`** *(default)* | Sub-millisecond AST symbol search by name, route, or prose | `grep` / `find` |
-| `kern_context` | Minimal relevant source slice for a symbol (definition + callers + callees) | `cat` / `read` |
+| **`kern_search`** *(default)* | Sub-millisecond AST symbol search by name [measured]; ranked/prose ~17 ms | `grep` / `find` |
+| **`kern_context`** *(default)* | Minimal relevant source slice for a symbol (definition + callers + callees) | `cat` / `read` |
 | **`kern_explore`** *(default)* | Full symbol call hierarchy, callers, callees, and blast radius | Manual file crawls |
 | **`kern_impact`** *(default)* | Predicts blast radius, risk rating, and test gaps before changing code | Guesswork refactoring |
-| `kern_plan` | Deterministic multi-file implementation plan for a proposed change | Ad-hoc edits |
-| `kern_run` | Orchestrates complete multi-step tasks across the explore-plan-edit-verify loop | Manual tool chains |
+| **`kern_plan`** *(default)* | Deterministic multi-file implementation plan for a proposed change | Ad-hoc edits |
+| **`kern_run`** *(default)* | Orchestrates complete multi-step tasks across the explore-plan-edit-verify loop | Manual tool chains |
 | **`kern_verify`** *(default)* | Unified verification engine across build, test, security, and architecture | Fragmented check scripts |
-| `kern_review` | Token-optimized code review context for diffs and pull requests | Whole-file diff reviews |
-| `kern_authorize_context` | Computes authorized symbol context with cryptographic access proof | Unchecked file access |
-| `kern_optimize` | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
+| **`kern_review`** *(default)* | Token-optimized code review context for diffs and pull requests | Whole-file diff reviews |
+| **`kern_optimize`** *(default)* | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
 | **`kern_buddy`** *(default)* | Session onboarding digest: conventions, layout, entry points, gotchas | Fresh-repo spelunking |
+| **`kern_exec`** *(default)* | Governed script runner — sandbox-isolated, PII-masked output; fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry | Ungated shell access |
+| **`kern_compact_file`** *(default)* | Compact symbolic file summary instead of reading the whole file (tier=full verbatim) | Whole-file reads |
+| **`kern_memory`** *(default)* | Project brain memory: add / list / recall / remove lessons | Lost cross-session lessons |
+| **`kern_evidence`** *(default)* | Signed-evidence toolkit: verify / explain / export / anchor | Unverifiable claims |
+| **`kern_probe`** *(default)* | Task → budget-capped symbol bundle (definitions, callers, callees, tests) | Ad-hoc task context gathering |
+| **`kern_doc`** *(default)* | Project docs: search / fetch / index (the only network call in kern) | Web searches |
+| **`kern_project_map`** *(default)* | Compressed whole-project map: files, symbols, line counts | Glob + full reads |
+| **`kern_ast_search`** *(default)* | AST-level symbol search ('func greet', 'type *User*') | Regex grep |
+| **`kern_stats`** *(default)* | Before/after token savings and cost estimates | Guessing token spend |
+| **`kern_why`** *(default)* | Symbol rationale: doc comment, dependents, why, edge counts | Blind archaeology |
+| **`kern_heal`** *(default)* | Self-correction loop on failing files (throwaway snapshot) | Manual fix loops |
+| **`kern_fit_context`** *(default)* | Fit files/symbols into a token budget (tiered AST folding) | Token-budget guessing |
+| **`kern_plan_context`** *(default)* | Deterministically plan which context a change needs | Over-/under-fetching context |
+| **`kern_path`** *(default)* | Shortest call path between two symbols | Manual call-graph walks |
+| **`kern_semcache`** *(default)* | Inspect/manage the semantic cache (stats / list / clear / similarity) | Repeated identical queries |
+| **`kern_swap`** *(default)* | Swap fenced code blocks ↔ per-file symbolic signatures | Raw code dumps |
+| **`kern_mask_pii`** *(default)* | Local secret/PII scan (API keys, tokens, URLs, emails) | Prompt leaks |
+| **`kern_fetch_raw_anchor`** *(default)* | Re-read truncated anchor output (full logs/code slices on demand) | Lost truncated output |
 
-*The six ***(default)*** tools are what a wired agent sees on `tools/list`. The
-rest are advertised only when `KERN_MCP_FULL=1` is set — the full 117-tool catalog.
+*The 29 ***(default)*** tools are what a wired agent sees on `tools/list`. The
+rest are advertised only when `KERN_MCP_FULL=1` is set — the full 31-tool catalog.
 On a default install an agent still reaches them through
 `kern_meta`'s natural-language router, which dispatches internally to every
 catalog tool with structured argument passthrough. `KERN_MCP_PHASE=explore|plan|edit|verify`
 filters either surface to the active agent phase, and `KERN_MCP_SINGLE_TOOL=1`
 collapses the advertised surface to `kern_meta` alone.*
 
+For the generated tool-selection guide, routing matrix, risk levels, and
+when-to-use guidance, see [`docs/tool-selection.md`](docs/tool-selection.md).
+
 ---
 
 ## SDKs
 
-Three thin, zero-dependency clients for the kern-server REST API (`kern web`; loopback
-`127.0.0.1:8090` by default, `KERN_AUTH_TOKEN` bearer gate on non-loopback binds):
+Thin, zero-dependency clients for the tool catalog:
 
-- **Go** — [`sdk/go/kernsdk`](sdk/go/kernsdk) (stdlib-only)
-- **Python** — [`sdk/python/kern_sdk`](sdk/python/kern_sdk) (stdlib-only)
+- **Python** — [sdk/python/kern_sdk](sdk/python/kern_sdk) (stdlib-only)
 - **TypeScript** — [`sdk/typescript/src`](sdk/typescript/src) (zero-dep, uses `fetch`)
 
-Each client wraps the typed control-plane endpoints (`analyze`, `plan`, `impact`, `memory`,
-`loop`, …) **plus a full-catalog passthrough** to the MCP tool catalog:
-
-```go
-client := kernsdk.New("http://localhost:8090", nil)
-out, _ := client.CallTool(ctx, "kern_mask_pii", map[string]any{"text": "token=sk-abc"})
-// out == "masked 1 secrets ..."   (Python: client.call_tool(...) · TypeScript: client.callTool(...))
-```
-
-`CallTool` POSTs the tool's argument map to **`/v1/tools/{name}`**, which delegates to the
-same governed in-process dispatch MCP clients hit (KERN_TOOLS allowlist, root confinement,
-RBAC) and returns the raw tool output (`{"output": ...}`): unknown tools → 404, governed
-denials → 403, tool failures → 500. One route reaches the entire catalog; for anything the
-SDK clients do not wrap, raw MCP JSON-RPC remains available over `kern mcp` (stdio) or
-`kern-mcp --http`.
-All three SDK contract suites share `sdk/contract/tools_call.json`; run them in sequence with `sdk/contract/verify.sh` (fails on the first failure).
+The clients wrap the catalog's REST passthrough contract — `CallTool` POSTs
+the tool's argument map to `/v1/tools/{name}`, which delegates to the same
+governed in-process dispatch MCP clients hit and returns the raw tool output
+(`{"output": ...}`). **Note:** the HTTP host for that route (the former
+enterprise web console, `kern serve`) is not part of this tree today; the
+clients are kept as contract-pinned references and their shared route-shape
+fixture (`sdk/contract/tools_call.json`) pins the contract until the route
+reappears. For direct integration today, use MCP JSON-RPC over `kern mcp`
+(stdio) or `kern-mcp --http`. Run the contract suites with
+`sdk/contract/verify.sh` (fails on the first failure).
 
 ---
 
 ## Multi-Agent Specialist Squad (The 7 Roles)
 
-`kern` embeds a 7-role specialist squad architecture (`kern team` / `internal/agents`) that autonomous agents can orchestrate across the **Explore → Plan → Edit → Verify** engineering loop:
+`kern` embeds a 7-role specialist squad architecture (`kern run` / `internal/agents`) that autonomous agents can orchestrate across the **Explore → Plan → Edit → Verify** engineering loop:
 
 | Specialist Role | Focus Area | Autonomy Level | Key Trigger |
 |---|---|---|---|
 | **Planner** (`RolePlanner`) | Requirements analysis, milestone phasing & boundary scoping | L0–L3 | `kern_plan` / `kern_meta("plan <task>")` |
 | **Architect** (`RoleArchitect`) | AST call graph verification, interface satisfaction & module boundaries | L0–L3 | `kern_explore` / `kern_meta("architecture...")` |
-| **Coder** (`RoleCoder`) | Isolated `.kern/sandboxes/` edits with `TreeDiff` payload extraction | L2–L3 | `kern_safe_change` / `kern_refactor` |
+| **Coder** (`RoleCoder`) | Isolated `.kern/sandboxes/` edits with `TreeDiff` payload extraction | L2–L3 | `kern-safe-change` / `kern_meta("refactor")` |
 | **Reviewer** (`RoleReviewer`) | AST diff auditing, code maintainability & anti-pattern detection | L0–L2 | `kern_review` / `kern_meta("review staged changes")` |
-| **Security** (`RoleSecurity`) | Static taint analysis, injection sink scans & policy firewall gates (G0–G39) | L0–L2 | `kern_check` / `kern_sec` / `kern_taint` |
-| **Tester** (`RoleTester`) | Reproduction test fixture synthesis & test pass rate verification | L0–L2 | `kern_synthesize_test` / `kern_validate` |
-| **SRE** (`RoleSRE`) | AST symbol stack trace correlation, log compression & incident triage | L0–L4 | `kern-incident-triage` / `kern_correlate_evidence` |
+| **Security** (`RoleSecurity`) | Secret scans, dependency audit & policy firewall gates | L0–L2 | `kern_verify (security)` / `kern sec` |
+| **Tester** (`RoleTester`) | Reproduction test fixture synthesis & test pass rate verification | L0–L2 | `kern_verify (test)` / `kern_heal` |
+| **SRE** (`RoleSRE`) | AST symbol stack trace correlation, log compression & incident triage | L0–L4 | `kern-incident-triage` / `kern_optimize (log)` |
 
 ---
 
@@ -467,57 +513,31 @@ kern optimize <prompt>    # Strip filler, mask secrets, and preserve context (-A
 kern stats                # Track cumulative local token & cost savings
 ```
 
-See [`docs/cli-reference.md`](docs/cli-reference.md) for the full 200+ command guide.
+See [`docs/cli-reference.md`](docs/cli-reference.md) for the full command guide.
 
 ---
 
-## Beyond Search: Digital Twin, Modernization, Consensus & LSP
+## Beyond Search: Entity-Aware Graph Intelligence
 
 Deterministic workflows for the harder parts of maintenance — all local, all
 graph-backed:
 
-- **`kern twin` — the digital-twin entity layer.** Extracts the runtime
-  inventory (API endpoints, DB tables, topics, services, deployments) from
-  your project and merges it into the code graph, so `kern graph --entities`
-  renders what talks to what. `kern correlate` / `kern incident --correlate`
-  use it to chain an alert → service → deployment → commit → symbol in one
-  pass. Also via MCP: `kern_graph` (entities) and `kern_correlate`.
-- **`kern modernize` — monolith modernization plans.** Deterministic (no
-  LLM) bounded-context detection reusing the code graph — communities,
-  bridges and churn identify the seams — and a phased, risk-ordered
-  extraction plan comes out (capped at 20 phases). Also `kern_modernize`
-  via MCP and the web console.
-- **`kern review-consensus` — multi-persona review synthesis.** Normalizes
-  several independent `kern review` packs into one report: agreement with
-  exact supporters, divergence surfaced explicitly, and unresolved questions
-  listed as next verifications.
-- **`kern lsp` & `kern lsp-bridge` — LSP integration.** `kern lsp` serves
-  kern as a minimal stdio language server; `kern lsp-bridge` spawns external
-  language servers (gopls, pyright, vtsls, …) on demand and pools
-  definition/hover/references/symbols queries — also `kern_lsp_bridge` via
-  MCP.
+- **`kern graph --entities` — the entity layer.** Renders the runtime
+  inventory the index extracted from your project (API endpoints, DB
+  tables, topics, services, deployments) merged into the code graph, so
+  you can see what talks to what. Also via MCP: `kern_graph` (entities).
+- **`kern arch` — architecture communities & boundaries.** Detects
+  communities, hubs and cross-community coupling in the call graph; the
+  same engine that powers `kern guard`'s boundary verdicts. Also via MCP:
+  `kern_arch`.
 
 ## CI gate
-`kern check --ci` runs the blueprint change-governance pipeline in a machine-readable mode for CI: a JSON verdict on stdout and an exit code that matches it (0 = passed, 1 = failed, 2 = usage error). The default human output of `kern check` is unchanged.
+`kern verify` runs the unified verification engine in CI: security and architecture gates over the checked-out tree, a PASS/FAIL/WARN verdict per check, and an exit code that matches it (0 = pass/warn, 1 = FAIL findings, 3 = denied — see `kern exitcode`). `--staged` scopes every check to the staged changes instead of the whole tree.
 ```bash
-kern check --ci
+kern verify security,architecture
+kern verify --staged security,architecture   # what the pre-commit hook runs
 ```
-```json
-{
-  "passed": true,
-  "checks": [
-    { "name": "architecture", "status": "PASS", "detail": "ok (0 findings)" }
-  ],
-  "evidence": {
-    "status": "PASS",
-    "exit_code": 0,
-    "summary": { "total": 0, "errors": 0, "warnings": 0, "blocks": 0, "skipped": 0 },
-    "correlation_id": "bp-...",
-    "duration_ms": 12
-  }
-}
-```
-The verdict shape is stable: `passed` mirrors the exit code, `checks[]` has one entry per executed gate (name/status/detail), and `evidence` carries the raw per-check results with the standard bpcli verdict fields. The [`kern-gate`](.github/workflows/kern-gate.yml) GitHub Action uses it as the repository's governance gate (checkout → setup Go → `kern check --ci` → fail on non-zero). It validates the checked-out state (staged changes; empty in a fresh checkout) — for a base-vs-head diff gate use `kern ci`.
+The [`test` workflow](.github/workflows/test.yml) uses it as this repository's governance gate (checkout → build kern → `kern verify --staged security,architecture` → fail on FAIL).
 
 ---
 
@@ -528,7 +548,7 @@ The verdict shape is stable: `passed` mirrors the exit code, `checks[]` has one 
 
 Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# · Java · Ruby · PHP · Shell · Dart · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
 
-*SFCs (Vue, Svelte, Astro) extract `<script>` blocks automatically. 13 of the 18 languages use deep tree-sitter grammars in the default build (Go is also parsed precisely by `go/ast`); the pure-Go build (`-tags notreesitter`) swaps in regex heuristics covering 16 languages — Dart is tree-sitter-only.*
+*SFCs (Vue, Svelte, Astro) extract `<script>` blocks automatically. 13 of the 18 languages use deep tree-sitter grammars in the default build (Go is also parsed precisely by `go/ast`); prebuilt installs ship this build on the 5 native platforms (see [Install](#1-install)), while the pure-Go build (`-tags notreesitter`) swaps in regex heuristics covering 16 languages — Dart is tree-sitter-only.*
 </details>
 
 <details>
@@ -558,7 +578,7 @@ Spring Boot, Django, FastAPI, Flask, Express, NestJS, Rails, Laravel, Gin, Echo,
 [ok] capabilities           sqlite: on (persistent index + FTS5) · treesitter: on
 [ok] claude                 kern MCP registered
 [ok] cursor                 kern entry present
-[ok] freshness              index is fresh (13080 symbols, 53520 call edges)
+[ok] freshness              index is fresh (16529 symbols, 1893 files)
 [ok] precision              all 11 languages at AST-or-better precision
 [ok] stats                  3720 ops, 831446 tokens saved (19.9%)
 
@@ -580,13 +600,13 @@ verdict: all systems operational
 ## Docs
 
 - [`docs/index.md`](docs/index.md) — docs site index: TOC of the full docs tree (ADRs, architecture ledger, recipes, benchmarks, tooling, security).
-- [`docs/recipes.md`](docs/recipes.md) — Task-oriented recipes: "Is this refactor safe?", "Triage a prod crash", and 13 more.
-- [`docs/cli-reference.md`](docs/cli-reference.md) — Complete 200+ CLI command reference.
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (117 tools).
-- [`docs/configuration.md`](docs/configuration.md) — Configuration, `.kern.yaml` profiles, and environment variables.
-- [`docs/duplication-benchmark.md`](docs/duplication-benchmark.md) — Multi-language structural duplication benchmark results.
+- [`docs/recipes.md`](docs/recipes.md) — Task-oriented recipes: "Is this refactor safe?", "Triage a crash", and 9 more.
+- [`docs/cli-reference.md`](docs/cli-reference.md) — Complete CLI command reference.
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (31 tools).
+- [`docs/tool-selection.md`](docs/tool-selection.md) — Generated tool-selection guide, routing matrix, and risk levels.
+- [`docs/configuration.md`](docs/configuration.md) — Configuration, `.kern/config.json` + `.kern/kern.yaml` profiles, and environment variables.
+- [`docs/duplication-benchmark.md`](docs/duplication-benchmark.md) — Duplication-detector benchmark record ([historical] — suite deleted in `a05c91c7`; scoring core survives in `internal/duplication`).
 - [`docs/privacy.md`](docs/privacy.md) — Security and privacy specifications.
-- [`docs/authorized-context.md`](docs/authorized-context.md) — Authorized-context & governance proofs.
 - [`docs/skills.md`](docs/skills.md) — Bundled agent skills & runbooks.
 - [`docs/benchmarks/`](docs/benchmarks/) — Benchmark suite index: semantic retention, graph latency, telemetry audit, token savings.
 

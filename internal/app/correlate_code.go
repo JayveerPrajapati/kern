@@ -152,7 +152,7 @@ func (p *Platform) serviceToCode(svc string, chain runtime.CorrelationChain) (fi
 			continue
 		}
 		if fileSet[filepath.ToSlash(n.Symbol.File)] {
-			id := n.ID
+			id := n.Label
 			if id == "" {
 				id = n.Symbol.Qualified
 			}

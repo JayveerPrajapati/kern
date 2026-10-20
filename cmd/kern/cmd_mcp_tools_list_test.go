@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // `kern mcp tools` is the discoverability front door for the MCP catalog:
@@ -19,8 +19,8 @@ func TestMCPToolsListsCatalog(t *testing.T) {
 	if !strings.Contains(out, "kern_meta") {
 		t.Fatal("kern_meta missing from listing")
 	}
-	if !strings.Contains(out, "governance (") {
-		t.Fatal("governance category group missing")
+	if !strings.Contains(out, "graph (") {
+		t.Fatal("graph category group missing")
 	}
 	if !strings.Contains(out, "KERN_MCP_FULL=1") {
 		t.Fatal("full-surface hint missing")
@@ -68,9 +68,16 @@ func TestMCPToolsCategoryFilter(t *testing.T) {
 		}
 	}
 
-	flagOut := captureStdout(t, func() { runMCPToolsList([]string{"--category", "governance"}) })
-	if !strings.Contains(flagOut, "governance (") {
-		t.Fatalf("governance group missing, got: %s", firstLines(flagOut))
+	flagOut := captureStdout(t, func() { runMCPToolsList([]string{"--category", "verify"}) })
+	if !strings.Contains(flagOut, "verify (") {
+		t.Fatalf("verify group missing, got: %s", firstLines(flagOut))
+	}
+
+	// A declared-but-empty category (governance after the 2026-10-18 surface
+	// slim) prints a note and exits 0, not a fatal.
+	emptyOut := captureStdout(t, func() { runMCPToolsList([]string{"--category", "governance"}) })
+	if !strings.Contains(emptyOut, "no tools in category") {
+		t.Fatalf("expected graceful empty-category note, got: %s", firstLines(emptyOut))
 	}
 
 	expectExit(t, 1, func() { runMCPToolsList([]string{"no-such-category"}) })
@@ -83,6 +90,20 @@ func TestRunMCPToolsIntercept(t *testing.T) {
 	out := captureStdout(t, func() { runMCP([]string{"tools"}) })
 	if !strings.Contains(out, "kern MCP catalog:") {
 		t.Fatalf("runMCP(tools) did not list the catalog, got: %s", firstLines(out))
+	}
+}
+
+// The literal `list` positional is the explicit no-filter form: `kern mcp
+// tools list` must list the whole catalog, never be mistaken for a category
+// (the "no tools in category \"list\"" bug — the exact command every new user
+// types first).
+func TestMCPToolsListPositionalListsCatalog(t *testing.T) {
+	out := captureStdout(t, func() { runMCPToolsList([]string{"list"}) })
+	if !strings.Contains(out, "kern MCP catalog:") {
+		t.Fatalf("`list` must list the catalog, got: %s", firstLines(out))
+	}
+	if !strings.Contains(out, "kern_meta") {
+		t.Fatal("kern_meta missing from `kern mcp tools list` output")
 	}
 }
 

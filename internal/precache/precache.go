@@ -6,6 +6,7 @@ package precache
 
 import (
 	"errors"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -97,7 +98,7 @@ func Warm(root string) *Report {
 		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
-		if !index.QuickExt(rel) {
+		if !langparse.QuickExt(rel) {
 			return nil
 		}
 		// Per-pass budget: stop reading files once we have warmed enough

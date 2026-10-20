@@ -174,6 +174,8 @@ func (p RetentionPolicy) Apply(ms []domain.Memory, now time.Time) ([]domain.Memo
 // result. Without governance attached it is a no-op returning an empty result.
 // The sweep is recorded in the audit trail.
 func (s *MemoryStore) ApplyRetention() (RetentionResult, error) {
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	gov := s.gov

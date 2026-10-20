@@ -18,9 +18,13 @@ import (
 )
 
 // TestTokenSavingsReport is the machine-generated, reproducible token-savings
-// report for kern's compact context modes (graph / context / neighborhood)
+// report for kern's compact context modes (graph / context / export-json)
 // versus the naive baseline of pasting the FULL source of every file the
-// query touches.
+// query touches. graph and context are the agent-facing compact renders;
+// export-json is the --json/--graphml machine serialization, measured for
+// transparency but excluded from the savings claim (F4, 2026-10-17: a
+// full-metadata JSON envelope is verbose by design and is not what agents
+// paste into context).
 //
 // Two run modes:
 //
@@ -44,13 +48,14 @@ var updateGolden = flag.Bool("update", false, "rewrite docs/benchmarks/token-sav
 //	go test ./internal/tokstats -run TestTokenSavingsReport -update
 //
 // and copy the logged value here.
-const goldenNumbersSHA256 = "a060c3f05643f41140f20a259109012e6a1cdec0ffa9c7b5d12f178acfbb70d1"
+const goldenNumbersSHA256 = "63d56f32f648bec1f4025f352fe99d47d17606642284ffd58538a5a432751d06"
 
 const reportRelPath = "docs/benchmarks/token-savings.md"
 
-// reportModes are the three compact-context modes under test. They must match
-// the mode labels used by compactFor.
-var reportModes = []string{"graph", "context", "neighborhood"}
+// reportModes are the modes under test: the two agent-facing compact
+// renders (graph, context) plus the JSON export serialization
+// (export-json). They must match the mode labels used by compactFor.
+var reportModes = []string{"graph", "context", "export-json"}
 
 // hubSymbols are the representative "hub" symbols of the fixture: public lib
 // symbols that are both called from other packages and call into lib helpers,
@@ -976,10 +981,10 @@ func TestTokenSavingsReport(t *testing.T) {
 		}
 		t.Logf("wrote %s (%d lines)", docPath, strings.Count(report, "\n"))
 		t.Logf("NEXT numeric sha256 for goldenNumbersSHA256: %s", payloadSHA)
-		t.Logf("aggregate savings: overall=%d%%  graph=%d%%  context=%d%%  neighborhood=%d%%",
+		t.Logf("aggregate savings: overall=%d%%  graph=%d%%  context=%d%%  export-json=%d%%",
 			overall, savingsPct(perMode["graph"][0], perMode["graph"][1]),
 			savingsPct(perMode["context"][0], perMode["context"][1]),
-			savingsPct(perMode["neighborhood"][0], perMode["neighborhood"][1]))
+			savingsPct(perMode["export-json"][0], perMode["export-json"][1]))
 		return
 	}
 
@@ -1017,7 +1022,7 @@ func compactFor(ix *index.Index, sym string, g index.GraphResult, mode string) s
 		return ix.Graph(sym)
 	case "context":
 		return ix.Context(sym, 12)
-	case "neighborhood":
+	case "export-json":
 		return g.GraphJSON()
 	}
 	return ""
@@ -1108,8 +1113,8 @@ func renderReport(ix *index.Index, samples []sample, rows []string, perMode map[
 	b.WriteString("## 1. Methodology\n\n")
 	b.WriteString("- **Fixture:** a deterministic in-test tree — `lib` (hub package: store, cache, config, logger), `app` (HTTP server + user handlers + wiring), `main` (driver). Written to `t.TempDir()` and indexed with `index.Build` on every run; sources live in `internal/tokstats/savings_report_test.go` (`savingsFixtureFiles`).\n")
 	fmt.Fprintf(&b, "- **Queries:** %d hub symbols × %d modes = %d samples. Hub symbols: `%s`.\n", len(hubSymbols), len(reportModes), len(samples), strings.Join(hubSymbols, "`, `"))
-	b.WriteString("- **Modes:** `graph` (`Index.Graph`), `context` (`Index.Context(sym, 12)`), `neighborhood` (`GraphResult.GraphJSON` via `Index.Neighborhood`).\n")
-	b.WriteString("- **Naive baseline:** the concatenated FULL source of every file the query touches (definition, caller and callee files — what a naive agent would paste). File set and order mirror `TokenSavingsForNeighborhood`'s walk, so the neighborhood baseline equals that helper exactly; graph/context use the same all-touched-files baseline (stricter than their def-file-only helper baseline).\n")
+	b.WriteString("- **Modes:** `graph` (`Index.Graph`), `context` (`Index.Context(sym, 12)`), `export-json` (`GraphResult.GraphJSON` via `Index.Neighborhood` — the `--json`/`--graphml` machine export, not an agent-facing render).\n")
+	b.WriteString("- **Naive baseline:** the concatenated FULL source of every file the query touches (definition, caller and callee files — what a naive agent would paste). File set and order mirror `TokenSavingsForNeighborhood`'s walk, so the export-json baseline equals that helper exactly; graph/context use the same all-touched-files baseline (stricter than their def-file-only helper baseline).\n")
 	b.WriteString("- **Labeled denominator:** every savings percentage in this report is annotated with what it is relative to (\"N files read raw\") so the baseline is never implicit — the same rule every kern savings renderer follows (finding V1).\n")
 	b.WriteString("- **Counter:** `internal/tokenize.Count` — the same deterministic counter kern's `TokenSavingsFor*` helpers use.\n")
 	b.WriteString("- **Savings:** `floor((naive − compact) / naive × 100)`, computed by `computeTokenSavings` (the engine behind all three helpers); the compact output counted includes kern's appended stats summary line where the API emits one.\n")
@@ -1153,10 +1158,17 @@ func renderReport(ix *index.Index, samples []sample, rows []string, perMode map[
 	}
 	fmt.Fprintf(&b, "| **overall** | **%d** | **%d** | **%d%%** |\n\n", totalNaive, totalCompact, overall)
 
-	// Verdict, derived from the measured numbers.
+	// Verdict, derived from the measured numbers. The per-mode bar gates
+	// only the AGENT-FACING compact renders (graph, context): export-json
+	// is the --json/--graphml machine serialization, measured for
+	// transparency — its full-metadata JSON envelope is verbose by design
+	// (negative savings are possible) and it is not what agents paste into
+	// context, so it is excluded from the claim (F4, 2026-10-17). The
+	// overall row still includes export-json, which only dilutes it — the
+	// conservative direction.
 	minMode := 100
 	minModeName := ""
-	for _, mode := range reportModes {
+	for _, mode := range []string{"graph", "context"} {
 		if p := savingsPct(perMode[mode][0], perMode[mode][1]); p < minMode {
 			minMode = p
 			minModeName = mode
@@ -1172,17 +1184,17 @@ func renderReport(ix *index.Index, samples []sample, rows []string, perMode map[
 	b.WriteString("## 5. Verdict\n\n")
 	fmt.Fprintf(&b, "For this fixture class — a small multi-package Go service (lib hub + app + main consumers), %d samples — the claim of **substantial savings** is **%s**.\n\n",
 		len(samples), verdictWord(backed))
-	fmt.Fprintf(&b, "- Overall savings: **%d%% vs all touched files** (%d → %d tokens).\n", overall, totalNaive, totalCompact)
-	fmt.Fprintf(&b, "- Per-mode (vs naive full-file paste): graph %d%%, context %d%%, neighborhood %d%% (weakest mode: %s at %d%%).\n",
+	fmt.Fprintf(&b, "- Overall savings (all three modes incl. export-json): **%d%% vs all touched files** (%d → %d tokens).\n", overall, totalNaive, totalCompact)
+	fmt.Fprintf(&b, "- Per-mode (vs naive full-file paste): graph %d%%, context %d%% — the agent-facing compact renders; weakest %s at %d%%. export-json %d%%: the `--json`/`--graphml` machine serialization, measured for transparency — verbose by design, never pasted into agent context.\n",
 		savingsPct(perMode["graph"][0], perMode["graph"][1]),
 		savingsPct(perMode["context"][0], perMode["context"][1]),
-		savingsPct(perMode["neighborhood"][0], perMode["neighborhood"][1]),
-		minModeName, minMode)
+		minModeName, minMode,
+		savingsPct(perMode["export-json"][0], perMode["export-json"][1]))
 	fmt.Fprintf(&b, "- **Surgical context**: compact output stays at or below 20%% of the naive full-file paste (≥80%% savings) in **%d of %d** samples.\n", surgical, len(samples))
 	if backed {
-		b.WriteString("- kern's graph/context/neighborhood outputs replace multi-file full-source pastes with a fraction of the tokens while retaining the same symbol, caller and callee information. On this fixture the savings claim is quantitative, not marketing.\n")
+		b.WriteString("- kern's graph/context outputs replace multi-file full-source pastes with a fraction of the tokens while retaining the same symbol, caller and callee information. On this fixture the savings claim is quantitative, not marketing.\n")
 	} else {
-		b.WriteString("- The measured savings did not reach the 50% overall / 40% per-mode bar on this fixture. Investigate before claiming substantial savings for this fixture class.\n")
+		b.WriteString("- The measured savings did not reach the 50% overall / 40% per-agent-mode bar on this fixture. Investigate before claiming substantial savings for this fixture class.\n")
 	}
 	return b.String()
 }

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -85,12 +84,41 @@ func TestHandleAnalyzeLens(t *testing.T) {
 	if !strings.HasPrefix(out, "ANALYSIS for: Greet\n") {
 		t.Errorf("output = %q, want ANALYSIS prefix", out)
 	}
-	if !strings.Contains(out, "[task: ") {
-		t.Errorf("output should carry the task line, got %q", out)
+	// QA 6.6: an ephemeral task record must not leak its bookkeeping
+	// annotation into the payload (the a-<n> ID dies with the process).
+	if strings.Contains(out, "[task: ") {
+		t.Errorf("default (ephemeral) output must not carry the task line, got %q", out)
 	}
 
 	if _, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "lens": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown lens") {
 		t.Errorf("unknown lens: err = %v, want rejection with 'unknown lens'", err)
+	}
+}
+
+// TestHandlePlanSections (B3/B5): kern_plan's end-to-end output carries the
+// context-sufficiency proof and the first slice, with the served-ledger
+// hook wired (nothing served yet → ready-to-execute false, 0/N served).
+func TestHandlePlanSections(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handlePlan(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handlePlan: %v", err)
+	}
+	if !strings.HasPrefix(out, "PLAN for: Greet\n") {
+		t.Fatalf("handlePlan output = %q, want PLAN prefix", out)
+	}
+	for _, want := range []string{
+		"## Context sufficiency",
+		"ready-to-execute: false",
+		"served: 0/",
+		"## First slice",
+		"Smallest verifiable first edit:",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plan output must contain %q, got:\n%s", want, out)
+		}
 	}
 }
 
@@ -125,8 +153,8 @@ func TestHandleAnalyzeProfile(t *testing.T) {
 	if !strings.HasPrefix(m.Content, "ANALYSIS for: Greet\n") {
 		t.Errorf("wrapped content should carry the ANALYSIS prefix, got %q", m.Content)
 	}
-	if !strings.Contains(m.Content, "[task: ") {
-		t.Errorf("wrapped content should carry the task line, got %q", m.Content)
+	if strings.Contains(m.Content, "[task: ") {
+		t.Errorf("wrapped content must not carry the ephemeral task line (QA 6.6), got %q", m.Content)
 	}
 
 	if _, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "profile": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown profile") {
@@ -159,8 +187,8 @@ func TestHandleAnalyzeProfileAndLensCombined(t *testing.T) {
 	if !strings.Contains(m.Content, "ANALYSIS for: Greet") {
 		t.Errorf("content should carry the analysis, got %q", m.Content)
 	}
-	if !strings.Contains(m.Content, "[task: ") {
-		t.Errorf("content should carry the task line, got %q", m.Content)
+	if strings.Contains(m.Content, "[task: ") {
+		t.Errorf("content must not carry the ephemeral task line (QA 6.6), got %q", m.Content)
 	}
 }
 
@@ -175,26 +203,23 @@ func TestHandleImpactNoDuplicateHeader(t *testing.T) {
 	if n := strings.Count(out, "IMPACT for:"); n != 1 {
 		t.Errorf("handleImpact output contains %d \"IMPACT for:\" headers, want exactly 1:\n%s", n, out)
 	}
-	if !strings.Contains(out, "[task: ") {
-		t.Errorf("handleImpact output missing task line:\n%s", out)
+	if strings.Contains(out, "[task: ") {
+		t.Errorf("default (ephemeral) impact output must not carry the task line (QA 6.6):\n%s", out)
 	}
 }
 
-// TestHandleMetaRoutesLLMProviders: the meta dispatch switch must have a
-// case for every classifier route — a missing case silently reclassifies to
-// kern_search (the default branch). Regression for the kern_llm_providers
-// route added with the LLM-provider intent.
+// TestHandleMetaRoutesLLMProviders pins the P1 gate after the 2026-10-18
+// surface slim removed kern_llm_providers: a request about the LLM provider
+// chain carries no code intent and is refused (the old route reclassified to
+// kern_llm_providers; the gate message teaches the surviving surface).
 func TestHandleMetaRoutesLLMProviders(t *testing.T) {
 	t.Parallel()
 	s := newTestServer()
-	out, err := s.CallTool(context.Background(), "kern_meta", map[string]any{
+	_, err := s.CallTool(context.Background(), "kern_meta", map[string]any{
 		"request": "list the LLM provider chain and whether a host sampler is connected",
 	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !strings.Contains(out, "classified as: kern_llm_providers") {
-		t.Errorf("kern_meta must route LLM-provider questions to kern_llm_providers, got:\n%s", out)
+	if err == nil || !strings.Contains(err.Error(), "no code intent detected") {
+		t.Errorf("kern_meta must refuse a no-code-intent request after the slim, got: %v", err)
 	}
 }
 
@@ -247,6 +272,29 @@ func TestHandleVerifyAcceptsBuildTest(t *testing.T) {
 	}
 }
 
+// TestHandleVerifyDeniedWithoutExecAllowlist pins the agent-surface gate
+// (P3): the MCP kern_verify types path for command-executing types must fail
+// closed WITHOUT KERN_ALLOW_EXEC / KERN_TOOLS — the CLI gate removal must
+// not open an agent hole. build/test are governed exec checks; the denial
+// must surface before any check runs (no real build on the fixture).
+func TestHandleVerifyDeniedWithoutExecAllowlist(t *testing.T) {
+	// The dev box exports KERN_ALLOW_EXEC globally; clear it plus the tool
+	// allowlist so the denial is deterministic.
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	_, err := s.handleVerify(context.Background(), "", map[string]any{"root": root, "types": "build,test"})
+	if err == nil {
+		t.Fatal("kern_verify(build,test) without KERN_ALLOW_EXEC must be denied, got nil")
+	}
+	if !strings.Contains(err.Error(), "command execution blocked") {
+		t.Fatalf("denial must name the exec firewall, got: %v", err)
+	}
+}
+
 // TestHandleVerifyAcceptsArchitecture: kern_verify with the index-only
 // architecture check runs in-process (no exec allowlist required) and
 // returns the typed verdict.
@@ -294,8 +342,10 @@ func TestHandleVerifyLicenseWarnSurfacesFindings(t *testing.T) {
 	if strings.Contains(out, "license: OK") {
 		t.Errorf("output must not claim a clean license OK:\n%s", out)
 	}
-	if !strings.Contains(out, "[task: ") {
-		t.Errorf("output missing task line:\n%s", out)
+	// Verify always persists its authoritative task (t-<n>, queryable via
+	// kern task <id>), so the task line legitimately stays.
+	if !strings.Contains(out, "[task: t-") {
+		t.Errorf("verify output must carry the persisted task line:\n%s", out)
 	}
 }
 
@@ -331,33 +381,15 @@ func TestHandleWhatIfGarbageWarns(t *testing.T) {
 // instead of silently running the ~180s provider-chain fallthrough. The
 // provider is pinned to Ollama at an unreachable address so the test is
 // deterministic on any host.
-func TestHandleLoopAutonomousFailsFastWithoutProvider(t *testing.T) {
-	t.Setenv("KERN_LLM_PROVIDER", "ollama")
-	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1") // nothing listens here: instant refusal
-	s := newTestServer()
-	start := time.Now()
-	_, err := s.handleLoop(context.Background(), map[string]any{"root": ".", "intent": "test intent", "mode": "autonomous"})
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("kern_loop mode=autonomous with no reachable provider must error")
-	}
-	if !strings.Contains(err.Error(), "provider") {
-		t.Errorf("error must mention the provider, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "kern_loop") {
-		t.Errorf("error must point at kern_loop mode=autonomous, got: %v", err)
-	}
-	if elapsed > 30*time.Second {
-		t.Errorf("kern_loop mode=autonomous took %v — the pre-flight must fail fast, not run the 180s workflow", elapsed)
-	}
-}
 
 // TestHandleAnalyzeTaskPersistenceOptIn locks the F9 opt-in contract on the
 // MCP surface: kern_analyze is read-only, so a DEFAULT call must create only
-// an ephemeral in-memory task (a-<n> ID, no store write) — a fresh
-// TaskService (a new process) must NOT resolve the printed task ID. Passing
-// persist_task=true opts into the authoritative record (t-<n>, queryable via
-// kern task <id>), which a fresh TaskService must resolve.
+// an ephemeral in-memory task (a-<n> ID, no store write) and must NOT leak
+// its bookkeeping annotation into the payload (QA 6.6 — the ephemeral ID
+// dies with the process). Passing persist_task=true opts into the
+// authoritative record (t-<n>, queryable via kern task <id>), which a fresh
+// TaskService must resolve — and only then does the output carry the task
+// line, because the ID is a real handle.
 func TestHandleAnalyzeTaskPersistenceOptIn(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -378,23 +410,18 @@ func TestHandleAnalyzeTaskPersistenceOptIn(t *testing.T) {
 		return rest[:end]
 	}
 
-	// Default kern_analyze call: the task record must stay ephemeral.
+	// Default kern_analyze call: the task record must stay ephemeral AND the
+	// payload must not carry the task line (QA 6.6).
 	out, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet"})
 	if err != nil {
 		t.Fatalf("handleAnalyze (default): %v", err)
 	}
-	ephID := taskID(out)
-	if !strings.HasPrefix(ephID, "a-") {
-		t.Fatalf("default task id = %q, want ephemeral a-<n> (no persisted record)", ephID)
-	}
-	// A fresh service reads the same persisted store `kern task <id>` reads;
-	// the ephemeral record must NOT be there.
-	ts := tasklife.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
-	if _, ok := ts.Get(ephID); ok {
-		t.Fatalf("default kern_analyze persisted task %q — read-only calls must stay ephemeral", ephID)
+	if strings.Contains(out, "[task: ") {
+		t.Fatalf("default kern_analyze must not carry the ephemeral task line (QA 6.6):\n%s", out)
 	}
 
-	// persist_task=true: the caller opted into the authoritative record.
+	// persist_task=true: the caller opted into the authoritative record, so
+	// the footer returns the queryable ID.
 	out, err = s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "persist_task": true})
 	if err != nil {
 		t.Fatalf("handleAnalyze (persist_task=true): %v", err)
@@ -403,6 +430,7 @@ func TestHandleAnalyzeTaskPersistenceOptIn(t *testing.T) {
 	if !strings.HasPrefix(perID, "t-") {
 		t.Fatalf("persist_task=true task id = %q, want store-assigned t-<n> (authoritative record)", perID)
 	}
+	ts := tasklife.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
 	if got, ok := ts.Get(perID); !ok {
 		t.Fatalf("task %q not queryable from a fresh TaskService after persist_task=true", perID)
 	} else if got.State == "" {

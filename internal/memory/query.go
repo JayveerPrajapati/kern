@@ -47,8 +47,11 @@ type Query struct {
 //
 // This is the un-governed read path (no agent identity, no audit). Governed
 // consumers use AuthorizedRecall, which checks read permission and records
-// the recall in the audit trail.
+// the recall in the audit trail. The read is serialized with writers
+// (QA 5.4) like CurrentMemories.
 func (s *MemoryStore) Recall(query Query) ([]domain.Memory, error) {
+	fl := s.lockStore() // QA 5.4: serialize the read with concurrent writers
+	defer fl.Unlock()
 	return s.recall(query, "", false)
 }
 

@@ -121,8 +121,9 @@ func TestCallersForSameNameFuncsAcrossPackages(t *testing.T) {
 // TestCallsForSameNameFuncsAcrossPackages pins the callee side: the wrapper's
 // callees (its own helper, the qualified core call, the foreign stdlib call)
 // must not leak into the core's callee list, and vice versa. The predeclared
-// builtin append stays on the core's list even though another package defines
-// a symbol named "append".
+// builtin append is filtered at record time (record-time noise filter — see
+// IsNoiseCallee) even though another package defines a symbol named "append",
+// so the core's callee list no longer carries it.
 func TestCallsForSameNameFuncsAcrossPackages(t *testing.T) {
 	ix, err := Build(sharedNameRepo(t))
 	if err != nil {
@@ -138,14 +139,14 @@ func TestCallsForSameNameFuncsAcrossPackages(t *testing.T) {
 	}
 
 	coreCallees := ix.CallsFor(core)
-	for _, want := range []string{"helper", "append"} {
+	for _, want := range []string{"helper"} {
 		if !contains(coreCallees, want) {
 			t.Errorf("CallsFor(core) = %v; missing callee %q", coreCallees, want)
 		}
 	}
-	for _, banned := range []string{"bHelper", "Sprintf", "a.Shared", "Shared"} {
+	for _, banned := range []string{"bHelper", "Sprintf", "a.Shared", "Shared", "append"} {
 		if contains(coreCallees, banned) {
-			t.Errorf("CallsFor(core) = %v; must not include %q (wrapper-only callee)", coreCallees, banned)
+			t.Errorf("CallsFor(core) = %v; must not include %q (wrapper-only callee or filtered builtin)", coreCallees, banned)
 		}
 	}
 

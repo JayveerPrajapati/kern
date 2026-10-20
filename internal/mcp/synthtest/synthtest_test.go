@@ -2,8 +2,11 @@ package synthtest
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func TestSynthesizeEmptyTarget(t *testing.T) {
@@ -49,5 +52,22 @@ func TestSynthesizeJSONFormat(t *testing.T) {
 	}
 	if !strings.Contains(res, `"target_symbol": "Sub"`) {
 		t.Errorf("expected json target_symbol, got: %s", res)
+	}
+}
+
+// TestSynthesizeAutoGapIndexLoadError pins the B1 fix: a failing index load
+// under --auto-gap must surface as its own error naming the fix — the load
+// error used to be swallowed, collapsing "index failed" into the engine's
+// generic missing-source message.
+func TestSynthesizeAutoGapIndexLoadError(t *testing.T) {
+	ctx := context.Background()
+	_, err := Synthesize(ctx, Hooks{LoadIndex: func(ctx context.Context, root string) (*index.Index, error) {
+		return nil, fmt.Errorf("boom")
+	}}, map[string]any{"auto_gap": true})
+	if err == nil || !strings.Contains(err.Error(), "failed to load") {
+		t.Fatalf("expected index-load error to surface, got: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "kern index") {
+		t.Fatalf("error should name the fix (kern index), got: %v", err)
 	}
 }

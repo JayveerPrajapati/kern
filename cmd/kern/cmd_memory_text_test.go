@@ -16,7 +16,7 @@ import (
 func TestMemoryListTextAutoLabel(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
-	if err := memory.AddAuto(root, "User: how do I ship this?"); err != nil {
+	if _, err := memory.AddAuto(root, "User: how do I ship this?"); err != nil {
 		t.Fatalf("memory.AddAuto: %v", err)
 	}
 	if err := memory.Add(root, "deploys run via the release workflow"); err != nil {
@@ -57,5 +57,28 @@ func TestMemoryRecallTextNoMatchHint(t *testing.T) {
 	}
 	if strings.Contains(hit, memory.NoRecallMatch) {
 		t.Fatalf("no-match hint leaked into a hit result, got %q", hit)
+	}
+}
+
+// TestMemoryListEmptyFriendlyMessage pins QA 6.3: `kern memory list` on an
+// empty store prints a friendly "no lessons stored yet" pointer (exit stays
+// 0), while --json keeps the machine-readable empty array.
+func TestMemoryListEmptyFriendlyMessage(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	out := captureStdout(t, func() { runMemory([]string{"list", "--root", root}) })
+	if !strings.Contains(out, "no lessons stored yet") {
+		t.Fatalf("expected a friendly empty-store message, got %q", out)
+	}
+	if strings.Contains(out, "usage:") {
+		t.Fatalf("empty-store list must not print usage (it is not an error), got %q", out)
+	}
+	// --json stays machine-readable: an empty array, not prose.
+	outJSON := captureStdout(t, func() { runMemory([]string{"list", "--json", "--root", root}) })
+	if !strings.Contains(outJSON, "[]") {
+		t.Fatalf("--json on an empty store must print an empty array, got %q", outJSON)
+	}
+	if strings.Contains(outJSON, "no lessons stored yet") {
+		t.Fatalf("--json must not carry the prose hint, got %q", outJSON)
 	}
 }

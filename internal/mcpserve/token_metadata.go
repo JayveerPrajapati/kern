@@ -60,11 +60,13 @@ func countRequestTokens(tool string, args map[string]any) int {
 }
 
 // tokenMetadataFor computes the token metadata for one tool call: request
-// tokens before processing, response tokens after, the estimated cost, and the
-// savings when the response shrank the payload (input > output).
-func tokenMetadataFor(tool string, args map[string]any, out string) TokenMetadata {
+// tokens before processing, response tokens after (the caller precomputes
+// returned via tokenize.Count over the FINAL response text — the exact text
+// the client sees — so the full-text count runs exactly once per call), the
+// estimated cost, and the savings when the response shrank the payload
+// (input > output).
+func tokenMetadataFor(tool string, args map[string]any, returned int) TokenMetadata {
 	used := countRequestTokens(tool, args)
-	returned := tokenize.Count(out)
 	savings := used - returned
 	if savings < 0 {
 		savings = 0
@@ -83,9 +85,11 @@ func tokenMetadataFor(tool string, args map[string]any, out string) TokenMetadat
 }
 
 // AttachTokenMetadata stamps result with the structured token metadata for the
-// call. Every tools/call response path (executed tools, pre-tool denials and
-// confinement-gate rejections) routes through here so clients always get the
-// token ledger.
-func AttachTokenMetadata(result map[string]any, tool string, args map[string]any, out string) {
-	result["tokenMetadata"] = tokenMetadataFor(tool, args, out)
+// call. returned is the precomputed tokenize.Count of the final response text,
+// so the full-text count runs once per call (toolCallResponse computes it and
+// shares it with RecordToolCall). Every tools/call response path (executed
+// tools, pre-tool denials and confinement-gate rejections) routes through here
+// so clients always get the token ledger.
+func AttachTokenMetadata(result map[string]any, tool string, args map[string]any, returned int) {
+	result["tokenMetadata"] = tokenMetadataFor(tool, args, returned)
 }

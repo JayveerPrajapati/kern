@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,22 +17,48 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/filecache"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/ignore"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/tokstats"
 )
 
-// indexVersion is bumped whenever the persisted index schema changes, so
-// stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 13
+// indexVersion is bumped whenever the persisted index schema or derived-data
+// semantics change, so stale caches are rebuilt automatically. v16 preserves
+// enclosing declarations alongside call source files; v17 retains Go import
+// aliases and qualified, lexically-scoped receiver types; v18 adds per-file
+// JS/TS default/reexport records; v19 requires explicit runtime export visibility;
+// v20 preserves compiler-selected Go declaration IDs and binding mode;
+// v21 adds javac identities and compiler-derived dispatch candidate provenance.
+const indexVersion = 21
+
+// BuildStats records how an index was produced, surfaced by `kern index
+// --status` and the build/update JSON summaries so build cost is visible
+// without profiling: Kind is "build" (full parse) or "update" (incremental
+// refresh), Ms the wall-clock duration of the producing pass, Workers the
+// parse pool size actually used (1 = serial path or small-tree bypass),
+// Reused the per-file results copied from a prior index. A zero Kind marks
+// indexes produced before this field existed (or hand-constructed ones):
+// consumers report nothing, not zeros.
+type BuildStats struct {
+	Kind    string `json:"kind"`
+	Ms      int64  `json:"ms"`
+	Workers int    `json:"workers"`
+	Reused  int    `json:"reused"`
+}
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
-	Root    string                `json:"root"`
-	Version int                   `json:"version"`
-	Symbols []Symbol              `json:"symbols"`
-	Calls   map[string][]CallEdge `json:"calls"`
-	Callers map[string][]string   `json:"callers"`
+	Root          string                `json:"root"`
+	Version       int                   `json:"version"`
+	Symbols       []Symbol              `json:"symbols"`
+	Calls         map[string][]CallEdge `json:"calls"`
+	Callers       map[string][]string   `json:"callers"`
+	GoTypes       bool                  `json:"go_types,omitempty"`
+	JavaCompiler  bool                  `json:"java_compiler,omitempty"`
+	JavaClasspath string                `json:"java_classpath,omitempty"`
 	// AliasCallers maps a bare name to callers of dotted callees with that bare
 	// name ("Println" -> callers of "fmt.Println"); it never contributes callers
 	// to a resolved local symbol.
@@ -50,7 +75,10 @@ type Index struct {
 	// file actually imports a forbidden package. Populated by Build/extract;
 	// absent in indexes written by older kern (guard then no-ops the
 	// import-level check per file, fail-open).
-	ImportsByFile  map[string][]ImportEdge `json:"imports_by_file,omitempty"`
+	ImportsByFile map[string][]ImportEdge `json:"imports_by_file,omitempty"`
+	// ExportsByFile maps a JS/TS source file to its explicit exports and
+	// reexports, so imports of those names bind to the declaring symbol.
+	ExportsByFile  map[string][]ExportEdge `json:"exports_by_file,omitempty"`
 	FileHashes     map[string]string       `json:"file_hashes"`
 	GeneratedFiles map[string]bool         `json:"generated_files,omitempty"`
 	// Communities maps a symbol full name to its community label, populated by
@@ -70,13 +98,18 @@ type Index struct {
 	PromotedLowEdges   int `json:"promoted_low_edges,omitempty"`
 	UnresolvedLowEdges int `json:"unresolved_low_edges,omitempty"`
 	// CallResolution counts distinct call targets and how many of them fail
-	// to resolve against the symbol table. Surfaced in `kern index
-	// --status`: a high unresolved share on a real repo is usually external
-	// stdlib/vendor targets or untyped dynamic-language receivers, which is
-	// expected and correct — the number exists so the honest per-repo
-	// resolution rate is visible and regressions are provable. Zero on
-	// indexes built before this pass existed.
+	// to resolve against the symbol table, split by cause (External =
+	// foreign-import-qualified stdlib/vendor targets, expected unresolved;
+	// InRepo = the honest actionable share). Surfaced in `kern index
+	// --status`: a high external share on a real repo is expected and
+	// correct; the in-repo share is the number whose regressions are
+	// provable. Zero on indexes built before this pass existed.
 	CallResolution CallResStats `json:"call_resolution,omitempty"`
+	// BuildStats records how this index was last produced (kind, wall
+	// duration, workers, reused per-file results) so `kern index --status`
+	// can surface build cost. Zero Kind on indexes built before this field
+	// existed. Surfaced read-only; never consulted by build/freshness logic.
+	BuildStats BuildStats `json:"build_stats,omitempty"`
 	// ProseVocab is the build-time inverted word→symbol table:
 	// each prose word ("middleware", "retry") maps to the full names of
 	// symbols whose name or defining directory matches that word. Built by
@@ -138,10 +171,93 @@ type Index struct {
 // idempotent by construction (sync.Once), which also makes a repeated
 // reindexByFile/buildSymbolIndex on an already-populated index a no-op.
 type indexCache struct {
-	symbolOnce sync.Once
-	kindOnce   sync.Once
-	symbolIdx  map[string][]Symbol
-	kindIdx    map[string][]Symbol
+	symbolOnce  sync.Once
+	kindOnce    sync.Once
+	symbolIdx   map[string][]Symbol
+	kindIdx     map[string][]Symbol
+	bindingOnce sync.Once
+	bindings    *exportCatalog
+	communities sync.Once
+	declComm    map[string]string
+	callerOnce  sync.Once
+	callerIdx   *callerIndex
+}
+
+// callerIndex is the lazily-built reverse-edge index behind CallersFor and
+// the sourced-caller buckets, precomputed ONCE per index so per-symbol
+// lookups stop rescanning the whole Calls/Callers/Pkgs maps on every query.
+// The blast-radius walk (internal/intel blastRadiusWalk) calls
+// CallersFor once per visited node; the unique-name widening inside
+// callersForLegacy used to rescan ALL of ix.Callers (plus recompute
+// foreignImportBases and filePkgIndex) per node — the measured ~900x
+// latency regression vs docs/benchmarks/graph-latency.md's documented
+// numbers. All four tables are pure functions of the finalized index (maps
+// are never mutated after finalize), so the once-build is safe and the
+// cached values are bit-identical to the recomputed ones.
+type callerIndex struct {
+	foreignBases    map[string]bool                // foreignImportBases, computed once
+	filePkg         map[string]string              // filePkgIndex, computed once
+	bySimpleKey     map[string]map[string][]string // ix.Callers grouped by simpleKey(k)
+	sourcedBySimple map[string][]string            // callers of sourced edges, by simpleName(edge.Target)
+}
+
+// callerIndex returns the index's lazily-built reverse-edge tables, building
+// them once from the finalized index on first use (same sync.Once pattern as
+// the binding catalog and symbol index).
+func (ix *Index) callerIndex() *callerIndex {
+	c := ix.getCache()
+	c.callerOnce.Do(func() {
+		ci := &callerIndex{
+			foreignBases:    ix.foreignImportBases(),
+			filePkg:         ix.filePkgIndex(),
+			bySimpleKey:     map[string]map[string][]string{},
+			sourcedBySimple: map[string][]string{},
+		}
+		for k, callers := range ix.Callers {
+			sk := simpleKey(k)
+			bucket := ci.bySimpleKey[sk]
+			if bucket == nil {
+				bucket = map[string][]string{}
+				ci.bySimpleKey[sk] = bucket
+			}
+			bucket[k] = callers
+		}
+		// Sourced-caller buckets: every caller of an edge with source
+		// provenance, keyed by the target's simple name — the exact index
+		// intel's blast-radius walk used to rebuild from ALL of ix.Calls on
+		// every invocation (internal/intel/intel.go). Deduplicated and sorted
+		// for deterministic iteration.
+		seen := map[string]map[string]bool{}
+		for caller, edges := range ix.Calls {
+			for _, e := range edges {
+				if e.SourceFile == "" {
+					continue
+				}
+				sk := simpleKey(e.Target)
+				if seen[sk] == nil {
+					seen[sk] = map[string]bool{}
+				}
+				seen[sk][caller] = true
+			}
+		}
+		for sk, set := range seen {
+			list := make([]string, 0, len(set))
+			for caller := range set {
+				list = append(list, caller)
+			}
+			ci.sourcedBySimple[sk] = dedupeSorted(list)
+		}
+		c.callerIdx = ci
+	})
+	return c.callerIdx
+}
+
+// SourcedCallersBySimple returns the callers of every call edge whose
+// target's simple name is simple, limited to edges with source provenance
+// (SourceFile != "") — the cached reverse-edge index intel's blast-radius
+// walk consumes. Nil when no sourced edge targets that simple name.
+func (ix *Index) SourcedCallersBySimple(simple string) []string {
+	return ix.callerIndex().sourcedBySimple[simple]
 }
 
 // getCache returns the index's lookup cache. It is allocated by initMaps
@@ -546,21 +662,22 @@ func (ix *Index) legacyStale() bool {
 			return false
 		}
 	}
-	cur, mtimes, err := indexableHashesObserved(ix.Root, ign)
+	obs, err := indexableHashesObserved(ix.Root, ign)
 	if err != nil {
 		ix.clearStaleSnapshot() // no usable observation
 		return true
 	}
-	ix.retainStaleSnapshot(cur, mtimes)
-	if len(cur) != len(ix.FileHashes) {
-		return true
-	}
-	for f, h := range cur {
-		if ph, ok := ix.FileHashes[f]; !ok || ph != h {
-			return true
+	fresh := len(obs.hashes) == len(ix.FileHashes)
+	if fresh {
+		for f, h := range obs.hashes {
+			if ph, ok := ix.FileHashes[f]; !ok || ph != h {
+				fresh = false
+				break
+			}
 		}
 	}
-	return false
+	ix.retainStaleSnapshot(obs, fresh)
+	return !fresh
 }
 
 // LoadFile reads an index directly from a store path (used for
@@ -722,13 +839,29 @@ type BuildOption func(*buildConfig)
 // the machine-derived default" (see resources.go); a non-zero explicit
 // option always wins over the adaptive default.
 type buildConfig struct {
-	prior  *Index
-	reused atomic.Int64
+	javaCompiler  bool
+	javaClasspath string
+	goTypes       bool
+	prior         *Index
+	reused        atomic.Int64
 	// workers is the parse/scan worker pool size (0 = adaptive default).
 	workers int
 	// maxBytes is the largest file the index will read and scan
 	// (0 = adaptive default).
 	maxBytes int64
+	// resolvedWorkers reports the pool size the build actually used, set
+	// by buildSerial (always 1) and buildParallel (small-tree bypass = 1,
+	// pool = resolved tunables) for the Index.BuildStats report. Zero when
+	// neither ran yet.
+	resolvedWorkers int
+}
+
+func WithGoTypes() BuildOption {
+	return func(config *buildConfig) { config.goTypes = true }
+}
+
+func WithJavaCompiler(classpath string) BuildOption {
+	return func(config *buildConfig) { config.javaCompiler, config.javaClasspath = true, classpath }
 }
 
 // WithPriorIndex reuses per-file parse results from a prior index of the
@@ -775,6 +908,12 @@ func BuildWithOptions(root string, opts ...BuildOption) (*Index, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if cfg.prior != nil && cfg.prior.Root == abs && cfg.prior.GoTypes {
+		cfg.goTypes = true
+	}
+	if cfg.prior != nil && cfg.prior.Root == abs && cfg.prior.JavaCompiler && !cfg.javaCompiler {
+		cfg.javaCompiler, cfg.javaClasspath = true, cfg.prior.JavaClasspath
+	}
 	// A prior index from a different root never matches a relative path
 	// set, but guard explicitly so a mistaken caller cannot silently
 	// reuse cross-project results.
@@ -791,6 +930,12 @@ func BuildWithOptions(root string, opts ...BuildOption) (*Index, error) {
 		return nil, err
 	}
 	ix.reusedResults = int(cfg.reused.Load())
+	ix.BuildStats = BuildStats{
+		Kind:    "build",
+		Ms:      time.Since(start).Milliseconds(),
+		Workers: cfg.resolvedWorkers,
+		Reused:  int(cfg.reused.Load()),
+	}
 	metrics.Default().RecordIndexBuild(time.Since(start))
 	return ix, nil
 }
@@ -850,6 +995,7 @@ func copyPkg(p *Pkg) *Pkg {
 	c := *p
 	c.Files = append([]string(nil), p.Files...)
 	c.Imports = append([]ImportEdge(nil), p.Imports...)
+	c.Exports = append([]ExportEdge(nil), p.Exports...)
 	if p.StructFields != nil {
 		c.StructFields = make(map[string]string, len(p.StructFields))
 		for k, v := range p.StructFields {
@@ -863,16 +1009,6 @@ func copyPkg(p *Pkg) *Pkg {
 		}
 	}
 	return &c
-}
-
-// fileModTimeNanos returns the file's modification time in Unix nanoseconds,
-// or 0 when the stat fails (mirroring the serial build, where a failed stat
-// simply leaves MaxMtime untouched for that file).
-func fileModTimeNanos(d fs.DirEntry) int64 {
-	if info, ierr := d.Info(); ierr == nil {
-		return info.ModTime().UnixNano()
-	}
-	return 0
 }
 
 // walkIndexable walks root applying the index's file-selection policy —
@@ -911,7 +1047,7 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 		if ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
-		if !quickExt(rel) && filepath.Ext(rel) != "" {
+		if !langparse.QuickExt(rel) && filepath.Ext(rel) != "" {
 			return nil
 		}
 		// Skip non-regular files (FIFOs, sockets, device nodes) to avoid blocking reads.
@@ -920,10 +1056,20 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 		}
 		// Skip files larger than maxBytes before reading them so huge
 		// generated/bundled files never get loaded into memory or scanned.
-		if info, ierr := d.Info(); ierr == nil && info.Size() > maxBytes {
+		// One d.Info() stat serves both the size cap and the mtime:
+		// DirEntry.Info() re-stats on every call (no caching), so the
+		// historical second call via fileModTimeNanos doubled the walk's
+		// stat cost. A failed stat keeps the historical semantics: the
+		// file is accepted with mtime 0 (MaxMtime untouched for it).
+		info, ierr := d.Info()
+		if ierr == nil && info.Size() > maxBytes {
 			return nil
 		}
-		return fn(rel, path, fileModTimeNanos(d))
+		var mtime int64
+		if ierr == nil {
+			mtime = info.ModTime().UnixNano()
+		}
+		return fn(rel, path, mtime)
 	})
 }
 
@@ -933,6 +1079,7 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 // output is what kern's freshness/identity proofs compare against).
 func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	ix := New(abs)
+	cfg.resolvedWorkers = 1
 	// Kick off the git identity observations (tree OID + commit) BEFORE the
 	// walk so the ~0.5s git staging dance overlaps with the file walk instead
 	// of running after it; joined once FileHashes are final below.
@@ -956,7 +1103,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 			// the whole index build. Matches the sec scanner's behavior.
 			return nil
 		}
-		if !isIndexable(rel, src) {
+		if !langparse.IsIndexable(rel, src) {
 			return nil
 		}
 		return ix.applyFileResult(reuseOrCompute(cfg.prior, rel, src, mtime, &cfg.reused))
@@ -966,6 +1113,16 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
+	if cfg.goTypes {
+		if err := ix.bindGoTypes(); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.javaCompiler {
+		if err := ix.bindJavaCompiler(cfg.javaClasspath); err != nil {
+			return nil, err
+		}
+	}
 	ix.promoteLowEdges()
 	ix.addFrameworkDIEdges()
 	ix.computeCallers()
@@ -997,6 +1154,14 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 // still applies results strictly in seq order.
 const reorderWindow = 1024
 
+// reorderBackoff is how long a worker sleeps when the reorder window is
+// full (its claim index runs ahead of the merge cursor, which is waiting
+// on a slow head-of-line file). A yield-only spin (runtime.Gosched) burned
+// CPU for the whole stall on big trees; the merge loop keeps draining
+// results and advances the window in bounded time, and 100µs is far below
+// per-file parse latency, so the sleep costs nothing real.
+const reorderBackoff = 100 * time.Microsecond
+
 // fileJob is one accepted file discovered by buildParallel's phase-1 walk.
 // seq follows the lexical walk order; the merge loop replays results in seq
 // order so the merged index matches buildSerial byte for byte.
@@ -1015,11 +1180,14 @@ type fileJob struct {
 //
 //  1. Phase 1 walks the tree serially, applying the exact same skip policy as
 //     the serial build (ignoreDirs, ignore patterns, quickExt, adaptive
-//     maxFileBytes) and collecting one job per accepted file in lexical walk
-//     order. No file contents are read here.
-//  2. Phase 2 runs a fixed pool of worker goroutines. Workers only claim job
-//     indices via an atomic counter and produce fileResults — they never touch
-//     the index. This is the central safety property of the parallel build.
+//     maxFileBytes) and counting accepted files without storing them —
+//     O(1) job memory. No file contents are read here.
+//  2. Phase 2 walks the tree again, streaming one job per accepted file in
+//     lexical walk order into a bounded channel consumed by a fixed pool of
+//     worker goroutines. Workers never touch the index, and the feeder holds
+//     at most reorderWindow jobs ahead of the merge cursor so the reorder
+//     buffer stays bounded (B7) — the central safety property of the
+//     parallel build. Small trees skip the pool and apply serially.
 //  3. Phase 3, in the main goroutine (the only goroutine that mutates ix),
 //     reorders the results by seq and folds them in lexical order via
 //     applyFileResult, then runs the same finalize passes as buildSerial.
@@ -1043,72 +1211,82 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	// regardless of .gitignore, producing huge symbol counts and slow builds.
 	ign := ignore.Load(abs)
 
-	// Phase 1: serial walk collecting jobs. The walk applies the exact same
-	// skip policy as the serial build via the shared walkIndexable.
-	var jobs []fileJob
-	err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
-		jobs = append(jobs, fileJob{seq: len(jobs), rel: rel, path: path, mtime: mtime})
+	// Phase 1: count-only pre-walk. The pool-vs-serial decision needs the
+	// total before workers start; counting without storing keeps the job list
+	// from ever materializing (O(files) memory -> O(1)). The count applies
+	// the exact same skip policy as the serial build via walkIndexable, so
+	// the feed pass below selects byte-identical files.
+	n := 0
+	if err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
+		n++
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 
-	// Phase 2: worker pool. Workers are pure — they never touch ix; every ix
-	// mutation happens only in the main goroutine's merge loop below.
-	// Small trees: pool + ordered-merge overhead exceeds the parse cost, so
-	// apply jobs serially in lexical order (byte-identical to the pool path).
-	if len(jobs) < t.parallelMin {
-		for _, j := range jobs {
+	// Phase 2: worker pool fed by a bounded channel. Workers are pure — they
+	// never touch ix; every ix mutation happens only in the main goroutine's
+	// merge loop below. Small trees: pool + ordered-merge overhead exceeds
+	// the parse cost, so apply jobs serially in lexical order (byte-identical
+	// to the pool path).
+	if n < t.parallelMin {
+		cfg.resolvedWorkers = 1
+		seq := 0
+		if err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
+			j := fileJob{seq: seq, rel: rel, path: path, mtime: mtime}
+			seq++
 			if r, ok := reuseByMtime(cfg.prior, j.rel, j.mtime); ok {
 				cfg.reused.Add(1)
-				if err := ix.applyFileResult(r); err != nil {
-					return nil, err
-				}
-				continue
+				return ix.applyFileResult(r)
 			}
 			src, serr := os.ReadFile(j.path)
 			if serr != nil {
-				continue // unreadable: same semantics as the serial build
+				return nil // unreadable: same semantics as the serial build
 			}
-			if !isIndexable(j.rel, src) {
-				continue
+			if !langparse.IsIndexable(j.rel, src) {
+				return nil
 			}
-			if err := ix.applyFileResult(reuseOrCompute(cfg.prior, j.rel, src, j.mtime, &cfg.reused)); err != nil {
-				return nil, err
-			}
+			return ix.applyFileResult(reuseOrCompute(cfg.prior, j.rel, src, j.mtime, &cfg.reused))
+		}); err != nil {
+			return nil, err
 		}
 	} else {
 		workers := t.workers
+		cfg.resolvedWorkers = workers
 		results := make(chan fileResult, t.resultBuf)
+		jobs := make(chan fileJob, t.resultBuf)
 		var wg sync.WaitGroup
-		var next atomic.Int64
 		// applied tracks the merge cursor: the next seq the merge loop will
-		// apply. Workers may claim jobs at most reorderWindow ahead of it, so
-		// the reorder buffer stays bounded (B7).
+		// apply. The feeder streams at most reorderWindow jobs ahead of it,
+		// so the reorder buffer stays bounded (B7).
 		var applied atomic.Int64
+		// Feeder: the second walk streams accepted files into the bounded job
+		// channel as the pool consumes them, so parsing starts before the walk
+		// ends and job memory stays O(1). The window check lives here — a
+		// worker cannot return a job to the channel once pulled — and when the
+		// in-flight count reaches reorderWindow the feeder backs off; the
+		// merge loop keeps draining results and advances the window in bounded
+		// time. A walk error is captured, the channel is closed so workers
+		// drain, and the error is returned after the merge loop (the index is
+		// discarded either way).
+		var walkErr error
+		go func() {
+			defer close(jobs)
+			seq := 0
+			walkErr = walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
+				for int64(seq)-applied.Load() >= reorderWindow {
+					time.Sleep(reorderBackoff)
+				}
+				jobs <- fileJob{seq: seq, rel: rel, path: path, mtime: mtime}
+				seq++
+				return nil
+			})
+		}()
 		for w := 0; w < workers; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for {
-					claim := next.Load()
-					if claim >= int64(len(jobs)) {
-						return
-					}
-					if claim >= applied.Load()+reorderWindow {
-						// The reorder window is full — the merge cursor is
-						// waiting on a slow head-of-line file. Back off; the
-						// merge loop keeps draining results and will advance
-						// the window once the head arrives.
-						runtime.Gosched()
-						continue
-					}
-					idx := next.Add(1) - 1
-					if idx >= int64(len(jobs)) {
-						return
-					}
-					job := jobs[idx]
+				for job := range jobs {
 					if r, ok := reuseByMtime(cfg.prior, job.rel, job.mtime); ok {
 						r.seq = job.seq
 						cfg.reused.Add(1)
@@ -1123,7 +1301,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 						results <- fileResult{seq: job.seq, rel: job.rel, readErr: true}
 						continue
 					}
-					if !isIndexable(job.rel, src) {
+					if !langparse.IsIndexable(job.rel, src) {
 						results <- fileResult{seq: job.seq, rel: job.rel, skip: true}
 						continue
 					}
@@ -1161,12 +1339,25 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			}
 			applied.Store(int64(nextSeq))
 		}
+		if walkErr != nil {
+			return nil, walkErr
+		}
 		if firstErr != nil {
 			return nil, firstErr
 		}
 	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
+	if cfg.goTypes {
+		if err := ix.bindGoTypes(); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.javaCompiler {
+		if err := ix.bindJavaCompiler(cfg.javaClasspath); err != nil {
+			return nil, err
+		}
+	}
 	ix.promoteLowEdges()
 	ix.addFrameworkDIEdges()
 	ix.computeCallers()
@@ -1251,7 +1442,7 @@ func computeFileResult(rel string, src []byte, mtime int64) fileResult {
 		mtime:     mtime,
 		generated: IsGeneratedPath(rel) || isGeneratedContent(src),
 	}
-	lang := detectLang(rel, src)
+	lang := langparse.DetectLang(rel, src)
 	if lang == "go" {
 		var err error
 		r.syms, r.calls, r.inherits, r.pkg, err = extract(rel, src)
@@ -1259,7 +1450,7 @@ func computeFileResult(rel string, src []byte, mtime int64) fileResult {
 			r.parseErr = true
 		}
 	} else {
-		r.syms, r.calls, r.inherits, r.pkg, _ = extractForeign(rel, src, lang)
+		r.syms, r.calls, r.inherits, r.pkg, _ = langparse.ExtractForeign(rel, src, lang, tsExtract)
 	}
 	return r
 }
@@ -1309,7 +1500,10 @@ func (ix *Index) applyFileResult(r fileResult) error {
 	ix.fileResults[r.rel] = stored
 	ix.Symbols = append(ix.Symbols, r.syms...)
 	for owner, callees := range r.calls {
-		ix.Calls[owner] = append(ix.Calls[owner], callees...)
+		for _, edge := range callees {
+			edge.SourceFile = r.rel
+			ix.Calls[owner] = append(ix.Calls[owner], edge)
+		}
 	}
 	for subtype, bases := range r.inherits {
 		ix.Inherits[subtype] = append(ix.Inherits[subtype], bases...)
@@ -1378,6 +1572,12 @@ func (ix *Index) applyFileResult(r fileResult) error {
 			// for files with no imports so they serialize as [] (not null) in
 			// index.json.
 			ix.ImportsByFile[file] = append([]ImportEdge{}, r.pkg.Imports...)
+			if len(r.pkg.Exports) > 0 {
+				if ix.ExportsByFile == nil {
+					ix.ExportsByFile = map[string][]ExportEdge{}
+				}
+				ix.ExportsByFile[file] = append([]ExportEdge(nil), r.pkg.Exports...)
+			}
 		}
 	}
 	return nil
@@ -1414,44 +1614,69 @@ func checkFileSymbolConflicts(rel string, syms []Symbol) error {
 			return strings.Compare(x.Kind, y.Kind)
 		case x.Receiver != y.Receiver:
 			return strings.Compare(x.Receiver, y.Receiver)
+		case x.Outer != y.Outer:
+			return strings.Compare(x.Outer, y.Outer)
 		default:
 			return x.Line - y.Line
 		}
 	})
 	for i := 1; i < len(order); i++ {
 		p, c := syms[order[i-1]], syms[order[i]]
-		if p.Name == c.Name && p.Kind == c.Kind && p.Receiver == c.Receiver &&
-			(p.Line != c.Line || p.End != c.End) && symbolConflictKinds[c.Kind] && (c.Receiver != "" || typeKinds[c.Kind] || c.Kind == "type") {
+		// Equal Params/Outer keeps the conflict (true duplicate); different
+		// = an overload (WD-6) or a nested type under another parent (WD-6c).
+		if p.Name == c.Name && p.Kind == c.Kind && p.Receiver == c.Receiver && p.Outer == c.Outer &&
+			(p.Line != c.Line || p.End != c.End) && symbolConflictKinds[c.Kind] && (c.Receiver != "" || langparse.TypeKinds[c.Kind] || c.Kind == "type") &&
+			slices.Equal(p.Params, c.Params) {
 			return fmt.Errorf("index: duplicate symbol conflict in %s: %q (%s) at lines %d and %d — the same identity was extracted twice; refusing to index (fail-loud; report an extractor bug)", rel, c.Name, c.Kind, p.Line, c.Line)
 		}
 	}
 	return nil
 }
 
-// CallResStats counts distinct call targets and how many are unresolved.
+// CallResStats counts distinct call targets and how many are unresolved,
+// with the unresolved share split by cause (F3, production-readiness audit
+// 2026-10-17): External targets are qualified by a foreign import base
+// ("fmt.Println", vendor packages) — unresolvable by design and expected;
+// InRepo is everything else — bare dynamic-language receivers,
+// project-qualified targets that failed to resolve — the honest actionable
+// share. Unresolved stays the sum so existing readers and the overall rate
+// are unchanged. Zero External/InRepo on indexes built before the split
+// (older readers then see the legacy unsplit render).
 type CallResStats struct {
 	Total      int `json:"total"`
 	Unresolved int `json:"unresolved"`
+	External   int `json:"external,omitempty"`
+	InRepo     int `json:"in_repo,omitempty"`
 }
 
 // measureCallResolution counts distinct callee targets and how many fail
-// resolveName. Runs after computeCallers in every finalize/load sequence so
-// `kern index --status` can report the honest per-repo resolution rate.
+// resolveName, splitting unresolved targets by cause. Runs after
+// computeCallers in every finalize/load sequence so `kern index --status`
+// can report the honest per-repo resolution rate.
 func (ix *Index) measureCallResolution() {
 	seen := map[string]struct{}{}
-	var unres int
+	var external, inRepo int
+	// Foreign import bases ("fmt", "time") identify stdlib/vendor-qualified
+	// targets the index cannot and should not resolve; recomputed per call
+	// (same trust model as computeCallers, which runs before this pass).
+	foreign := ix.foreignImportBases()
 	for _, callees := range ix.Calls {
 		for _, ce := range callees {
 			if _, dup := seen[ce.Target]; dup {
 				continue
 			}
 			seen[ce.Target] = struct{}{}
-			if _, ok := resolveName(ix, ce.Target); !ok {
-				unres++
+			if _, ok := resolveName(ix, ce.Target); ok {
+				continue
+			}
+			if i := strings.Index(ce.Target, "."); i > 0 && foreign[ce.Target[:i]] {
+				external++
+			} else {
+				inRepo++
 			}
 		}
 	}
-	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: unres}
+	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: external + inRepo, External: external, InRepo: inRepo}
 }
 
 // methodLangFromFile resolves the language a method symbol's file must have
@@ -1466,7 +1691,7 @@ func methodLangFromFile(rel string) string {
 	case ".vue", ".svelte", ".astro", "":
 		return "" // content-dependent or extensionless: ambiguous without src
 	}
-	return detectLang(rel, nil)
+	return langparse.DetectLang(rel, nil)
 }
 
 // enforceMethodLangInvariant guards the A5 bare-callee-never-methods rule's
@@ -1538,6 +1763,9 @@ func (ix *Index) computeCallers() {
 	}
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
+			if ce.Dynamic {
+				continue
+			}
 			c := ce.Target
 			if c == caller {
 				continue
@@ -1657,28 +1885,49 @@ func (ix *Index) computeCallers() {
 			}
 		}
 	}
-	for iface, iDir := range ifaceDir {
-		for concrete, cDir := range concreteDir {
-			if concrete == iface || cDir != iDir {
-				continue
-			}
-			if _, isIface := ifaceDir[concrete]; isIface {
-				continue
-			}
-			if len(concreteMethods[concrete]) > 0 {
-				edge := "implements:" + iface
-				already := false
-				for _, e := range ix.Inherits[concrete] {
-					if e == edge {
-						already = true
-						break
-					}
+	// Group by directory before pairing: the (interface × concrete) cross
+	// product below only ever matches same-directory names, so grouping
+	// collapses an O(interfaces × concretes) iteration — millions of
+	// dir-compare skips per finalize on a large repo — to exactly the
+	// same-dir pairs that can match. Output is identical: every pair the
+	// old loop skipped differed in dir, and the appended edges are
+	// sorted+deduped below regardless of append order.
+	ifacesByDir := map[string][]string{}
+	for iface, dir := range ifaceDir {
+		ifacesByDir[dir] = append(ifacesByDir[dir], iface)
+	}
+	concretesByDir := map[string][]string{}
+	for concrete, dir := range concreteDir {
+		concretesByDir[dir] = append(concretesByDir[dir], concrete)
+	}
+	for dir, ifaces := range ifacesByDir {
+		concretes, ok := concretesByDir[dir]
+		if !ok {
+			continue
+		}
+		for _, iface := range ifaces {
+			for _, concrete := range concretes {
+				if concrete == iface {
+					continue
 				}
-				if !already {
-					if ix.Inherits == nil {
-						ix.Inherits = map[string][]string{}
+				if _, isIface := ifaceDir[concrete]; isIface {
+					continue
+				}
+				if len(concreteMethods[concrete]) > 0 {
+					edge := "implements:" + iface
+					already := false
+					for _, e := range ix.Inherits[concrete] {
+						if e == edge {
+							already = true
+							break
+						}
 					}
-					ix.Inherits[concrete] = append(ix.Inherits[concrete], edge)
+					if !already {
+						if ix.Inherits == nil {
+							ix.Inherits = map[string][]string{}
+						}
+						ix.Inherits[concrete] = append(ix.Inherits[concrete], edge)
+					}
 				}
 			}
 		}
@@ -1736,6 +1985,9 @@ func (ix *Index) addDispatchEdges() {
 	added := map[string]bool{} // dedupe key "caller->virtualCallee"
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
+			if ce.Dynamic || ce.Synth == "dispatch" || declarationBinding(ce.Binding) {
+				continue
+			}
 			c := ce.Target
 			// Parse "Receiver.method" to find the receiver and method name.
 			dot := strings.LastIndex(c, ".")
@@ -1766,14 +2018,14 @@ func (ix *Index) addDispatchEdges() {
 				if virtualCallee == caller {
 					continue
 				}
-				key := caller + "->" + virtualCallee
+				key := caller + "->" + virtualCallee + "\x00" + ce.SourceFile
 				if added[key] {
 					continue
 				}
 				added[key] = true
 				// Virtual dispatch edges are inferred through the inheritance
 				// graph, not stated in source: LOW.
-				ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: virtualCallee, Confidence: ConfidenceLow})
+				ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: virtualCallee, Confidence: ConfidenceLow, SourceFile: ce.SourceFile, Synth: "dispatch"})
 				ix.Callers[virtualCallee] = append(ix.Callers[virtualCallee], caller)
 			}
 		}
@@ -1781,7 +2033,7 @@ func (ix *Index) addDispatchEdges() {
 
 	// Dedupe after adding virtual edges.
 	for k := range ix.Calls {
-		ix.Calls[k] = dedupeCallEdges(ix.Calls[k])
+		ix.Calls[k] = langparse.DedupeCallEdges(ix.Calls[k])
 	}
 	for k := range ix.Callers {
 		ix.Callers[k] = dedupeSorted(ix.Callers[k])
@@ -1800,49 +2052,6 @@ func dedupeSorted(in []string) []string {
 	return slices.Compact(cp)
 }
 
-// dedupeCallEdges dedupes a call-edge slice by target keeping the
-// HIGHEST-confidence representative. A first-wins dedupe let an
-// edge recorded LOW before it was re-resolved stay LOW forever; promotion
-// can also merge distinct target forms ("db.Open" and "Open") into one key,
-// and the highest confidence is the honest verdict for that key. Ties keep
-// the first occurrence, preserving input order determinism. The output is
-// sorted by target, so the Calls map stays in the deterministic order the
-// finalize passes rely on.
-func dedupeCallEdges(in []CallEdge) []CallEdge {
-	if len(in) < 2 {
-		return in
-	}
-	best := map[string]CallEdge{}
-	for _, e := range in {
-		if prev, ok := best[e.Target]; !ok || confRank(e.Confidence) > confRank(prev.Confidence) {
-			best[e.Target] = e
-		}
-	}
-	out := make([]CallEdge, 0, len(best))
-	for _, e := range best {
-		out = append(out, e)
-	}
-	slices.SortFunc(out, func(a, b CallEdge) int { return strings.Compare(a.Target, b.Target) })
-	return out
-}
-
-// confRank orders the confidence tiers so the best representative wins:
-// HIGH(3) > MEDIUM(2) > LOW(1). An empty confidence ranks LOW.
-func confRank(c Confidence) int {
-	switch c {
-	case ConfidenceHigh:
-		return 3
-	case ConfidenceMedium:
-		return 2
-	default:
-		return 1
-	}
-}
-
-// symbolsFor returns every symbol whose bare or full name matches. Build
-// paths precompute the lookup table eagerly (buildSymbolIndex), making
-// this O(1); indexes that loaded without it build the table once on the
-// first lookup (see below), so no path pays a per-call linear scan.
 // Callers only iterate the result — the cached slices are shared.
 func (ix *Index) symbolsFor(name string) []Symbol {
 	// The name -> symbols table is built eagerly by the build/update paths
@@ -1970,7 +2179,7 @@ func (ix *Index) kindSymbols(kind string) ([]Symbol, bool) {
 const symbolRegexCacheSize = 128
 
 var (
-	symbolRegexCacheMu sync.Mutex
+	symbolRegexCacheMu sync.RWMutex
 	// symbolRegexCache maps a stripped search pattern to its compiled regex.
 	// Compiled regexes are immutable and safe for concurrent use, so one
 	// cached entry may be shared across concurrent Search calls.
@@ -1984,33 +2193,66 @@ var (
 // reaches symbolRegexCacheSize entries; evicting a regex never changes
 // behavior — the same pattern is simply recompiled on its next use.
 func cachedSymbolRegex(p string) *regexp.Regexp {
+	// Fast path under the shared read lock: concurrent Search calls never
+	// serialize on each other's cache lookups.
+	symbolRegexCacheMu.RLock()
+	re, ok := symbolRegexCache[p]
+	symbolRegexCacheMu.RUnlock()
+	if ok {
+		return re
+	}
+	// Compile OUTSIDE the lock: a cold pattern's compile must not block
+	// concurrent searches. Losing an insert race costs one redundant
+	// compile; the double-check under the write lock below keeps the
+	// cache canonical.
+	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
+	compiled := regexp.MustCompile(expr)
 	symbolRegexCacheMu.Lock()
 	defer symbolRegexCacheMu.Unlock()
 	if re, ok := symbolRegexCache[p]; ok {
 		return re
 	}
-	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
-	re := regexp.MustCompile(expr)
 	if len(symbolRegexCache) >= symbolRegexCacheSize {
 		delete(symbolRegexCache, symbolRegexOrder[0])
 		symbolRegexOrder = symbolRegexOrder[1:]
 	}
-	symbolRegexCache[p] = re
+	symbolRegexCache[p] = compiled
 	symbolRegexOrder = append(symbolRegexOrder, p)
-	return re
+	return compiled
+}
+
+// SearchPatternKind returns the kind prefix of a search pattern ("func" for
+// "func handle*") or "" when the pattern has no recognized kind prefix.
+// Kind prefixes restrict a Search to one symbol kind: `func handle*` matches
+// only functions, while methods — a distinct kind — need `method handle*`.
+func SearchPatternKind(pattern string) string {
+	if i := strings.IndexByte(pattern, ' '); i > 0 {
+		switch pattern[:i] {
+		case "func", "method", "struct", "interface", "type", "const", "var",
+			"class", "enum", "trait", "module", "union", "impl", "prop", "heading", "entry":
+			return pattern[:i]
+		}
+	}
+	return ""
+}
+
+// KindGlobHint returns the kind-glob hint line for a NO-MATCH AST search
+// whose pattern carried no kind prefix (6.4): a bare `handle*` silently
+// misses methods (their kind is "method", not "func"), and `func handle*`
+// never returns them either. Returns "" when the pattern already uses a kind
+// prefix (or is empty) — the hint is deterministic and short.
+func KindGlobHint(pattern string) string {
+	if SearchPatternKind(pattern) != "" || strings.TrimSpace(pattern) == "" {
+		return ""
+	}
+	return " — no matches: try a kind prefix (func|method|type|struct|interface|const|var|class), e.g. 'method handle*'"
 }
 
 func symbolRegex(pattern string) (*regexp.Regexp, string) {
+	kind := SearchPatternKind(pattern)
 	p := pattern
-	kind := ""
-	if i := strings.IndexByte(p, ' '); i > 0 {
-		prefix := p[:i]
-		switch prefix {
-		case "func", "method", "struct", "interface", "type", "const", "var",
-			"class", "enum", "trait", "module", "union", "impl", "prop", "heading", "entry":
-			kind = prefix
-			p = p[i+1:]
-		}
+	if kind != "" {
+		p = pattern[len(kind)+1:]
 	}
 	// The cache is keyed on the stripped pattern, so "func foo" and
 	// "method foo" share one compiled regex; only the kind differs.
@@ -2036,7 +2278,7 @@ func symbolMatches(s Symbol, kind string, re *regexp.Regexp) bool {
 }
 
 // searchTypeKinds is the set of symbol kinds matched by the "type" search
-// prefix. It is a superset of the parser's typeKinds (which is used for call
+// prefix. It is a superset of the parser's TypeKinds (which is used for call
 // graph construction and must not include "type" or "record").
 var searchTypeKinds = map[string]bool{
 	"type": true, "class": true, "interface": true, "struct": true,
@@ -2135,36 +2377,26 @@ func uniqueReceiverQualifiedSymbol(ix *Index, c string, foreignImportBases, defi
 	return matches[0], true
 }
 
-// CallersFor returns deduplicated callers attributable to a local symbol.
-// Attribution is package-aware. Methods key under the unique "Type.Method"
-// full name, and a package-level symbol whose bare name is unambiguous owns
-// its bare bucket outright — both keep the exact recorded callers,
-// byte-identical to before. When two or more packages define the same simple
-// name, the shared bare bucket mixes every same-named symbol's callers, so a
-// bare edge is attributed to s only when the caller side resolves to a symbol
-// in s's own package directory, and package-qualified keys
-// ("governance.AuthorizeContext") are attributed only to the exact symbol
-// they resolve to (mirroring qualifiedCalleeSymbol's dir match). A bare edge
-// whose caller lives in a different package is never attributed to a
-// same-named symbol — that is the merge bug this guards against.
-func (ix *Index) CallersFor(s Symbol) []string {
+// CallersFor returns deduplicated, package-aware callers attributable to a
+// local symbol. Methods key under the unique "Type.Method" full name; an
+// unambiguous bare name owns its bucket outright — both keep exact recorded
+// callers. When packages share a simple name, a bare edge is attributed to s
+// only when the caller resolves to s's own package directory, and qualified
+// keys attribute only to the exact symbol they resolve to. A cross-package
+// bare caller is never attributed to a same-named symbol.
+func (ix *Index) callersForLegacy(s Symbol) []string {
 	exact := ix.Callers[s.FullName()]
 	if s.Receiver != "" || len(ix.symbolsFor(s.Name)) == 1 || s.File == "" {
 		out := dedupeSorted(exact)
 		// Unique simple name: the graph resolves ANY qualifier for a unique
 		// name (resolveNodeID case 1), so every dotted callee key ending in
-		// the name ("g.WhatDependsOn" — a variable receiver,
-		// "kdiff.IndexSpanResolver" — an import alias, "mystery.M" — an
-		// unresolvable variable) attributes its callers to the one symbol.
-		// Keys whose first qualifier is a foreign package import base
-		// ("fmt.Println") never attribute to a local symbol (the
-		// TestForeignCalleeNeverAliasesLocalSymbol contract); the canonical
-		// map stays resolved-only — this path only widens the RENDERED
-		// caller set, matching the graph.
+		// the name attributes its callers to the one symbol — except keys
+		// whose first qualifier is a foreign import base ("fmt.Println");
+		// this only widens the RENDERED caller set.
 		if len(ix.symbolsFor(s.Name)) == 1 {
-			foreign := ix.foreignImportBases()
-			for k, callers := range ix.Callers {
-				if k == s.FullName() || simpleKey(k) != s.Name {
+			foreign := ix.callerIndex().foreignBases
+			for k, callers := range ix.callerIndex().bySimpleKey[s.Name] {
+				if k == s.FullName() {
 					continue
 				}
 				i := strings.IndexByte(k, '.')
@@ -2172,11 +2404,9 @@ func (ix *Index) CallersFor(s Symbol) []string {
 					continue
 				}
 				for _, c := range callers {
-					// A caller that IS this symbol is the symbol's own
-					// chained self-edge ("Schema.Properties.check" ->
-					// "Schema.check" recorded by Schema.check itself) —
-					// never a caller (computeCallers skips self-edges on
-					// the direct path; the widened render must too).
+					// A caller that IS this symbol is its own chained
+					// self-edge — never a caller (computeCallers skips
+					// self-edges; so must this widened render).
 					if c == s.FullName() {
 						continue
 					}
@@ -2184,34 +2414,21 @@ func (ix *Index) CallersFor(s Symbol) []string {
 				}
 			}
 		}
-		// A METHOD's bare-name bucket is not its own: a bare edge lives under
-		// the bare key ("check"), and the graph's caller-package fallback
-		// resolves a same-package bare reference to the method when it is the
-		// package's only definition of the name. Mirror that — same-package
-		// bare callers join the method's callers. Bare FUNCS already own
-		// their bare bucket via exact above; a method never does (methods are
-		// not bare-callable, so its receiver-qualified bucket holds only
-		// qualified callers).
+		// A METHOD's bare-name bucket is not its own: the graph's
+		// caller-package fallback resolves a same-package bare reference to
+		// the method when it is the package's only definition of the name —
+		// mirror that (bare FUNCS own theirs via exact above).
 		if s.Receiver != "" {
 			dir := filepath.Dir(s.File)
 			// Package-qualified keys ("metrics.Load") whose qualifier names
 			// the package: the graph resolves a RESOLVABLE caller's
-			// qualifier through its own imports (landing only where the
-			// imports point — a blueprint caller of "metrics.Load" hits
-			// internal/bpreceipt/metrics, not this method), and falls back
-			// to a last-segment package heuristic ONLY when the caller is
-			// unresolvable (a pooled bare caller bucket like "runMetrics",
-			// shared by two packages). Mirror that: only the key's
-			// UNRESOLVABLE callers join here — attributing a resolvable
-			// caller by directory base alone would over-attribute
-			// (internal/metrics and internal/bpreceipt/metrics share the
-			// "metrics" base). A package-qualified key ("tokenize.Count")
-			// names the package's RECEIVER-LESS symbol: when the package
-			// defines the simple name as a func, the key is the func's form
-			// and its callers belong to the func, never to a same-named
-			// method (the graph's import-qualified resolution lands on the
-			// func too — BPECounter.Count/Estimator.Count must not inherit
-			// the func Count's callers).
+			// qualifier through its own imports and falls back to a
+			// last-segment heuristic ONLY for unresolvable callers. Mirror
+			// that: only the key's UNRESOLVABLE callers join — attributing
+			// a resolvable caller by directory base would over-attribute
+			// (a directory base like "metrics" is not unique to one
+			// package). A qualified key naming a package's RECEIVER-LESS symbol
+			// belongs to that func, never to a same-named method.
 			hasLocalFunc := false
 			for _, d := range ix.symbolsFor(s.Name) {
 				if d.Receiver == "" && filepath.Dir(d.File) == dir {
@@ -2220,8 +2437,8 @@ func (ix *Index) CallersFor(s Symbol) []string {
 				}
 			}
 			if !hasLocalFunc {
-				for k, callers := range ix.Callers {
-					if k == s.FullName() || simpleKey(k) != s.Name {
+				for k, callers := range ix.callerIndex().bySimpleKey[s.Name] {
+					if k == s.FullName() {
 						continue
 					}
 					i := strings.LastIndexByte(k, '.')
@@ -2239,30 +2456,19 @@ func (ix *Index) CallersFor(s Symbol) []string {
 				}
 			}
 			// Bare-name bucket: a method named with a Go predeclared
-			// identifier ("append", "len") is never bare-callable — a bare
-			// reference binds to the builtin (Go scoping) or to a
-			// package-level func that shadows it, so the bucket holds only
-			// builtin calls and must not widen the method's callers.
+			// identifier is never bare-callable (a bare reference binds to
+			// the builtin or a shadowing func), so that bucket must not
+			// widen the method's callers.
 			if !isPredeclared(s.Name) && exactlyOneLocalDef(ix, s.Name, dir) {
 				for _, c := range ix.Callers[s.Name] {
 					// Mirror the graph's callee-side resolution of a bare
-					// callee (resolveEndpointPackageAware anchored on the
-					// caller), which depends on the CALLER's form:
-					//  - a receiver-qualified caller ("Client.audit", pooled
-					//    by the Python and TS SDKs) is resolved by trying
-					//    every receiver-matched candidate — the same-package
-					//    def wins, so a caller with ANY def in this package
-					//    is attributed (callerHasLocalDef);
-					//  - a bare caller ("List") needs an unambiguous
-					//    resolution — every def must live here
-					//    (callerInPackage; the orgapprovals List that drives
-					//    the bare func loadLocked must not leak onto
-					//    ArtifactStore.loadLocked just because
-					//    internal/tasklife also defines a List);
-					//  - either form is additionally attributed when the
-					//    caller's package imports this def's package (the
-					//    internal/web rate-limit test drives the SDK's
-					//    Client.do through an HTTP client).
+					// callee, which depends on the CALLER's form: a
+					// receiver-qualified caller is resolved by trying every
+					// receiver-matched candidate — the same-package def
+					// wins (callerHasLocalDef); a bare caller needs every
+					// def local (callerInPackage — an ambiguous name must
+					// not leak across packages); either form also joins when
+					// the caller's package imports this def's package.
 					if ix.callerAttributedBare(c, s, dir) {
 						out = append(out, c)
 					}
@@ -2275,23 +2481,16 @@ func (ix *Index) CallersFor(s Symbol) []string {
 	var out []string
 	// Package-qualified keys ("db.Open", "lock.Acquire") whose qualifier names
 	// a directory holding a definition of s: the bucket is attributed to every
-	// same-directory candidate, not just the first the qualifier happens to
-	// match — two packages can share a directory base ("memory" ->
-	// internal/memory and internal/mcp/memory) and build-tagged duplicates can
-	// share one package ("lock.Acquire" -> lock_unix.go and lock_windows.go),
-	// and impact attributes the qualified endpoint to each same-named
-	// definition whose package the qualifier names. A RESOLVABLE caller
-	// (unique simple name) is attributed only when its package actually
-	// imports this definition's package under the qualifier — the graph
-	// resolves the qualified callee through the CALLER's imports, so a
-	// caller of "governance.AuthorizeContext" (the core, imported as
-	// "governance") must not be base-matched onto the MCP wrapper in
-	// internal/mcp/governance just because both packages end in
-	// "governance". Unresolvable callers join via the graph's last-segment
-	// package fallback, which fires only when the caller cannot be
-	// attributed.
-	for k, callers := range ix.Callers {
-		if k == s.FullName() || simpleKey(k) != s.Name {
+	// same-directory candidate — two packages can share a directory base
+	// ("memory") and build-tagged duplicates can share one package
+	// (lock_unix.go/lock_windows.go). A RESOLVABLE caller (unique simple
+	// name) is attributed only when its package actually imports this
+	// definition's package under the qualifier — the graph resolves the
+	// qualified callee through the CALLER's imports (a "governance.X" call
+	// must not base-match the MCP wrapper in internal/mcp/governance).
+	// Unresolvable callers join via the last-segment package fallback.
+	for k, callers := range ix.callerIndex().bySimpleKey[s.Name] {
+		if k == s.FullName() {
 			continue
 		}
 		i := strings.LastIndexByte(k, '.')
@@ -2311,35 +2510,27 @@ func (ix *Index) CallersFor(s Symbol) []string {
 		}
 	}
 	// Bare-name bucket: same-package callers only, gated by exactlyOneLocalDef
-	// (methods included — the graph's caller-package fallback ambiguity). Two
-	// graph paths are mirrored: (a) when the bare name has a UNIQUE receiver-less
-	// definition project-wide (resolveNodeID's qualified-match — methods never
-	// match a bare reference), every bare edge calls that one definition, so an
-	// ambiguous caller name is still attributed when it has a definition in the
-	// package (the graph resolves the callee via the unique match and the caller
-	// via its same-package preference); (b) otherwise a shared bare name needs a
-	// caller wholly in the package (the graph needs a unique caller to
-	// disambiguate). The strict all-matches callerInPackage stays in force for
-	// the computeCallers merge guard, which must not let a cross-package
-	// qualified caller enter a shared bare bucket.
+	// (methods included). Two graph paths are mirrored: (a) a UNIQUE
+	// receiver-less definition project-wide owns every bare edge — an
+	// ambiguous caller still joins when it has a definition in the package
+	// (same-package preference); (b) otherwise a shared bare name needs a
+	// caller wholly in the package. The strict callerInPackage stays in force
+	// for the computeCallers merge guard (no cross-package qualified caller
+	// may enter a shared bare bucket).
 	for _, c := range exact {
 		if uniqueReceiverLessDef(ix, s.Name) {
 			// Path (a): the bare name resolves to the unique receiver-less
 			// definition regardless of local methods or the caller's
-			// ambiguity; the caller is attributed via same-package
-			// preference.
+			// ambiguity; the caller joins via same-package preference.
 			if callerHasLocalDef(ix, c, dir) {
 				out = append(out, c)
 			}
 		} else if exactlyOneLocalDef(ix, s.Name, dir) && ix.callerAttributedBare(c, s, dir) {
 			// Path (b): shared bare name — the graph's caller-package
 			// fallback needs an unambiguous local resolution (methods
-			// included) and a caller resolved into the package: the
-			// same-package def for a receiver-qualified caller (any
-			// local def wins — Check.Run is shared by several packages
-			// but the blueprint Check.Run calls the blueprint
-			// normalizePath), every def local for a bare caller, or an
-			// import-linked caller.
+			// included) and a caller resolved into the package (any local
+			// def wins for a receiver-qualified caller; every def local
+			// for a bare caller; or an import-linked caller).
 			out = append(out, c)
 		}
 	}
@@ -2467,7 +2658,7 @@ func (ix *Index) callerImportsDef(caller string, d Symbol, qual string) bool {
 	if len(defs) != 1 {
 		return false // unresolvable callers join via the graph's fallback instead
 	}
-	filePkg := ix.filePkgIndex()
+	filePkg := ix.callerIndex().filePkg
 	callerPkg := filePkg[defs[0].File]
 	if callerPkg == "" {
 		return false
@@ -2587,7 +2778,7 @@ func (ix *Index) callerImportsDefPkg(caller string, s Symbol) bool {
 			}
 		}
 	}
-	filePkg := ix.filePkgIndex()
+	filePkg := ix.callerIndex().filePkg
 	defPkg := filePkg[s.File]
 	if defPkg == "" {
 		return false
@@ -2659,7 +2850,7 @@ func (ix *Index) callerImportsDefPkgAnchored(callerDef Symbol, s Symbol) bool {
 			return false
 		}
 	}
-	filePkg := ix.filePkgIndex()
+	filePkg := ix.callerIndex().filePkg
 	defPkg := filePkg[s.File]
 	if defPkg == "" {
 		return false
@@ -2689,18 +2880,27 @@ func (ix *Index) CallersOfName(name string) []string {
 	return dedupeSorted(ix.AliasCallers[name])
 }
 
-// CallsFor returns deduplicated callees recorded under the exact key of s.
-// Methods and unambiguous package-level symbols keep the recorded bucket
-// byte-identical. When two or more packages define the same simple name, the
-// shared caller bucket mixes every same-named symbol's callees, so each edge
-// is attributed to s only when the callee could have been recorded from s's
-// own file: a bare callee that resolves into s's package (or stays foreign),
-// or a qualified callee whose qualifier names an import of s's file or a type
-// declared in s's package. A package-qualified callee naming s's own package
-// ("governance.NewFirewall") was recorded by a same-named symbol in another
-// file — s never qualifies its own package — and never leaks into s's list.
+// CallsFor returns deduplicated callees recorded under the exact key of s,
+// selecting edges from s's source file when provenance is available. Synthetic
+// and legacy edges without a source file retain import/package attribution.
 func (ix *Index) CallsFor(s Symbol) []string {
 	edges := ix.Calls[s.FullName()]
+	owned := false
+	for _, edge := range edges {
+		if edge.SourceFile != "" {
+			owned = true
+			break
+		}
+	}
+	if owned && s.File != "" {
+		var targets []string
+		for _, edge := range edges {
+			if edge.SourceFile == s.File || (edge.SourceFile == "" && calleeAttributable(ix, edge.Target, s)) {
+				targets = append(targets, edge.Target)
+			}
+		}
+		return dedupeSorted(targets)
+	}
 	if s.Receiver != "" || len(ix.symbolsFor(s.Name)) == 1 || s.File == "" {
 		return dedupeSorted(CallEdgeTargets(edges))
 	}
@@ -2924,11 +3124,30 @@ func (ix *Index) ContextDef(d Symbol, linesAround int) string {
 		linesAround = 12
 	}
 	var b strings.Builder
-	src, err := os.ReadFile(filepath.Join(ix.Root, d.File))
+	abs := filepath.Join(ix.Root, d.File)
+	// F-3: serve the line window from the shared file-content cache when the
+	// file is unchanged (size:mtime re-checked on every Get); read the whole
+	// file as before only on a miss. The stat is taken once and passed into
+	// the cache so the stored entry is tagged with the version the bytes were
+	// read under. Credential-shaped files are never cached (same guard
+	// kern_compact_file applies, internal/mcp/context/context.go).
+	fi, err := os.Stat(abs)
 	if err != nil {
 		return ""
 	}
-	all := strings.Split(string(src), "\n")
+	var all []string
+	if cached, ok := filecache.Default.Get(abs, fi); ok {
+		all = strings.Split(string(cached), "\n")
+	} else {
+		src, err := os.ReadFile(abs)
+		if err != nil {
+			return ""
+		}
+		if !fsutil.LooksLikeCredentialFile(abs) {
+			filecache.Default.Put(abs, src, fi)
+		}
+		all = strings.Split(string(src), "\n")
+	}
 	start := d.Line - linesAround
 	if start < 1 {
 		start = 1

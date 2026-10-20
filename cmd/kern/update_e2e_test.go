@@ -69,7 +69,7 @@ func TestUpdateE2E(t *testing.T) {
 	}
 	scriptURL := "file://" + filepath.Join(root, "install.sh")
 
-	// buildAll compiles kern, kern-mcp and kern-server into dir, each
+	// buildAll compiles kern and kern-mcp into dir, each
 	// stamped with ver via the Makefile-style ldflags pair.
 	buildAll := func(dir, ver string) {
 		t.Helper()
@@ -80,7 +80,7 @@ func TestUpdateE2E(t *testing.T) {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "go", "build",
 			"-ldflags", fmt.Sprintf("-X main.version=%s -X github.com/JayveerPrajapati/kern/internal/version.Version=%s", ver, ver),
-			"-o", dir+"/", "./cmd/kern", "./cmd/kern-mcp", "./cmd/kern-server")
+			"-o", dir+"/", "./cmd/kern", "./cmd/kern-mcp")
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("go build %s: %v\n%s", ver, err, out)
@@ -103,7 +103,7 @@ func TestUpdateE2E(t *testing.T) {
 		platform := runtime.GOOS + "-" + runtime.GOARCH
 		tarball := filepath.Join(rel, "kern-"+platform+".tar.gz")
 		cmd := exec.Command("tar", "-czf", tarball,
-			"-C", src, "kern", "kern-mcp", "kern-server")
+			"-C", src, "kern", "kern-mcp")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("tar fixture %s: %v\n%s", tag, err, out)
 		}

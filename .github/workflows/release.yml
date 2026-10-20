@@ -3,23 +3,40 @@ on:
   push:
     tags:
       - "v*"
+  # Manual dry-run: workflow_dispatch runs the whole test/review/build +
+  # build-native (CGO, tree-sitter `-full`) matrix against any ref WITHOUT
+  # publishing. The `release` (publish) job is gated on
+  # github.event_name == 'push', so a dispatched run validates the native
+  # matrix — which otherwise only ever runs on a real tag push — before a
+  # tag ships.
 
+# Least privilege: only the publish job needs to write.
 permissions:
-  contents: write
+  contents: read
 
+# Never cancel a release that is mid-publish: a second tag push would leave a
+# half-uploaded release behind.
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   changelog:
     name: changelog entry exists for tag
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
+    # Release binaries must carry the patched stdlib (see lint-and-vuln in
+    # ci.yml): GOTOOLCHAIN is auto-downloaded and used for the matrix builds.
+    env:
+      GOTOOLCHAIN: go1.27.2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Changelog entry exists for tag
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "dry-run (workflow_dispatch): changelog gate skipped — no tag to check"
+            exit 0
+          fi
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
           if ! grep -qF "## [${version}]" CHANGELOG.md; then
@@ -54,13 +71,12 @@ jobs:
       - name: Build kern from checkout
         run: |
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
-          go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
 
-      # Run the same reusable code-review action on the release tag that runs
-      # on PRs, so a release is reviewed against main before it ships. `comment`
-      # is disabled because a tag push has no pull request to comment on; the
-      # review + risk + boundary-guard analysis still runs and the verdict is
-      # surfaced in the job summary.
+      # Run the kern-review action on the release tag so a release is reviewed
+      # against main before it ships (no workflow runs it on PRs today).
+      # `comment` is disabled because a tag push has no pull request to comment
+      # on; the review + risk + boundary-guard analysis still runs and the
+      # verdict is surfaced in the job summary.
       - uses: ./.github/actions/kern-review
         with:
           base-ref: origin/main
@@ -98,10 +114,12 @@ jobs:
           os="${MATRIX_TARGET%/*}"
           arch="${MATRIX_TARGET#*/}"
           tag="${GITHUB_REF#refs/tags/}"
-          echo "os=$os" >> "$GITHUB_OUTPUT"
-          echo "arch=$arch" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "dir=kern-$os-$arch" >> "$GITHUB_OUTPUT"
+          {
+            echo "os=$os"
+            echo "arch=$arch"
+            echo "tag=$tag"
+            echo "dir=kern-$os-$arch"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build
         shell: bash
@@ -116,20 +134,18 @@ jobs:
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
             go build -buildvcs=false -trimpath -tags sqlite,notreesitter -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
-          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite,notreesitter -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
-            -o "$dir/kern-server" ./cmd/kern-server
 
       # Shrink the binaries with UPX (best compression). Significant savings:
-      # the Go runtime + three cmd binaries land ~50% smaller once packed.
+      # the Go runtime + the two cmd binaries land ~50% smaller once packed.
       # UPX runs only for linux targets: windows .exe cross-compression from
       # the linux runner is fragile, and UPX refuses macOS/Mach-O binaries
       # without --force-macos (and even then the packed binary can be broken).
-      # The `kern` binary is smoke-tested with its `version` subcommand after
-      # compression; the MCP/stdio binaries (kern-mcp, kern-server) are verified
-      # structurally with `file` because they read stdin and have no
-      # non-interactive `version` subcommand. A broken compression still fails
-      # the job before SHA256SUMS is generated.
+      # Both binaries expose a non-interactive `version` subcommand
+      # (positional `version`, plus -v/--version) that prints and exits, so
+      # each is smoke-tested with it where the built binary can execute on this
+      # runner and structurally verified with `file` elsewhere. `kern` remains
+      # the primary smoke; a broken compression still fails the job before
+      # SHA256SUMS is generated.
       - name: Compress binaries with UPX (linux only)
         if: steps.vars.outputs.os == 'linux'
         shell: bash
@@ -137,6 +153,7 @@ jobs:
           sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
           dir="${{ steps.vars.outputs.dir }}"
           upx --best --no-lzma "$dir/kern"
+          upx --best --no-lzma "$dir/kern-mcp"
           # Only smoke-test by executing when the built binary can run on this
           # runner (GOOS/GOARCH == host). Cross-compiled binaries (e.g. an
           # arm64 build on the amd64 ubuntu runner) execute fine at build time
@@ -145,13 +162,12 @@ jobs:
           if [ "${{ steps.vars.outputs.os }}" = "linux" ] && \
              [ "${{ steps.vars.outputs.arch }}" = "$(uname -m | sed 's/x86_64/amd64/')" ]; then
             "$dir/kern" version >/dev/null
+            "$dir/kern-mcp" version >/dev/null
           else
-            file "$dir/kern" | grep -qi "ELF"
+            file "$dir/kern" | grep -qi "ELF" && file "$dir/kern-mcp" | grep -qi "ELF"
           fi
-          upx --best --no-lzma "$dir/kern-server" && file "$dir/kern-server" | grep -qi "ELF"
-          upx --best --no-lzma "$dir/kern-mcp" && file "$dir/kern-mcp" | grep -qi "ELF"
           echo "compressed sizes:"
-          du -h "$dir/kern" "$dir/kern-mcp" "$dir/kern-server"
+          du -h "$dir/kern" "$dir/kern-mcp"
 
       - name: Package (tar.gz, or zip for windows)
         shell: bash
@@ -161,8 +177,7 @@ jobs:
           if [ "$os" = "windows" ]; then
             mv "$dir/kern" "$dir/kern.exe"
             mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
-            mv "$dir/kern-server" "$dir/kern-server.exe"
-            (cd "$dir" && zip -r "../${dir}.zip" .)
+            python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[1])" "$dir"
           else
             tar -czf "${dir}.tar.gz" -C "$dir" .
           fi
@@ -174,17 +189,156 @@ jobs:
             kern-*.tar.gz
             kern-*.zip
 
+  # Native, CGO-enabled build matrix producing the tree-sitter-enabled
+  # `-full` assets. Tree-sitter grammars are hard-CGO, so they can only be
+  # compiled on a runner whose GOOS/GOARCH matches the target — the reason
+  # the cross-compiled `build` job above ships the pure-Go
+  # `-tags sqlite,notreesitter` build. Every target here runs on a native
+  # runner; windows-arm64 has no native runner yet and stays pure-Go only
+  # (no `-full` asset). The build mirrors the `build` job minus the pure-Go
+  # tags: same -trimpath + ldflags stamping, same two binaries, same
+  # linux-only UPX policy. Installers probe for these assets FIRST and fall
+  # back to the pure-Go build when a `-full` asset is missing.
+  build-native:
+    name: build-native ${{ matrix.target }}
+    needs: [test, changelog, review]
+    strategy:
+      matrix:
+        include:
+          - target: linux/amd64
+            runner: ubuntu-latest
+          - target: linux/arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin/amd64
+            # macos-13 (the old Intel runner) is retired; macos-15-intel is
+            # its native replacement.
+            runner: macos-15-intel
+          - target: darwin/arm64
+            runner: macos-15
+          - target: windows/amd64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Release binaries must carry the patched stdlib (see lint-and-vuln in
+    # ci.yml): GOTOOLCHAIN is auto-downloaded and used for the matrix builds.
+    env:
+      GOTOOLCHAIN: go1.27.2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set target variables
+        id: vars
+        shell: bash
+        run: |
+          MATRIX_TARGET="${{ matrix.target }}"
+          os="${MATRIX_TARGET%/*}"
+          arch="${MATRIX_TARGET#*/}"
+          tag="${GITHUB_REF#refs/tags/}"
+          {
+            echo "os=$os"
+            echo "arch=$arch"
+            echo "tag=$tag"
+            echo "dir=kern-$os-$arch-full"
+          } >> "$GITHUB_OUTPUT"
+
+      # CGO_ENABLED=1 and NO build tags: the default build compiles the
+      # tree-sitter grammars in (the `sqlite` tag is a no-op — modernc.org/
+      # sqlite is pure-Go, gated by `!nosqlite` — so it is dropped here).
+      # GOOS/GOARCH are set to the matrix target even though they match the
+      # host, keeping the naming logic uniform with the `build` job.
+      - name: Build (tree-sitter, CGO)
+        shell: bash
+        run: |
+          os="${{ steps.vars.outputs.os }}"
+          arch="${{ steps.vars.outputs.arch }}"
+          dir="${{ steps.vars.outputs.dir }}"
+          mkdir -p "$dir"
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=1 \
+            go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
+            -o "$dir/kern" ./cmd/kern
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=1 \
+            go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
+            -o "$dir/kern-mcp" ./cmd/kern-mcp
+
+      # Smoke-test the tree-sitter build with each binary's `version`
+      # subcommand. The `build` job can only run this where the
+      # cross-compiled binary executes (linux, host == target); here every
+      # runner is native, so all five targets are exercised for real — a
+      # broken CGO/tree-sitter link fails the job before the asset ships.
+      - name: Smoke test binary versions (native)
+        shell: bash
+        run: |
+          dir="${{ steps.vars.outputs.dir }}"
+          "$dir/kern" version >/dev/null
+          "$dir/kern-mcp" version >/dev/null
+          file "$dir/kern"
+
+      # UPX: linux only — same policy as the `build` job (windows .exe
+      # compression from a foreign runner is fragile; UPX refuses Mach-O
+      # without --force-macos, which can produce broken binaries). The linux
+      # runners here are native, so the compressed binary is re-smoke-tested
+      # with `kern version` exactly like the `build` job does.
+      - name: Compress binaries with UPX (linux only)
+        if: steps.vars.outputs.os == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
+          dir="${{ steps.vars.outputs.dir }}"
+          upx --best --no-lzma "$dir/kern"
+          upx --best --no-lzma "$dir/kern-mcp"
+          "$dir/kern" version >/dev/null
+          "$dir/kern-mcp" version >/dev/null
+          file "$dir/kern" | grep -qi "ELF"
+          file "$dir/kern-mcp" | grep -qi "ELF"
+          echo "compressed sizes:"
+          du -h "$dir/kern" "$dir/kern-mcp"
+
+      - name: Package (tar.gz, or zip for windows)
+        shell: bash
+        run: |
+          os="${{ steps.vars.outputs.os }}"
+          dir="${{ steps.vars.outputs.dir }}"
+          if [ "$os" = "windows" ]; then
+            mv "$dir/kern" "$dir/kern.exe"
+            mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
+            python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[1])" "$dir"
+          else
+            tar -czf "${dir}.tar.gz" -C "$dir" .
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}-full"
+          path: |
+            kern-*-full.tar.gz
+            kern-*-full.zip
+
   release:
     name: publish release
-    needs: build
+    # Gate: only a real tag push publishes. A workflow_dispatch run exists to
+    # dry-run the test/review/build/build-native matrix against any ref and
+    # must never create a release.
+    if: github.event_name == 'push'
+    needs: [build, build-native]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     env:
       # Optional GPG signing secrets (see docs/security/signed-releases.md).
       # When GPG_PRIVATE_KEY is unset every signing step below is skipped and
       # the release ships SHA256SUMS-only (checksum integrity, no authenticity).
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      # Job-level so `if: env.TAP_PUBLISH_TOKEN != ''` below can see it: a
+      # step's own `env:` is not visible to that step's `if:`, and `secrets`
+      # is not allowed in `if:` at all.
+      TAP_PUBLISH_TOKEN: ${{ secrets.TAP_PUBLISH_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -209,9 +363,22 @@ jobs:
           # Ready-to-use Homebrew formula: url + sha256 filled in for this tag.
           sed -e "s|__KERN_VERSION__|${tag}|g" \
               -e "s|__KERN_SHA256__|${sha}|" \
+              -e "s|JayveerPrajapati/kern|${{ github.repository }}|g" \
               homebrew/kern.rb > kern.rb
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      # Post-packaging release smoke (B3): verifies what users download —
+      # SHA256SUMS round-trip, binary stamps, a live MCP stdio handshake
+      # (29/31 tool surfaces), index+search on this checkout, and doctor
+      # with zero [fail] findings — against the real release archives, not
+      # the development binary. Runs on every real tag push (the job is
+      # gated on push), before the release is published.
+      - name: Release smoke (artifacts)
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          scripts/release-smoke.sh --dir dist --repo . --version "$tag"
 
       # --- GPG signing (optional but recommended) ---------------------------
       # Signs SHA256SUMS and every release binary with the project's GPG key.
@@ -255,24 +422,12 @@ jobs:
             gpg --batch --verify "${f}.sig" "${f}"
           done
           echo "all release signatures verified"
-      # Attach the signatures + public key to the release once it exists. Runs
-      # only when signing happened (the step above set signed=true).
-      - name: Upload GPG signatures to release (optional)
-        if: ${{ steps.sign.outputs.signed == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.release.outputs.tag }}"
-          gh release upload "$tag" \
-            dist/SHA256SUMS.sig dist/SHA256SUMS.asc dist/kern-*.sig \
-            --clobber
-
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          tag="${{ steps.release.outputs.tag }}"
+          tag="$TAG"
           version="${tag#v}"
           # Release notes come from the CHANGELOG entry for this tag (the test
           # job above already failed the run if the section is missing), so the
@@ -283,12 +438,12 @@ jobs:
           # Printing stops at the next "## " section header (single source of
           # truth: the CHANGELOG).
           {
-            echo '- `curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh`'
+            echo "- \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`"
             echo "- \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`"
-            echo '- `brew install kern` — from the tap repo (auto-published by this workflow); formula attached as `kern.rb`.'
-            echo 'Assets include a `SHA256SUMS` file (`install.sh` verifies against it).'
+            echo "- Homebrew: a ready-to-import formula is attached as \`kern.rb\` (\`brew install ./kern.rb\`); a \`owner/tap\` formula is auto-published only when the repository has the \`TAP_PUBLISH_TOKEN\` secret configured."
+            echo "Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it)."
             if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
-              echo '- Assets are GPG-signed: `SHA256SUMS.sig` (detached signature) + `SHA256SUMS.asc` (public key). See `docs/security/signed-releases.md`.'
+              echo "- Assets are GPG-signed: \`SHA256SUMS.sig\` (detached signature) + \`SHA256SUMS.asc\` (public key). See \`docs/security/signed-releases.md\`."
             fi
             awk -v ver="[$version]" '
               /^## / {
@@ -296,11 +451,25 @@ jobs:
                 if (index($0, ver)==4) { f=1; next }
               }
               f { print }
-            '
+            ' CHANGELOG.md
           } > /tmp/release-notes.md
           gh release create "$tag" dist/kern-*.tar.gz dist/kern-*.zip dist/SHA256SUMS kern.rb \
             --notes-file /tmp/release-notes.md \
             --draft=false
+
+      # Attach the signatures + public key. This MUST come after the release is
+      # created: `gh release upload` fails on a tag with no release yet. Runs
+      # only when signing happened (the sign step set signed=true).
+      - name: Upload GPG signatures to release (optional)
+        if: ${{ steps.sign.outputs.signed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            dist/SHA256SUMS.sig dist/SHA256SUMS.asc dist/kern-*.sig \
+            --clobber
 
       # Auto-publish the Homebrew formula to the tap repo so `brew tap <owner>/tap
       # && brew install kern` works for every released tag WITHOUT running
@@ -319,9 +488,11 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.TAP_PUBLISH_TOKEN }}
           TAP_OWNER: ${{ vars.TAP_OWNER }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          tag="${{ steps.release.outputs.tag }}"
-          owner="${TAP_OWNER:-${{ github.repository_owner }}}"
+          tag="$TAG"
+          owner="${TAP_OWNER:-$REPO_OWNER}"
           echo "==> publishing kern ${tag} to tap ${owner}/homebrew-tap"
           git clone "https://${TAP_TOKEN}@github.com/${owner}/homebrew-tap.git" tap
           mkdir -p tap/Formula

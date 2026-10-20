@@ -42,6 +42,11 @@ func (e *Extractor) Extract() ([]domain.Node, []domain.Edge, error) {
 		if !isSourceExt(filepath.Ext(path)) {
 			return nil
 		}
+		// Test/fixture files (F3-4): route registrations in tests mirror
+		// real handlers without being the repo's HTTP surface.
+		if IsTestPath(path) {
+			return nil
+		}
 		fileNodes, fileEdges := e.extractFile(path)
 		nodes = append(nodes, fileNodes...)
 		edges = append(edges, fileEdges...)
@@ -105,6 +110,13 @@ func (e *Extractor) extractFile(path string) ([]domain.Node, []domain.Edge) {
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+		// Comment lines (Go/JS // and /*, block-comment *, Python/Ruby #)
+		// document route registrations without registering them — the
+		// extractor's own pattern docs must not become endpoints (F3-4's
+		// "GET ..." came from a doc comment).
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "*") {
+			continue
+		}
 		for _, rp := range routePatterns {
 			m := rp.regex.FindStringSubmatch(line)
 			if m == nil {
@@ -191,4 +203,19 @@ func isSourceExt(ext string) bool {
 		return true
 	}
 	return false
+}
+
+// IsTestPath reports whether a file is a test or fixture path: Go/Python
+// test naming, JS spec tests, or testdata/fixtures directories. Route
+// registrations in such files mirror real handlers without being the
+// repo's HTTP surface (F3-4) — this extractor and the twin entity
+// inventory skip them, the same exclusion the buddy digest applies.
+func IsTestPath(path string) bool {
+	base := filepath.Base(path)
+	slash := filepath.ToSlash(path)
+	if strings.HasPrefix(base, "test_") || strings.Contains(slash, "/testdata/") || strings.Contains(slash, "/fixtures/") {
+		return true
+	}
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	return strings.HasSuffix(stem, "_test") || strings.HasSuffix(stem, ".test") || strings.HasSuffix(stem, ".spec")
 }

@@ -16,17 +16,31 @@ import (
 //  4. <root>/.kern/runtime.json                      -> local JSON snapshot
 //
 // Env vars are read via config so .kern/config.json keys work as overrides.
+// Bearer credentials are env-ONLY (KERN_PROMETHEUS_TOKEN, KERN_OTEL_TOKEN,
+// KERN_K8S_TOKEN) — deliberately never config-file keys, so secrets cannot be
+// written into .kern/config.json. A configured endpoint that fails URL
+// validation returns nil instead of spawning a broken poller; doctor reports
+// the invalid configuration via DescribeSource.
 // Returns nil when nothing is configured — the "no telemetry" state that
 // every consumer must treat as an absent dimension, not a failure.
 func LoadSource(root string) Source {
 	interval := PollInterval()
 	if url := config.String("", "KERN_PROMETHEUS_URL", "runtime.prometheus_url", ""); url != "" {
-		return NewLivePrometheusSource(url, interval)
+		if ValidateURL(url) != nil {
+			return nil
+		}
+		return NewLivePrometheusSource(url, os.Getenv("KERN_PROMETHEUS_TOKEN"), interval)
 	}
 	if url := config.String("", "KERN_OTEL_URL", "runtime.otel_url", ""); url != "" {
-		return NewLiveOtelSource(url, interval)
+		if ValidateURL(url) != nil {
+			return nil
+		}
+		return NewLiveOtelSource(url, os.Getenv("KERN_OTEL_TOKEN"), interval)
 	}
 	if api := config.String("", "KERN_K8S_API", "runtime.k8s.api", ""); api != "" {
+		if ValidateURL(api) != nil {
+			return nil
+		}
 		return NewLiveKubernetesSource(
 			api,
 			os.Getenv("KERN_K8S_TOKEN"),

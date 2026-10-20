@@ -69,7 +69,7 @@ func surfaceDriftLogPath(root string) string {
 //
 // Path mapping (matches exactly the parity surfaces the drift gates check):
 //
-//	CatalogTouched: paths under "internal/mcp/catalog/" — the catalog
+//	CatalogTouched: paths under "internal/mcpcatalog/" — the catalog
 //	    manifest (catalog.ToolNames() is the source of truth behind
 //	    mcp.ToolNames(), which TestPluginMatchesMCPCatalog compares against
 //	    the plugin; tool-registration edits elsewhere in internal/mcp —
@@ -170,17 +170,21 @@ func changedPath(fields []string) string {
 }
 
 // isCatalogSurface reports whether the changed path is part of the MCP
-// catalog manifest — internal/mcp/catalog/, the source of truth behind
+// catalog manifest — internal/mcpcatalog/, the source of truth behind
 // mcp.ToolNames().
 func isCatalogSurface(path string) bool {
-	return strings.HasPrefix(path, "internal/mcp/catalog/")
+	return strings.HasPrefix(path, "internal/mcpcatalog/")
 }
 
-// isPluginSurface reports whether the changed path is either copy of the
-// opencode plugin that must stay byte-identical.
+// isPluginSurface reports whether the changed path is one of the two live
+// copies of the opencode plugin that must stay byte-identical: the checkout
+// copy (.opencode/plugins/kern.ts) and the bundled asset
+// (internal/agentwire/assets/plugin/kern.ts). The old
+// internal/setup/assets/plugin/kern.ts location was removed in 57db483, so
+// it is no longer checked.
 func isPluginSurface(path string) bool {
 	return path == ".opencode/plugins/kern.ts" ||
-		path == "internal/setup/assets/plugin/kern.ts"
+		path == "internal/agentwire/assets/plugin/kern.ts"
 }
 
 // isDocsSurface reports whether the changed path is one of the regenerated

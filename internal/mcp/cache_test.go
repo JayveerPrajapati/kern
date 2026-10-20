@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,6 +94,11 @@ func toolCacheFiles(t *testing.T) []string {
 // (F6 correctness contract), including the provenance summary line modulo the
 // live-derived "built Xs ago" age segment.
 func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
+	// The served ledger (B1) supersedes D1's full-payload replay for
+	// same-session identical repeats of etag-eligible tools. This test pins
+	// the D1 hit path itself (F6 provenance replay), so the session-dedup
+	// layer is disabled to exercise it in isolation.
+	t.Setenv("KERN_SERVED_LEDGER", "0")
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	r1 := s.toolCallResponse(json.RawMessage(`"1"`), searchCall(root, nil)).(map[string]any)
@@ -104,11 +112,16 @@ func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
 	if !reflect.DeepEqual(res1["provenance"], res2["provenance"]) {
 		t.Fatalf("provenance differs between fresh run and cache hit:\nfresh: %+v\nhit:   %+v", res1["provenance"], res2["provenance"])
 	}
-	// Content text identical except the live-derived age seconds in the
-	// summary line ("built 3s ago" — recomputed at serve time on both paths).
-	norm := regexp.MustCompile(`built \d+s ago`)
-	t1 := norm.ReplaceAllString(contentText(r1), "built X ago")
-	t2 := norm.ReplaceAllString(contentText(r2), "built X ago")
+	// Content text identical except the live-derived segments: the age
+	// seconds in the summary line ("built 3s ago" — recomputed at serve time
+	// on both paths) and the threshold-gated duration footer ("[kern] took
+	// Xs" — only a slow FRESH run crosses the threshold). The footer's
+	// leading newline is part of the footer: normalizing it with the text
+	// keeps both paths byte-equal whether or not the fresh run tripped the
+	// threshold under full-suite load (F6, QA 2026-10-20).
+	norm := regexp.MustCompile(`built \d+s ago|\n\[kern\] took \d+(?:\.\d+)?s`)
+	t1 := norm.ReplaceAllString(contentText(r1), "")
+	t2 := norm.ReplaceAllString(contentText(r2), "")
 	if t1 != t2 {
 		t.Fatalf("text differs between fresh run and cache hit:\nfresh: %q\nhit:   %q", t1, t2)
 	}
@@ -124,6 +137,146 @@ func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
 	}
 }
 
+// TestToolCacheProvenanceNormalizerAbsorbsFooterAsymmetry pins the
+// full-suite F6 flake (2026-10-20): under load the FRESH index build
+// crosses durationFooterThreshold and gains a "[kern] took Xs" footer,
+// while the fast cache-hit replay does not, so the fresh text carries one
+// extra separator newline. The summary normalization in
+// TestToolCacheHitIdenticalToFreshRun must absorb the footer INCLUDING its
+// leading newline (the footer's separator is part of the footer). This
+// test forces that asymmetry deterministically by faking the slow-fresh
+// footer and asserts the normalizer renders both paths byte-identical.
+func TestToolCacheProvenanceNormalizerAbsorbsFooterAsymmetry(t *testing.T) {
+	t.Setenv("KERN_SERVED_LEDGER", "0")
+	root := mcpProject(t)
+	s := cacheTestServer(t)
+	r1 := s.toolCallResponse(json.RawMessage(`"1"`), searchCall(root, nil)).(map[string]any)
+	r2 := s.toolCallResponse(json.RawMessage(`"2"`), searchCall(root, nil)).(map[string]any)
+	if isErrorResult(r1) || isErrorResult(r2) {
+		t.Fatalf("search calls errored: %q / %q", contentText(r1), contentText(r2))
+	}
+	// The observed full-suite failure: the fresh side gains the footer, the
+	// hit side does not. Simulate the asymmetry (a local run is fast enough
+	// that neither side emits a real footer).
+	fresh := contentText(r1) + "\n[kern] took 99.0s"
+	hit := contentText(r2)
+	norm := regexp.MustCompile(`built \d+s ago|\n\[kern\] took \d+(?:\.\d+)?s`)
+	t1 := norm.ReplaceAllString(fresh, "")
+	t2 := norm.ReplaceAllString(hit, "")
+	if t1 != t2 {
+		t.Fatalf("normalizer must absorb the duration-footer asymmetry:\nfresh: %q\nhit:   %q", t1, t2)
+	}
+}
+
+// TestD1LookupProbesFreshness (C2/F1, ADR-0012): on a watcher-less host
+// nothing breaks the D1 replay cycle — the identity only rotates after a
+// rebuild, and rebuilds only happen on handler runs (D1 misses) — so a
+// same-args repeat call would replay the cached response even after the
+// tree changed. The fix: cacheIndexIdentity validates the cached identity
+// with the session's rate-limited staleness probe (Session.ProbeFresh)
+// before trusting it; a stale probe invalidates the session cache (never
+// builds), the identity reports "noindex", the lookup misses, and the
+// handler serves rebuilt content. D1 is ON here (cacheTestServer default),
+// so a regression re-introduces the replay and the stale text fails this
+// test.
+func TestD1LookupProbesFreshness(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package fixture\n\nfunc Target() string { return \"v1\" }\n")
+
+	s := cacheTestServer(t)
+	defer s.Close()
+
+	// First call: builds the index, serves v1, stores the D1 entry.
+	r1 := s.toolCallResponse(json.RawMessage(`"1"`), exploreEtagParams(root, "Target", "")).(map[string]any)
+	if isErrorResult(r1) {
+		t.Fatalf("kern_explore errored: %q", contentText(r1))
+	}
+	if !strings.Contains(contentText(r1), "v1") {
+		t.Fatalf("first serve lacks v1: %q", contentText(r1))
+	}
+
+	// Sleep past the freshness cooldown so the probe re-arms (1s without a
+	// native watcher, 5s with one — sleep past the longer bound).
+	time.Sleep(5500 * time.Millisecond)
+
+	// Edit the tree. The D1 lookup must now probe, find the cached index
+	// stale, miss, and serve the rebuilt content — not the cached v1.
+	write("a.go", "package fixture\n\nfunc Target() string { return \"v2 edited\" }\n")
+	r2 := s.toolCallResponse(json.RawMessage(`"2"`), exploreEtagParams(root, "Target", "")).(map[string]any)
+	if isErrorResult(r2) {
+		t.Fatalf("kern_explore errored after edit: %q", contentText(r2))
+	}
+	if !strings.Contains(contentText(r2), "v2 edited") {
+		t.Fatalf("D1 replayed the stale response after an edit (probe not wired): %q", contentText(r2))
+	}
+}
+
+// TestD1LookupBurstAfterCooldownNoStaleReplay (D1): a concurrent burst of
+// cacheable calls that all arrive after the freshness cooldown expired must
+// never replay stale content. The session's probe is single-flighted per
+// cooldown window (project.ProbeFresh): one probe (the runner) invalidates
+// the cached identity for the whole burst; every caller misses the stale
+// entry and serves the rebuilt content. Before the memo, every burst caller
+// ran its own full probe concurrently.
+func TestD1LookupBurstAfterCooldownNoStaleReplay(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package fixture\n\nfunc Target() string { return \"v1\" }\n")
+
+	s := cacheTestServer(t)
+	defer s.Close()
+
+	// Prime: builds the index and stores the v1 D1 entry.
+	r1 := s.toolCallResponse(json.RawMessage(`"1"`), exploreEtagParams(root, "Target", "")).(map[string]any)
+	if isErrorResult(r1) {
+		t.Fatalf("prime kern_explore errored: %q", contentText(r1))
+	}
+	if !strings.Contains(contentText(r1), "v1") {
+		t.Fatalf("prime serve lacks v1: %q", contentText(r1))
+	}
+
+	// Sleep past the freshness cooldown so the probe re-arms (1s without a
+	// native watcher, 5s with one — sleep past the longer bound).
+	time.Sleep(5500 * time.Millisecond)
+
+	// Edit the tree, then fire the whole burst concurrently: every call
+	// lands after the cooldown expired, so the burst shares one probe.
+	write("a.go", "package fixture\n\nfunc Target() string { return \"v2 edited\" }\n")
+	const burst = 6
+	resps := make([]map[string]any, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			resps[n] = s.toolCallResponse(json.RawMessage(fmt.Sprintf("\"%d\"", n+2)), exploreEtagParams(root, "Target", "")).(map[string]any)
+		}(i)
+	}
+	wg.Wait()
+	for i, r := range resps {
+		if isErrorResult(r) {
+			t.Fatalf("burst call %d errored: %q", i, contentText(r))
+		}
+		if strings.Contains(contentText(r), "v1") {
+			t.Fatalf("burst call %d replayed stale v1 after an edit: %q", i, contentText(r))
+		}
+		if !strings.Contains(contentText(r), "v2 edited") {
+			t.Fatalf("burst call %d lacks v2 edited: %q", i, contentText(r))
+		}
+	}
+}
+
 // TestToolCacheKeyChangesWithIndexIdentity: the cache key embeds the index
 // identity, so a different identity (an index rebuild) can never serve a stale
 // entry (F2/F6). Different roots and different tools also key apart, while
@@ -134,26 +287,26 @@ func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
 func TestToolCacheKeyChangesWithIndexIdentity(t *testing.T) {
 	t.Parallel()
 	args := map[string]any{"root": "/r", "query": "x"}
-	kA := cacheKeyFor("kern_search", args, "/r", "identityA")
-	kB := cacheKeyFor("kern_search", args, "/r", "identityB")
+	kA := cacheKeyFor(context.Background(), "kern_search", args, "/r", "identityA")
+	kB := cacheKeyFor(context.Background(), "kern_search", args, "/r", "identityB")
 	if kA == kB {
 		t.Fatal("key must change when the index identity differs (rebuild)")
 	}
-	kRoot := cacheKeyFor("kern_search", args, "/other", "identityA")
+	kRoot := cacheKeyFor(context.Background(), "kern_search", args, "/other", "identityA")
 	if kA == kRoot {
 		t.Fatal("key must change when the resolved root differs")
 	}
-	kTool := cacheKeyFor("kern_explore", args, "/r", "identityA")
+	kTool := cacheKeyFor(context.Background(), "kern_explore", args, "/r", "identityA")
 	if kA == kTool {
 		t.Fatal("key must change when the tool differs")
 	}
-	kStrip := cacheKeyFor("kern_search", map[string]any{
+	kStrip := cacheKeyFor(context.Background(), "kern_search", map[string]any{
 		"root": "/r", "query": "x", "no_cache": "1", "agent_id": "a", "task": "t",
 	}, "/r", "identityA")
 	if kA != kStrip {
 		t.Fatal("no_cache/agent_id/task must be stripped from the key (same entry)")
 	}
-	kView := cacheKeyFor("kern_search", map[string]any{
+	kView := cacheKeyFor(context.Background(), "kern_search", map[string]any{
 		"root": "/r", "query": "x", "max_output": "500",
 	}, "/r", "identityA")
 	if kA == kView {
@@ -168,7 +321,7 @@ func TestToolCacheMutatingToolNeverCached(t *testing.T) {
 	s := cacheTestServer(t)
 	for _, name := range []string{
 		"kern_approve", "kern_register_host_sampler", "kern_lock",
-		"kern_stats", "kern_commitmsg", "kern_changes", "kern_review", "kern_memory",
+		"kern_stats", "kern_changes", "kern_review", "kern_memory",
 		"kern_doc", "kern_skill", "kern_snapshot",
 	} {
 		if toolCacheable(name) {
@@ -264,6 +417,11 @@ func TestToolCacheDisabledByEnv(t *testing.T) {
 }
 
 func TestToolCacheAuditEntryOnHit(t *testing.T) {
+	// Same-session identical repeats are the served ledger's (B1) scenario —
+	// it answers with the one-line pointer before D1 is consulted. This test
+	// pins the D1 hit path's audit tagging (F5), so the session-dedup layer
+	// is disabled to exercise it in isolation.
+	t.Setenv("KERN_SERVED_LEDGER", "0")
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	s.toolCallResponse(json.RawMessage(`"1"`), searchCall(root, nil)) // miss → store
@@ -340,7 +498,7 @@ func TestToolCacheStoredTextIsPiiMasked(t *testing.T) {
 	secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"
 	s.cacheStore(ctx, "kern_search", args, "deploy token "+secret+" now")
 
-	key := toolCacheKeyPrefix + cacheKeyFor("kern_search", args, "/tmp", "noindex")
+	key := toolCacheKeyPrefix + cacheKeyFor(context.Background(), "kern_search", args, "/tmp", "noindex")
 	var e toolCacheEntry
 	if err := cache.Load(key, &e); err != nil {
 		t.Fatalf("entry must be stored: %v", err)
@@ -370,7 +528,7 @@ func TestToolCacheSizeCapSkipsLargeEntries(t *testing.T) {
 	s := cacheTestServer(t)
 	ctx := context.WithValue(context.Background(), indexScopeKey{}, &indexScope{})
 	args := map[string]any{"root": "/tmp", "query": "q"}
-	key := toolCacheKeyPrefix + cacheKeyFor("kern_search", args, "/tmp", "noindex")
+	key := toolCacheKeyPrefix + cacheKeyFor(context.Background(), "kern_search", args, "/tmp", "noindex")
 	big := strings.Repeat("x", toolCacheEntrySizeCap+1)
 	s.cacheStore(ctx, "kern_search", args, big)
 	if cache.Exists(key) {
@@ -390,22 +548,15 @@ func TestToolCacheSizeCapSkipsLargeEntries(t *testing.T) {
 func TestCacheableAllowlistPinned(t *testing.T) {
 	t.Parallel()
 	cacheable := map[string]bool{
-		// index-backed deterministic tools (F1)
+		// index-backed deterministic tools (F1) — the 2026-10-18 surface slim
+		// shrank the catalog to 32 tools; the cacheable set is the 12 survivors
+		// flagged Cacheable in the catalog.
 		"kern_search": true, "kern_explore": true, "kern_context": true,
-		"kern_compact_file": true, "kern_ast_search": true, "kern_fts_search": true,
-		"kern_why":      true,
-		"kern_inherits": true, "kern_path": true, "kern_dead": true,
-		"kern_cycles": true, "kern_larges": true, "kern_arch": true,
-		"kern_communities": true, "kern_hubs": true, "kern_near": true,
-		"kern_probe": true, "kern_retrieve": true,
-		"kern_resolve": true, "kern_explain": true, "kern_graph": true,
-		"kern_bridges": true, "kern_cochange": true, "kern_surprising": true,
-		"kern_churn": true, "kern_test_gaps": true, "kern_fragility_hotspots": true,
-		"kern_frameworks": true, "kern_fw_trace": true, "kern_entry_points": true,
-		"kern_meta": true, // F11: vetted like every other entry (runtime gate R1)
+		"kern_compact_file": true, "kern_ast_search": true, "kern_why": true,
+		"kern_path": true, "kern_arch": true, "kern_probe": true,
+		"kern_graph": true, "kern_meta": true,
 		// pure-arg tools (F1)
-		"kern_mask_pii": true, "kern_prose": true, "kern_check_draft": true,
-		"kern_schema_validate": true, "kern_verify_output": true,
+		"kern_mask_pii": true,
 	}
 	got := map[string]bool{}
 	for _, tool := range tools {
@@ -433,7 +584,7 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 		"kern_agents", "kern_memory", "kern_runtime", "kern_stream", "kern_lsp_bridge",
 		"kern_llm_providers", "kern_context_watch", "kern_agent", "kern_optimize",
 		"kern_org", "kern_semantic",
-		"kern_commitmsg", "kern_changes", "kern_review",
+		"kern_changes", "kern_review",
 		"kern_doc", "kern_skill", "kern_snapshot",
 		"kern_repo_search",
 	} {
@@ -465,7 +616,7 @@ func TestToolCacheMetaRoutingGate(t *testing.T) {
 	for _, tc := range cases {
 		args := map[string]any{"request": tc.request}
 		routed, _ := classifyMetaRequest(tc.request)
-		if got := cacheableForCall("kern_meta", args); got != tc.want {
+		if got := cacheableForCall(context.Background(), "kern_meta", args); got != tc.want {
 			t.Errorf("kern_meta request %q (routes to %s): cacheableForCall = %v, want %v",
 				tc.request, routed, got, tc.want)
 		}
@@ -503,6 +654,11 @@ func TestToolCacheMetaUncacheableRouteNeverCached(t *testing.T) {
 // served from the cache on the second — the hit is tagged
 // Policy:"tool-cache" in the audit chain (R1).
 func TestToolCacheMetaCacheableRouteServedFromCache(t *testing.T) {
+	// Same-session identical repeats are the served ledger's (B1) scenario —
+	// it answers with the one-line pointer before D1 is consulted. This test
+	// pins the D1 hit path for a cacheable kern_meta route (R1), so the
+	// session-dedup layer is disabled to exercise it in isolation.
+	t.Setenv("KERN_SERVED_LEDGER", "0")
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	pa, _ := json.Marshal(map[string]any{
@@ -554,10 +710,10 @@ func TestToolCacheSemanticSearchNeverCached(t *testing.T) {
 	}
 	// The predicate itself: semantic args exclude a cacheable tool, and the
 	// same tool without semantic stays cacheable.
-	if cacheableForCall("kern_search", map[string]any{"query": "Greet", "semantic": "true"}) {
+	if cacheableForCall(context.Background(), "kern_search", map[string]any{"query": "Greet", "semantic": "true"}) {
 		t.Fatal("kern_search with semantic=true must not be cacheable")
 	}
-	if !cacheableForCall("kern_search", map[string]any{"query": "Greet"}) {
+	if !cacheableForCall(context.Background(), "kern_search", map[string]any{"query": "Greet"}) {
 		t.Fatal("kern_search without semantic must remain cacheable")
 	}
 }
@@ -573,14 +729,14 @@ func TestToolCacheIdentityIgnoresBuiltAt(t *testing.T) {
 	idA := &index.IndexIdentity{ContentRoot: "/r", TreeOID: "tree-abc", GitCommit: "c1", BuiltAt: base}
 	idB := &index.IndexIdentity{ContentRoot: "/r", TreeOID: "tree-abc", GitCommit: "c1", BuiltAt: base.Add(24 * time.Hour)}
 	args := map[string]any{"root": "/r", "query": "x"}
-	kA := cacheKeyFor("kern_search", args, "/r", indexIdentityString(idA))
-	kB := cacheKeyFor("kern_search", args, "/r", indexIdentityString(idB))
+	kA := cacheKeyFor(context.Background(), "kern_search", args, "/r", indexIdentityString(idA))
+	kB := cacheKeyFor(context.Background(), "kern_search", args, "/r", indexIdentityString(idB))
 	if kA != kB {
 		t.Fatal("identical ContentRoot/TreeOID/GitCommit with different BuiltAt must produce the same cache key")
 	}
 	// Content change still rotates the key (F2/F6).
 	idC := &index.IndexIdentity{ContentRoot: "/r", TreeOID: "tree-xyz", GitCommit: "c1", BuiltAt: base}
-	if kA == cacheKeyFor("kern_search", args, "/r", indexIdentityString(idC)) {
+	if kA == cacheKeyFor(context.Background(), "kern_search", args, "/r", indexIdentityString(idC)) {
 		t.Fatal("a different TreeOID must produce a different cache key")
 	}
 }

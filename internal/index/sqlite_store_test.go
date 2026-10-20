@@ -8,6 +8,83 @@ import (
 	"testing"
 )
 
+func TestSQLiteJavaCompilerBindingsRoundTrip(t *testing.T) {
+	requireJavaCompiler(t)
+	root := writeTree(t, map[string]string{"Api.java": "interface Job { int run(int value); } class Good implements Job { public int run(int value) { return value; } } class Api { void call(Job job) { job.run(1); } }"})
+	ix, err := BuildWithOptions(root, WithJavaCompiler(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenSQLite(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Save(ix); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.JavaCompiler || loaded.JavaClasspath != ix.JavaClasspath {
+		t.Fatal("SQLite lost Java compiler mode")
+	}
+	before, after := ix.Calls["Api.call"], loaded.Calls["Api.call"]
+	if len(before) != 2 || len(after) != 2 {
+		t.Fatalf("SQLite lost runtime candidates: before=%+v after=%+v", before, after)
+	}
+	for position := range before {
+		if before[position] != after[position] {
+			t.Fatalf("SQLite changed compiler metadata: before=%+v after=%+v", before, after)
+		}
+	}
+	edges, err := store.LookupCalls("Api.call")
+	if err != nil || len(edges) != 2 || edges[1] != before[1] {
+		t.Fatalf("point query lost Java compiler metadata: %+v, %v", edges, err)
+	}
+	for _, edge := range loaded.CallBindings().Edges {
+		if edge.Binding != "javac" || edge.Resolution != "resolved" {
+			t.Fatalf("loaded compiler edge lost provenance: %+v", edge)
+		}
+	}
+}
+
+func TestSQLiteGoCompilerBindingsRoundTrip(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":  "module demo\n\ngo 1.22\n",
+		"main.go": "package demo\nfunc Use() { Work() }\nfunc Work() {}\n",
+	})
+	ix, err := BuildWithOptions(root, WithGoTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenSQLite(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Save(ix); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ix.Calls["Use"][0]
+	if want.ToID == "" || !loaded.GoTypes || len(loaded.Calls["Use"]) != 1 || loaded.Calls["Use"][0] != want {
+		t.Fatalf("SQLite dropped compiler metadata: %+v", loaded.Calls["Use"])
+	}
+	edges, err := store.LookupCalls("Use")
+	if err != nil || len(edges) != 1 || edges[0] != want {
+		t.Fatalf("point query dropped compiler metadata: %+v, %v", edges, err)
+	}
+	graph := loaded.CallBindings()
+	if len(graph.Edges) != 1 || graph.Edges[0].From != want.FromID || graph.Edges[0].To != want.ToID || graph.Edges[0].Resolution != "resolved" {
+		t.Fatalf("loaded graph lost compiler identity: %+v", graph)
+	}
+}
+
 func TestSQLiteRoundTrip(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := writeTree(t, map[string]string{
@@ -96,6 +173,9 @@ func TestSQLiteCallsKindColumn(t *testing.T) {
 	if !storeHasColumn(store.db, "calls", "kind") {
 		t.Fatal("calls table missing kind column")
 	}
+	if !storeHasColumn(store.db, "calls", "source_file") {
+		t.Fatal("calls table missing source_file column")
+	}
 	if !storeHasColumn(store.db, "communities", "symbol") {
 		t.Fatal("communities table missing symbol column")
 	}
@@ -105,6 +185,101 @@ func TestSQLiteCallsKindColumn(t *testing.T) {
 	}
 	if kinds == 0 {
 		t.Fatal("expected call edges with kind='call'")
+	}
+}
+
+func TestSQLiteSourceIdentityRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := writeTree(t, map[string]string{
+		"a/source.go": "package a\nimport \"strings\"\nfunc Shared() { aHelper(); strings.TrimSpace(\"a\") }\nfunc aHelper() {}\n",
+		"b/source.go": "package b\nimport \"strings\"\nfunc Shared() { bHelper() }\nfunc bHelper() { strings.TrimSpace(\"b\") }\n",
+	})
+	ix, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQLite(root, ix); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSQLite(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSourceCalls(t, loaded, "go")
+	if !equalCallEdges(loaded.Calls["Shared"], ix.Calls["Shared"]) {
+		t.Errorf("loaded shared edges = %v, want %v", loaded.Calls["Shared"], ix.Calls["Shared"])
+	}
+}
+
+func TestSQLiteAliasAndDynamicRoundTrip(t *testing.T) {
+	ix := aliasPersistenceFixture(t)
+	if err := SaveSQLite(ix.Root, ix); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSQLite(ix.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBindingPersistence(t, ix, loaded)
+	store, err := OpenSQLite(ix.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	edges, err := store.LookupCalls("Use")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalCallEdges(edges, ix.Calls["Use"]) {
+		t.Fatalf("point lookup lost dynamic/source binding: %+v", edges)
+	}
+}
+
+func TestSQLiteDeclarationIdentityRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := writeTree(t, map[string]string{"source.go": "package fixture\nfunc Shared() {}\n"})
+	ix, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix.Symbols[0].Outer = "Container"
+	ix.Symbols[0].Params = []string{"int", "string"}
+	want := ix.Symbols[0].DeclarationID()
+	if err := SaveSQLite(root, ix); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSQLite(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Symbols[0].DeclarationID(); got != want {
+		t.Errorf("loaded declaration identity = %s, want %s", got, want)
+	}
+	store, err := OpenSQLite(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	symbol, err := store.LookupSymbol("Shared")
+	if err != nil || symbol == nil {
+		t.Fatalf("LookupSymbol = %v, error %v", symbol, err)
+	}
+	if symbol.DeclarationID() != want {
+		t.Errorf("point lookup lost declaration identity: %+v", symbol)
+	}
+	fileSymbols, err := store.LookupFileSymbols("source.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fileSymbols) != 1 || fileSymbols[0].DeclarationID() != want {
+		t.Errorf("file lookup lost declaration identity: %+v", fileSymbols)
+	}
+	searchSymbols, err := store.SearchFTS("Shared", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searchSymbols) != 1 || searchSymbols[0].DeclarationID() != want {
+		t.Errorf("FTS lookup lost declaration identity: %+v", searchSymbols)
 	}
 }
 
@@ -283,6 +458,11 @@ func TestSQLitePointQueries(t *testing.T) {
 	}
 	if len(calls) == 0 {
 		t.Fatalf("LookupCalls(main) got 0 calls, expected call to greet")
+	}
+	for _, edge := range calls {
+		if edge.SourceFile != "main.go" {
+			t.Errorf("point lookup lost call source: %+v", edge)
+		}
 	}
 
 	// 4. LookupFileSymbols

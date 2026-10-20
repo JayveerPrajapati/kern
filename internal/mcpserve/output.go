@@ -26,14 +26,16 @@ var selfRecordingTools = map[string]bool{
 // RecordToolCall appends one per-tool stats entry for an executed MCP tool
 // call: the tool name, the session (when the caller passed one — the same
 // convention the optimize handlers use) and the returned payload token
-// estimate via the shared tokenizer. Tools that do not know their
-// before/after contribute AfterTokens only (Before=0, Saved=0 — honest, never
-// fabricated). Agent attribution: an explicit agent_id argument wins; else
-// the client identity captured at initialize (clientInfo.name); else the
-// neutral "mcp" bucket so `kern stats --by-agent` never reports
-// "(unattributed)" for tool calls. Recording must never fail a tool call, so
-// every error path is swallowed.
-func RecordToolCall(tool string, args map[string]any, out string, clientName string) {
+// estimate. tokensOut is the precomputed tokenize.Count of the final response
+// text — the caller (toolCallResponse) computes it ONCE per call and shares
+// it with AttachTokenMetadata, so the full-text count never runs twice.
+// Tools that do not know their before/after contribute AfterTokens only
+// (Before=0, Saved=0 — honest, never fabricated). Agent attribution: an
+// explicit agent_id argument wins; else the client identity captured at
+// initialize (clientInfo.name); else the neutral "mcp" bucket so
+// `kern stats --by-agent` never reports "(unattributed)" for tool calls.
+// Recording must never fail a tool call, so every error path is swallowed.
+func RecordToolCall(tool string, args map[string]any, tokensOut int, clientName string) {
 	if selfRecordingTools[tool] {
 		return
 	}
@@ -49,12 +51,23 @@ func RecordToolCall(tool string, args map[string]any, out string, clientName str
 	if agent == "" {
 		agent = "mcp"
 	}
+	// A slice=<anchor>:lines:A-B|tail:N re-read re-delivers retained output
+	// without re-executing the tool: its AfterTokens are context cost, not
+	// savings. Flag it so the stats ledger can net slice re-reads off the
+	// gross savings figure (kern stats --net).
+	sliceRead := mcpargs.ArgString(args, "slice") != ""
+	root := mcpargs.ArgString(args, "root")
+	if root == "" {
+		root, _ = os.Getwd()
+	}
 	_ = optimize.Recorder.Record(stats.Entry{
 		Session:     mcpargs.ArgString(args, "session"),
 		Operation:   stats.OpToolCall,
 		Tool:        tool,
 		Agent:       agent,
-		AfterTokens: tokenize.Count(out),
+		Root:        root,
+		Slice:       sliceRead,
+		AfterTokens: tokensOut,
 	})
 }
 
@@ -98,10 +111,11 @@ func outputBudget() int {
 // default smaller while source-carrying tools get headroom.
 var perToolOutputBudgets = map[string]int{
 	// kern_search / kern_ast_search answer with ranked symbol lists; a broad
-	// query can emit hundreds of file:line rows. A tighter default keeps the
-	// answer scannable — slice=tail:N recovers the rest.
-	"kern_search":     8 << 10,
-	"kern_ast_search": 8 << 10,
+	// query can emit hundreds of file:line rows. 16 KiB (raised from 8 KiB —
+	// the tight budget truncated ranked lists mid-symbol) keeps the answer
+	// scannable; slice=tail:N still recovers the rest.
+	"kern_search":     16 << 10,
+	"kern_ast_search": 16 << 10,
 	// kern_explore / kern_compact_file ship VERBATIM source alongside call
 	// flow / symbol summaries: at the 24 KiB global cap a dense symbol
 	// truncates mid-source. Doubling the headroom keeps the first slice

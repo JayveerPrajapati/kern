@@ -194,6 +194,26 @@ func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
 	}
 	root := t.TempDir()
 
+	// Deterministic fix for the ENOTEMPTY TempDir-cleanup flake (observed
+	// under full-suite parallel load, 2026-10-08): a sandboxed `go version`
+	// writes telemetry into $HOME/Library at exit, and those late writes
+	// MkdirAll-recreate the (already removed) home child of the test's
+	// temp root — the root rmdir then fails "directory not empty". Neither
+	// GOTELEMETRY=off in the go env file (verified: `go version`'s
+	// telemetry bootstrap ignores it) nor the GOTELEMETRY env var (not in
+	// the sandbox allowlist, by design) can stop the writer — but
+	// telemetry is best-effort by design: pre-creating `telemetry` as a
+	// REGULAR FILE makes the child's MkdirAll fail and the write give up
+	// without failing the command. Verified: exit 0, zero files created
+	// under Library.
+	goDir := filepath.Join(home, "Library", "Application Support", "go")
+	if err := os.MkdirAll(goDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(goDir, "telemetry"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Blocked: reading a file under a blocklisted dir must fail (EPERM) and
 	// the secret must never appear in the run's output.
 	res := Run(context.Background(), root, "cat", []string{sentinel}, 10*time.Second)
@@ -235,6 +255,16 @@ func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
 	gres := Run(context.Background(), root, "go", []string{"version"}, 60*time.Second)
 	if !gres.OK {
 		t.Fatalf("sandboxed `go version` must succeed under FS confinement; err=%v out=%q", gres.Err, gres.Output)
+	}
+	// Live guard that the GOTELEMETRY=off env file actually took effect:
+	// telemetry must never appear in the fake home (its late writes are the
+	// ENOTEMPTY flake's writer — see the seeding comment above).
+	// Live guard that the telemetry blockade actually held: `telemetry`
+	// must still be a regular FILE (never a directory) and must not have
+	// grown artifacts — its late writes are the ENOTEMPTY flake's writer
+	// (see the blockade comment above).
+	if info, err := os.Stat(filepath.Join(goDir, "telemetry")); err != nil || info.IsDir() {
+		t.Fatalf("telemetry blockade broken: it became a directory or vanished")
 	}
 
 	// The sandboxed `go version` writes Go telemetry files into $HOME — the

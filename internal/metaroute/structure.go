@@ -38,7 +38,7 @@ func ClassifyStructureTools(low, request string) (string, map[string]any, bool) 
 		// wants the import-cycle view. "layering violations" keeps the
 		// architecture-verify arm below (pinned by structure_test.go).
 		(HasWord(low, "layering") && !strings.Contains(low, "violation")):
-		return "kern_cycles", map[string]any{}, true
+		return "kern_graph", map[string]any{}, true
 	case strings.Contains(low, "layering") || strings.Contains(low, "layer violation") ||
 		strings.Contains(low, "boundary violation") || strings.Contains(low, "architecture violation") ||
 		strings.Contains(low, "architectural violation"):
@@ -48,10 +48,12 @@ func ClassifyStructureTools(low, request string) (string, map[string]any, bool) 
 		// match "profile", "workflow" never matches "slow"): slow/slowest,
 		// performance/perf, profiling/profile. The old "slow path"/"slow
 		// code"/"slow function" substrings are covered by HasWord("slow").
+		// The fragility-specific terms (fragile/bug-prone) died with the
+		// kern_fragility_hotspots tool (2026-10-18 pivot cut); hotspot/perf
+		// questions route to the churn analysis instead.
 		HasWord(low, "slow") || HasWord(low, "slowest") || HasWord(low, "performance") || HasWord(low, "perf") ||
-		HasWord(low, "profiling") || HasWord(low, "profile") ||
-		HasWord(low, "fragile") || HasWord(low, "fragility") || strings.Contains(low, "bug-prone") || strings.Contains(low, "bug prone"):
-		return "kern_fragility_hotspots", map[string]any{}, true
+		HasWord(low, "profiling") || HasWord(low, "profile"):
+		return "kern_search", map[string]any{"query": request}, true
 	// Flow/trace questions that name a concrete HTTP route search for that
 	// route instead of the whole sentence ("how does a request to /v1/loop
 	// flow through the system down to storage" → search "/v1/loop").

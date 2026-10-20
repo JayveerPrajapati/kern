@@ -13,6 +13,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // Hooks provides dependencies from the owning MCP server.
@@ -83,9 +84,9 @@ func Hubs(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		limit = n
 	}
 	var b strings.Builder
-	b.WriteString(intel.RenderHubs(intel.Hubs(ix, limit)))
+	b.WriteString(topology.RenderHubs(topology.Hubs(ix, limit)))
 	b.WriteString("\n\n")
-	b.WriteString(intel.RenderBridges(intel.Bridges(ix, 15)))
+	b.WriteString(topology.RenderBridges(topology.Bridges(ix, 15)))
 	return b.String(), nil
 }
 

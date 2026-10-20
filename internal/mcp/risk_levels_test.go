@@ -40,21 +40,14 @@ func TestNamedToolRiskLevels(t *testing.T) {
 	t.Parallel()
 	want := map[string]string{
 		// critical — execution tools
-		"kern_exec":    RiskCritical,
-		"kern_sandbox": RiskCritical,
-		"kern_execute": RiskCritical,
+		"kern_exec": RiskCritical,
 		// high — security-sensitive tools
-		"kern_security":    RiskHigh,
-		"kern_safe_delete": RiskHigh,
-		"kern_rename":      RiskHigh,
 		// medium — analysis tools
-		"kern_analyze": RiskMedium,
-		"kern_plan":    RiskMedium,
-		"kern_impact":  RiskMedium,
-		"kern_verify":  RiskMedium,
+		"kern_plan":   RiskMedium,
+		"kern_impact": RiskMedium,
+		"kern_verify": RiskMedium,
 		// medium — contained state mutation (D1 F1 reclassification: these
 		// were low but mutate state, so they are never cacheable)
-		"kern_register_host_sampler": RiskMedium,
 		// low — read-only tools
 		"kern_search":       RiskLow,
 		"kern_explore":      RiskLow,

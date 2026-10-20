@@ -46,6 +46,7 @@ type File struct {
 
 // Symbol is a code symbol: function, class, method, type, etc.
 type Symbol struct {
+	ID        string `json:",omitempty"`
 	Name      string // simple name
 	Qualified string // qualified name (package.Name or Type.Method)
 	Kind      string // "func", "method", "class", "type", "const", "var", etc.
@@ -82,15 +83,22 @@ type Node struct {
 	Service    *Service    // non-nil for "service" nodes
 	Team       *Team       // non-nil for "team" nodes
 	Deployment *Deployment // non-nil for "deployment" nodes (twin runtime extractor)
+	Package    string      `json:",omitempty"`
+	Resolution string      `json:",omitempty"`
+	Candidates []string    `json:",omitempty"`
 }
 
 // Edge is an edge in the knowledge graph.
 type Edge struct {
-	From string // node ID
-	To   string // node ID
-	Kind string // "calls", "depends_on", "inherits", "imports", "contains", "defines"
-	File string // where the edge originates
-	Line int
+	From       string // node ID
+	To         string // node ID
+	Kind       string // "calls", "depends_on", "inherits", "imports", "contains", "defines"
+	File       string // where the edge originates
+	Line       int
+	Reference  string `json:",omitempty"`
+	Resolution string `json:",omitempty"`
+	Confidence string `json:",omitempty"`
+	Synth      string `json:",omitempty"`
 }
 
 // ClaimType discriminates the kind of claim a Claim represents.
@@ -331,6 +339,7 @@ type PrecheckResult struct {
 // EvidenceRefs, and ArtifactID fields make the binding explicit so an auditor
 // can reconstruct WHY an approval was granted and WHAT it authorized.
 type Approval struct {
+	Kind        string // approval kind; "" = generic action approval, "allowed-for-command" = mcp-exec command
 	ID          string
 	TaskID      string
 	Requester   string // agent ID

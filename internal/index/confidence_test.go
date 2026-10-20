@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"testing"
 )
 
@@ -227,7 +228,7 @@ public class App {
     }
 }
 `
-	syms, calls, _, pkg, err := extractForeign("App.java", []byte(src), "java")
+	syms, calls, _, pkg, err := langparse.ExtractForeign("App.java", []byte(src), "java", tsExtract)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 ---
 name: kern-incident-triage
 description: >-
-Use when investigating any crash, panic, error log, stack trace, or failing test. Compress the raw log with kern_optimize (action=log), run kern ops triage to map stack frames to AST symbols, auto-synthesize a minimal failing reproduction test in an ephemeral worktree, and auto-repair the defect.
+  Use when investigating any crash, panic, error log, stack trace, or failing test. Compress the raw log with kern_optimize (action=log), run kern ops triage to map stack frames to AST symbols, auto-synthesize a minimal failing reproduction test in an ephemeral worktree, and auto-repair the defect.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-incident-triage/SKILL.md; copies must stay identical — run kern setup to sync -->
@@ -61,7 +61,7 @@ What `kern ops triage` performs automatically:
    ```json
    {"request": "verify test coverage and run build"}
    ```
-3. Run `kern check` to verify architectural conformance.
+3. Run `kern verify architecture` to verify architectural conformance.
 
 ---
 

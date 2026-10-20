@@ -20,7 +20,11 @@ const (
 // capabilities returned in the MCP initialize result. MCP hosts surface it
 // to users and agents. It is deliberately grounded (no hype), omits a hard
 // tool count (the catalog grows), and describes what the tools actually do.
-const instructions = "kern is a fully local-first code context engine. It makes no network calls and requires no API keys: every tool runs against a prebuilt, per-project symbol index. Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified."
+// The network claim is qualified (F8): the engine makes no network calls of
+// its own (no telemetry, no phoning home), but two opt-in fetch paths reach
+// URLs the caller explicitly names — kern_doc action=fetch and kern_evidence
+// bundle urls.
+const instructions = "kern is a fully local-first code context engine. It requires no API keys and makes no network calls of its own — no telemetry, no phoning home: every tool runs against a prebuilt, per-project symbol index. The only network use is fetching a URL you explicitly name (kern_doc action=fetch, kern_evidence url bundles). Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified."
 
 // serverVersion is stamped at build time via -ldflags "-X main.version=...";
 // the binary entry points forward it through SetServerVersion. Defaults to

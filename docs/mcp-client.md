@@ -1,8 +1,8 @@
 # External MCP Servers
 
-Kern is a full MCP citizen: it serves 117 `kern_*` tools over
+Kern is a full MCP citizen: it serves 31 `kern_*` tools over
 `kern mcp` / `cmd/kern-mcp`, and it can call tools from external MCP
-servers through `kern_mcp_call`.
+servers through the MCP tool surface.
 
 ## Configure a server
 
@@ -27,7 +27,7 @@ kern mcp-client add web --transport streamable-http \
 kern mcp-client call github create_issue '{"title": "bug", "body": "..."}'
 ```
 
-Through the tool surface, `kern_mcp_call {server, tool, arguments}` bridges
+Through the tool surface, MCP `tools/call` bridges
 the server's tool; you may pass the raw wire name or the public name
 `mcp__<server>__<tool>`. Only the raw name is sent on the wire; public names
 are normalized to `[A-Za-z0-9_-]` (max 64 chars, SHA-256 suffix on lossy
@@ -36,5 +36,5 @@ normalization).
 ## Scope
 
 Tools only — MCP resources and prompts are unsupported. The client is
-stdlib-only and always built; tools are reached through `kern_mcp_call`,
+stdlib-only and always built; tools are reached through MCP `tools/call`,
 not registered as native `kern_*` tools.

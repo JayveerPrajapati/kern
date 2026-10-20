@@ -7,7 +7,7 @@ there's nothing to wire per language. What exists:
 
 - **`.kern/boundaries.json`** (optional) — architecture guardrails. Declare
   forbidden dependency crossings (e.g. a frontend importing a backend DB
-  model); `kern guard` (or `kern_guard_check`) rejects a diff before it
+  model); `kern guard` rejects a diff before it
   touches the filesystem. `kern guard init` writes a starter file.
 - **Doc search index** (optional) — `kern docs index` (or
   `kern_doc action=index, semantic=true`) embeds project docs with a local Ollama
@@ -30,14 +30,17 @@ there's nothing to wire per language. What exists:
 violations and the not-configured warning are appended to
 `.kern/events.jsonl` for replay when no relay is running, and streamed
 live when one is. The socket is local-user-only; a second
-  server (e.g. kern-server) detects the live owner and runs without its
+  process detects the live owner and runs without its
   own relay. Deep workspace paths that exceed the OS socket-path limit
   transparently bind under a hashed name in the temp dir.
 - **Environment variables** — `OLLAMA_HOST` (default `http://localhost:11434`,
-  used only when you opt in), `KERN_LLM_PROVIDER` (`ollama` default;
-  `openai`/`anthropic`/`google` for remote providers; `none`/`off`/`disabled`
-  disables LLM use entirely — offline and deterministic, no probe attempts),
-  `KERN_EMBED_MODEL` (default
+  used only when you opt in), `KERN_LLM_PROVIDER` (`auto` default — the chain
+  host sampler → local agent CLIs → Ollama, see [local-llm.md](local-llm.md);
+  `openai`/`anthropic`/`google`/an agent-CLI name pin one provider;
+  `none`/`off`/`disabled` disables LLM use entirely — offline and
+  deterministic, no probe attempts), `KERN_LLM_REQUIRED` (default off;
+  `1` makes a missing LLM provider a hard `kern doctor` failure instead of
+  graceful degradation — CI/enterprise gating), `KERN_EMBED_MODEL` (default
   `nomic-embed-text`), `KERN_VERSION`/`KERN_CHANNEL`/`KERN_INSTALL_DIR`
   (installer: `KERN_VERSION` pins a release tag, `KERN_CHANNEL` selects the
   channel `latest` resolves to — `latest` (default), `stable` (newest
@@ -65,7 +68,16 @@ servers ignore it:** the root-aware servers that back each web-console
 `/v1/tools/{name}` passthrough (single-project `kern serve` and every
 enterprise-mode project) confine to their App root ONLY — a
 `KERN_MCP_ROOTS` value naming another project's tree can never widen one
-project's console.
+project's console. `KERN_MCP_FULL=1` / `KERN_MCP_PHASE` / `KERN_MCP_CATEGORY` /
+`KERN_MCP_SINGLE_TOOL` / `KERN_MCP_HIGH_LEVEL_ONLY` shape only what `tools/list`
+**advertises** — a named `tools/call` always dispatches through the full catalog.
+`KERN_MCP_FULL=1` advertises all 31 tools instead of the 29-tool default;
+`KERN_MCP_PHASE=explore|plan|edit|verify` filters either tier down to the active
+agent phase plus the always-on meta/cross tools; `KERN_MCP_CATEGORY=<family>`
+keeps one tool family (e.g. `graph`, `verify`) with `kern_meta` always present;
+`KERN_MCP_SINGLE_TOOL=1` collapses the advertised surface to `kern_meta` alone;
+`KERN_MCP_HIGH_LEVEL_ONLY=1` is the legacy 6-tool middle set, deprecated in
+favor of the default surface or `KERN_MCP_FULL=1`.
 - **`.kern/config.json`** (optional) — one config path for operator knobs,
   resolved as **env var > `.kern/config.json` > built-in default**, per
   project root. JSON, stdlib-only, parsed once per root; a malformed file
@@ -74,7 +86,8 @@ project's console.
 
   ```json
   {
-    "llm": { "provider": "ollama", "model": "llama3.2",
+    "llm": { "provider": "auto", "model": "llama3.2",
+             "required": false,
              "model_roles": {"planner": "gpt-4o"} },
     "tokenizer": "estimator",
     "cost_per_token": 0.00001,
@@ -102,44 +115,34 @@ project's console.
 `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
 isolation knobs, and installer vars.
 
-### Agent RBAC environment variables
+### Machine-wide install, guard and first-index knobs
 
-Role-based access control for MCP agents (`kern_agent_role_rbac`, enforced at
-the tool-dispatch choke point) is controlled by two env-only opt-ins:
+When kern is wired machine-wide (`kern setup --global-only`), a repo needs no
+setup: the first agent call indexes it. These switches control that behavior.
 
-| Variable | Default | Meaning |
+| Setting | Default | Meaning |
 |---|---|---|
-| `KERN_ALLOW_RBAC_ASSIGN` | unset | When `1`, allows the `assign` action of `kern_agent_role_rbac` (role assignment). Fails closed otherwise — an agent must never be able to assign itself a role. |
-| `KERN_RBAC_DEFAULT_DENY` | unset | When `1`, agents with no explicitly assigned role — including the built-in `default` principal that every unauthenticated call resolves to — are mapped to the read-only `reviewer` role instead of the legacy permit-all loopback trust. Explicitly assigned roles are unaffected. |
+| `KERN_AUTO_WIRE=0` | wire | Installer only: download kern but do not wire any agent. |
+| `KERN_INDEX_WAIT_SECONDS` | `25` | Longest one MCP tool call waits on an index build. Past it the call returns the stale index if one exists, else a retryable "still building" error; the build keeps running. `0` waits indefinitely. One-shot CLI commands always wait. |
+| `KERN_ALLOW_BROAD_INDEX=1` | unset | Allow automatic first indexing of `$HOME`, a filesystem root or a documents folder (refused by default; `kern index <dir>` is always allowed). |
+| `KERN_DISABLED=1` | unset | Switch the agent hook guard off for this process: built-in read/grep/bash are not redirected. Not audited; does not affect the git hooks (use `KERN_BYPASS`). |
+| `.kern/off` (file) | absent | Same, for one repo. Delete the file to re-enable. |
+| `.kern/indexing` (file) | managed by kern | Written while a full first index build runs; the hook guard lets built-ins through while it is fresh (under 15 minutes old, so a crashed build cannot leave the guard open). Covers the shell hook guard only: the opencode plugin calls the `kern` CLI directly (2-minute ceiling), so it never sees the MCP "still building" error; it pre-warms the index when it loads instead (see `KERN_PRELOAD`). |
+| `KERN_PRELOAD=0` | warm | Do not pre-warm the index. The MCP server normally starts building it when an agent connects (`initialize`), and the opencode plugin runs a background `kern buddy` when it loads, so the first real tool call finds it ready. Both go through the guarded auto-index path and honor `KERN_DISABLED` and `.kern/off`. |
+| `KERN_BYPASS=1` / `KERN_ENFORCE=0` | unset | Emergency override for hooks and git hooks; audited to `~/.kern/audit/bypass.jsonl` (`KERN_BYPASS_REASON` records why). |
+| `KERN_PROTECTED_BRANCHES` | `main master` | Space-separated branches the global pre-push hook refuses to force-push or delete. |
+| `KERN_BIN` | `~/.local/bin/kern` | Where the hook guard looks for kern when it is not on `PATH`; if none is found the guard fails open. |
+
+`kern doctor` reports the state of all of these for the current repo.
 
 ### Org governance environment variables
 
-Org mode (enterprise server / org-wide policy + approvals + RBAC) is strictly
-opt-in and is gated on its RBAC pairing:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `KERN_ORG_ROOT` | unset | The org root directory: enables org mode. Blast radius: the org policy document at `<root>/.kern/org-policy.json` overrides the default firewall policy set for every project under the org, org-wins RBAC (org role assignments at `<root>/.kern/org-rbac.json` beat per-project roles), and the org-wide approval store (`/org/approvals`, deploy-gate approvals) becomes authoritative. **Pairing requirement:** with `KERN_ORG_ROOT` set, `KERN_RBAC_DEFAULT_DENY=1` is REQUIRED — enterprise `New()` and `WithOrgRoot` refuse to start without it, because org-wins RBAC rests on a client-asserted `agent_id` (untrusted input) and unassigned principals would otherwise keep the legacy permit-all trust, defeating the org-governance story. |
-| `KERN_ORG_ALLOW_WEAK_RBAC` | unset | **Unsafe escape hatch.** When `1`, org mode is allowed without `KERN_RBAC_DEFAULT_DENY=1` — unassigned agents keep the legacy permit-all posture under org-wins RBAC. Only for deployments that genuinely need weak org RBAC; documented-unsafe. |
-
-> **Security note — `agent_id` is untrusted input.** Every RBAC decision keys
-> off the `agent_id` a caller asserts (tool-call argument, raw REST body).
-> It is NOT authenticated identity: an agent that can supply another agent's
-> id inherits that agent's role. Org mode mitigates this only when
-> `KERN_RBAC_DEFAULT_DENY=1` (unassigned ⇒ read-only), never by trusting the
-> id. Treat `agent_id` as a label, not proof of identity.
-
-Interplay: `KERN_RBAC_DEFAULT_DENY=1` auto-permits the `assign` action of
-`kern_agent_role_rbac` — but only for principals that are already permitted
-the tool. Unassigned/reviewer principals are denied `kern_agent_role_rbac` at
-dispatch like any other write tool, so a stranded read-only principal can
-never self-elevate: self-assignment stays impossible by design. Role bootstrap
-is therefore an operator out-of-band action — hand-edit
-`<root>/.kern/rbac.json` (owner-only, atomic write) or run `assign` as a
-privileged principal; a restart, or the next assignment, brings the change
-into effect. `KERN_ALLOW_RBAC_ASSIGN=1` keeps working standalone (assign
-without default-deny). Assignments persist to `<root>/.kern/rbac.json` and
-survive restarts.
+Org mode is opt-in through `KERN_ORG_ROOT`. The org policy document at
+`<root>/.kern/org-policy.json` overrides the default firewall policy set for
+every project under the org. `kern policy set|get|apply` manages the policy,
+and `kern doctor` reports its state. There is no per-tool MCP RBAC tool in
+the current catalog; loopback clients use the default governed agent and the
+`KERN_TOOLS` execution allowlist.
 
 - **`.kern/kern.yaml`** (optional) — per-project log compression profiles and adaptive truncation rules. Configure custom patterns, context line padding (`keep_lines_before`/`keep_lines_after`), or complete removal (`action: strip_completely`).
 

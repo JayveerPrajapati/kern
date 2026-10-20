@@ -181,6 +181,11 @@ type Plan struct {
 	Budget      int         `json:"budget"`
 	TotalTokens int         `json:"total_tokens"`
 	Truncated   bool        `json:"truncated,omitempty"`
+	// Note carries an optional low-confidence resolution label (set by
+	// plan-context when the change fuzzy-resolved or landed on a symbol by
+	// common-word name collision). Rendered as a leading line and included
+	// in JSON so machine consumers see the caveat too. B2, QA 2026-10-15.
+	Note string `json:"note,omitempty"`
 }
 
 // SelectEvidence scores the packet's evidence-bearing items against the
@@ -321,6 +326,9 @@ func RenderPlan(p *Plan) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "== context plan: %s (budget %d, ~%d tokens) ==\n", p.TaskType, p.Budget, p.TotalTokens)
+	if p.Note != "" {
+		fmt.Fprintf(&b, "%s\n", p.Note)
+	}
 	var prios []string
 	for i, pr := range p.Policy.Priorities {
 		if i >= 3 {

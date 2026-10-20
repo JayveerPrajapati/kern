@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/fit"
-	"github.com/JayveerPrajapati/kern/internal/fragility"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mutation"
@@ -140,7 +139,12 @@ func runRefactorTransaction(rest []string) {
 		// Read from argument or file
 		data, err := os.ReadFile(rest[0])
 		if err == nil {
-			_ = json.Unmarshal(data, &edits)
+			// A malformed edits file must not half-apply: mirror the --edits
+			// flag's fatal path above instead of silently falling through to
+			// the empty check (which would report a misleading usage error).
+			if err := json.Unmarshal(data, &edits); err != nil {
+				fatal("invalid --edits JSON in %s: %v", rest[0], err)
+			}
 		}
 	}
 
@@ -245,7 +249,7 @@ func runMutationTest(rest []string) int {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
 	// Positional root (kern mutate /path/to/module), same convention as
-	// commitmsg and index: silently ignoring it made `kern mutate [root]`
+	// commit and index: silently ignoring it made `kern mutate [root]`
 	// mutate the CWD instead — in a test context that spawned the package's
 	// own suite recursively (live-caught 2026-09-23).
 	if f.root == "" && len(args) > 0 && args[0] != "" {
@@ -369,56 +373,6 @@ func extractFloatFlag(args []string, flag string) (rest []string, value float64)
 		}
 	}
 	return rest, value
-}
-
-func runFragility(rest []string) {
-	f, args := parseFlagsOrDie(rest)
-	root := "."
-	if len(args) > 0 {
-		root = args[0]
-	}
-	if f.root != "" {
-		root = f.root
-	}
-
-	report, err := fragility.Analyze(context.Background(), fragility.Options{
-		Root:   root,
-		Target: f.target,
-		Limit:  20,
-	})
-	if err != nil {
-		fatal("fragility analysis: %v", err)
-	}
-
-	if f.json {
-		printJSON(report)
-		return
-	}
-
-	fmt.Println("=== KernOps Fragility & Defect-Churn Map ===")
-	fmt.Printf("Repository Root:   %s\n", root)
-	fmt.Printf("Analyzed Commits:  %d\n", report.EvaluatedCommits)
-	fmt.Printf("Hotspots Found:    %d\n\n", len(report.Hotspots))
-
-	if len(report.Hotspots) == 0 {
-		fmt.Println("No fragility hotspots identified matching criteria.")
-		return
-	}
-
-	for i, h := range report.Hotspots {
-		riskBadge := fragilityRiskBadge(h.RiskLevel)
-
-		fmt.Printf("[%d] %s (%s) — %s\n", i+1, h.Target, h.Kind, riskBadge)
-		fmt.Printf("    Fragility Score: %.2f (Defect Fixes: %d / %d commits, Callers: %d)\n",
-			h.FragilityScore, h.DefectCommits, h.TotalCommits, h.CallerCount)
-		if len(h.TopDependents) > 0 {
-			fmt.Printf("    Top Callers:     %s\n", strings.Join(h.TopDependents, ", "))
-		}
-		if len(h.RecentFixes) > 0 {
-			fmt.Printf("    Recent Fixes:    %s\n", strings.Join(h.RecentFixes, " | "))
-		}
-		fmt.Println()
-	}
 }
 
 // extractListFlag removes occurrences of flag (a value-taking flag that the

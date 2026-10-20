@@ -11,7 +11,9 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/clietag"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
@@ -52,13 +54,11 @@ Core Workflows (The 5 Essential Verbs):
   kern explore <symbol|file> [--arch] [--json]    Deep symbol/file exploration (source, call flow, blast radius)
   kern search <query> [--repos] [--semantic]      AST symbol & full-text search across codebase
   kern plan <symbol|task> [--json]                Blast-radius impact & surgical refactor planning
-  kern mutate | kern rename | kern refactor       Safe AST transformations, renames & test gap sensitivity
   kern verify [types] [--types build,test,sec]    Unified build/test/firewall gate validation (G0-G39; G10 retired)
 
 Context & Token Optimization:
   kern optimize <prompt> [--fewshot] [--mask]     Compress & fine-tune prompts with project memory
   kern fit-context <symbol|file> [--max-tokens N]  Multi-tier adaptive token window compressor
-  kern pack [root] [--max-tokens N] [--graph]     Token-dense context bundle for LLMs
   kern compact <file>                             Symbolic signature summary of a file
 
 Agent & Session Setup:
@@ -67,8 +67,7 @@ Agent & Session Setup:
   kern setup [--detect] [--global] [--global-rules] [--agents-md=thin|full]   Wire kern-first tools into AI agents (MCP/OpenCode/Claude)
   kern doctor [root] [--json]                     Diagnostic report (binary, index, wiring, freshness)
 
-Server & Catalog Surfaces:
-  kern web [--addr :8090] [--enterprise]          Web console + REST API (loopback-only; the kern-server binary)
+Catalog Surfaces:
   kern mcp tools [category] [--json]              Full MCP tool catalog listing (grouped by category, with risk)
   kern evidence export|verify|explain             Tamper-evident evidence bundles (governance-grade)
 
@@ -222,7 +221,7 @@ func main() {
 	// clears the persisted file before rendering; all other commands load the
 	// prior state on startup and save the updated state on exit.
 	metricsPath := cache.Path("metrics.json")
-	isStatsPerfReset := cmd == "stats" && len(rest) > 0 && rest[0] == "performance" && hasFlag(rest[1:], "--reset")
+	isStatsPerfReset := cmd == "stats" && len(rest) > 0 && rest[0] == "performance" && cliflags.HasFlag(rest[1:], "--reset")
 	if !isStatsPerfReset {
 		_ = metrics.Default().Load(metricsPath) // best-effort; missing file is fine
 	}
@@ -245,12 +244,12 @@ func main() {
 		return dispatchCommand(cmd, rest)
 	}()
 
-	// NIT-11 fail-loud: --etag is a conditional-fetch flag for exactly four
-	// commands (kern context|compact|retrieve|explore). If it was set but the
-	// executed command never consumed it (e.g. `kern optimize prompt
-	// --etag X`), warn on stderr instead of silently ignoring it.
-	if etagFlagSet(rest) && !etagConsumed {
-		fmt.Fprintln(os.Stderr, "kern: --etag was set but this command does not consume it (only kern context, compact, retrieve, explore honor --etag); ignoring")
+	// NIT-11 fail-loud: --etag is a conditional-fetch flag for exactly eight
+	// commands (kern context|compact|retrieve|explore|search|why|inherits|graph).
+	// If it was set but the executed command never consumed it (e.g. `kern
+	// optimize prompt --etag X`), warn on stderr instead of silently ignoring it.
+	if clietag.EtagFlagSet(rest) && !clietag.Consumed() {
+		fmt.Fprintln(os.Stderr, "kern: --etag was set but this command does not consume it (only kern context, compact, retrieve, explore, search, why, inherits, graph honor --etag); ignoring")
 	}
 
 	// Persist the updated snapshot before exiting. Best-effort: a write

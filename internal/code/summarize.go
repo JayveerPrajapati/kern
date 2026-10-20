@@ -12,6 +12,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/filecache"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // Symbol is a single named declaration in a file.
@@ -263,7 +266,9 @@ func hashBytes(b []byte) string {
 const MaxReadFileBytes = 10 * 1024 * 1024
 
 // ReadFile reads a file for summarization, verifying that it is a regular file
-// within the size bound.
+// within the size bound. Unchanged files (same size:mtime stat) are served
+// from the shared file-content cache; only a miss reads the disk. All tiers
+// (full/folded/summary) render AFTER the read, so every tier benefits.
 func ReadFile(path string) ([]byte, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -275,7 +280,23 @@ func ReadFile(path string) ([]byte, error) {
 	if fi.Size() > MaxReadFileBytes {
 		return nil, fmt.Errorf("%s exceeds maximum size (%d bytes > %d)", path, fi.Size(), MaxReadFileBytes)
 	}
-	return os.ReadFile(path)
+	// The stat above IS the cache's freshness check: pass it through so a hit
+	// costs no extra syscall and the stored entry is tagged with the version
+	// the bytes were read under.
+	if b, ok := filecache.Default.Get(path, fi); ok {
+		return b, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Credential-shaped files are refused by the compact tool before they
+	// reach the cache; the same guard here keeps them out of the shared cache
+	// for every other read path.
+	if !fsutil.LooksLikeCredentialFile(path) {
+		filecache.Default.Put(path, b, fi)
+	}
+	return b, nil
 }
 
 // ReadAllLines is a small helper used by the project walker.

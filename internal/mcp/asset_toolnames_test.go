@@ -24,7 +24,7 @@ func TestAssetToolNamesInCatalog(t *testing.T) {
 	root := repoRoot(t)
 
 	assets := []string{
-		filepath.Join(root, "internal", "setup", "assets", "AGENTS.md"),
+		filepath.Join(root, "internal", "agentwire", "assets", "AGENTS.md"),
 	}
 	// Bespoke per-agent instruction rules (continue/windsurf/kiro).
 	instructionGlob, err := filepath.Glob(filepath.Join(root, "internal", "setup", "assets", "instructions", "*.md"))
@@ -83,7 +83,7 @@ func TestAssetMentionsAllDefaultTools(t *testing.T) {
 	root := repoRoot(t)
 
 	assets := []string{
-		filepath.Join(root, "internal", "setup", "assets", "AGENTS.md"),
+		filepath.Join(root, "internal", "agentwire", "assets", "AGENTS.md"),
 	}
 
 	defaults := map[string]bool{}

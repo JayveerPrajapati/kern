@@ -13,10 +13,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/mcp/rbac"
+	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 )
 
 // dispatchFunc is the signature of every tool handler in dispatchTable. The
@@ -37,146 +38,57 @@ var dispatchTable map[string]dispatchFunc
 
 func init() {
 	dispatchTable = map[string]dispatchFunc{
-		"kern_llm_providers":         simple((*Server).handleLLMProviders),
-		"kern_register_host_sampler": simple((*Server).handleRegisterHostSampler),
-		"kern_validate_staged":       simple((*Server).handleValidateStaged),
-		"kern_validate_proposed":     simple((*Server).handleValidateProposed),
-		"kern_explain_finding":       simple((*Server).handleExplainFinding),
-		"kern_meta":                  simple((*Server).handleMeta),
-		"kern_optimize":              simple((*Server).handleOptimize),
-		"kern_fetch_raw_anchor":      simple((*Server).handleFetchAnchor),
-		"kern_memory":                simple((*Server).handleMemory),
-		"kern_mask_pii":              simple((*Server).handleMaskPII),
-		"kern_security":              simple((*Server).handleSecurity),
-		"kern_safe_delete":           simple((*Server).handleSafeDelete),
-		"kern_doc":                   simple((*Server).handleDoc),
-		"kern_commitmsg":             simple((*Server).handleCommitmsg),
-		"kern_precache":              simple((*Server).handlePrecache),
-		"kern_swap":                  simple((*Server).handleSwap),
-		"kern_sandbox":               (*Server).handleSandbox,
-		"kern_diff_files":            simple((*Server).handleDiffFiles),
-		"kern_heal":                  (*Server).handleHeal,
-		"kern_repair":                simple((*Server).handleRepair),
-		"kern_refactor_transaction":  simple((*Server).handleRefactorTransaction),
-		"kern_validate":              simple((*Server).handleValidate),
-		"kern_schema_validate":       simple((*Server).handleSchemaValidate),
-		"kern_verify_output":         simple((*Server).handleVerifyOutput),
-		"kern_check_draft":           simple((*Server).handleCheckDraft),
-		"kern_taint":                 simple((*Server).handleTaint),
-		"kern_compact_file":          simple((*Server).handleCompact),
-		"kern_fit_context":           simple((*Server).handleFitContext),
-		"kern_buddy":                 simple((*Server).handleBuddy),
-		"kern_project_map":           simple((*Server).handleProjectMap),
-		"kern_pack":                  simple((*Server).handlePack),
-		"kern_runtime":               simple((*Server).handleRuntime),
-		"kern_deploy":                simple((*Server).handleDeploy),
-		"kern_evidence":              simple((*Server).handleEvidence),
-		"kern_stats":                 simple((*Server).handleStats),
-		"kern_semcache":              simple((*Server).handleSemcache),
-		"kern_context_budget":        simple((*Server).handleContextBudget),
-		"kern_ast_search":            simple((*Server).handleAstSearch),
-		"kern_frameworks":            simple((*Server).handleFrameworks),
-		"kern_fw_trace":              simple((*Server).handleFWTrace),
-		"kern_entry_points":          simple((*Server).handleEntryPoints),
-		"kern_search":                simple((*Server).handleSearch),
-		"kern_prose":                 simple((*Server).handleProse),
-		"kern_repo_search":           simple((*Server).handleRepoSearch),
-		"kern_why":                   simple((*Server).handleWhy),
-		"kern_inherits":              simple((*Server).handleInherits),
-		"kern_context":               simple((*Server).handleContext),
-		"kern_changes":               simple((*Server).handleChanges),
-		"kern_review":                simple((*Server).handleReview),
-		"kern_hubs":                  simple((*Server).handleHubs),
-		"kern_test_gaps":             simple((*Server).handleTestGaps),
-		"kern_mutation_test":         simple((*Server).handleMutationTest),
-		"kern_path":                  simple((*Server).handlePath),
-		"kern_dead":                  simple((*Server).handleDead),
-		"kern_cycles":                simple((*Server).handleCycles),
-		"kern_larges":                simple((*Server).handleLarges),
-		"kern_arch":                  simple((*Server).handleArch),
-		"kern_communities":           simple((*Server).handleCommunities),
-		"kern_churn":                 simple((*Server).handleChurn),
-		"kern_fragility_hotspots":    simple((*Server).handleFragilityHotspots),
-		"kern_near":                  simple((*Server).handleNear),
-		"kern_graph":                 simple((*Server).handleGraph),
-		"kern_explore":               simple((*Server).handleExplore),
-		"kern_fts_search":            simple((*Server).handleFtsSearch),
-		"kern_bridges":               simple((*Server).handleBridges),
-		"kern_lsp_bridge":            simple((*Server).handleLSPBridge),
-		"kern_surprising":            simple((*Server).handleSurprising),
-		"kern_snapshot":              simple((*Server).handleSnapshot),
-		"kern_cochange":              simple((*Server).handleCochange),
-		"kern_probe":                 simple((*Server).handleProbe),
-		"kern_retrieve":              simple((*Server).handleRetrieve),
-		"kern_resolve":               simple((*Server).handleResolve),
-		"kern_context_envelope":      simple((*Server).handleContextEnvelope),
-		"kern_plan_context":          simple((*Server).handlePlanContext),
-		"kern_orchestrate":           simple((*Server).handleOrchestrate),
-		"kern_skill":                 simple((*Server).handleSkill),
-		"kern_trace":                 simple((*Server).handleTrace),
-		"kern_lock":                  simple((*Server).handleLock),
-		"kern_usage_guide":           simple((*Server).handleUsageGuide),
-		"kern_guard_check":           simple((*Server).handleGuardCheck),
-		"kern_authorize_context":     simple((*Server).handleAuthorizeContext),
-		"kern_rename":                simple((*Server).handleRename),
-		"kern_exec":                  simple((*Server).handleExec),
-		"kern_analyze":               simple((*Server).handleAnalyze),
-		"kern_plan":                  simple((*Server).handlePlan),
-		"kern_execute":               simple((*Server).handleExecute),
-		"kern_verify":                (*Server).handleVerify,
-		"kern_incident":              simple((*Server).handleIncident),
-		"kern_what_if":               simple((*Server).handleWhatIf),
-		"kern_impact":                simple((*Server).handleImpact),
-		"kern_flight":                simple((*Server).handleFlight),
-		"kern_agents":                simple((*Server).handleAgents),
-		"kern_do":                    simple((*Server).handleDo),
-		"kern_loop":                  simple((*Server).handleLoop),
-		"kern_run":                   simple((*Server).handleRun),
-		"kern_workflow":              simple((*Server).handleWorkflow),
-		"kern_onboard":               simple((*Server).handleOnboard),
-		"kern_audit":                 simple((*Server).handleAudit),
-		"kern_approve":               simple((*Server).handleApprove),
-		"kern_correlate":             simple((*Server).handleCorrelate),
-		"kern_learn":                 simple((*Server).handleLearn),
-		"kern_modernize":             simple((*Server).handleModernize),
-		"kern_health":                simple((*Server).handleHealth),
-		"kern_compose":               simple((*Server).handleCompose),
-		"kern_pre_edit":              simple((*Server).handlePreEdit),
-		"kern_prompt_fill":           simple((*Server).handlePromptFill),
-		"kern_semantic":              simple((*Server).handleSemantic),
-		"kern_context_watch":         simple((*Server).handleContextWatch),
-		"kern_explain":               simple((*Server).handleExplain),
-		"kern_cross_repo_impact":     simple((*Server).handleCrossRepoImpact),
-		"kern_policy_dsl":            simple((*Server).handlePolicyDSL),
-		"kern_agent":                 simple((*Server).handleAgent),
-		"kern_mcp_call":              simple((*Server).handleMcpCall),
-		"kern_stream":                simple((*Server).handleStream),
-		"kern_ast_transform":         simple((*Server).handleAstTransform),
-		"kern_synthesize_test":       simple((*Server).handleSynthesizeTest),
-		"kern_org":                   simple((*Server).handleOrg),
+		"kern_meta":             simple((*Server).handleMeta),
+		"kern_optimize":         simple((*Server).handleOptimize),
+		"kern_fetch_raw_anchor": simple((*Server).handleFetchAnchor),
+		"kern_memory":           simple((*Server).handleMemory),
+		"kern_mask_pii":         simple((*Server).handleMaskPII),
+		"kern_doc":              simple((*Server).handleDoc),
+		"kern_swap":             simple((*Server).handleSwap),
+		"kern_heal":             (*Server).handleHeal,
+		"kern_compact_file":     simple((*Server).handleCompact),
+		"kern_fit_context":      simple((*Server).handleFitContext),
+		"kern_buddy":            simple((*Server).handleBuddy),
+		"kern_project_map":      simple((*Server).handleProjectMap),
+		"kern_evidence":         simple((*Server).handleEvidence),
+		"kern_stats":            simple((*Server).handleStats),
+		"kern_semcache":         simple((*Server).handleSemcache),
+		"kern_ast_search":       simple((*Server).handleAstSearch),
+		"kern_search":           simple((*Server).handleSearch),
+		"kern_why":              simple((*Server).handleWhy),
+		"kern_context":          simple((*Server).handleContext),
+		"kern_review":           simple((*Server).handleReview),
+		"kern_path":             simple((*Server).handlePath),
+		"kern_arch":             simple((*Server).handleArch),
+		"kern_graph":            simple((*Server).handleGraph),
+		"kern_explore":          simple((*Server).handleExplore),
+		"kern_probe":            simple((*Server).handleProbe),
+		"kern_plan_context":     simple((*Server).handlePlanContext),
+		"kern_exec":             simple((*Server).handleExec),
+		"kern_plan":             simple((*Server).handlePlan),
+		"kern_verify":           (*Server).handleVerify,
+		"kern_impact":           simple((*Server).handleImpact),
+		"kern_run":              simple((*Server).handleRun),
 	}
 }
 
 // dispatchTool routes a prechecked tool name to its handler. Every registered
 // kern_* tool has an entry in dispatchTable; runTool applies allowlist and
-// root validation via precheckTool before dispatching, and RBAC enforcement
-// (kern_agent action=rbac) runs here at the single dispatch funnel so direct
-// tools/call, kern_meta sub-tool routing, compose steps and CallTool all pass
+// root validation via precheckTool before dispatching (RBAC enforcement for
+// org-assigned agents died with the org plane, 2026-10-18 pivot cut).
 // the same gate — no invocation path can reach a handler without its role
 // check.
 func (s *Server) dispatchTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("%w: missing tool name (tools/call requires a \"name\" parameter)", domain.ErrToolUnknown)
+	}
 	h, ok := dispatchTable[name]
 	if !ok {
 		return "", fmt.Errorf("%w: %s", domain.ErrToolUnknown, name)
 	}
-	// RBAC enforcement: an agent with an assigned role may only invoke tools
-	// its role grants (AllowedTools; DeniedTools always win). Agents without
-	// an assigned role keep the legacy loopback-client trust model unchanged
-	// (backward compatible). Denial surfaces as a tool error before any
-	// handler side effect runs.
-	if allowed, reason := rbac.CheckAgentTool(agentIDFor(args), name); !allowed {
-		return "", fmt.Errorf("%w: RBAC denied: %s", domain.ErrToolDenied, reason)
-	}
+	// RBAC enforcement was enterprise-plane (org-assigned roles gating
+	// per-tool access) and died with the org plane (2026-10-18 pivot cut).
+	// Callers without an assigned role keep the loopback-client trust model.
 	return h(s, ctx, id, args)
 }
 
@@ -222,4 +134,52 @@ func (s *Server) CallToolGoverned(ctx context.Context, name string, args map[str
 		}
 	}
 	return s.runTool(ctx, "sdk", "", name, args)
+}
+
+// CallToolGovernedResult is CallToolGoverned speaking the conditional-fetch
+// protocol (C2/F3, ADR-0012): the call runs under a per-call indexScope, so
+// an eligible response carries its etag and a caller passing back an etag it
+// was previously handed gets a structured unchanged verdict instead of the
+// full text. REST routes and the SDK surface these as response fields —
+// never the bare "unchanged (etag ...)" one-liner masquerading as tool
+// output, which is why the raw CallToolGoverned (string-only callers) keeps
+// the bare-ctx full-text contract (F-10). The working-set registry records
+// the serve exactly like a JSON-RPC tools/call, so the trust-but-verify gate
+// (C1/P1) accepts this caller's next etag claim.
+func (s *Server) CallToolGovernedResult(ctx context.Context, name string, args map[string]any) (domain.ToolCallResult, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if s.preTool != nil {
+		if err := s.preTool(name, args); err != nil {
+			return domain.ToolCallResult{}, fmt.Errorf("pre-tool-use denied: %w", err)
+		}
+	}
+	// Per-call scope, same construction toolCallResponse uses
+	// (server_validation.go): maybeShortCircuit stamps etag/unchanged on it
+	// and the D1 replay path stamps the stored etag.
+	scope := &indexScope{}
+	ctx = context.WithValue(ctx, indexScopeKey{}, scope)
+	text, err := s.runTool(ctx, "sdk", "", name, args)
+	res := domain.ToolCallResult{Output: text}
+	// Mirror toolCallResponse's attachment gate (HIGH-1): composed steps
+	// re-enter runTool under this same scope, so a non-eligible outer tool
+	// must not inherit an inner step's etag.
+	if scope.etag != "" && etag.Eligible(name) {
+		res.Etag = scope.etag
+		res.Unchanged = scope.unchanged
+		ident := ""
+		if scope.ix != nil && scope.ix.Identity != nil {
+			ident = indexIdentityString(scope.ix.Identity)
+		}
+		etag.Default.Record(argString(args, "agent_id"), etag.Entry{
+			Tool:     name,
+			Args:     etag.CanonicalArgsKey(args),
+			ETag:     scope.etag,
+			Stamp:    time.Now(),
+			Identity: ident,
+			View:     serveView(name, args),
+		})
+	}
+	return res, err
 }

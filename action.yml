@@ -1,8 +1,8 @@
 name: kern
 description: >
-  Zero-telemetry local code-intelligence, change-firewall verification, and
-  governance analysis for AI agent workflows and CI pipelines. Runs kern check,
-  guard, verify, or review locally without network egress.
+  Zero-telemetry local code-intelligence, change-governance verification, and
+  analysis for AI agent workflows and CI pipelines. Runs kern verify, guard,
+  review, or doctor locally without network egress.
 
 branding:
   icon: shield
@@ -16,14 +16,14 @@ inputs:
     default: latest
   command:
     description: >
-      kern command to execute (e.g. 'check', 'verify', 'review', 'guard', 'doctor').
+      kern command to execute (e.g. 'verify', 'review', 'guard', 'doctor').
     required: false
-    default: check
+    default: verify
   args:
     description: >
-      Additional CLI flags and arguments passed to the command (e.g. '--ci', '--staged', '--format=sarif').
+      Additional CLI flags and arguments passed to the command (e.g. '--types security,architecture', '--staged', '--format=sarif').
     required: false
-    default: --ci
+    default: --types security,architecture
   kern-bin:
     description: >
       Path to an existing kern binary already present on the runner. When set, download is skipped.

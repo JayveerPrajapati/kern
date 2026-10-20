@@ -317,6 +317,37 @@ func TestRunBuildOutput(t *testing.T) {
 	}
 }
 
+// TestRunBuildJSONNotCompacted locks the JSON-passthrough fix: a child that
+// prints a JSON document must come back verbatim. The line-level compactor
+// keeps the head plus every error/warn-shaped line, which splices unrelated
+// entries of a large JSON document together (observed live: a governed
+// `kern audit --json` came back as unparseable JSON — its "Result": "error"
+// lines from thousands of entries were spliced onto the head). The
+// non-error-bearing tail lines are the canary: the compactor would drop
+// them past the 60-line head, JSON passthrough keeps them.
+func TestRunBuildJSONNotCompacted(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// 300 entries: every 3rd carries "error" (compactor bait), the rest
+	// "ok" — entry 200 is well past the compactor's 60-line head and only
+	// survives if compaction never ran.
+	cmd := `printf '{"entries": [' ; for i in $(seq 1 300); do if [ $((i % 3)) -eq 0 ]; then printf '\n  {"ID":"e%s","Result":"error"},' "$i"; else printf '\n  {"ID":"e%s","Result":"ok"},' "$i"; fi; done ; printf '\n]}'`
+	res, err := RunBuild(context.Background(), cmd, "", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Output, "cmd: ") {
+		t.Fatalf("expected cmd: prefix, got %q", res.Output[:40])
+	}
+	for _, want := range []string{`"ID":"e1"`, `"ID":"e200"`, `"ID":"e299"`, `"Result":"error"`} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("JSON output lost %s — compaction must not touch JSON child output", want)
+		}
+	}
+	if strings.Contains(res.Output, "lines omitted") {
+		t.Fatalf("JSON output was truncated by the line-level compactor")
+	}
+}
+
 func TestRunBuildFailure(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	res, err := RunBuild(context.Background(), "exit 3", t.TempDir(), Options{})
@@ -353,30 +384,6 @@ func TestRunBuildMissingWorkdir(t *testing.T) {
 	}
 	if !strings.Contains(ok.Output, "cmd: pwd") {
 		t.Fatalf("expected cmd: prefix, got %q", ok.Output)
-	}
-}
-
-func TestCompactCommandOutputFiltersNoise(t *testing.T) {
-	out := compactCommandOutput(strings.Join([]string{
-		"[INFO] starting work",
-		"[DEBUG] tracing internals",
-		"Downloading 100%",
-		"progress: 10/10",
-		"real warning: disk full",
-		"",
-		"error: build failed",
-		"plain useful line",
-	}, "\n"))
-	got := strings.Split(out, "\n")
-	for _, want := range []string{"real warning: disk full", "error: build failed", "plain useful line"} {
-		if !contains(got, want) {
-			t.Fatalf("expected %q kept, got %q", want, got)
-		}
-	}
-	for _, drop := range []string{"[INFO]", "[DEBUG]", "Downloading", "progress:"} {
-		if contains(got, drop) {
-			t.Fatalf("expected %q filtered, got %q", drop, got)
-		}
 	}
 }
 

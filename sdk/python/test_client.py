@@ -252,6 +252,20 @@ class LiveServerCrossCheck(unittest.TestCase):
         repo_root = os.path.abspath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
         )
+        # 2026-10-19: the live REST passthrough route (POST /v1/tools/{name})
+        # shipped with the enterprise web console (`kern serve`), which was
+        # removed from this tree. Until a new host for the route exists, this
+        # live cross-check skips; the mocked suites above still pin the
+        # shared contract fixture (sdk/contract/tools_call.json).
+        raise unittest.SkipTest(
+            "live cross-check skipped: the REST tools passthrough "
+            "(/v1/tools/{name}, served by `kern serve`) was removed with "
+            "the enterprise web console — the SDK clients remain "
+            "contract-pinned against the shared fixture"
+        )
+        # NOTE: the original server-spawn logic below is dormant (kept for
+        # when a new host for the route lands) — the SkipTest above always
+        # fires first.
         go = shutil.which("go")
         kern_bin = shutil.which("kern")
         if go and os.path.exists(os.path.join(repo_root, "go.mod")):

@@ -4,6 +4,9 @@ package index
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -204,24 +207,34 @@ func endpointPartsReport(ref string) (qual, bare string) {
 // documented-subset floor bounds, and pins the exact measured
 // precision/recall so drift fails loudly. It runs only in the default
 // (tree-sitter) build — the precise path must exist to compare.
-func TestParityReportPerLanguage(t *testing.T) {
+// langReport is one language's measured parity over the fixture corpus —
+// file-scope (not test-local) so both the parity report test and the
+// published-accuracy doc gate (TestAccuracyDocMatchesParity) render from
+// the SAME measurement.
+type langReport struct {
+	lang       string
+	tsSyms     int
+	reSyms     int
+	sharedSyms int
+	tsOnlySyms int
+	reOnlySyms int
+	edges      edgeParityCounts
+	precision  float64
+	recall     float64
+	guard      guardDropModel
+	pinnedPrec float64
+	pinnedRec  float64
+}
+
+// measureParityFixtures runs BOTH extractors over the shared fixture
+// corpus and returns the per-language report. Shared by
+// TestParityReportPerLanguage (pins + floors) and
+// TestAccuracyDocMatchesParity (docs/benchmarks/accuracy.md freshness).
+func measureParityFixtures(t *testing.T) []langReport {
+	t.Helper()
 	entries, err := parityFixtures.ReadDir("testfixture")
 	if err != nil {
 		t.Fatal(err)
-	}
-	type langReport struct {
-		lang       string
-		tsSyms     int
-		reSyms     int
-		sharedSyms int
-		tsOnlySyms int
-		reOnlySyms int
-		edges      edgeParityCounts
-		precision  float64
-		recall     float64
-		guard      guardDropModel
-		pinnedPrec float64
-		pinnedRec  float64
 	}
 	var reports []langReport
 	for _, e := range entries {
@@ -230,9 +243,9 @@ func TestParityReportPerLanguage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lang := detectLang(rel, b)
+		lang := langparse.DetectLang(rel, b)
 		tsSyms, tsCalls, _, _, errTS := tsExtract(rel, b, lang)
-		reSyms, reCalls, _, _, errRE := extractForeignRegex(rel, b, lang)
+		reSyms, reCalls, _, _, errRE := langparse.ExtractForeignRegex(rel, b, lang)
 		if errTS != nil || errRE != nil {
 			t.Fatalf("%s: ts=%v re=%v", rel, errTS, errRE)
 		}
@@ -268,17 +281,24 @@ func TestParityReportPerLanguage(t *testing.T) {
 		r.guard = guardDropsFor(lang, tsSyms, tsCalls)
 		reports = append(reports, r)
 	}
+	return reports
+}
+
+func TestParityReportPerLanguage(t *testing.T) {
+	reports := measureParityFixtures(t)
 
 	// Stable-summary pin: the exact measured precision/recall per language at
-	// HEAD (Phase 5 Part C, 2026-10-06, after the LoudGreeter corpus
-	// extension). Recall is 1.0 on every language — the subset contract holds
-	// perfectly: the regex path surfaces every tree-sitter edge. Precision is
-	// below 1.0 by exactly the DOCUMENTED declaration-line artifacts
-	// (regexExtraEdges: 5 java, 4 python, 4 typescript) — verified below.
-	// Update deliberately when an extractor improvement shifts the numbers.
+	// HEAD (updated 2026-10-19 with the @overload fixture extension: the
+	// Overloaded class adds one documented declaration-line artifact edge,
+	// dropping python precision 0.667 -> 8/13; recall stays 1.0 on every
+	// language — the subset contract holds perfectly: the regex path surfaces
+	// every tree-sitter edge. Precision is below 1.0 by exactly the
+	// DOCUMENTED declaration-line artifacts (regexExtraEdges: 5 java, 5
+	// python, 4 typescript) — verified below. Update deliberately when an
+	// extractor improvement shifts the numbers.
 	pinned := map[string][2]float64{
 		"java":       {0.5454545454545454, 1.0},
-		"python":     {0.6666666666666666, 1.0},
+		"python":     {0.6153846153846154, 1.0},
 		"typescript": {0.6923076923076923, 1.0},
 	}
 	for i := range reports {
@@ -381,6 +401,27 @@ func TestParityReportPerLanguage(t *testing.T) {
 		// by the receiver-matched path; the guard model confirms the count.
 		if r.guard.goScopedDrops != 0 {
 			t.Errorf("%s: Go-scoped never-methods guard model drops %d receiver-less method edges (candidates %d) — corpus edges must survive", r.lang, r.guard.goScopedDrops, r.guard.candidates)
+		}
+	}
+}
+
+// TestAccuracyDocMatchesParity is the published-accuracy freshness gate
+// (docs/benchmarks/accuracy.md): the doc's per-language table must contain
+// the SAME measured rows this file reports, so the published numbers cannot
+// lag an extractor change — updating the parity pins above without the doc
+// (or vice versa) fails here.
+func TestAccuracyDocMatchesParity(t *testing.T) {
+	reports := measureParityFixtures(t)
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "benchmarks", "accuracy.md"))
+	if err != nil {
+		t.Fatalf("read docs/benchmarks/accuracy.md: %v", err)
+	}
+	text := string(doc)
+	for _, r := range reports {
+		row := fmt.Sprintf("| `%s` | %d | %d | %d | %d | %d | %d | %.3f | %.3f |",
+			r.lang, r.tsSyms, r.reSyms, r.sharedSyms, r.edges.tsEdges, r.edges.reEdges, r.edges.shared, r.precision, r.recall)
+		if !strings.Contains(text, row) {
+			t.Errorf("docs/benchmarks/accuracy.md is stale for %s — expected row %q (regenerate: go test ./internal/index -run TestParityReportPerLanguage -v, update doc + pins together)", r.lang, row)
 		}
 	}
 }

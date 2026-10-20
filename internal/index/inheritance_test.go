@@ -3,6 +3,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"testing"
 )
 
@@ -25,7 +26,7 @@ func TestTreeSitterInheritancePython(t *testing.T) {
 class Cat(Animal, Pet):
     pass
 `
-	_, _, inherits, _, _ := extractForeign("animals.py", []byte(src), "python")
+	_, _, inherits, _, _ := langparse.ExtractForeign("animals.py", []byte(src), "python", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}
@@ -44,7 +45,7 @@ interface Wild {}
 class Cat extends Animal implements Pet, Wild {
 }
 `
-	_, _, inherits, _, _ := extractForeign("Cat.java", []byte(src), "java")
+	_, _, inherits, _, _ := langparse.ExtractForeign("Cat.java", []byte(src), "java", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}
@@ -63,7 +64,7 @@ interface Meow extends Speak {}
 
 class Cat extends Animal implements Pet, Wild {}
 `
-	_, _, inherits, _, _ := extractForeign("cat.ts", []byte(src), "typescript")
+	_, _, inherits, _, _ := langparse.ExtractForeign("cat.ts", []byte(src), "typescript", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}
@@ -84,7 +85,7 @@ impl Animal for Cat {}
 
 trait Meow: Speak {}
 `
-	_, _, inherits, _, _ := extractForeign("cat.rs", []byte(src), "rust")
+	_, _, inherits, _, _ := langparse.ExtractForeign("cat.rs", []byte(src), "rust", tsExtract)
 	if !hasBase(inherits, "Cat", "implements", "Animal") {
 		t.Errorf("expected Cat implements Animal, got %v", inherits["Cat"])
 	}
@@ -96,7 +97,7 @@ trait Meow: Speak {}
 func TestTreeSitterInheritanceCpp(t *testing.T) {
 	src := `class Cat : public Animal, virtual Pet {};
 `
-	_, _, inherits, _, _ := extractForeign("cat.cpp", []byte(src), "cpp")
+	_, _, inherits, _, _ := langparse.ExtractForeign("cat.cpp", []byte(src), "cpp", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}
@@ -109,7 +110,7 @@ func TestTreeSitterInheritanceRuby(t *testing.T) {
 	src := `class Cat < Animal
 end
 `
-	_, _, inherits, _, _ := extractForeign("cat.rb", []byte(src), "ruby")
+	_, _, inherits, _, _ := langparse.ExtractForeign("cat.rb", []byte(src), "ruby", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}
@@ -117,7 +118,7 @@ end
 
 func TestTreeSitterInheritancePHP(t *testing.T) {
 	src := `<?php class Cat extends Animal implements Pet, Wild {}`
-	_, _, inherits, _, _ := extractForeign("cat.php", []byte(src), "php")
+	_, _, inherits, _, _ := langparse.ExtractForeign("cat.php", []byte(src), "php", tsExtract)
 	if !hasBase(inherits, "Cat", "extends", "Animal") {
 		t.Errorf("expected Cat extends Animal, got %v", inherits["Cat"])
 	}

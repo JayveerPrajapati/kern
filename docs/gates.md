@@ -1,8 +1,17 @@
 # Blueprint Firewall Gates (G0–G39; G10, G37, G38 retired — 37 active)
 
+> **[historical] — this gate suite was deleted with the blueprint family**
+> (commit a05c91c7, ~19.7k LOC; the standalone blueprint repo is the successor).
+> `internal/gates/registry.go` no longer exists and `kern check` / `kern ci`
+> are no longer commands. The surviving enforcement surfaces are
+> `kern verify` (security + architecture gates, exit 1 on FAIL) and the
+> diff-gate family in `internal/diffgate` (G36 below survives there as the
+> catalog:doc freshness gate, exercised via `kern gen-catalog`). This page is
+> kept as the historical gate catalog.
+
 This document is the catalog of the 37 active Blueprint change-firewall gates (G0 through G39,
 G10, G37, G38 retired) implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
-These gates are enforced by `kern check` and `kern ci` to ensure architectural integrity,
+These gates were enforced by `kern check` and `kern ci` to ensure architectural integrity,
 security, and code health.
 
 ---
@@ -43,11 +52,11 @@ security, and code health.
 | **G29** | Approval gate (two-person rule) | Block | high-risk agent changes require explicit human approval before proceeding |
 | **G30** | Diff gate: gofmt | Warn | diff-gate format:gofmt flags unformatted changed .go files (advisory WARN; gofmt -l is deterministic) |
 | **G31** | Diff gate: vulnerabilities | Warn | diff-gate vulnerability:sec maps the in-house sec scanner onto the changed set (error→BLOCK, warning→WARN, info→INFO) |
-| **G32** | Diff gate: schema drift | Warn | diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; --init-baseline round-trips |
+| **G32** | Diff gate: schema drift | Warn | diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; regenerate with `kern gen-docs --doc schemas`, verify without writing with `kern gen-docs --doc schemas --check` |
 | **G33** | Diff gate: unsafe execution | Warn | diff-gate exec:unsafe flags changed non-test .go files importing os/exec, calling exec.Command, or containing sh -c (advisory WARN) |
 | **G34** | Diff gate: changelog | Warn | diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN) |
 | **G35** | Diff gate: MCP catalog drift | Block | diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard) |
-| **G36** | Diff gate: tool catalog doc freshness | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation (docs never drift from the catalog) |
+| **G36** | Diff gate: tool catalog doc freshness | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation; verify without writing with `kern gen-catalog --check` (and `kern gen-docs --doc selection --check` for the selection guide) |
 | **G39** | Documentation budget | Block | diff-gate doc:budget BLOCKs when a document listed in docs/doc-budgets.json exceeds its word ceiling or goes missing (one home per fact, enforced ceilings) |
 
 ---

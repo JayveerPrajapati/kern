@@ -200,3 +200,73 @@ func TestExecuteTransactionScrubsOperatorEnv(t *testing.T) {
 		t.Errorf("compile child received the operator env: KERN_TEST_SECRET leaked into %q", res.CompilerOutput)
 	}
 }
+
+// TestTransactionalRefactorRejectsSymlinkEscape pins the symlink-containment
+// fix: an edit whose path is a symlink pointing OUTSIDE the project root must
+// be rejected (fail closed), and the symlink's target must never be written.
+func TestTransactionalRefactorRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	link := filepath.Join(root, "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	_, err := ExecuteTransaction(context.Background(), TransactionRequest{
+		Root:  root,
+		Edits: []FileEdit{{Path: "link.txt", Content: "pwned\n"}},
+		Apply: true,
+	})
+	if err == nil {
+		t.Fatal("expected symlink-escape edit to be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Errorf("error = %q, want it to name the symlink containment escape", err)
+	}
+	outsideContent, _ := os.ReadFile(outside)
+	if strings.Contains(string(outsideContent), "pwned") {
+		t.Error("symlink-escape edit wrote through the symlink to the outside file")
+	}
+}
+
+// TestTransactionalRefactorAbortsOnConcurrentEdit pins the TOCTOU preflight:
+// a compile command that mutates the live tree between snapshot and apply must
+// abort the apply before any write lands, so the concurrent edit is preserved.
+func TestTransactionalRefactorAbortsOnConcurrentEdit(t *testing.T) {
+	root := t.TempDir()
+	if strings.ContainsAny(root, " \t") {
+		t.Skipf("temp dir contains whitespace, compile command would split: %q", root)
+	}
+	mainPath := filepath.Join(root, "main.go")
+	if err := os.WriteFile(mainPath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	// Mutator script appends to the ABSOLUTE live main.go path; it runs as the
+	// compile command (cmd.Dir is the sandbox, so only the absolute path can
+	// reach the live tree).
+	mutator := filepath.Join(root, "mutate.sh")
+	script := "#!/bin/sh\nprintf 'hacked\\n' >> " + mainPath + "\n"
+	if err := os.WriteFile(mutator, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mutator: %v", err)
+	}
+
+	_, err := ExecuteTransaction(context.Background(), TransactionRequest{
+		Root:           root,
+		Edits:          []FileEdit{{Path: "main.go", Content: "package main // edited\n"}},
+		CompileCommand: "sh " + mutator,
+		Apply:          true,
+	})
+	if err == nil {
+		t.Fatal("expected concurrent-edit abort, got nil")
+	}
+	if !strings.Contains(err.Error(), "changed on disk") {
+		t.Errorf("error = %q, want it to report the file changed on disk", err)
+	}
+	mainContent, _ := os.ReadFile(mainPath)
+	if strings.Contains(string(mainContent), "// edited") {
+		t.Error("apply clobbered the concurrently-edited main.go")
+	}
+}

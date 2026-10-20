@@ -170,7 +170,10 @@ func TestDetectLangFromContent(t *testing.T) {
 		{"const x = () => 1", "node"},
 		{"echo hello", "bash"},
 		{"ls -la /tmp", "bash"},
-		{"curl -s http://example.com", "bash"},
+		// curl still auto-detects as bash when the egress gate is satisfied
+		// (a network-only first command without an egress declaration is
+		// refused — see TestAutoBashRefusesNetworkCommandWithoutEgress).
+		{"curl -s http://example.com\n# egress: example.com:80", "bash"},
 		{"git status --short", "bash"},
 		{"python3 -m http.server 8000", "bash"},
 		{"puts 'hello'", "ruby"},
@@ -195,4 +198,65 @@ func runtimeInstalled(name string) bool {
 	}
 	_, err := exec.LookPath(r.bin)
 	return err == nil
+}
+
+// TestEgressRegexNetworkBuiltins verifies the egress heuristic catches the
+// network-shaped operations that previously slipped through the unisolated
+// gate: bash's /dev/tcp and /dev/udp redirection builtins, telnet, socat,
+// and openssl's s_client subcommand. Local operations — openssl dgst (local
+// crypto) and echo — must stay clear.
+func TestEgressRegexNetworkBuiltins(t *testing.T) {
+	network := []string{
+		"exec 3<>/dev/tcp/evil.example/443",
+		"exec 3<>/dev/udp/evil.example/53",
+		"telnet evil.example",
+		"socat TCP:evil.example:443",
+		"openssl s_client -connect evil.example:443",
+	}
+	for _, code := range network {
+		if !containsNetworkCall(code) {
+			t.Errorf("containsNetworkCall(%q) = false, want true (network builtin)", code)
+		}
+	}
+	local := []string{
+		"openssl dgst -sha256 file",
+		"echo hi",
+	}
+	for _, code := range local {
+		if containsNetworkCall(code) {
+			t.Errorf("containsNetworkCall(%q) = true, want false (local operation)", code)
+		}
+	}
+}
+
+// TestAutoBashRefusesNetworkCommandWithoutEgress verifies the auto-bash
+// fallback refuses to auto-classify a script whose first command is a pure
+// network operation (curl, ssh, ...) unless the code declares egress targets.
+// Without this gate, `kern exec "curl ..."` would auto-run as bash and
+// silently reach the network on hosts where the operator set
+// KERN_ALLOW_UNISOLATED=1. Non-network shell commands and egress-declared
+// network commands still auto-detect as bash.
+func TestAutoBashRefusesNetworkCommandWithoutEgress(t *testing.T) {
+	// The RunScript-level check is bash-independent: without bash the content
+	// detector returns "" anyway, and with bash the network gate refuses the
+	// first command. Either way detection fails closed with the --lang error.
+	res := RunScript(Run{Lang: "", Code: "curl -s https://example.com"})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "cannot detect language: pass --lang") {
+		t.Errorf("RunScript(curl without egress) error = %v, want language-detection error", res.Err)
+	}
+	if !runtimeInstalled("bash") {
+		t.Skip("bash not installed; remaining assertions exercise the bash fallback")
+	}
+	if got := detectLangFromContent("curl -s https://example.com"); got != "" {
+		t.Errorf("detectLangFromContent(curl without egress) = %q, want \"\"", got)
+	}
+	if got := detectLangFromContent("curl -s https://example.com\n# egress: example.com:443"); got != "bash" {
+		t.Errorf("detectLangFromContent(curl with egress) = %q, want bash", got)
+	}
+	if got := detectLangFromContent("echo hi"); got != "bash" {
+		t.Errorf("detectLangFromContent(echo hi) = %q, want bash", got)
+	}
+	if got := detectLangFromContent("ssh user@host ls"); got != "" {
+		t.Errorf("detectLangFromContent(ssh without egress) = %q, want \"\"", got)
+	}
 }

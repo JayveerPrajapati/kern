@@ -386,6 +386,70 @@ index 111..222 100644
 	}
 }
 
+// TestSubjectCommentFirstHunkNeverLeaks pins 6.5: a hunk that OPENS with
+// comment lines must not leak comment prose into the subject. A diff whose
+// first added line is "// lane ..." used to produce "chore(lib): lane" —
+// the word-grab fallback scanned comment lines. The subject must come from
+// the next non-comment line instead.
+func TestSubjectCommentFirstHunkNeverLeaks(t *testing.T) {
+	diff := `diff --git a/lib/queue.go b/lib/queue.go
+index 111..222 100644
+--- a/lib/queue.go
++++ b/lib/queue.go
+@@ -1,2 +1,5 @@
++// lane is the queue lane for retried jobs
++// TODO: split by priority
++processQueue(lane)
++return fmt.Sprintf("routed to %s", lane)
+`
+	m := Generate(diff)
+	if strings.Contains(strings.ToLower(m.Subject), "lane") {
+		t.Fatalf("comment prose leaked into the subject: %s", m.Subject)
+	}
+	if !strings.Contains(strings.ToLower(m.Subject), "process queue") {
+		t.Fatalf("subject should name the non-comment added call processQueue, got: %s", m.Subject)
+	}
+}
+
+// TestSubjectCommentOnlyDiffFallsBack pins 6.5: a diff whose added lines are
+// ALL comments has no meaningful subject — the message falls back to the
+// type(scope) + "update" placeholder instead of naming comment prose.
+func TestSubjectCommentOnlyDiffFallsBack(t *testing.T) {
+	diff := `diff --git a/lib/queue.go b/lib/queue.go
+index 111..222 100644
+--- a/lib/queue.go
++++ b/lib/queue.go
+@@ -1,2 +1,4 @@
++// lane is the queue lane for retried jobs
++// TODO: split by priority
+`
+	m := Generate(diff)
+	if strings.Contains(m.Subject, "lane") {
+		t.Fatalf("comment prose leaked into the subject: %s", m.Subject)
+	}
+	if !strings.HasSuffix(m.Subject, "(lib): update") {
+		t.Fatalf("comment-only diff must fall back to the type(scope) placeholder, got: %s", m.Subject)
+	}
+}
+
+// TestSubjectQuotedStringStripped pins 6.5: quoted string content is prose
+// (error messages, URLs) and must not name the subject through the
+// word-grab/action rules.
+func TestSubjectQuotedStringStripped(t *testing.T) {
+	diff := `diff --git a/lib/queue.go b/lib/queue.go
+index 111..222 100644
+--- a/lib/queue.go
++++ b/lib/queue.go
+@@ -1,2 +1,3 @@
++return errors.New("support lane routing")
++handleErr(err)
+`
+	m := Generate(diff)
+	if strings.Contains(strings.ToLower(m.Subject), "lane") {
+		t.Fatalf("quoted string content leaked into the subject: %s", m.Subject)
+	}
+}
+
 // TestEnhanceAttributesBodyDeepEdits (F-CM1): a body-deep edit — hunk
 // context far from the declaration header, or --unified=0 diffs with no
 // context at all — still names the enclosing declaration when the file

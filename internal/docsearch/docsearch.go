@@ -104,7 +104,11 @@ func CacheKey(root string) string {
 // are scoped to an explicit project root only.
 var errRootRequired = errors.New("docsearch: project root is required — doc indexes are scoped to one project")
 
-// Load reads a previously persisted index for root. Returns nil when absent.
+// Load reads a previously persisted index for root. Returns nil when
+// absent. Ghost purge: chunks whose source file no longer exists under root
+// are dropped (and the purge is persisted best-effort), so a stale cache can
+// never keep serving fragments of deleted documents — the doc-search
+// counterpart of the symbol index's staleness machinery.
 func Load(root string) *Index {
 	if strings.TrimSpace(root) == "" {
 		return nil
@@ -113,7 +117,52 @@ func Load(root string) *Index {
 	if err := cache.Load(CacheKey(root), ix); err != nil {
 		return nil
 	}
+	if n := ix.PurgeDeleted(root); n > 0 {
+		// Best-effort persist: a failed save only costs re-purging the
+		// in-memory index on the next Load, never a wrong search result.
+		_ = ix.Save()
+	}
 	return ix
+}
+
+// PurgeDeleted drops chunks whose source file no longer exists under root
+// and returns how many were dropped. On-disk documents are indexed with
+// root-relative Chunk.File paths, so each unique file is stat-joined against
+// root once (one stat per file, not per chunk). Fetched documents (the
+// fetch/ prefix — MergeFetched's virtual paths backed by the global
+// docs-fetch cache, not the project tree) are exempt: their "file" never
+// exists under root by design.
+func (ix *Index) PurgeDeleted(root string) int {
+	missing := map[string]bool{}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, d := range ix.Docs {
+		f := d.Chunk.File
+		if f == "" || strings.HasPrefix(f, fetchPrefix) || missing[f] {
+			continue
+		}
+		path := f
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, f)
+		}
+		if _, err := os.Stat(path); err != nil {
+			missing[f] = true
+		}
+	}
+	if len(missing) == 0 {
+		return 0
+	}
+	kept := ix.Docs[:0]
+	purged := 0
+	for _, d := range ix.Docs {
+		if missing[d.Chunk.File] {
+			purged++
+			continue
+		}
+		kept = append(kept, d)
+	}
+	ix.Docs = kept
+	return purged
 }
 
 // IndexDir walks root and chunks + embeds every document file. It returns the

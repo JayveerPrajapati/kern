@@ -17,10 +17,10 @@ func TestArchDriftRecordsMapping(t *testing.T) {
 		Findings: []architecture.ArchDrift{
 			{
 				// LOC + deps drift on one subsystem -> 2 records.
-				Subsystem:  "internal/web",
+				Subsystem:  "internal/gates",
 				LOC:        5200,
 				Cap:        4700,
-				Violations: []string{"internal/gates", "internal/optimize"},
+				Violations: []string{"internal/verifycmd", "internal/optimize"},
 			},
 			{
 				// Structural problem only -> 1 degraded-warn record.
@@ -47,18 +47,18 @@ func TestArchDriftRecordsMapping(t *testing.T) {
 		got[r.Subsystem] = append(got[r.Subsystem], r)
 	}
 
-	web := got["internal/web"]
-	if len(web) != 2 {
-		t.Fatalf("internal/web records = %d, want 2: %+v", len(web), web)
+	gates := got["internal/gates"]
+	if len(gates) != 2 {
+		t.Fatalf("internal/gates records = %d, want 2: %+v", len(gates), gates)
 	}
 	kinds := map[string]string{}
-	for _, r := range web {
+	for _, r := range gates {
 		kinds[r.ViolationKind] = r.Change
 	}
 	if kinds["loc-over-cap"] != "" {
 		t.Errorf("loc-over-cap Change = %q, want empty (no change ref)", kinds["loc-over-cap"])
 	}
-	if kinds["import-not-in-allowed-deps"] != "internal/gates, internal/optimize" {
+	if kinds["import-not-in-allowed-deps"] != "internal/verifycmd, internal/optimize" {
 		t.Errorf("import-not-in-allowed-deps Change = %q, want the joined imports", kinds["import-not-in-allowed-deps"])
 	}
 

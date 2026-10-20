@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ func (ix *Index) promoteLowEdges() {
 	for owner, edges := range ix.Calls {
 		for i := range edges {
 			e := &edges[i]
-			if e.Confidence != ConfidenceLow || e.Target == "" {
+			if e.Confidence != ConfidenceLow || e.Target == "" || e.Binding == "go/ssa-cha" || (e.Binding == "javac" && e.Synth != "") {
 				continue
 			}
 			if canon := ix.canonicalEdgeTarget(e.Target); canon != "" && canon != e.Target {
@@ -55,7 +56,7 @@ func (ix *Index) promoteLowEdges() {
 			}
 		}
 		if touched[owner] {
-			ix.Calls[owner] = dedupeCallEdges(edges)
+			ix.Calls[owner] = langparse.DedupeCallEdges(edges)
 		}
 	}
 }

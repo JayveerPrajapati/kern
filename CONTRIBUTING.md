@@ -9,12 +9,12 @@ contributor front door; the [README](README.md) covers the user story.
 ```bash
 git clone https://github.com/JayveerPrajapati/kern
 cd kern
-go build ./...          # Go 1.25+
-go test ./...           # full suite (~2-4 min); targeted: go test ./internal/sec/
+go build ./...          # Go 1.27+
+go test ./...           # full suite (~2-4 min); iteration loop: make test-touched
 go vet ./...
 ```
 
-No codegen bootstrap: everything is `go` + the repo itself (a thin 159-line
+No codegen bootstrap: everything is `go` + the repo itself (a thin
 `Makefile` wraps the common workflows — see `make help`).
 `kern` is self-hosting — run `go run ./cmd/kern doctor` to check your
 worktree the way users' installs are checked.
@@ -23,14 +23,19 @@ worktree the way users' installs are checked.
 
 | Path | What it is |
 |---|---|
-| `cmd/kern` | The CLI. One `run*` function per command; the command table lives in `dispatch_table.go` (215 entries: name, category, help, usage). |
+| `cmd/kern` | The CLI. One `run*` function per command; the command table lives in `dispatch_table.go` (59 entries incl. flag aliases: name, category, help, usage). |
 | `cmd/kern-mcp` | The MCP server binary (delegates to `internal/mcp`). |
-| `cmd/kern-server` | Web console + enterprise control plane (`internal/web`). |
-| `internal/` | All core logic — 184 packages (190 total incl. `cmd/`, `evaluate/`, `sdk`). `internal/mcp` is the MCP surface; `internal/app` is the platform glue. |
+| `internal/` | All core logic — ~130 packages (~189 total incl. `cmd/` and `evaluate/`). `internal/mcp` is the MCP surface; `internal/app` is the platform glue. |
 | `docs/` | Generated + curated docs. `docs/tool-catalog.md` is GENERATED — never hand-edit. |
-| `.kern/sandboxes/loop/` | A SEPARATE go module (vendored snapshot for sandbox-loop tests). Never rewrite its imports when refactoring `internal/` — `go build ./...` excludes it, and rewriting breaks it. |
 
 ## House rules (the ones tests enforce)
+
+**Finding your way around:** the
+[10-minute architecture tour](docs/contributing/architecture-tour.md) walks
+the entry points → index → MCP surface → the self-check gates, in execution
+order. `make test-touched` runs only the packages your diff touches (plus
+the gate packages for cross-package files like the plugin and AGENTS.md) —
+the fast iteration loop; the full `make test-short` is the pre-merge ritual.
 
 **ARCHITECTURE.md is a contract.** `go test ./internal/architecture/`
 parses the subsystem ledger in [ARCHITECTURE.md](ARCHITECTURE.md) and
@@ -38,7 +43,7 @@ fails on divergence: every `internal/*` dir has a LOC cap and an
 allowed-deps set. Adding a new internal import to a package means updating
 the table FIRST — that is the drift gate. Caps are ~1.5x baseline.
 
-**MCP catalog parity.** `internal/mcp/catalog/tools.go` is the single
+**MCP catalog parity.** `internal/mcpcatalog/tools.go` is the single
 source of truth for tool names/descriptions. After changing it:
 
 ```bash
@@ -82,9 +87,32 @@ changed, why, and how it was verified (which tests ran).
 
 ## Verification bar
 
-- Targeted package tests while iterating (`go test ./internal/<pkg>/`).
+- Targeted package tests while iterating — `make test-touched` does this
+  for you from the diff (cross-package pins included).
 - Full `go test ./...` + `go vet ./...` before handing off.
 - `go test ./internal/architecture/` after touching `internal/` structure.
 - For MCP-surface changes: regenerate the catalog doc + run the parity
   tests above, then smoke the server:
   `printf '…jsonrpc initialize…' | go run ./cmd/kern-mcp`.
+
+## Good first contributions
+
+Issues labeled [`good first issue`](https://github.com/JayveerPrajapati/kern/labels)
+are pre-scoped: one subsystem, a named gate, a clear done-condition. The
+recurring kinds, in rough order of fit:
+
+- **Doc-drift fixes** — a gate like `TestDocToolCountsDerived` or
+  `TestAccuracyDocMatchesParity` fails with file+line; the fix is updating
+  the doc (and pins) deliberately. The failure message IS the spec.
+- **New benchmark protocol pages** — `docs/benchmarks/` has a template:
+  methodology, measured numbers, a gate test. Copy the pattern.
+- **New tree-sitter grammar wiring** — a new language in
+  `internal/index/treesitter.go` + parity fixtures. Starts from the
+  existing 14-language map; the parity gate defines done.
+- **Small subsystem work** — anything from the low-LOC end of
+  `ARCHITECTURE.md`'s ledger (`internal/strutil`, `internal/flock`, ...):
+  read it whole in one sitting, then improve it.
+
+Not beginner work: `internal/governance` and `internal/mcp` (security
+surface — every change passes the fail-closed gates), and the plugin
+4-copy sync (mechanical but easy to get subtly wrong).

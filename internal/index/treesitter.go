@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/JayveerPrajapati/kern/internal/calleefilter"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"github.com/UserNobody14/tree-sitter-dart/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	"github.com/tree-sitter/tree-sitter-bash/bindings/go"
@@ -63,21 +66,29 @@ var tsNodeTypes = map[string]string{
 	// JavaScript/TypeScript
 	"function_expression":            "func",
 	"generator_function_declaration": "func",
-	"arrow_function":                 "func",
-	"method_definition":              "method",
-	"class_declaration":              "class",
-	"class":                          "class",
-	"abstract_class_declaration":     "class",
-	"interface_declaration":          "interface",
-	"type_alias_declaration":         "type",
-	"enum_declaration":               "enum",
-	"variable_declaration":           "var",
-	"lexical_declaration":            "const",
-	"function_signature":             "func",
-	"method_signature":               "method",
-	"property_signature":             "prop",
-	"public_field_definition":        "prop",
-	"abstract_method_signature":      "method",
+	// NOTE: arrow_function is deliberately NOT a symbol node. Anonymous
+	// arrows have no name of their own — ExtractName's child scan would
+	// return the FIRST PARAMETER ("n" in `xs.map(n => n * 2)`), minting a
+	// phantom method named "n" per callback that collides on the duplicate
+	// gate when the same parameter name repeats inside one enclosing
+	// function (live repro: wf_project conduit AIAssistantPanel.tsx, two
+	// `.map(n => ...)` callbacks, index refused). Named bindings keep
+	// their symbol via the const/let/var declaration path, which promotes
+	// to func when it has an arrow_function descendant (below).
+	"method_definition":          "method",
+	"class_declaration":          "class",
+	"class":                      "class",
+	"abstract_class_declaration": "class",
+	"interface_declaration":      "interface",
+	"type_alias_declaration":     "type",
+	"enum_declaration":           "enum",
+	"variable_declaration":       "var",
+	"lexical_declaration":        "const",
+	"function_signature":         "func",
+	"method_signature":           "method",
+	"property_signature":         "prop",
+	"public_field_definition":    "prop",
+	"abstract_method_signature":  "method",
 	// Python
 	"function_definition":       "func",
 	"class_definition":          "class",
@@ -134,8 +145,8 @@ var tsNodeTypes = map[string]string{
 	"property_name":       "prop",
 }
 
-// tsLanguageFor maps kern language ids (from detectLang) to tree-sitter
-// grammar ids. detectLang uses "shell" for shell files and "typescript" for
+// tsLanguageFor maps kern language ids (from langparse.DetectLang) to tree-sitter
+// grammar ids. langparse.DetectLang uses "shell" for shell files and "typescript" for
 // both .ts and .tsx; the grammars are keyed "bash" and "tsx" respectively.
 func tsLanguageFor(lang, rel string) (string, bool) {
 	switch lang {
@@ -151,6 +162,16 @@ func tsLanguageFor(lang, rel string) (string, bool) {
 	return lang, ok
 }
 
+// tsParserPool recycles tree-sitter parsers across files: sitter.NewParser
+// is a C allocation, and allocating one per foreign-language file (plus
+// Close per file) was pure churn on polyglot trees. Parsers are safe to
+// reuse after Parse — the language is re-armed per use via SetLanguage —
+// and pooled parsers are never Close()d: the pool keeps a bounded set
+// alive for the process lifetime instead.
+var tsParserPool = sync.Pool{
+	New: func() any { return sitter.NewParser() },
+}
+
 // tsExtractor uses tree-sitter to extract symbols, calls and inheritance.
 func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
 	tsLangID, ok := tsLanguageFor(lang, rel)
@@ -159,8 +180,8 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]Call
 	}
 	tsLang := tsLanguageMap[tsLangID]
 
-	parser := sitter.NewParser()
-	defer parser.Close()
+	parser := tsParserPool.Get().(*sitter.Parser)
+	defer tsParserPool.Put(parser)
 	if err := parser.SetLanguage(tsLang); err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -182,13 +203,12 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]Call
 	defs := collectDefinitions(root, src, rel, lang)
 
 	// Second pass: collect call edges
-	collectCalls(root, src, defs, calls)
+	collectCalls(root, src, defs, calls, lang, rel)
 
 	// Java: resolve member-invocation callees through per-method local types
-	// (x.bar() -> Foo.bar()) so cross-file edges bind, mirroring the regex
-	// path's collectJavaLocalTypes/resolveJavaCallee pair (java_resolve.go).
+	// (x.bar() -> Foo.bar()) so cross-file edges bind (java_resolve.go).
 	if lang == "java" {
-		resolveJavaCalls(root, src, calls)
+		langparse.ResolveJavaCalls(root, src, calls)
 	}
 
 	// Third pass: collect inheritance (extends / implements) edges
@@ -202,26 +222,20 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]Call
 		Lang:  lang,
 	}
 
-	calls = attributeTopLevelCalls(rel, src, lang, defs, calls)
-	// Top-level (file-owned) edges were attributed by the shared regex
-	// entry-rule scan at MEDIUM. Where the AST has already proven the callee
-	// is a real symbol in this file, the edge inherits AST-grade confidence —
-	// the regex scan merely re-discovered a fact tree-sitter verified.
-	// Unresolved callees (external, dynamic) stay MEDIUM.
+	calls = langparse.AttributeTopLevelCalls(rel, src, lang, defs, calls)
+	// Top-level (file-owned) edges enter at MEDIUM (the shared regex
+	// entry-rule scan); where the AST proved the callee is a real symbol in
+	// this file, the edge inherits AST-grade confidence.
 	promoteFileEdgesToASTConfidence(rel, defs, calls)
 	return defs, calls, inherits, pkg, nil
 }
 
-// promoteFileEdgesToASTConfidence raises MEDIUM-confidence file-owned edges
-// (top-level calls attributed by the shared regex entry-rule scan in
-// attributeTopLevelCalls) to HIGH when the callee is a verified tree-sitter
-// symbol: tree-sitter has already proven the target exists in this file, so
-// the regex-derived edge inherits AST-grade confidence (recommendation B
-// part 2). Only exact full-name matches are promoted — dotted targets
-// through unknown receivers (g.loud) and external callees stay MEDIUM
-// because the AST cannot verify them. The parity gate tolerates the
-// resulting ts>regex confidence gap: regex is the documented lower-fidelity
-// subset and may be less certain, never more certain.
+// promoteFileEdgesToASTConfidence raises MEDIUM file-owned edges (top-level
+// calls from the shared regex scan in langparse.AttributeTopLevelCalls) to HIGH when
+// the callee is a verified tree-sitter symbol: the AST has proven the
+// target exists in this file (recommendation B part 2). Only exact
+// full-name matches are promoted; dotted targets through unknown receivers
+// and external callees stay MEDIUM (regex is never more certain).
 func promoteFileEdgesToASTConfidence(rel string, defs []Symbol, calls map[string][]CallEdge) {
 	owner := "file:" + rel
 	edges := calls[owner]
@@ -249,21 +263,89 @@ func promoteFileEdgesToASTConfidence(rel string, defs []Symbol, calls map[string
 	}
 }
 
+// isPythonOverloadStub reports whether a Python decorated_definition wraps a
+// function whose decorator stack contains a literal `overload` or
+// `typing.overload` — the typing stub idiom (multiple @overload signatures
+// followed by one real implementation). Stubs must not claim the symbol
+// identity: the real def owns it, and a stub colliding with the impl trips
+// the fail-loud duplicate gate. Robust across stacked decorators (@overload
+// combined with @staticmethod or others): ANY decorator in the stack matching
+// the literal names marks the def as a stub. Only function definitions
+// qualify — @overload on a class is not the typing idiom and keeps
+// extracting.
+func isPythonOverloadStub(n *sitter.Node, src []byte) bool {
+	isFunc := false
+	hasOverload := false
+	for i := uint(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Kind() {
+		case "decorator":
+			if !hasOverload && decoratorIsOverload(c, src) {
+				hasOverload = true
+			}
+		case "function_definition":
+			isFunc = true
+		}
+	}
+	return isFunc && hasOverload
+}
+
+// decoratorIsOverload reports whether a decorator node is literally
+// `overload` or `typing.overload`: the decorated name's text (the decorator's
+// non-`@` child — identifier, attribute, …) is one of the two names.
+func decoratorIsOverload(d *sitter.Node, src []byte) bool {
+	for i := uint(0); i < d.ChildCount(); i++ {
+		e := d.Child(i)
+		if e == nil || e.Kind() == "@" {
+			continue
+		}
+		name := string(src[e.StartByte():e.EndByte()])
+		return name == "overload" || name == "typing.overload"
+	}
+	return false
+}
+
 // collectDefinitions walks the AST and extracts symbol definitions.
 func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symbol {
 	var syms []Symbol
+	// CSS is redeclarative: the same class/id/property is legitimately
+	// re-selected in compound (`.data-table th`), pseudo (`.btn:disabled`)
+	// and media contexts on different lines — the fail-loud duplicate gate
+	// (correct for code languages) must not fire on valid CSS. A CSS symbol
+	// is its selector NAME within a file: keep the first occurrence as the
+	// definition site, drop later re-selections. @keyframes names (func)
+	// stay gated — a repeated name is a real CSS error. The regex extractor
+	// dedupes identically (foreign_lang.go) so tree-sitter/regex parity
+	// holds.
+	cssSeen := map[string]bool{}
 	var walk func(*sitter.Node)
 	walk = func(n *sitter.Node) {
 		kind := n.Kind()
+		// Python typing stubs: skip @overload-decorated defs wholesale — the
+		// signature carries no body and the real implementation (defined
+		// separately) owns the identity. Without this, the stub and the impl
+		// collide on the fail-loud duplicate gate ("same identity extracted
+		// twice").
+		if lang == "python" && kind == "decorated_definition" && isPythonOverloadStub(n, src) {
+			return
+		}
 		if symKind, ok := tsNodeTypes[kind]; ok {
-			name := extractName(n, src, kind)
-			// Skip the file root node itself (e.g. Python's "module"): it is a
-			// container, not a symbol in its own right.
+			name := langparse.ExtractName(n, src, kind)
+			// Skip the file root node (Python's "module"): a container.
 			if name != "" && n != node {
-				// CSS custom properties are the only props worth indexing; plain
-				// property names (color, opacity) are noise.
+				// Only CSS custom properties (--*) are props worth indexing.
 				if kind == "property_name" && !strings.HasPrefix(name, "--") {
 					return
+				}
+				if lang == "css" && symKind != "func" {
+					key := symKind + "\x00" + name
+					if cssSeen[key] {
+						return
+					}
+					cssSeen[key] = true
 				}
 				start := n.StartPosition()
 				end := n.EndPosition()
@@ -275,36 +357,54 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 					End:  int(end.Row) + 1,
 					Lang: lang,
 				}
-				// Direct declarations score HIGH. CSS id selectors mapped to "const"
-				// are a loose heuristic: LOW. Arrow functions promoted from const/var
-				// are an inferred kind: MEDIUM (set below).
+				// Direct declarations score HIGH; CSS id-selector "const" is LOW.
 				sym.Confidence = ConfidenceHigh
 				if symKind == "const" && kind == "id_selector" {
 					sym.Confidence = ConfidenceLow
 				}
-				// JS/TS arrow functions assigned via const/let/var read as
-				// function definitions, matching the regex path.
+				// JS/TS arrow functions via const/let/var read as funcs (regex parity).
 				if symKind == "const" || symKind == "var" {
 					if hasDescendantKind(n, "arrow_function") {
 						sym.Kind = "func"
 						sym.Confidence = ConfidenceMedium
 					}
 				}
-				// C++ out-of-class definitions carry a qualified name
-				// ("Shape::Shape") — split receiver from method name.
+				// C++ out-of-class names ("Shape::Shape"): split receiver.
 				if i := strings.Index(name, "::"); i >= 0 {
 					sym.Receiver = name[:i]
 					sym.Name = name[i+2:]
 					sym.Kind = "method"
 				}
-				// Try to find receiver for methods, and promote functions that
-				// live inside a class/impl container to methods.
+				// Nested types record their enclosing class in Outer — the
+				// conflict-check discriminator for same-named nested classes
+				// under different parents (WD-6c).
+				if symKind != "method" && symKind != "func" {
+					sym.Outer = langparse.FindReceiver(n, node, src)
+				}
+				// Find the receiver for methods; promote class-contained funcs.
 				if symKind == "method" || symKind == "func" {
-					if recv := findReceiver(n, node, src); recv != "" {
+					if recv := langparse.FindReceiver(n, node, src); recv != "" {
 						sym.Kind = "method"
 						sym.Receiver = recv
+						// The receiver class's own parent (WD-6d): same-named
+						// nested classes hold same-named methods.
+						sym.Outer = outerOfClass(n, node, src)
 					} else if symKind == "method" {
 						sym.Kind = "func"
+					}
+					// Overload discriminator (WD-6): different parameter
+					// lists = legitimate overloads, not duplicates.
+					for i := uint(0); i < n.ChildCount(); i++ {
+						fp := n.Child(i)
+						if fp == nil || fp.Kind() != "formal_parameters" {
+							continue
+						}
+						for j := uint(0); j < fp.ChildCount(); j++ {
+							if p := fp.Child(j); p != nil && (p.Kind() == "formal_parameter" || p.Kind() == "required_parameter") {
+								sym.Params = append(sym.Params, string(src[p.StartByte():p.EndByte()]))
+							}
+						}
+						break
 					}
 				}
 				syms = append(syms, sym)
@@ -321,7 +421,7 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 }
 
 // collectCalls walks the AST and extracts call edges.
-func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string][]CallEdge) {
+func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string][]CallEdge, lang string, file string) {
 	// Build a set of locally-defined symbol names so calls to them are always
 	// kept even when the regex keyword heuristic would not match.
 	nameSet := make(map[string]bool)
@@ -345,20 +445,22 @@ func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string
 		}
 		if isCall {
 			// Try to extract the callee name
-			if callee := extractCallee(n, src); callee != "" {
+			if callee := langparse.ExtractCallee(n, src); callee != "" {
 				// Find the enclosing function
 				if caller := findEnclosingFunction(n, src); caller != "" {
-					if _, ok := nameSet[callee]; ok || !isKeywordCall(callee) {
-						if callee != caller {
-							// Calls to a locally-defined symbol are direct
-							// syntactic edges: HIGH. Unresolved targets (not
-							// in the local definition set) are name-based
-							// guesses that may be external or dynamic: MEDIUM.
-							conf := ConfidenceHigh
-							if _, ok := nameSet[callee]; !ok {
-								conf = ConfidenceMedium
+					if lang != "go" || !calleefilter.IsNoiseCalleeFor(callee, true, file) {
+						if _, ok := nameSet[callee]; ok || !isKeywordCall(callee) {
+							if callee != caller {
+								// Calls to a locally-defined symbol are direct
+								// syntactic edges: HIGH. Unresolved targets (not
+								// in the local definition set) are name-based
+								// guesses that may be external or dynamic: MEDIUM.
+								conf := ConfidenceHigh
+								if _, ok := nameSet[callee]; !ok {
+									conf = ConfidenceMedium
+								}
+								calls[caller] = append(calls[caller], CallEdge{Target: callee, Confidence: conf})
 							}
-							calls[caller] = append(calls[caller], CallEdge{Target: callee, Confidence: conf})
 						}
 					}
 				}
@@ -408,7 +510,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 
 		switch kind {
 		case "class_definition": // Python: class Cat(Animal); Dart: class Cat extends Animal implements Pet
-			subtype = extractName(n, src, kind)
+			subtype = langparse.ExtractName(n, src, kind)
 			for i := uint(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c == nil {
@@ -424,7 +526,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 				}
 			}
 		case "class_declaration", "interface_declaration": // JS/TS/PHP/Java
-			subtype = extractName(n, src, kind)
+			subtype = langparse.ExtractName(n, src, kind)
 			extendsKinds := map[string]bool{
 				"extends_clause": true, "superclass": true, "extends_interfaces": true,
 				"extends_type_clause": true, "base_clause": true, "base_class_clause": true,
@@ -443,6 +545,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 				case extendsKinds[ck]:
 					// class_heritage nests extends/implements clauses; unwrap it
 					// so each clause is classified by its own kind.
+					clauses := 0
 					for j := uint(0); j < c.ChildCount(); j++ {
 						cc := c.Child(j)
 						if cc == nil {
@@ -450,10 +553,17 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 						}
 						cck := cc.Kind()
 						if extendsKinds[cck] {
+							clauses++
 							bases = append(bases, tag("extends", collectNamesDeep(cc))...)
 						} else if implementsKinds[cck] {
+							clauses++
 							bases = append(bases, tag("implements", collectNamesDeep(cc))...)
 						}
+					}
+					// JavaScript's class_heritage holds the base expression
+					// directly, with no extends_clause wrapper.
+					if ck == "class_heritage" && clauses == 0 {
+						bases = append(bases, tag("extends", collectNamesDeep(c))...)
 					}
 					if ck != "class_heritage" {
 						bases = append(bases, tag("extends", collectNamesDeep(c))...)
@@ -463,7 +573,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 				}
 			}
 		case "class": // Ruby: class Cat < Animal
-			subtype = extractName(n, src, kind)
+			subtype = langparse.ExtractName(n, src, kind)
 			for i := uint(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c != nil && c.Kind() == "superclass" {
@@ -471,7 +581,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 				}
 			}
 		case "class_specifier": // C++: class Cat : public Animal, virtual Pet
-			subtype = extractName(n, src, kind)
+			subtype = langparse.ExtractName(n, src, kind)
 			for i := uint(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c != nil && c.Kind() == "base_class_clause" {
@@ -485,7 +595,7 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 				bases = append(bases, tag("implements", names[:len(names)-1])...)
 			}
 		case "trait_item": // Rust: trait Meow: Speak
-			subtype = extractName(n, src, kind)
+			subtype = langparse.ExtractName(n, src, kind)
 			for i := uint(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c != nil && c.Kind() == "trait_bounds" {
@@ -540,81 +650,6 @@ func isKeywordCall(name string) bool {
 	return kw[name]
 }
 
-// extractName gets the identifier name from a definition node. It looks for
-// the first direct name-bearing child; if none exists it descends shallowly so
-// declaration shapes that wrap their name (C's function_declarator, Java's
-// variable_declarator, PHP's name child) still resolve.
-// methodLike node kinds put the method name after their return type, so the
-// name is the last name-bearing child rather than the first.
-var methodLike = map[string]bool{
-	"method_declaration":        true,
-	"method_definition":         true,
-	"method_signature":          true,
-	"abstract_method_signature": true,
-	"constructor_declaration":   true,
-	"function_signature_item":   true,
-}
-
-func extractName(node *sitter.Node, src []byte, kind string) string {
-	nameKinds := map[string]bool{
-		"identifier": true, "type_identifier": true, "property_identifier": true,
-		"name": true, "field_identifier": true, "namespace_name": true,
-		"class_name": true, "method_name": true, "word": true, "variable_name": true,
-		"constant": true, "id_name": true, "keyframes_name": true,
-		"property_name": true,
-	}
-	// Qualified identifiers (C++ "Shape::Shape") keep their full text so the
-	// caller can split receiver from method name.
-	if node.Kind() == "qualified_identifier" {
-		return strings.ReplaceAll(string(src[node.StartByte():node.EndByte()]), " ", "")
-	}
-	// Leaf name nodes (e.g. CSS property_name) are their own name.
-	if nameKinds[node.Kind()] {
-		return string(src[node.StartByte():node.EndByte()])
-	}
-	// Field-based names (Dart signatures carry the name in a "name" field;
-	// other grammars fall through to child scanning).
-	if f := node.ChildByFieldName("name"); f != nil && nameKinds[f.Kind()] {
-		return string(src[f.StartByte():f.EndByte()])
-	}
-	// Method-like declarations carry the return type before the name; the name
-	// is the last name-bearing child ("public String list()" -> "list").
-	if methodLike[node.Kind()] {
-		last := ""
-		for i := uint(0); i < node.ChildCount(); i++ {
-			child := node.Child(i)
-			if child == nil {
-				continue
-			}
-			ck := child.Kind()
-			if nameKinds[ck] {
-				last = string(src[child.StartByte():child.EndByte()])
-			}
-		}
-		if last != "" {
-			return last
-		}
-	}
-	for i := uint(0); i < node.ChildCount(); i++ {
-		child := node.Child(i)
-		if child == nil {
-			continue
-		}
-		ck := child.Kind()
-		if nameKinds[ck] {
-			return string(src[child.StartByte():child.EndByte()])
-		}
-		if ck == "function_declarator" || ck == "declarator" || ck == "variable_declarator" ||
-			ck == "name" || ck == "method_declarator" || ck == "impl_item" || ck == "class_definition" ||
-			ck == "qualified_identifier" || ck == "function_signature" {
-			if n := extractName(child, src, ck); n != "" {
-				return n
-			}
-		}
-	}
-	return ""
-}
-
 // hasDescendantKind reports whether any node at or below n has the given kind.
 func hasDescendantKind(n *sitter.Node, want string) bool {
 	if n.Kind() == want {
@@ -628,22 +663,19 @@ func hasDescendantKind(n *sitter.Node, want string) bool {
 	return false
 }
 
-// findReceiver finds the receiver/container type for a method. Rust methods
-// live under impl_item; class methods (Java/C#/TS) under a class body whose
-// ancestor carries the type name; Python methods under class_definition; PHP
-// under class_declaration.
-func findReceiver(node, root *sitter.Node, src []byte) string {
-	for p := node.Parent(); p != nil && p.Id() != root.Id(); p = p.Parent() {
+// langparse.FindReceiver finds the receiver/container type for a method. Rust methods
+// live under impl_item; class methods under a class body whose ancestor
+// carries the type name; Python under class_definition; PHP class_declaration.
+// outerOfClass returns the class enclosing the symbol's immediate class
+// container — the receiver class's own parent (WD-6d discriminator).
+// Empty when the container is top-level.
+func outerOfClass(n, root *sitter.Node, src []byte) string {
+	for p := n.Parent(); p != nil && p.Id() != root.Id(); p = p.Parent() {
 		switch p.Kind() {
-		case "impl_item", "struct_item", "trait_item", "class_definition",
-			"class_declaration", "interface_declaration", "enum_declaration",
-			"record_declaration", "struct_declaration", "trait_declaration",
-			"namespace_declaration", "module", "class":
-			if name := extractName(p, src, p.Kind()); name != "" {
-				return name
-			}
-		case "class_body", "declaration_list", "body", "block", "body_statement":
-			// intermediate container — keep walking up
+		case "class_definition", "class_declaration", "interface_declaration",
+			"enum_declaration", "record_declaration", "struct_declaration",
+			"trait_declaration", "struct_item", "trait_item", "impl_item":
+			return langparse.FindReceiver(p, root, src)
 		}
 	}
 	return ""
@@ -652,17 +684,6 @@ func findReceiver(node, root *sitter.Node, src []byte) string {
 // findEnclosingFunction finds the function containing a call and returns its
 // receiver-qualified name (e.g. "User.login") so call edges land on the same
 // key the definition uses.
-// funcKinds are node kinds that carry a function/method name.
-var funcKinds = map[string]bool{
-	"function_item": true, "function_signature_item": true, "method_declaration": true,
-	"function_definition": true, "constructor_declaration": true, "method_definition": true,
-	"function_signature": true, "function_declaration": true, "generator_function_declaration": true,
-	"method_signature": true, "getter_signature": true, "setter_signature": true,
-	"constructor_signature": true, "factory_constructor_signature": true, "operator_signature": true,
-	"local_function_declaration": true,
-	"method":                     true, "singleton_method": true,
-}
-
 // bodyKinds are container nodes whose previous sibling can carry a function
 // signature (Dart keeps "function_signature" and "function_body" as siblings
 // under program / class_body).
@@ -678,26 +699,26 @@ func findEnclosingFunction(node *sitter.Node, src []byte) string {
 		// enclosing list (program / class_body): a body node's previous
 		// sibling carries the signature.
 		if bodyKinds[k] {
-			if ps := p.PrevSibling(); ps != nil && funcKinds[ps.Kind()] {
-				if name := extractName(ps, src, ps.Kind()); name != "" {
+			if ps := p.PrevSibling(); ps != nil && langparse.FuncKinds[ps.Kind()] {
+				if name := langparse.ExtractName(ps, src, ps.Kind()); name != "" {
 					// C++ qualified definitions ("Shape::area") map to "Shape.area".
 					if i := strings.Index(name, "::"); i >= 0 {
 						return name[:i] + "." + name[i+2:]
 					}
-					if recv := findReceiver(ps, rootOf(ps), src); recv != "" {
+					if recv := langparse.FindReceiver(ps, langparse.RootOf(ps), src); recv != "" {
 						return recv + "." + name
 					}
 					return name
 				}
 			}
 		}
-		if funcKinds[k] {
-			if name := extractName(p, src, k); name != "" {
+		if langparse.FuncKinds[k] {
+			if name := langparse.ExtractName(p, src, k); name != "" {
 				// C++ qualified definitions ("Shape::area") map to "Shape.area".
 				if i := strings.Index(name, "::"); i >= 0 {
 					return name[:i] + "." + name[i+2:]
 				}
-				if recv := findReceiver(p, rootOf(p), src); recv != "" {
+				if recv := langparse.FindReceiver(p, langparse.RootOf(p), src); recv != "" {
 					return recv + "." + name
 				}
 				return name
@@ -706,99 +727,16 @@ func findEnclosingFunction(node *sitter.Node, src []byte) string {
 	}
 	return ""
 }
-
-// rootOf climbs to the top of the tree from any node.
-func rootOf(node *sitter.Node) *sitter.Node {
-	for p := node.Parent(); p != nil; p = p.Parent() {
-		node = p
-	}
-	return node
-}
-
-// extractCallee extracts the callee name from a call expression. Member-style
-// nodes keep their full dotted chain ("System.out.println" stays as-is) so the
-// edge matches the regex extractor's keys; scoped identifiers resolve to their
-// last segment ("Point::new" -> "new").
-func extractCallee(node *sitter.Node, src []byte) string {
-	// A name-bearing node returns its own text.
-	switch node.Kind() {
-	case "identifier", "type_identifier", "field_identifier", "property_identifier", "name", "method_name", "word":
-		return string(src[node.StartByte():node.EndByte()])
-	}
-	// Member-style nodes resolve to their dotted chain (scoped identifiers keep
-	// only the last segment so "Point::new" lands on "new" like the regex).
-	switch node.Kind() {
-	case "member_expression", "attribute", "method_invocation", "field_expression", "field_access", "call", "function_expression":
-		parts := []string{}
-		for i := uint(0); i < node.ChildCount(); i++ {
-			child := node.Child(i)
-			if child == nil {
-				continue
-			}
-			ck := child.Kind()
-			// Only name-bearing and nested-member segments count; argument
-			// lists, index expressions and punctuation are skipped so
-			// "System.out.println(...)" resolves to "System.out.println".
-			if ck == "identifier" || ck == "type_identifier" || ck == "field_identifier" ||
-				ck == "property_identifier" || ck == "name" || ck == "method_name" || ck == "word" ||
-				ck == "constant" {
-				parts = append(parts, string(src[child.StartByte():child.EndByte()]))
-			} else if ck == "member_expression" || ck == "attribute" || ck == "method_invocation" || ck == "field_expression" || ck == "field_access" || ck == "scoped_identifier" || ck == "call" || ck == "function_expression" {
-				if seg := extractCallee(child, src); seg != "" {
-					parts = append(parts, seg)
-				}
-			}
-		}
-		return strings.Join(parts, ".")
-	case "scoped_identifier":
-		name := ""
-		for i := uint(0); i < node.ChildCount(); i++ {
-			child := node.Child(i)
-			if child == nil {
-				continue
-			}
-			if seg := extractCallee(child, src); seg != "" {
-				name = seg
-			}
-		}
-		return name
-	case "selector": // Dart: callee is the receiver chain before the args
-		if p := node.Parent(); p != nil && p.Kind() != "arguments" && p.Kind() != "argument_part" {
-			txt := strings.TrimSpace(string(src[p.StartByte():node.StartByte()]))
-			if i := strings.LastIndex(txt, "="); i >= 0 {
-				txt = txt[i+1:]
-			}
-			return strings.TrimSpace(txt)
-		}
-	}
-	for i := uint(0); i < node.ChildCount(); i++ {
-		child := node.Child(i)
-		if child == nil {
-			continue
-		}
-		ck := child.Kind()
-		if ck == "command_name" {
-			if name := extractCallee(child, src); name != "" {
-				return name
-			}
-			continue
-		}
-		switch ck {
-		case "identifier", "type_identifier", "field_identifier", "property_identifier", "name", "method_name", "word", "constant":
-			return string(src[child.StartByte():child.EndByte()])
-		case "member_expression", "attribute", "method_invocation", "field_expression", "field_access", "scoped_identifier":
-			if name := extractCallee(child, src); name != "" {
-				return name
-			}
-		}
-	}
-	return ""
-}
-
-// TreeSitterAvailable reports whether tree-sitter is available for the given language.
 func TreeSitterAvailable(lang string) bool {
 	if _, ok := tsLanguageFor(lang, ""); ok {
 		return true
 	}
 	return false
+}
+
+// TsExtract exposes the tree-sitter extractor to sibling packages (langparse
+// injects it into ExtractForeign) and to external tests. Same behavior as
+// tsExtract; the stub build returns the not-enabled error.
+func TsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
+	return tsExtract(rel, src, lang)
 }

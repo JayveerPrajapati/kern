@@ -73,6 +73,20 @@ func TestFitContextFoldedSource(t *testing.T) {
 	}
 }
 
+// TestFitContextMissingFileErrors pins the honest-failure contract (QA
+// 2026-10-15 finding 6): a requested file that cannot be read must fail the
+// call naming the file — it used to be silently skipped, and the fitted
+// result read as an empty success.
+func TestFitContextMissingFileErrors(t *testing.T) {
+	_, err := FitContext(context.Background(), Request{Files: []string{"does/not/exist.go"}})
+	if err == nil {
+		t.Fatalf("expected error for missing requested file, got nil")
+	}
+	if !strings.Contains(err.Error(), "does/not/exist.go") {
+		t.Fatalf("error should name the missing file, got: %v", err)
+	}
+}
+
 func TestFitContextEmpty(t *testing.T) {
 	dir := t.TempDir()
 	res, err := FitContext(context.Background(), Request{

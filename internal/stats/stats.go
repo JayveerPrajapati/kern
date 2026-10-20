@@ -1,12 +1,14 @@
-// Package stats records before/after token counts and cost estimates in a
-// local JSONL log. Nothing is transmitted anywhere.
+// Package stats records local token/cost savings; nothing is transmitted.
 package stats
 
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -14,7 +16,6 @@ import (
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 )
 
-// Operation is the kind of optimization performed.
 type Operation string
 
 const (
@@ -23,18 +24,11 @@ const (
 	OpProjectMap     Operation = "project_map"
 	OpRunBuild       Operation = "run_build"
 	OpOptimizeLog    Operation = "optimize_log"
-	// OpToolCall marks entries recorded at MCP dispatch: one per executed
-	// tool call, carrying the Tool name and the returned payload size. It is
-	// excluded from Summarize (the optimization-events ledger) so existing
-	// surfaces ("N ops, N tokens saved") keep their meaning; the per-tool
-	// ledger lives in SummarizeByTool.
+	// OpToolCall marks one MCP dispatch; SummarizeByTool owns its ledger.
 	OpToolCall Operation = "tool_call"
 )
 
-// ToolForOperation maps an optimization Operation to the canonical MCP tool
-// that produced it, so existing optimization entries can be attributed to a
-// tool in the per-tool ledger. An empty result means the operation has no
-// natural tool mapping.
+// ToolForOperation maps an operation to its canonical MCP tool.
 func ToolForOperation(op Operation) string {
 	switch op {
 	case OpOptimizePrompt:
@@ -51,37 +45,25 @@ func ToolForOperation(op Operation) string {
 	return ""
 }
 
-// Entry is one recorded optimization.
 type Entry struct {
-	Time      time.Time `json:"time"`
-	Session   string    `json:"session,omitempty"`
-	Operation Operation `json:"operation"`
-	// Tool is the MCP tool that produced the entry ("" for entries recorded
-	// before per-tool attribution existed). Old JSONL lines without the field
-	// read back as "" — backward compatible.
-	Tool string `json:"tool,omitempty"`
-	// Agent is the agent identity the entry is attributed to (the MCP
-	// agent_id argument, "" for entries recorded before per-agent
-	// attribution existed). Old JSONL lines without the field read back as
-	// "" — backward compatible.
-	Agent        string  `json:"agent,omitempty"`
-	Source       string  `json:"source,omitempty"`
-	Model        string  `json:"model,omitempty"`
-	BeforeTokens int     `json:"before_tokens"`
-	AfterTokens  int     `json:"after_tokens"`
-	SavedTokens  int     `json:"saved_tokens"`
-	SavedPercent float64 `json:"saved_percent"`
-	CostSavedUSD float64 `json:"cost_saved_usd"`
-	BeforeBytes  int     `json:"before_bytes"`
-	AfterBytes   int     `json:"after_bytes"`
+	Time         time.Time `json:"time"`
+	Session      string    `json:"session,omitempty"`
+	Operation    Operation `json:"operation"`
+	Tool         string    `json:"tool,omitempty"`
+	Agent        string    `json:"agent,omitempty"`
+	Root         string    `json:"root,omitempty"`
+	Slice        bool      `json:"slice,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	BeforeTokens int       `json:"before_tokens"`
+	AfterTokens  int       `json:"after_tokens"`
+	SavedTokens  int       `json:"saved_tokens"`
+	SavedPercent float64   `json:"saved_percent"`
+	CostSavedUSD float64   `json:"cost_saved_usd"`
+	BeforeBytes  int       `json:"before_bytes"`
+	AfterBytes   int       `json:"after_bytes"`
 }
 
-// CostPerMillion returns the USD input price per 1M tokens for a model.
-// It delegates to the canonical resolver in internal/context (longest-prefix
-// table + KERN_MODEL_COSTS extension + the KERN_COST_PER_TOKEN/cost_per_token
-// override chain), so the per-entry ledger always agrees with the aggregate
-// "cost model" label instead of a divergent exact-match table. Unknown and
-// empty models resolve to the flat assumed default ($10/1M).
 func CostPerMillion(model string) float64 {
 	return kernctx.CostPerMillionFor(model)
 }
@@ -100,7 +82,6 @@ func ModelSavings(savedTokens int) map[string]float64 {
 	return out
 }
 
-// DefaultModel is used when a caller doesn't specify a model.
 const DefaultModel = "gpt-4o-mini"
 
 // Recorder appends entries to the per-day JSONL log.
@@ -124,14 +105,10 @@ func (r *Recorder) dayPath(t time.Time) string {
 // Record writes one entry.
 func (r *Recorder) Record(e Entry) error {
 	if e.Time.IsZero() {
-		e.Time = time.Now().UTC()
-	} else {
-		e.Time = e.Time.UTC()
+		e.Time = time.Now()
 	}
-	// Savings are only derived when the caller knows the before count. A
-	// tool that only knows its returned payload (per-tool dispatch entries)
-	// records BeforeTokens=0 and must not show fabricated negative savings
-	// (Record used to derive Saved = Before - After unconditionally).
+	e.Time = e.Time.UTC()
+	e.Root = absPath(e.Root)
 	if e.BeforeTokens > 0 {
 		e.SavedTokens = e.BeforeTokens - e.AfterTokens
 		e.SavedPercent = float64(e.SavedTokens) / float64(e.BeforeTokens) * 100
@@ -150,14 +127,10 @@ func (r *Recorder) Record(e Entry) error {
 	return err
 }
 
-// walkEntries iterates every entry in the day window (days <= 0 = today only)
-// that passes the session filter, invoking fn for each. Shared by Summarize
-// and SummarizeByTool so both surfaces agree on the same window semantics.
 func (r *Recorder) walkEntries(days int, session string, fn func(Entry)) error {
 	cutoff := time.Now().UTC().AddDate(0, 0, -(days - 1))
 	if days <= 0 {
-		// days<=0 means today only, not "all time": an empty range counts no
-		// full days before today.
+		// days<=0 means today only, not "all time".
 		cutoff = time.Now().UTC()
 	}
 	bound := cutoff.Truncate(24 * time.Hour)
@@ -181,6 +154,8 @@ func (r *Recorder) walkEntries(days int, session string, fn func(Entry)) error {
 			continue
 		}
 		sc := bufio.NewScanner(f)
+		// Raise Scanner's default cap: entries can exceed 64KiB.
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
 			var e Entry
 			if json.Unmarshal(sc.Bytes(), &e) != nil {
@@ -191,12 +166,14 @@ func (r *Recorder) walkEntries(days int, session string, fn func(Entry)) error {
 			}
 			fn(e)
 		}
+		if serr := sc.Err(); serr != nil {
+			return fmt.Errorf("stats: %s: %w", de.Name(), serr)
+		}
 		_ = f.Close()
 	}
 	return nil
 }
 
-// Summary aggregates entries over a time range.
 type Summary struct {
 	Operations  int               `json:"operations"`
 	BeforeTotal int               `json:"before_tokens"`
@@ -205,16 +182,61 @@ type Summary struct {
 	SavedPct    float64           `json:"saved_percent"`
 	CostSaved   float64           `json:"cost_saved_usd"`
 	ByOperation map[Operation]int `json:"by_operation"`
+	// SliceReadTokens counts re-delivered anchor output.
+	SliceReadTokens int `json:"slice_read_tokens"`
+	// RulesInjectionTokens: the session's rules-injection cost (rule files).
+	RulesInjectionTokens int `json:"rules_injection_tokens,omitempty"`
+	// Sessions counts distinct sessions in the window.
+	Sessions      int     `json:"sessions,omitempty"`
+	NetSavedTotal int     `json:"net_saved_tokens,omitempty"`
+	NetSavedPct   float64 `json:"net_saved_percent,omitempty"`
+	ToolCalls     int     `json:"tool_calls,omitempty"`
 }
 
-// Summarize reads all log files matching the filter and aggregates the
-// optimization-events ledger. Per-tool dispatch entries (Operation ==
-// OpToolCall) are excluded so "operations" keeps meaning the count of
-// optimization events; the per-tool ledger is served by SummarizeByTool.
 func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
+	return r.summarize(days, session, "")
+}
+
+func (r *Recorder) SummarizeByRoot(days int, session, root string) (*Summary, error) {
+	return r.summarize(days, session, absPath(root))
+}
+
+func (r *Recorder) Roots(days int, session string) ([]string, error) {
+	roots := make(map[string]struct{})
+	err := r.walkEntries(days, session, func(e Entry) {
+		if e.Root != "" {
+			roots[e.Root] = struct{}{}
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return slices.Sorted(maps.Keys(roots)), nil
+}
+
+func absPath(root string) string {
+	if root == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	return filepath.Clean(root)
+}
+
+func (r *Recorder) summarize(days int, session, root string) (*Summary, error) {
 	sum := &Summary{ByOperation: make(map[Operation]int)}
+	sessions := make(map[string]struct{})
 	if err := r.walkEntries(days, session, func(e Entry) {
+		if root != "" && e.Root != root {
+			return
+		}
+		sessions[e.Session] = struct{}{}
 		if e.Operation == OpToolCall {
+			sum.ToolCalls++
+			if e.Slice {
+				sum.SliceReadTokens += e.AfterTokens
+			}
 			return
 		}
 		sum.Operations++
@@ -226,13 +248,24 @@ func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
 	}); err != nil {
 		return sum, err
 	}
+	sum.Sessions = len(sessions)
 	if sum.BeforeTotal > 0 {
 		sum.SavedPct = float64(sum.SavedTotal) / float64(sum.BeforeTotal) * 100
 	}
 	return sum, nil
 }
 
-// ToolStat is one tool's aggregated per-tool ledger row.
+func (s *Summary) ApplyNet(rulesTokens int) {
+	if s == nil {
+		return
+	}
+	s.RulesInjectionTokens = rulesTokens
+	s.NetSavedTotal = s.SavedTotal - rulesTokens*s.Sessions - s.SliceReadTokens
+	if s.BeforeTotal > 0 {
+		s.NetSavedPct = float64(s.NetSavedTotal) / float64(s.BeforeTotal) * 100
+	}
+}
+
 type ToolStat struct {
 	Tool           string  `json:"tool"`
 	Calls          int     `json:"calls"`
@@ -241,15 +274,20 @@ type ToolStat struct {
 	CostSaved      float64 `json:"cost_saved_usd"`
 }
 
-// SummarizeByTool aggregates every entry that carries a Tool (per-tool
-// dispatch entries plus optimization entries whose Operation maps to a tool)
-// over the same day window as Summarize. Tools that do not know their
-// before/after contribute tokens returned only (saved = 0 — honest, never
-// fabricated). Rows are sorted by tokens saved desc, then tokens returned
-// desc, then tool name for a stable table.
-func (r *Recorder) SummarizeByTool(days int, session string) ([]ToolStat, error) {
+func (r *Recorder) SummarizeByTool(days int, session string, roots ...string) ([]ToolStat, error) {
+	root := ""
+	if len(roots) > 0 {
+		root = absPath(roots[0])
+	}
+	return r.summarizeByTool(days, session, root)
+}
+
+func (r *Recorder) summarizeByTool(days int, session, root string) ([]ToolStat, error) {
 	byTool := make(map[string]*ToolStat)
 	if err := r.walkEntries(days, session, func(e Entry) {
+		if root != "" && e.Root != root {
+			return
+		}
 		if e.Tool == "" {
 			return
 		}
@@ -281,7 +319,6 @@ func (r *Recorder) SummarizeByTool(days int, session string) ([]ToolStat, error)
 	return out, nil
 }
 
-// AgentStat is one agent's aggregated per-agent ledger row.
 type AgentStat struct {
 	Agent          string  `json:"agent"`
 	Calls          int     `json:"calls"`
@@ -290,18 +327,9 @@ type AgentStat struct {
 	CostSaved      float64 `json:"cost_saved_usd"`
 }
 
-// unattributedAgent is the bucket every entry without an agent attribution
-// falls into, so the per-agent ledger is complete instead of silently
-// dropping legacy/agent-less entries.
+// unattributedAgent keeps legacy entries in the agent ledger.
 const unattributedAgent = "(unattributed)"
 
-// SummarizeByAgent aggregates entries by the agent that produced them (the
-// MCP agent_id argument, plus optimization entries recorded with an Agent)
-// over the same day window as Summarize. Entries without an attribution
-// (recorded before per-agent attribution existed, or by surfaces that never
-// knew the agent) fall into the "(unattributed)" bucket. Rows are sorted by
-// tokens saved desc, then tokens returned desc, then agent name for a stable
-// table — the same ordering SummarizeByTool uses.
 func (r *Recorder) SummarizeByAgent(days int, session string) ([]AgentStat, error) {
 	byAgent := make(map[string]*AgentStat)
 	if err := r.walkEntries(days, session, func(e Entry) {

@@ -68,9 +68,6 @@ func TestDispatchCommandCheapRoutes(t *testing.T) {
 			t.Errorf("dispatchCommand(%q) = %d, want 0", cmd, code)
 		}
 	}
-	if code := dispatchCommand("guide", nil); code != 0 {
-		t.Errorf("dispatchCommand(guide) = %d, want 0", code)
-	}
 }
 
 // TestDispatchCommandUnknownExits2: an unrecognized command is a hard error
@@ -115,6 +112,19 @@ func TestSuggestCommands(t *testing.T) {
 	if got := suggestCommands("definitely-not-a-command"); len(got) != 0 {
 		t.Errorf("suggestCommands(garbage) = %v, want no suggestions", got)
 	}
+	// Shape/length-aware fuzzy matching (4.1b): the removed `kern try`
+	// command must not pull in the semantically unrelated `why` (edit
+	// distance 2 on a 3-char query), and a genuine typo like "serch" must
+	// still find "search".
+	if got := suggestCommands("try"); len(got) != 0 {
+		t.Errorf("suggestCommands(try) = %v, want no suggestions (fuzzy must not suggest why)", got)
+	}
+	if got := suggestCommands("try"); slices.Contains(got, "why") {
+		t.Errorf("suggestCommands(try) = %v, must never suggest why", got)
+	}
+	if got := suggestCommands("serch"); !slices.Contains(got, "search") {
+		t.Errorf("suggestCommands(serch) = %v, want search included", got)
+	}
 	if got := suggestCommands(""); got != nil {
 		t.Errorf("suggestCommands(\"\") = %v, want nil", got)
 	}
@@ -155,8 +165,8 @@ func TestProjectMapCommandRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := captureStdout(t, func() {
-		if code := dispatchCommand("project_map", []string{"--root", dir}); code != 0 {
-			t.Errorf("dispatchCommand(project_map) = %d, want 0", code)
+		if code := dispatchCommand("project-map", []string{"--root", dir}); code != 0 {
+			t.Errorf("dispatchCommand(project-map) = %d, want 0", code)
 		}
 	})
 	if !strings.Contains(out, "Project:") || !strings.Contains(out, "a.go") {
@@ -165,8 +175,8 @@ func TestProjectMapCommandRoutes(t *testing.T) {
 }
 
 func TestEveryCommandHasUsage(t *testing.T) {
-	if len(commandTable) < 170 {
-		t.Fatalf("commandTable has %d entries, want >= 170", len(commandTable))
+	if len(commandTable) < 45 {
+		t.Fatalf("commandTable has %d entries, want >= 45 (52 after the 2026-10-18 CLI slim)", len(commandTable))
 	}
 	for name, e := range commandTable {
 		if strings.TrimSpace(e.usage) == "" {
@@ -191,8 +201,8 @@ func TestEveryCommandHasUsage(t *testing.T) {
 // knows how to render (unknown categories would silently vanish from the
 // fixed-order header list, so they are pinned by cliCategoryOrder).
 func TestEveryCommandHasCategory(t *testing.T) {
-	if len(commandTable) < 170 {
-		t.Fatalf("commandTable has %d entries, want >= 170", len(commandTable))
+	if len(commandTable) < 45 {
+		t.Fatalf("commandTable has %d entries, want >= 45 (52 after the 2026-10-18 CLI slim)", len(commandTable))
 	}
 	known := map[string]bool{}
 	for _, cat := range cliCategoryOrder {
@@ -237,92 +247,15 @@ func TestPackArgsDefaultBudget(t *testing.T) {
 	}
 }
 
-// snakeAliasPairs is the 17 kebab/snake duplicate command pairs (N4): the
-// snake_case forms are hidden from the printed help listings but MUST keep
-// dispatching.
-var snakeAliasPairs = map[string]string{
-	"agent_coordination": "agent-coordination",
-	"agent_fingerprint":  "agent-fingerprint",
-	"agent_role_rbac":    "agent-role-rbac",
-	"ast_transform":      "ast-transform",
-	"context_watch":      "context-watch",
-	"cross_repo_impact":  "cross-repo-impact",
-	"doc_fetch":          "doc-fetch",
-	"doc_search":         "doc-search",
-	"evidence_anchor":    "evidence-anchor",
-	"memory_ranked":      "memory-ranked",
-	"policy_dsl":         "policy-dsl",
-	"pre_edit":           "pre-edit",
-	"project_map":        "project-map",
-	"prompt_fill":        "prompt-fill",
-	"semantic_diff":      "semantic-diff",
-	"semantic_merge":     "semantic-merge",
-	"synthesize_test":    "synthesize-test",
-}
-
 // TestSnakeAliasDispatchesSameAsKebab pins N4 backward compatibility: every
 // snake_case alias is marked alias:true, its kebab twin is not, and both
 // spellings still dispatch through the table (for the cheap handlers: a real
 // handler's usage error, never the unknown-command path).
-func TestSnakeAliasDispatchesSameAsKebab(t *testing.T) {
-	for snake, kebab := range snakeAliasPairs {
-		se, ok := commandTable[snake]
-		if !ok {
-			t.Errorf("snake alias %q missing from commandTable", snake)
-			continue
-		}
-		if !se.alias {
-			t.Errorf("snake alias %q must be marked alias: true", snake)
-		}
-		ke, ok := commandTable[kebab]
-		if !ok {
-			t.Errorf("kebab twin %q missing from commandTable", kebab)
-			continue
-		}
-		if ke.alias {
-			t.Errorf("kebab twin %q must NOT be marked alias", kebab)
-		}
-	}
-	// Behavioral dispatch proof on the cheap handlers: with no args each
-	// spelling must reach the handler's own usage error (exit 2) — never the
-	// "unknown command" path. Heavy handlers (index/network) and handlers
-	// whose empty-arg path runs a tool call (agent_role_rbac) are excluded;
-	// their dispatch is covered by the table-presence assertions above.
-	for _, name := range []string{"doc_fetch", "doc_search", "context_watch", "cross_repo_impact", "memory_ranked"} {
-		stderr, code := captureStderrExit(t, func() {
-			dispatchCommand(name, nil)
-		})
-		if code != 2 {
-			t.Errorf("dispatchCommand(%q, nil) exit = %d, want 2 (handler usage error)", name, code)
-		}
-		if strings.Contains(stderr, "unknown command") {
-			t.Errorf("dispatchCommand(%q) hit the unknown-command path:\n%s", name, stderr)
-		}
-	}
-}
 
 // TestHelpListingOmitsAliases pins N4: the printed catalog (`kern --all`,
 // flat and grouped) must no longer list the 16 snake_case aliases, while the
 // kebab-case twins stay listed. Dispatch keeps both spellings (see
 // TestSnakeAliasDispatchesSameAsKebab); this test covers the listing only.
-func TestHelpListingOmitsAliases(t *testing.T) {
-	seen := map[string]bool{}
-	for _, out := range []string{captureCatalogFlat(t), captureCatalogGrouped(t)} {
-		for name := range commandTable {
-			if strings.Contains(out, "  kern "+name) {
-				seen[name] = true
-			}
-		}
-	}
-	for snake, kebab := range snakeAliasPairs {
-		if seen[snake] {
-			t.Errorf("snake alias %q still appears in the help listing", snake)
-		}
-		if !seen[kebab] {
-			t.Errorf("kebab twin %q missing from the help listing", kebab)
-		}
-	}
-}
 
 // TestUsageAllPrintsToStdout pins the catalog stream contract: `kern --all`
 // (and `kern help --all`) are explicitly requested listings and must be

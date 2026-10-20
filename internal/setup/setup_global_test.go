@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
@@ -189,13 +190,16 @@ func TestWireGlobalUnbalancedMarkerLeavesFile(t *testing.T) {
 }
 
 // withTempHome points the global home resolution at a temp dir for the duration
-// of a test, so global wiring never touches the real home.
+// of a test, so global wiring never touches the real home. The canonical home
+// variable lives in internal/agentwire (GlobalHomeDir) — the wiring steps
+// extracted there (skills, global plugin, opencode config) read it, so the
+// override must target agentwire's variable for those paths to stay sandboxed.
 func withTempHome(t *testing.T, xdg bool) string {
 	t.Helper()
 	dir := t.TempDir()
-	oldHome := globalHomeDir
-	globalHomeDir = func() string { return dir }
-	t.Cleanup(func() { globalHomeDir = oldHome })
+	oldHome := agentwire.GlobalHomeDir
+	agentwire.GlobalHomeDir = func() string { return dir }
+	t.Cleanup(func() { agentwire.GlobalHomeDir = oldHome })
 	if xdg {
 		oldXDG := os.Getenv("XDG_CONFIG_HOME")
 		if err := os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config")); err != nil {

@@ -6,27 +6,19 @@
 package setup
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/gitblocks"
 )
 
-// mcpName / cliName return the platform-appropriate binary file names. On
-// Windows the release binaries are kern-mcp.exe / kern.exe; everywhere else
-// they are extensionless. setup resolves sibling and PATH paths with these so a
-// Windows install wires the correct .exe into agent configs instead of a bare
-// name that the OS cannot resolve.
-func mcpName() string {
-	if runtime.GOOS == "windows" {
-		return "kern-mcp.exe"
-	}
-	return "kern-mcp"
-}
-
+// cliName returns the platform-appropriate CLI binary file name. On Windows
+// the release binary is kern.exe; everywhere else it is extensionless.
 func cliName() string {
 	if runtime.GOOS == "windows" {
 		return "kern.exe"
@@ -36,17 +28,9 @@ func cliName() string {
 
 // Bin returns the absolute path to the kern-mcp binary that ships next to the
 // running executable, falling back to the bare command name (with the platform
-// extension, e.g. kern-mcp.exe on Windows).
+// extension, e.g. kern-mcp.exe on Windows). Implemented in internal/agentwire.
 func Bin() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return mcpName()
-	}
-	abs := filepath.Join(filepath.Dir(exe), mcpName())
-	if _, err := os.Stat(abs); err == nil {
-		return abs
-	}
-	return mcpName()
+	return agentwire.Bin()
 }
 
 // CLIBin returns the absolute path to the kern CLI binary (the sibling of
@@ -69,11 +53,9 @@ func CLIBin() string {
 // start kern-mcp. Prefer a PATH-resolved bare "kern-mcp" (the agent re-resolves
 // it against PATH at launch, so it works on any machine and survives relocation);
 // fall back to the sibling absolute path only when kern-mcp is not on PATH.
+// Implemented in internal/agentwire.
 func PortableMCPCommand() string {
-	if p, err := exec.LookPath(mcpName()); err == nil && p != "" {
-		return mcpName()
-	}
-	return Bin()
+	return agentwire.PortableMCPCommand()
 }
 
 // GlobalMCPCommand returns the command that GLOBAL agent configs should run to
@@ -164,6 +146,30 @@ func pluginGuardStatus(root string) Status {
 	return Status{Agent: "opencode guard", Path: p, Note: "legacy plugin — re-run kern setup"}
 }
 
+// globalPluginStatus reports one GLOBAL opencode plugin copy with an
+// actionable remediation hint: a missing copy must name `kern setup --global` (the only
+// writer of global copies — plain `kern setup` never touches them), instead
+// of the generic "not present" note that reads as benign next to the project
+// copy's "plugin already current" line. Present copies use the same policy
+// vocabulary as copyGlobalPlugin: current, customized, or an older shipped
+// version.
+func globalPluginStatus(path string) Status {
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(path))); err != nil {
+		return Status{Agent: "opencode plugin (global)", Skipped: true, Path: path, Note: "opencode not installed — skipped"}
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Status{Agent: "opencode plugin (global)", Path: path, Note: "global copy missing — run kern setup --global to install it"}
+	}
+	if asset, aerr := PluginAsset(); aerr == nil && bytes.Equal(b, asset) {
+		return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin already current"}
+	}
+	if !isShippedPluginVersion(b) {
+		return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin is customized — the next `kern setup --global` backs it up and refreshes it"}
+	}
+	return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin is an older kern version — run kern setup --global to refresh"}
+}
+
 // Check reports the current wiring state without changing anything.
 func Check(root string) []Status {
 	out := []Status{
@@ -173,9 +179,9 @@ func Check(root string) []Status {
 		fileStatus(filepath.Join(root, "AGENTS.md"), "AGENTS.md rules"),
 		fileStatus(globalOpencodePath(), "opencode (global config)"),
 	}
-	out = append(out, globalRulesStatus()...)
+	out = append(out, agentwire.GlobalRulesStatus()...)
 	for _, p := range GlobalPluginPaths() {
-		out = append(out, fileStatus(p, "opencode plugin (global)"))
+		out = append(out, globalPluginStatus(p))
 	}
 	out = append(out, pluginGuardStatus(root))
 	allAdapters, customErrs := effectiveAdapters(root)
@@ -193,11 +199,13 @@ func Check(root string) []Status {
 	out = append(out, fileStatusAny("cursor hooks", filepath.Join(root, ".cursor", "hooks.json"), filepath.Join(globalHomeDir(), ".cursor", "hooks.json")))
 	out = append(out, fileStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
+	out = append(out, fileStatus(filepath.Join(homeConfig(".qwen", "settings.json")("")), "qwen hooks"))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
 	out = append(out, fileStatus(continueSettingsPath(), "continue hooks"))
 	out = append(out, fileStatus(kiroHooksPath(), "kiro hooks"))
 	out = append(out, fileStatusAny("antigravity hooks", filepath.Join(root, ".agents", "hooks.json"), filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")))
 	out = append(out, checkGlobalGitHooks())
+	out = append(out, checkHookMatcherCompleteness(root)...)
 
 	// Report detected agents and their instruction file status
 	detected := DetectAgents(root)
@@ -225,7 +233,7 @@ func Check(root string) []Status {
 		out = append(out, Status{Agent: agent + " (detected)", Installed: installed, Path: path, Note: mark})
 	}
 
-	out = append(out, checkSkills(root)...)
+	out = append(out, agentwire.CheckSkills(root)...)
 	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
 	out = append(out, fileStatus(filepath.Join(root, ".git", "info", "exclude"), "git local exclude"))
 	out = append(out, fileStatus(globalConfig("git", "ignore")(""), "git global ignore"))
@@ -255,17 +263,26 @@ func Wire(root string, agents []string, detect bool, global bool) []Status {
 // WireOptions carries per-run knobs for WireWith. Zero value matches Wire's
 // default behavior exactly.
 type WireOptions struct {
-	// AgentsMD selects the repo AGENTS.md variant: "thin" writes the opt-in
-	// thin file (full kern rules live in the host's global instructions,
-	// managed by `kern setup --global-rules`), "full" writes the complete
-	// rules, "" uses the persisted .kern/config.json value (default "full").
-	// An explicit non-empty value is persisted so subsequent runs remember it.
+	// AgentsMD selects the repo AGENTS.md variant: "thin" writes the thin
+	// wiring-only file (full kern rules live in the host's global
+	// instructions, managed by `kern setup --global-rules`), "full" writes
+	// the complete rules, "" uses the persisted .kern/config.json value. The
+	// absent-key default is resolved PER FILE by wireAgentRules: thin when
+	// the corresponding host's global slot carries the kern-managed block,
+	// full otherwise (an unmanaged global slot means the repo file is the
+	// only delivery). An explicit non-empty value is persisted so subsequent
+	// runs remember it.
 	AgentsMD string
 	// DryRun suppresses every write and returns preview statuses whose
 	// notes describe what a real run would do ("[dry-run] would …"), so
 	// `kern setup --dry-run` never mutates the project. No status may
 	// claim a write happened.
 	DryRun bool
+	// GlobalOnly (requires global=true) wires ONLY user-level state — home
+	// MCP adapters, hooks, global rules/git ignore/skills — and writes no file
+	// under the project root. Repos then need no setup: the globally
+	// registered MCP server indexes a repo on first use.
+	GlobalOnly bool
 }
 
 // WireWith configures the requested agents like Wire, with per-run options.
@@ -336,6 +353,9 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		}
 	}
 
+	if opts.DryRun && opts.GlobalOnly {
+		return []Status{{Agent: "global", Installed: true, Note: "[dry-run] would wire user-level MCP + hooks for every supported agent, plus global git ignore/hooks and skills — no repo files, no home files changed"}}
+	}
 	if opts.DryRun {
 		// F10: --dry-run must not write anything. Mirror the wiring
 		// sequence below — same gates, same target paths — and report
@@ -357,7 +377,22 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			out = append(out, would(agent, path, action))
 		}
 		out = append(out, would("mcp", filepath.Join(root, ".mcp.json"), "write .mcp.json (universal MCP config)"))
-		out = append(out, would("AGENTS.md", filepath.Join(root, "AGENTS.md"), "write AGENTS.md ("+mode+" rules)"))
+		// Mirror WireRuleVariant's actual outcome, not just the resolved
+		// variant: an existing FULL rules file with no explicit thin choice
+		// is KEPT, so the preview must not announce a thin write it would
+		// not perform.
+		agentsMDPath := filepath.Join(root, "AGENTS.md")
+		keepFull := false
+		if agentwire.RulesVariant("AGENTS.md", mode, explicitThin) == "thin" && !explicitThin {
+			if b, err := os.ReadFile(agentsMDPath); err == nil {
+				keepFull = strings.Contains(string(b), agentwire.FullRulesHeader)
+			}
+		}
+		if keepFull {
+			out = append(out, Status{Agent: "AGENTS.md", Installed: true, Path: agentsMDPath, Note: "[dry-run] would keep existing full rules (pass --agents-md thin to switch)"})
+		} else {
+			out = append(out, would("AGENTS.md", agentsMDPath, "write AGENTS.md ("+agentwire.RulesVariant("AGENTS.md", mode, explicitThin)+" rules)"))
+		}
 		if repoEnabled("opencode") {
 			out = append(out, would("opencode", filepath.Join(root, "opencode.json"), "merge the kern MCP entry into opencode.json"))
 			out = append(out, would("opencode-plugin", filepath.Join(root, ".opencode", "plugins", "kern.ts"), "install/refresh the opencode plugin"))
@@ -411,25 +446,29 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		return out
 	}
 
-	// .mcp.json is the universal auto-discovered MCP file — always written.
-	out = append(out, wireMCPJSON(root, bin))
-	out = append(out, wireAgentRules(root, mode, wired, explicitThin))
-	if opts.AgentsMD != "" {
+	projectScope := !(opts.GlobalOnly && global)
+	// .mcp.json is the universal auto-discovered MCP file — always written
+	// (except in GlobalOnly mode, which touches no repo file).
+	if projectScope {
+		out = append(out, agentwire.WireMCPJSON(root, bin))
+		out = append(out, agentwire.WireAgentRules(root, mode, wired, explicitThin))
+	}
+	if projectScope && opts.AgentsMD != "" {
 		if err := setAgentsMD(root, opts.AgentsMD); err != nil {
 			out = append(out, Status{Agent: "kern config", Path: agentsMDConfigPath(root), Note: "persist agents_md: " + err.Error()})
 		}
 	}
-	if repoEnabled("opencode") {
-		out = append(out, wireOpencode(root))
-		out = append(out, wirePlugin(root))
+	if projectScope && repoEnabled("opencode") {
+		out = append(out, agentwire.WireOpencode(root))
+		out = append(out, agentwire.WirePlugin(root))
 	}
 	// User-global wiring: hooks, home/global MCP adapters, global
 	// opencode config/plugin, global git ignore and editor exclusions are
 	// written ONLY with --global. Project wiring must not touch them.
 	if global {
 		if globalEnabled("opencode") {
-			out = append(out, wireGlobal(GlobalMCPCommand()))
-			out = append(out, wireGlobalPlugin())
+			out = append(out, agentwire.WireGlobal(GlobalMCPCommand()))
+			out = append(out, agentwire.WireGlobalPlugin())
 		}
 		if globalEnabled("claude") {
 			out = append(out, wireClaude(bin))
@@ -448,6 +487,9 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		if a.scope == "global" && !global {
 			continue
 		}
+		if !projectScope && a.scope != "global" {
+			continue
+		}
 		gate := repoEnabled
 		if a.scope == "global" {
 			gate = globalEnabled
@@ -457,7 +499,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		}
 		// Instruction files are per-repo; only wire for present/detected
 		// agents, independent of the adapter's config scope.
-		if repoEnabled(a.name) {
+		if projectScope && repoEnabled(a.name) {
 			switch a.name {
 			case "continue":
 				out = append(out, wireContinueInstructions(root))
@@ -468,10 +510,10 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			}
 		}
 	}
-	if repoEnabled("cursor") {
+	if projectScope && repoEnabled("cursor") {
 		out = append(out, wireCursorRules(root))
 	}
-	if repoEnabled("antigravity") {
+	if projectScope && repoEnabled("antigravity") {
 		out = append(out, wireProjectAntigravityHooks(root))
 	}
 	if global {
@@ -500,16 +542,21 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			out = append(out, wireKiroHooks())
 		}
 	}
-	out = append(out, gitStatus(gitblocks.GitignoreGenerated(root)))
-	out = append(out, gitStatus(gitblocks.WireLocalGitExclude(root)))
+	if projectScope {
+		out = append(out, gitStatus(gitblocks.GitignoreGenerated(root)))
+		out = append(out, gitStatus(gitblocks.WireLocalGitExclude(root)))
+	}
 	if global {
 		out = append(out, wireGlobalGitHooks())
 		out = append(out, gitStatus(gitblocks.WireGlobalGitignore()))
 		out = append(out, wireEditorExclusions()...)
-		out = append(out, wireGlobalSkills()...)
+		out = append(out, agentwire.WireGlobalSkills()...)
 	}
 
-	out = append(out, wireProjectSkills(root)...)
+	if !projectScope {
+		return out
+	}
+	out = append(out, agentwire.WireProjectSkills(root)...)
 	out = append(out, ensureKernConfig(root))
 
 	// Wire kern-first instruction files for every present platform that
@@ -533,7 +580,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			detected = append(detected, a)
 		}
 	}
-	out = append(out, wireInstructions(root, detected)...)
+	out = append(out, wireInstructions(root, detected, wired, explicitThin)...)
 
 	return out
 }

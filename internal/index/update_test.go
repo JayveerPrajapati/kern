@@ -340,6 +340,56 @@ func TestUpdateChained(t *testing.T) {
 	}
 }
 
+// TestUpdateFiltersNoiseCalleesCopiedFromPrev pins L5-1: edges copied from
+// a disk-loaded prior for unchanged files bypass the record-time noise
+// filter, so stale builtin-callee edges survived every incremental update —
+// the merge boundary must filter them too.
+func TestUpdateFiltersNoiseCalleesCopiedFromPrev(t *testing.T) {
+	root := fixtureTree(t)
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prior.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var owner string
+	for _, s := range loaded.Symbols {
+		if s.Kind == "func" && s.Receiver == "" {
+			owner = s.FullName()
+			break
+		}
+	}
+	if owner == "" {
+		t.Fatal("fixture has no plain func to own injected edges")
+	}
+	// Simulate a pre-filter index: inject a builtin edge and a deep
+	// chain-shaped edge (which must SURVIVE — merge-time filtering is
+	// conservative without the AST).
+	loaded.Calls[owner] = append(loaded.Calls[owner],
+		CallEdge{Target: "append"}, CallEdge{Target: "a.b.c"})
+	updated, err := Update(root, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawChain := false
+	for _, ce := range updated.Calls[owner] {
+		if ce.Target == "append" {
+			t.Fatal("builtin callee survived the update merge")
+		}
+		if ce.Target == "a.b.c" {
+			sawChain = true
+		}
+	}
+	if !sawChain {
+		t.Fatal("chain-shaped callee was dropped by the merge filter")
+	}
+}
+
 // TestUpdateLoadedPriorSkipsIgnoredFiles ensures the incremental walk applies
 // the same .gitignore/.kernignore rules as Build: a gitignored file added
 // after the prior build is not indexed by either path.

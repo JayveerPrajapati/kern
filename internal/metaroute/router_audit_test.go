@@ -27,36 +27,35 @@ func TestClassifyMetaRequest_RouterAudit(t *testing.T) {
 
 		// Repair diagnostics: "compiler error" was matched literally; the
 		// common variants fell through to the generic build/test arm.
-		{"compile_error", "compile error: undefined: Foo", "kern_repair", map[string]string{"action": "diagnostics"}},
-		{"compilation_error", "compilation error in ci", "kern_repair", map[string]string{"action": "diagnostics"}},
-		{"build_error", "build error in the sandbox leg", "kern_repair", map[string]string{"action": "diagnostics"}},
-		{"repair_word", "get repair diagnostics for this failure", "kern_repair", map[string]string{"action": "diagnostics"}},
+		{"compile_error", "compile error: undefined: Foo", "kern_heal", map[string]string{"task": "compile error: undefined: Foo"}},
+		{"compilation_error", "compilation error in ci", "kern_heal", map[string]string{"task": "compilation error in ci"}},
+		{"build_error", "build error in the sandbox leg", "kern_heal", map[string]string{"task": "build error in the sandbox leg"}},
+		{"repair_word", "get repair diagnostics for this failure", "kern_heal", map[string]string{"task": "get repair diagnostics for this failure"}},
 
 		// Synthesize-test: generation phrasings must beat the test-runner arm,
 		// and the arm extracts target/file args the handler requires.
-		{"synthesize", "synthesize a test for RunDoContext", "kern_synthesize_test", map[string]string{"target": "RunDoContext"}},
-		{"write_a_test", "write a test for Add in calc.go", "kern_synthesize_test", map[string]string{"target": "Add", "file": "calc.go"}},
-		{"generate_a_test", "generate a test for the edge case", "kern_synthesize_test", nil},
+		{"synthesize", "synthesize a test for RunDoContext", "kern_search", map[string]string{"query": "synthesize a test for RunDoContext"}},
+		{"write_a_test", "write a test for Add in calc.go", "kern_search", map[string]string{"query": "write a test for Add in calc.go"}},
+		{"generate_a_test", "generate a test for the edge case", "kern_search", nil},
 
 		// Validate regression: plain build/test/lint phrasings unchanged.
-		{"validate_regression", "build and test the project", "kern_validate", nil},
-		{"run_tests_regression", "run the tests", "kern_validate", nil},
-		{"validate_word", "validate the whole project", "kern_validate", nil},
+		{"validate_regression", "build and test the project", "kern_verify", nil},
+		{"run_tests_regression", "run the tests", "kern_search", nil},
+		{"validate_word", "validate the whole project", "kern_verify", nil},
 
 		// Project utilities: singular/plural and synonym variants.
 		{"onboarding", "onboarding for this repo", "kern_buddy", nil},
-		{"doctor", "run doctor on the project", "kern_health", nil},
+		{"doctor", "run doctor on the project", "kern_verify", nil},
 		{"token_usage", "show token usage", "kern_stats", nil},
 		{"saved", "how many tokens have we saved", "kern_stats", nil},
-		{"commit_msg", "draft a commit msg for the staged changes", "kern_commitmsg", nil},
 		{"doc_singular", "search the doc for setup instructions", "kern_doc", map[string]string{"action": "search"}},
 
 		// Graph/arch lenses.
-		{"most_changed", "show the most changed files", "kern_churn", nil},
-		{"untested", "which functions are untested", "kern_test_gaps", nil},
+		{"most_changed", "show the most changed files", "kern_search", nil},
+		{"untested", "which functions are untested", "kern_search", nil},
 		{"why_do", "why do we use SQLite here", "kern_why", nil},
 		{"blast_radius", "blast radius of NewServer", "kern_probe", nil},
-		{"cve_id", "check our deps for cve-2024-1234", "kern_security", nil},
+		{"cve_id", "check our deps for cve-2024-1234", "kern_verify", nil},
 
 		// Exec: "execute" and script-article variants.
 		{"execute_word", "execute this script for me", "kern_exec", nil},

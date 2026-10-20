@@ -389,7 +389,14 @@ func RenderCompact(v VerificationResult) string {
 		}
 	}
 	if v.Build != nil {
-		line("build", okStatus(v.Build.OK), fmt.Sprintf("(%s)", v.Build.Duration))
+		if strings.HasPrefix(v.Build.Output, SkipPrefix) {
+			// 6.1: a build that was NOT executed (no build step declared) must
+			// never read as "build: OK" — surface the explicit skip, mirroring
+			// the tests/e2e/static-analysis skip lines below.
+			b.WriteString("build: SKIPPED " + FirstLine(strings.TrimPrefix(v.Build.Output, SkipPrefix)) + "\n")
+		} else {
+			line("build", okStatus(v.Build.OK), fmt.Sprintf("(%s)", v.Build.Duration))
+		}
 	}
 	if v.UnitTests != nil {
 		if v.UnitTests.Status == StatusSkipped || v.UnitTests.Status == StatusNoRunner {
@@ -469,9 +476,30 @@ func RenderCompact(v VerificationResult) string {
 			status = "WARN"
 		}
 		line("security", status, detail)
-		for i, fd := range v.Security.Findings {
+		// Live findings first (F6): the first-10 slice used raw scan order,
+		// which could fill the visible window entirely with [suppressed]
+		// entries while the actionable findings hid behind "... and N
+		// more" (observed live: 19 suppressed findings crowded out all 67
+		// actionable ones). Stable-partition so unsuppressed findings
+		// render first; suppressed entries only if the budget remains.
+		visible := v.Security.Findings
+		if len(visible) > 10 {
+			part := make([]Finding, 0, len(visible))
+			for _, fd := range visible {
+				if !fd.Suppressed {
+					part = append(part, fd)
+				}
+			}
+			for _, fd := range visible {
+				if fd.Suppressed {
+					part = append(part, fd)
+				}
+			}
+			visible = part
+		}
+		for i, fd := range visible {
 			if i >= 10 {
-				b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(v.Security.Findings)-10))
+				b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(visible)-10))
 				break
 			}
 			if fd.Suppressed {

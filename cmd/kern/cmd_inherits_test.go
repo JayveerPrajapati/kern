@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"testing"
 
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// TestInheritsResolution guards the inherits resolution chain (cmd_graph.go
-// runInherits): a bare ambiguous name must prefer the type symbol over a
-// same-named method, and a package-qualified name ("index.Index") must
-// resolve through the package-directory fallback instead of failing.
+// TestInheritsResolution guards the inherits resolution chain (the graph
+// family in internal/graphcli, moved from cmd_graph.go runInherits): a bare
+// ambiguous name must prefer the type symbol over a same-named method, and a
+// package-qualified name ("index.Index") must resolve through the
+// package-directory fallback instead of failing.
 func TestInheritsResolution(t *testing.T) {
 	dir := t.TempDir()
 	for _, sub := range []string{"index", "app"} {
@@ -63,25 +65,17 @@ func (p *Platform) Index() int { return 0 }
 	}
 }
 
-// TestTwinRejectsFileRoot guards runTwin's root validation: a file path
-// must fail fast with a usage error (exitError code 2) instead of building
-// a graph on a bogus root and emitting governance-store "not a directory"
-// noise.
+// TestTwinRejectsFileRoot guards runTwin's root validation (now behind the
+// graphcli.RunTwin entrypoint): a file path must fail fast with a usage
+// error (exit code 2) instead of building a graph on a bogus root and
+// emitting governance-store "not a directory" noise.
 func TestTwinRejectsFileRoot(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "x.txt")
 	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("runTwin(file) did not fail; expected a usage exitError")
-		}
-		ee, ok := r.(exitError)
-		if !ok || ee.code != 2 {
-			t.Fatalf("runTwin(file) panic = %v, want exitError code 2", r)
-		}
-	}()
-	runTwin([]string{file})
+	if code := graphcli.RunTwin([]string{file}); code != 2 {
+		t.Fatalf("runTwin(file) exit code = %d, want 2 (usage error)", code)
+	}
 }

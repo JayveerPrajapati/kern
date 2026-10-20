@@ -48,7 +48,7 @@ func TestImportQualifiedCalleeLinked(t *testing.T) {
 	deps := g.WhatDoesXDependOn("Run")
 	var sawDB, sawStore bool
 	for _, n := range deps {
-		switch n.ID {
+		switch n.Label {
 		case "db.Save":
 			sawDB = true
 		case "store.Save":
@@ -66,7 +66,7 @@ func TestImportQualifiedCalleeLinked(t *testing.T) {
 	rev := g.WhatDependsOn("db.Save")
 	found := false
 	for _, n := range rev {
-		if n.ID == "app.Run" {
+		if n.Label == "app.Run" {
 			found = true
 		}
 	}

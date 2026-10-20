@@ -22,6 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // LanguageServerDef maps a language to candidate server commands.
@@ -290,6 +292,11 @@ func StartClient(ctx context.Context, root string, serverCmd []string) (*Client,
 
 	cmd := exec.CommandContext(ctx, serverCmd[0], serverCmd[1:]...)
 	cmd.Dir = absRoot
+	// The LSP server inherits only a minimal environment (PATH/HOME/TMPDIR +
+	// the Go toolchain vars when set) — never the full operator environment
+	// (secrets). Same boundary internal/refactor and internal/mutation enforce
+	// for spawned child processes.
+	cmd.Env = fsutil.MinimalExecEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

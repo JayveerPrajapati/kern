@@ -16,10 +16,10 @@ import (
 func TestDigestRecentSessionActivity(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
-	if err := memory.AddAuto(root, "Edited /tmp/lane/a.go"); err != nil {
+	if _, err := memory.AddAuto(root, "Edited /tmp/lane/a.go"); err != nil {
 		t.Fatal(err)
 	}
-	if err := memory.AddAuto(root, "Command failed: panic: boom"); err != nil {
+	if _, err := memory.AddAuto(root, "Command failed: panic: boom"); err != nil {
 		t.Fatal(err)
 	}
 	// Explicit lessons are typed-store entries (P2-14: the digest's
@@ -65,7 +65,7 @@ func TestDigestRecentActivityCapped(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
 	for i := 0; i < 12; i++ {
-		if err := memory.AddAuto(root, "Edited /tmp/lane/file"+string(rune('A'+i))+".go"); err != nil {
+		if _, err := memory.AddAuto(root, "Edited /tmp/lane/file"+string(rune('A'+i))+".go"); err != nil {
 			t.Fatal(err)
 		}
 	}

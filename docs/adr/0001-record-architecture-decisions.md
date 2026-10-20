@@ -7,7 +7,7 @@ Accepted
 ## Context
 
 Kern ships a single binary with 200+ CLI commands and 140 MCP tools. Comments
-and tool descriptions reference numbered decisions (e.g. "ADR-0006", "ADR-0009")
+and tool descriptions reference numbered decisions (e.g. "ADR-0009")
 but no decision records existed in the repository, so the numbering had no home
 and new decisions had no template to follow.
 

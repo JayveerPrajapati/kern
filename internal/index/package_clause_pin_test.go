@@ -1,6 +1,10 @@
 package index
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/langparse"
+)
 
 // TestPackageClausesAreNotSymbols pins B6 (deep-dive 2026-10-03): package /
 // module / import clauses must never be indexed as first-class symbols — a
@@ -54,7 +58,7 @@ func TestPackageClausesAreNotSymbols(t *testing.T) {
 
 func mustExtractForeign(t *testing.T, rel string, src []byte, lang string) []Symbol {
 	t.Helper()
-	syms, _, _, _, err := extractForeign(rel, src, lang)
+	syms, _, _, _, err := langparse.ExtractForeign(rel, src, lang, tsExtract)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +67,7 @@ func mustExtractForeign(t *testing.T, rel string, src []byte, lang string) []Sym
 
 func mustExtractForeignRegex(t *testing.T, rel string, src []byte, lang string) []Symbol {
 	t.Helper()
-	syms, _, _, _, err := extractForeignRegex(rel, src, lang)
+	syms, _, _, _, err := langparse.ExtractForeignRegex(rel, src, lang)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,7 +22,7 @@ http_requests{service="orders",method="POST"} 567 1700000000
 	}))
 	defer srv.Close()
 
-	src := NewLivePrometheusSource(srv.URL, 100*time.Millisecond)
+	src := NewLivePrometheusSource(srv.URL, "", 100*time.Millisecond)
 	if src == nil {
 		t.Fatal("expected non-nil source")
 	}
@@ -43,7 +44,7 @@ http_requests{service="orders",method="POST"} 567 1700000000
 }
 
 func TestLivePrometheusSourceEmptyURL(t *testing.T) {
-	if src := NewLivePrometheusSource("", time.Second); src != nil {
+	if src := NewLivePrometheusSource("", "tok", time.Second); src != nil {
 		t.Error("empty URL should return nil")
 	}
 }
@@ -56,7 +57,7 @@ func TestLiveOtelSource(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := NewLiveOtelSource(srv.URL, 100*time.Millisecond)
+	src := NewLiveOtelSource(srv.URL, "", 100*time.Millisecond)
 	if src == nil {
 		t.Fatal("expected non-nil source")
 	}
@@ -74,7 +75,7 @@ func TestLiveOtelSource(t *testing.T) {
 }
 
 func TestLiveOtelSourceEmptyURL(t *testing.T) {
-	if src := NewLiveOtelSource("", time.Second); src != nil {
+	if src := NewLiveOtelSource("", "tok", time.Second); src != nil {
 		t.Error("empty URL should return nil")
 	}
 }
@@ -128,11 +129,92 @@ func TestLiveSourceCloseStopsPolling(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := NewLivePrometheusSource(srv.URL, 50*time.Millisecond)
+	src := NewLivePrometheusSource(srv.URL, "", 50*time.Millisecond)
 	src.Close() // should not block, should stop the goroutine
 
 	// Verify the goroutine exited by checking that Close returned.
 	// (If it hung, the test would time out.)
+}
+
+// TestLivePrometheusSourceBearerAuth pins the env-only credential path: a
+// non-empty token must arrive as a Bearer Authorization header on every poll
+// (LoadSource reads it from KERN_PROMETHEUS_TOKEN — env only, never a
+// config-file key).
+func TestLivePrometheusSourceBearerAuth(t *testing.T) {
+	var gotAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("# empty exposition\n"))
+	}))
+	defer srv.Close()
+
+	src := NewLivePrometheusSource(srv.URL, "sekrit", 50*time.Millisecond)
+	if src == nil {
+		t.Fatal("expected non-nil source")
+	}
+	defer src.Close()
+
+	waitFor(t, func() bool { return gotAuth.Load() != nil })
+	if gotAuth.Load().(string) != "Bearer sekrit" {
+		t.Errorf("Authorization = %q, want %q", gotAuth.Load(), "Bearer sekrit")
+	}
+}
+
+// TestLiveOtelSourceBearerAuth is the OTLP-collector equivalent.
+func TestLiveOtelSourceBearerAuth(t *testing.T) {
+	var gotAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"logs":[],"traces":[],"metrics":[]}`))
+	}))
+	defer srv.Close()
+
+	src := NewLiveOtelSource(srv.URL, "tok-otel", 50*time.Millisecond)
+	if src == nil {
+		t.Fatal("expected non-nil source")
+	}
+	defer src.Close()
+
+	waitFor(t, func() bool { return gotAuth.Load() != nil })
+	if gotAuth.Load().(string) != "Bearer tok-otel" {
+		t.Errorf("Authorization = %q, want %q", gotAuth.Load(), "Bearer tok-otel")
+	}
+}
+
+// TestLiveSourceFetchErrors pins transport-failure visibility: an endpoint
+// returning an error status must be countable (FetchErrors) and must surface
+// in the canonical status snapshot — an unreachable endpoint may never read
+// as healthy wiring with zero events.
+func TestLiveSourceFetchErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	src := NewLivePrometheusSource(srv.URL, "", 50*time.Millisecond)
+	if src == nil {
+		t.Fatal("expected non-nil source")
+	}
+	defer src.Close()
+
+	waitFor(t, func() bool {
+		n, _ := src.FetchErrors()
+		return n >= 1
+	})
+	n, last := src.FetchErrors()
+	if n < 1 {
+		t.Fatalf("FetchErrors = %d, want >= 1", n)
+	}
+	if !strings.Contains(last, "502") {
+		t.Errorf("last error = %q, want it to name the status", last)
+	}
+
+	snap := StatusSnapshot(src)
+	if got, _ := snap["fetch_errors"].(int); got != n {
+		t.Errorf("StatusSnapshot fetch_errors = %v, want %d", snap["fetch_errors"], n)
+	}
 }
 
 // waitFor polls cond until it returns true or the timeout elapses. Live

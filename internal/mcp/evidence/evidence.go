@@ -157,6 +157,12 @@ func Anchor(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		if err != nil {
 			proof.Verified = false
 			proof.Verification = fmt.Sprintf("File %s not accessible on disk: %v", cleanRel, err)
+		} else if fsutil.LooksLikeCredentialFile(fullPath) {
+			// F5: never serve credential-shaped file contents through an
+			// evidence proof — the verified-line excerpt would leak the
+			// secret.
+			proof.Verified = false
+			proof.Verification = fmt.Sprintf("File %s is a credential-shaped file; kern does not serve credential contents to connected agents", cleanRel)
 		} else {
 			data, err := os.ReadFile(fullPath)
 			if err != nil {
@@ -458,6 +464,11 @@ func evidenceBundleSource(file, url string) ([]byte, error) {
 		return []byte(res.Text), nil
 	}
 	if file != "" {
+		// F5: refuse credential-shaped bundle paths — the read would serve
+		// the credential contents to the caller.
+		if fsutil.LooksLikeCredentialFile(file) {
+			return nil, fmt.Errorf("read %s: credential-shaped filename — kern does not serve credential file contents to connected agents", file)
+		}
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", file, err)

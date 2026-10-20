@@ -231,6 +231,60 @@ func (s *FileStore) Consume(approvalID string) (bool, error) {
 	return claimed, nil
 }
 
+// Clear removes the approval with the given ID from the store (whatever its
+// status) and returns the removed record, recording the operator action in
+// the project's tamper-evident audit chain. It is the operator-side escape
+// hatch behind `kern approval clear` for records that block future work
+// without being decidable anymore: a REJECTED exec approval keeps denying
+// byte-identical retries of its command (rejection stickiness), and a stray
+// PENDING record sits in `kern approve list` forever. Clearing never grants
+// anything by itself — the next gated attempt mints a FRESH approval a
+// human still has to decide — so every direction is deny-or-re-arm: clearing
+// a rejected record only re-opens the human gate, and clearing an approved
+// record removes an unused grant. The removal runs inside the single flock'd
+// load-modify-save critical section (mutate), so a concurrent Decide/Consume
+// can never interleave. The audit write is best-effort like a decision's: a
+// failed chain write never fails the removal (it is already persisted; a
+// missing chain entry is detectable via `kern audit repair`).
+func (s *FileStore) Clear(approvalID, actor, reason string) (domain.Approval, error) {
+	var removed domain.Approval
+	err := s.mutate(func(approvals []domain.Approval) []domain.Approval {
+		kept := approvals[:0]
+		for _, it := range approvals {
+			if it.ID == approvalID {
+				removed = it
+				continue
+			}
+			kept = append(kept, it)
+		}
+		return kept
+	})
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	if removed.ID == "" {
+		return domain.Approval{}, fmt.Errorf("approval not found: %s", approvalID)
+	}
+	if reason == "" {
+		reason = fmt.Sprintf("cleared by %s (was %s)", actor, removed.Status)
+	}
+	entry := AuditEntry{
+		AgentID:   actor,
+		TaskID:    removed.TaskID,
+		Action:    "clear",
+		Resource:  "approval:" + removed.ID,
+		Approved:  false,
+		Result:    "cleared",
+		Policy:    "approval",
+		Reason:    reason,
+		Timestamp: time.Now(),
+	}
+	if err := s.auditLog().AppendExternal(entry); err != nil {
+		log.Printf("kern governance: approval %s cleared by %s NOT recorded in audit chain: %v", removed.ID, actor, err)
+	}
+	return removed, nil
+}
+
 // Decide marks an approval as approved or rejected, sets the DecidedAt timestamp,
 // and saves. Returns the updated approval and an error if not found.
 func (s *FileStore) Decide(approvalID, approver string, approved bool, reason string) (domain.Approval, error) {

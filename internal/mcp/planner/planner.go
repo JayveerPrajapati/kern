@@ -38,6 +38,9 @@ func PlanContext(ctx context.Context, h Hooks, args map[string]any) (string, err
 	if err != nil {
 		return "", err
 	}
+	// Surface the same low-confidence resolution label Analyze prefixes to
+	// its text (fuzzy match / common-word name collision) on the plan.
+	note := p.ResolutionNote(change)
 	budget := 0
 	if v := mcpargs.ArgString(args, "budget"); v != "" {
 		n, err := mcpargs.AtoiArg(v, budget)
@@ -47,6 +50,7 @@ func PlanContext(ctx context.Context, h Hooks, args map[string]any) (string, err
 		budget = n
 	}
 	plan := kernctx.PlanPacket(&pkt, change, budget)
+	plan.Note = note
 	if mcpargs.ArgBool(args, "json") {
 		out, err := json.MarshalIndent(plan, "", "  ")
 		if err != nil {

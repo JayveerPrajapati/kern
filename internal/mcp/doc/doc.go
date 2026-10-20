@@ -1,5 +1,5 @@
 // Package doc owns the doc-family tool bodies (kern_doc action=search|fetch|index,
-// kern_commitmsg, kern_precache) as plain functions. Search takes a Hooks
+// kern_precache) as plain functions. Search takes a Hooks
 // bundle (index loading + per-call authorization for its code-results
 // fallback) injected by the mcp adapter; the rest are Server-independent.
 // SanitizeDocName is the canonical doc-name sanitizer (server.go aliases it).
@@ -9,13 +9,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
-	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -98,16 +96,13 @@ func Search(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		return "", fmt.Errorf("query is required")
 	}
 	root := mcpargs.ArgString(args, "root")
-	ix := docsearch.Load(root)
-	if ix == nil {
-		var err error
-		ix, err = docsearch.IndexDir(root)
-		if err != nil {
-			return "", err
-		}
-		if err := ix.Save(); err != nil {
-			return "", err
-		}
+	// The decoded doc index is cached in-process per root, keyed to a cheap
+	// stat fingerprint of the persisted index file (docsearch.LoadCached): a
+	// search only pays the full JSON decode when the file changed.
+	// docsearch.Load's ghost-purge semantics still run on every reload path.
+	ix, err := docsearch.LoadCached(root)
+	if err != nil {
+		return "", err
 	}
 	k := 5
 	if v := mcpargs.ArgString(args, "k"); v != "" {
@@ -247,6 +242,9 @@ func Index(ctx context.Context, args map[string]any) (string, error) {
 	if err := ix.Save(); err != nil {
 		return "", err
 	}
+	// The persisted index changed: drop any cached entry so the next search
+	// re-loads (even if the rewrite happened to preserve size+mtime).
+	docsearch.InvalidateCache(root)
 	return "indexed " + strconv.Itoa(len(ix.Docs)) + " chunks from " + root, nil
 }
 
@@ -279,6 +277,9 @@ func Fetch(ctx context.Context, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// MergeFetched/ReembedFetch persisted a changed index: invalidate any
+	// cached entry so the next search re-loads and sees the fetched doc.
+	docsearch.InvalidateCache(root)
 	var b strings.Builder
 	if res.Truncated {
 		fmt.Fprintf(&b, "[Warning: document was truncated at size limit]\n\n")
@@ -306,46 +307,15 @@ func Fetch(ctx context.Context, args map[string]any) (string, error) {
 
 }
 
-func Commitmsg(ctx context.Context, args map[string]any) (string, error) {
-	root := mcpargs.ArgString(args, "root")
-	if root == "" {
-		root = "."
-	}
-	var out []byte
-	var err error
-	staged := mcpargs.ArgString(args, "staged")
-	rng := mcpargs.ArgString(args, "range")
-	// A crafted range starting with "-" would be parsed by git as an
-	// option rather than a revision range: reject it fail-closed.
-	if rng != "" && strings.HasPrefix(rng, "-") {
-		return "", fmt.Errorf("invalid range %q: must not start with -", rng)
-	}
-	if staged == "true" || staged == "1" {
-		out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--cached").Output()
-	} else if rng != "" {
-		out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--unified=0", rng).Output()
-	} else {
-		out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--cached").Output()
-		if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-			out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "HEAD").Output()
-			if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-				out, err = exec.CommandContext(ctx, "git", "-C", root, "diff").Output()
-			}
-		}
-	}
-	if err != nil {
-		return "", fmt.Errorf("git diff failed: %w", err)
-	}
-	return commitmsg.Generate(string(out)).String(), nil
-
-}
-
 func Precache(ctx context.Context, args map[string]any) (string, error) {
 	root := mcpargs.ArgString(args, "root")
 	if root == "" {
 		root = "."
 	}
 	rep := precache.Warm(root)
+	// precache.Warm re-indexes the doc index when it is missing: drop any
+	// cached entry so a subsequent search re-loads.
+	docsearch.InvalidateCache(root)
 	if rep.SourceMiss {
 		return "no project at " + root, nil
 	}

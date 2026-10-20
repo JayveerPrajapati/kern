@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -419,6 +420,9 @@ func TestCheckExecCommandApprovalLifecycle(t *testing.T) {
 	if !strings.Contains(err.Error(), "resolve with: kern approve") {
 		t.Fatalf("denial should carry the kern approve hint: %v", err)
 	}
+	if !strings.Contains(err.Error(), "allowed for: echo hello") {
+		t.Fatalf("denial should state the command it is allowed for: %v", err)
+	}
 	id := approvalIDFromErr(t, err)
 
 	store := NewFileStore(root)
@@ -428,6 +432,9 @@ func TestCheckExecCommandApprovalLifecycle(t *testing.T) {
 	}
 	if a.Status != "pending" {
 		t.Fatalf("approval status = %q, want pending", a.Status)
+	}
+	if a.Kind != ApprovalKindExecCommand {
+		t.Fatalf("approval Kind = %q, want %q", a.Kind, ApprovalKindExecCommand)
 	}
 	if a.TaskID != execCommandKey("echo hello") {
 		t.Fatalf("approval TaskID = %q, want command-bound key %q", a.TaskID, execCommandKey("echo hello"))
@@ -779,6 +786,51 @@ func TestCheckExecDangerousClassLifecycle(t *testing.T) {
 	}
 }
 
+// TestCheckExecCommandRejectionSticky locks the contract: after a human REJECTS a
+// command's approval, a byte-identical retry is hard-denied (no new approval
+// minted — rejection is sticky), while a DIFFERENT command still mints fresh.
+func TestCheckExecCommandRejectionSticky(t *testing.T) {
+	overrideExecApprovalSecret(t)
+	root := t.TempDir()
+	t.Setenv("KERN_TOOLS", "kern_sandbox")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+
+	const cmd = "rm -rf /tmp/rejection-sticky"
+	err := CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil {
+		t.Fatal("dangerous command must be gated at default risk")
+	}
+	id := approvalIDFromErr(t, err)
+	store := NewFileStore(root)
+	if _, derr := store.Decide(id, "oncall-human", false, "not this campaign"); derr != nil {
+		t.Fatalf("Decide: %v", derr)
+	}
+
+	// Byte-identical retry after rejection: hard deny, sticky.
+	err = CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil {
+		t.Fatal("byte-identical retry after rejection must be denied")
+	}
+	if !strings.Contains(err.Error(), "previously rejected") {
+		t.Fatalf("denial should name the sticky rejection, got: %v", err)
+	}
+	// Stickiness must not mint a new approval for the same command.
+	recs, lerr := NewFileStore(root).Load()
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("sticky rejection must not mint new approvals: want 1 record, got %d", len(recs))
+	}
+
+	// A DIFFERENT command is unaffected: it mints a fresh approval.
+	err = CheckExecCommand("rm -rf /tmp/other-command", root, "kern_sandbox")
+	if err == nil || !strings.Contains(err.Error(), "resolve with: kern approve") {
+		t.Fatalf("different command must mint a fresh approval, got: %v", err)
+	}
+}
+
 // TestCheckExecRiskLowDisablesClassification locks the documented opt-out:
 // KERN_EXEC_RISK=LOW is the explicit operator "I trust all commands" switch,
 // which disables class escalation.
@@ -828,5 +880,81 @@ func TestCheckExecDangerousClassNoRootHonestHint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "KERN_TOOLS") {
 		t.Fatalf("in-memory denial should point at the allowlist: %v", err)
+	}
+}
+
+// TestExecRejectionTTLExpiry locks the bounded half of rejection stickiness:
+// a REJECTED approval stops blocking byte-identical retries once the
+// rejection TTL has elapsed — the next attempt mints a FRESH approval a
+// human still has to decide (the gate re-arms, it does not open).
+func TestExecRejectionTTLExpiry(t *testing.T) {
+	overrideExecApprovalSecret(t)
+	root := t.TempDir()
+	t.Setenv("KERN_TOOLS", "kern_sandbox")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	t.Setenv("KERN_REJECTION_TTL", "1h")
+
+	const cmd = "rm -rf /tmp/rejection-expiry"
+	err := CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil {
+		t.Fatal("dangerous command must be gated at default risk")
+	}
+	id := approvalIDFromErr(t, err)
+	if _, derr := NewFileStore(root).Decide(id, "oncall-human", false, "reprobe later"); derr != nil {
+		t.Fatalf("Decide: %v", derr)
+	}
+
+	// Fresh rejection still blocks (sticky within the TTL).
+	if err := CheckExecCommand(cmd, root, "kern_sandbox"); err == nil || !strings.Contains(err.Error(), "previously rejected") {
+		t.Fatalf("fresh rejection must deny byte-identical retries, got: %v", err)
+	}
+
+	// Past the TTL the rejection lapses: the retry mints a fresh approval.
+	t.Setenv("KERN_REJECTION_TTL", "1ms")
+	time.Sleep(2 * time.Millisecond)
+	err = CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil || !strings.Contains(err.Error(), "resolve with: kern approve") {
+		t.Fatalf("expired rejection must mint a fresh approval, got: %v", err)
+	}
+}
+
+// TestExecRejectionClearReopensPath locks the operator escape hatch from
+// rejection stickiness: FileStore.Clear (the backend of `kern approval
+// clear <id>`) removes the rejected record so the next byte-identical
+// attempt mints a fresh approval instead of being hard-denied.
+func TestExecRejectionClearReopensPath(t *testing.T) {
+	overrideExecApprovalSecret(t)
+	root := t.TempDir()
+	t.Setenv("KERN_TOOLS", "kern_sandbox")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	t.Setenv("KERN_REJECTION_TTL", "")
+
+	const cmd = "rm -rf /tmp/rejection-clear"
+	err := CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil {
+		t.Fatal("dangerous command must be gated at default risk")
+	}
+	id := approvalIDFromErr(t, err)
+	store := NewFileStore(root)
+	if _, derr := store.Decide(id, "oncall-human", false, "not this campaign"); derr != nil {
+		t.Fatalf("Decide: %v", derr)
+	}
+
+	// The sticky denial teaches the clear command (not file surgery).
+	err = CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil || !strings.Contains(err.Error(), "kern approval clear "+id) {
+		t.Fatalf("sticky denial must name the clear command for the rejected id, got: %v", err)
+	}
+
+	// Clearing the rejected record re-opens the path: the next attempt
+	// mints a fresh approval a human still has to decide.
+	if _, cerr := store.Clear(id, "operator", "re-open after review"); cerr != nil {
+		t.Fatalf("Clear: %v", cerr)
+	}
+	err = CheckExecCommand(cmd, root, "kern_sandbox")
+	if err == nil || !strings.Contains(err.Error(), "resolve with: kern approve") {
+		t.Fatalf("cleared rejection must mint a fresh approval, got: %v", err)
 	}
 }

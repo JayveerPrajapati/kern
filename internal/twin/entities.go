@@ -17,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/twin/ids"
+	"github.com/JayveerPrajapati/kern/internal/twinindex"
 )
 
 // entityKinds is the set of entity (non-code) node kinds the twin extractors
@@ -48,7 +49,7 @@ type EntityInfo struct {
 // MergeIntoIndex merges the twin extractors into a code graph derived from
 // the given index, mirroring platform.go's wiring (runtime source included),
 // then augments the result with entities derived from the index's own
-// framework entry-point metadata (indexEntities). It returns the merged
+// framework entry-point metadata (twinindex.Entities). It returns the merged
 // knowledge graph the entity renderers consume. The runtime source is
 // resolved the same way the app platform resolves it, so a
 // `.kern/runtime.json` (or a live adapter) feeds deployment/error nodes; a
@@ -57,7 +58,7 @@ func MergeIntoIndex(ix *index.Index, root string) *intel.Graph {
 	g := intel.FromIndex(ix)
 	// Best-effort, like platform.go: extractor errors are non-fatal.
 	_ = Merge(&g, NewExtractors(root, runtime.LoadSource(root)))
-	indexEntities(ix, &g)
+	twinindex.Entities(ix, &g)
 	return &g
 }
 
@@ -268,13 +269,18 @@ func buildEntityGraph(g *intel.Graph) *entityGraph {
 			continue
 		}
 		eg.byID[n.ID] = i
+		if n.Package != "" {
+			eg.pkgOf[n.ID] = n.Package
+		}
 		if n.Symbol.Qualified != "" {
 			eg.qualIndex[n.Symbol.Qualified] = append(eg.qualIndex[n.Symbol.Qualified], i)
 			// packageOf: node IDs are "<pkg>.<Qualified>"; stripping the known
 			// Qualified suffix recovers the package path (root-package symbols
 			// have no prefix and get no entry).
-			if pkg := strings.TrimSuffix(n.ID, "."+n.Symbol.Qualified); pkg != n.ID {
-				eg.pkgOf[n.ID] = pkg
+			if _, known := eg.pkgOf[n.ID]; !known {
+				if pkg := strings.TrimSuffix(n.ID, "."+n.Symbol.Qualified); pkg != n.ID {
+					eg.pkgOf[n.ID] = pkg
+				}
 			}
 		}
 		if n.Symbol.Name != "" {

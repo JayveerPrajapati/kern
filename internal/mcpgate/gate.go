@@ -321,10 +321,16 @@ func (g *Gate) gatePath(key, p string) error {
 			return nil // inside an allowed root
 		}
 	}
-	// Audit A6: the denial must NOT disclose the server's allowed roots —
-	// they are server configuration a client must not learn from a denial.
-	// Name only the denied key with generic guidance.
-	return fmt.Errorf("path outside allowed roots for key %q", key)
+	// The denial names the denied key, the allowed roots and the escape
+	// hatches so the caller can actually resolve it (F1): KERN_MCP_ROOTS
+	// widens the allowed set, KERN_MCP_PERMISSIVE=1 relaxes governance, and
+	// KERN_MCP_NO_CONFINE=1 (server-level) disables confinement entirely.
+	// Roots are server configuration, but an operator debugging a denied
+	// call learns more from the actionable message than from a bare denial.
+	// The env vars are framed as OPERATOR-set-at-server-start (F2): they are
+	// fixed when the process launches, so the hint addresses the human who
+	// owns the terminal, not the calling agent (which cannot change them).
+	return fmt.Errorf("path outside allowed roots for key %q (allowed roots: %s; to widen, an operator sets KERN_MCP_ROOTS at server start, or relaxes governance with KERN_MCP_PERMISSIVE=1 / KERN_MCP_NO_CONFINE=1 — the server environment is fixed at process start, a tool call cannot change it)", key, strings.Join(g.roots, ", "))
 }
 
 // RootContains reports whether the symlink-resolved path resolved lies inside

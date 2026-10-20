@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
+	"github.com/JayveerPrajapati/kern/internal/gitrun"
 )
 
 // ChangedTestPackages derives the Go packages whose files have uncommitted
@@ -16,7 +16,7 @@ import (
 // alone. It was moved here from cmd/kern (where it was changedTestPackages) so
 // the CLI and the MCP high-level surface share one canonical derivation.
 func ChangedTestPackages(root string) []string {
-	out, err := mcp.GitOutput(root, "status", "--porcelain", "-uall")
+	out, err := gitrun.Output(root, "status", "--porcelain", "-uall")
 	if err != nil {
 		return nil
 	}

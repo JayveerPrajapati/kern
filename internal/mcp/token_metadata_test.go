@@ -133,7 +133,7 @@ func TestTokenMetadataOnPreToolDenial(t *testing.T) {
 	req := rpcRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(`"deny"`),
 		Method: "tools/call",
-		Params: json.RawMessage(`{"name":"kern_health","arguments":{}}`),
+		Params: json.RawMessage(`{"name":"kern_verify","arguments":{}}`),
 	}
 	respAny := s.safeDispatch(req)
 	resp, ok := respAny.(map[string]any)
@@ -158,7 +158,7 @@ func TestTokenMetadataOnGateDenial(t *testing.T) {
 	req := rpcRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(`1`),
 		Method: "tools/call",
-		Params: json.RawMessage(`{"name":"kern_health","arguments":{"root":"/etc"}}`),
+		Params: json.RawMessage(`{"name":"kern_verify","arguments":{"root":"/etc"}}`),
 	}
 	respAny := s.safeDispatch(req)
 	resp, ok := respAny.(map[string]any)

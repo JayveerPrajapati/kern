@@ -10,9 +10,10 @@ import (
 )
 
 // The governance-family handler bodies (kern_lock action=acquire|release|
-// status, kern_usage_guide, kern_rename, kern_authorize_context) live in
+// status, kern_usage_guide, kern_rename) live in
 // internal/mcp/governance. These adapters are the dispatch-table surface;
-// they build the leaf Hooks from server state and delegate.
+// they build the leaf Hooks from server state and delegate. (kern_authorize_context
+// died with the org plane, 2026-10-18 pivot cut.)
 
 func (s *Server) governanceHooks() mcpgovernance.Hooks {
 	return mcpgovernance.Hooks{
@@ -36,8 +37,4 @@ func (s *Server) handleUsageGuide(ctx context.Context, args map[string]any) (str
 
 func (s *Server) handleRename(ctx context.Context, args map[string]any) (string, error) {
 	return mcpgovernance.Rename(ctx, s.governanceHooks(), args)
-}
-
-func (s *Server) handleAuthorizeContext(ctx context.Context, args map[string]any) (string, error) {
-	return mcpgovernance.AuthorizeContext(ctx, s.governanceHooks(), args)
 }

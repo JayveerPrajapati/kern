@@ -278,11 +278,16 @@ func parseEgressTargets(code string) []string {
 // deliberately conservative heuristic (deny-by-default): a match does not
 // prove the script reaches the network, but the heuristic must not let real
 // egress slip through the unisolated gate. Bare command names (curl, wget,
-// ssh, ...) are matched on word boundaries; API forms (http.Get, net.Dial,
-// fetch, requests., urllib, ...) match their dotted/parameter shapes.
+// telnet, socat, ssh, ...) are matched on word boundaries; API forms
+// (http.Get, net.Dial, fetch, requests., urllib, ...) match their
+// dotted/parameter shapes. Also matched: bash's /dev/tcp and /dev/udp
+// redirection builtins (a socket over a file descriptor) and openssl's
+// s_client subcommand — the interactive TLS client. Bare openssl (dgst,
+// version, ...) is local crypto and is deliberately NOT matched.
 var networkCallRe = regexp.MustCompile(
-	`(?i)\b(curl|wget|nc|netcat|ssh|scp|socket|fetch|axios|node-fetch|httpx|aiohttp|urllib|HttpClient|Invoke-WebRequest|Invoke-RestMethod)\b` +
-		`|net/http|net\.Dial|http\.(Get|Post|NewRequest|Client)|requests\.`)
+	`(?i)\b(curl|wget|nc|netcat|telnet|socat|ssh|scp|socket|fetch|axios|node-fetch|httpx|aiohttp|urllib|HttpClient|Invoke-WebRequest|Invoke-RestMethod)\b` +
+		`|net/http|net\.Dial|http\.(Get|Post|NewRequest|Client)|requests\.` +
+		`|openssl\s+s_client|/dev/(tcp|udp)`)
 
 // containsNetworkCall reports whether code contains a network-shaped
 // operation. Used by the egress gate to deny-by-default: an unisolated script
@@ -643,6 +648,14 @@ func DetectLang(code string) string {
 	return detectLangFromContent(code)
 }
 
+// networkCmdRe matches first-line shell commands that are pure network
+// operations. The auto-bash fallback refuses these without an explicit egress
+// declaration: auto-running them would silently reach the network on
+// unisolated hosts. rsync and openssl are deliberately excluded — rsync can
+// be a local copy, and openssl is usually local crypto (only its s_client
+// subcommand is a network client, and that is covered by networkCallRe).
+var networkCmdRe = regexp.MustCompile(`^(curl|wget|nc|netcat|telnet|socat|ssh|scp)\b`)
+
 // detectLangFromContent identifies a language from unambiguous content signals
 // in the first few non-empty lines. This lets `kern exec "print(1)"` work
 // without --lang by recognizing Python's print(), Go's package decl, Ruby's
@@ -650,6 +663,14 @@ func DetectLang(code string) string {
 // found does it fall back to bash — and only for content that looks shell-like
 // (starts with a known shell builtin/command). Ambiguous content returns "" so
 // the caller surfaces the "cannot detect" error rather than guessing wrong.
+// An unlabeled script whose first command is a pure network operation (curl,
+// wget, ssh, ...) does NOT fall back to bash unless it declares egress
+// targets: auto-running it would silently reach the network on hosts where
+// the operator opted into unisolated runs (KERN_ALLOW_UNISOLATED=1). Refusing
+// auto-detection surfaces the "cannot detect language: pass --lang" error; an
+// explicit --lang bash is the operator's explicit intent, and an egress
+// declaration satisfies the gate. Shebang-based detection (DetectLang) is
+// unaffected — a #!/bin/bash script is explicit.
 func detectLangFromContent(code string) string {
 	lines := strings.Split(code, "\n")
 	var firstLines []string
@@ -711,6 +732,16 @@ func detectLangFromContent(code string) string {
 	if _, err := exec.LookPath("bash"); err == nil {
 		shellCmds := regexp.MustCompile(`^(echo|ls|cd|pwd|cat|grep|sed|awk|cp|mv|rm|mkdir|touch|export|source|export|for\s|while\s|if\s|case\s|true|false|curl|wget|git|printf|test|find|xargs|sort|uniq|head|tail|tee|date|env|kill|ps|du|df|chmod|chown|tar|unzip|zip|make|docker|sudo|bash|sh|set|read|sleep|time|watch|basename|dirname|wc|cut|tr|paste|diff|patch|cmp|sha256sum|md5|nc|ping|ssh|scp|rsync|go|node|npm|npx|pip|python|python3)\b`)
 		if shellCmds.MatchString(firstLines[0]) {
+			// A network-only first command must not auto-run as bash without an
+			// egress declaration: on a host where the operator set
+			// KERN_ALLOW_UNISOLATED=1 the script would reach the network
+			// silently. Refuse auto-detection — the caller surfaces "cannot
+			// detect language: pass --lang"; explicit --lang bash is the
+			// operator's explicit intent, and an "# egress:" (or "// egress:")
+			// declaration satisfies the gate.
+			if networkCmdRe.MatchString(firstLines[0]) && len(parseEgressTargets(code)) == 0 {
+				return ""
+			}
 			return "bash"
 		}
 	}

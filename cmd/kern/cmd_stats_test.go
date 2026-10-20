@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,9 +33,39 @@ func statsFixtureDir(t *testing.T) string {
 	return dir
 }
 
-// TestStatsDefaultOutputHasLedgerHints pins FIX 2c/6: the default stats
-// summary advertises the per-tool and per-agent ledgers so the surfaces are
-// discoverable.
+// statsRootedFixtureDir seeds a ledger with two rooted projects plus one
+// rootless legacy entry; the rooted helpers can assert exact isolation.
+func statsRootedFixtureDir(t *testing.T) string {
+	t.Helper()
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	dir := filepath.Join(cacheRoot, "kern", "stats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	here, other := t.TempDir(), t.TempDir()
+	day := time.Now().UTC().Format("2006-01-02") + ".jsonl"
+	lines := []string{
+		`{"operation":"tool_call","tool":"kern_search","root":` + quoteJSON(here) + `,"after_tokens":100}`,
+		`{"operation":"tool_call","tool":"kern_buddy","root":` + quoteJSON(other) + `,"after_tokens":20}`,
+		`{"operation":"tool_call","tool":"kern_rootless","after_tokens":5}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, day), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return here
+}
+
+func quoteJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestStatsDefaultOutputHasLedgerHints pins that the default stats summary
+// advertises the per-tool, per-agent, and per-project diagnostics.
 func TestStatsDefaultOutputHasLedgerHints(t *testing.T) {
 	statsFixtureDir(t)
 	out := captureStdout(t, func() {
@@ -42,11 +73,47 @@ func TestStatsDefaultOutputHasLedgerHints(t *testing.T) {
 	})
 	for _, want := range []string{
 		"kern stats (last 1 days)",
-		"per-tool ledger: kern stats --by-tool · per-agent: kern stats --by-agent",
+		"per-tool ledger: kern stats --by-tool · per-agent: kern stats --by-agent · per-project: kern stats --by-root",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats default output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestStatsNetOutput pins the `kern stats --net` surface: the labeled net
+// ledger with its honest components (gross saved tokens minus rules-injection
+// minus slice re-reads). The rules cost is computed from the --root's rule
+// files at runtime, so the fixture root carries a known AGENTS.md.
+func TestStatsNetOutput(t *testing.T) {
+	statsFixtureDir(t)
+	root := t.TempDir()
+	// 50 repeated lines: a known, non-zero rules-injection token count.
+	rule := strings.Repeat("// rule line for the net ledger fixture\n", 50)
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(rule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		runStats("stats", []string{"--net", "--days", "1", "--root", root})
+	})
+	for _, want := range []string{
+		"kern stats --net (last 1 days)",
+		"gross saved tokens",
+		"- rules injection",
+		"- slice re-reads",
+		"net saved tokens",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stats --net output missing %q:\n%s", want, out)
+		}
+	}
+	// Fixture ledger: 600 + 50 = 650 gross saved tokens (see statsFixtureDir),
+	// no slice re-reads, minus the AGENTS.md rules cost.
+	if !strings.Contains(out, "gross saved tokens : 650") {
+		t.Fatalf("stats --net must report the gross total, got:\n%s", out)
+	}
+	if !strings.Contains(out, "- slice re-reads   : 0 tokens") {
+		t.Fatalf("stats --net must report slice re-reads (0 in this fixture), got:\n%s", out)
 	}
 }
 
@@ -80,6 +147,40 @@ func TestStatsByAgentJSON(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats --by-agent --json output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestStatsByRootRendersProjects pins the local per-project diagnostic surface.
+func TestStatsByRootRendersProjects(t *testing.T) {
+	here := statsRootedFixtureDir(t)
+	out := captureStdout(t, func() {
+		runStats("stats", []string{"--by-root", "--days", "1"})
+	})
+	for _, want := range []string{
+		"kern stats --by-root (last 1 days)",
+		"tool calls",
+		"tokens saved",
+		here,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stats --by-root output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "kern_rootless") {
+		t.Fatalf("stats --by-root must not turn legacy rootless entries into a project row:\n%s", out)
+	}
+}
+
+func TestStatsByToolRootScopesProject(t *testing.T) {
+	root := statsRootedFixtureDir(t)
+	out := captureStdout(t, func() {
+		runStats("stats", []string{"--by-tool", "--root", root, "--days", "1"})
+	})
+	if !strings.Contains(out, "root: "+root) || !strings.Contains(out, "kern_search") {
+		t.Fatalf("stats --by-tool --root output missing project scope/tool:\n%s", out)
+	}
+	if strings.Contains(out, "kern_buddy") || strings.Contains(out, "kern_rootless") {
+		t.Fatalf("project-scoped tool ledger leaked another project:\n%s", out)
 	}
 }
 

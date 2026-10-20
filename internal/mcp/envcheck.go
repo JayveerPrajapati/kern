@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // ValidateMCPSurfaceEnv fails loudly at server startup when KERN_MCP_CATEGORY

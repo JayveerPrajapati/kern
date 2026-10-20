@@ -1,10 +1,24 @@
 {
   "rules": [
-    {"path": "AGENTS.md", "max_words": 2900},
-    {"path": "README.md", "max_words": 6000},
-    {"path": "docs/authorized-context.md", "max_words": 1900},
-    {"path": "docs/privacy.md", "max_words": 550},
-    {"path": "docs/mcp/README.md", "max_words": 550},
-    {"path": "docs/benchmarks/README.md", "max_words": 500}
+    {
+      "path": "AGENTS.md",
+      "max_words": 2900
+    },
+    {
+      "path": "README.md",
+      "max_words": 6000
+    },
+    {
+      "path": "docs/privacy.md",
+      "max_words": 550
+    },
+    {
+      "path": "docs/mcp/README.md",
+      "max_words": 550
+    },
+    {
+      "path": "docs/benchmarks/README.md",
+      "max_words": 500
+    }
   ]
 }

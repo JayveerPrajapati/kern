@@ -18,7 +18,7 @@ import (
 func TestPluginDefaultToolsMatchGoDefaultTools(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	pluginPath := filepath.Join(root, "internal", "setup", "assets", "plugin", "kern.ts")
+	pluginPath := filepath.Join(root, "internal", "agentwire", "assets", "plugin", "kern.ts")
 	b, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("read plugin asset: %v", err)

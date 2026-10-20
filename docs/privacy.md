@@ -1,10 +1,10 @@
 # Privacy
 
-kern is a local, deterministic code-intelligence engine for AI agents. It runs entirely on your machine — zero network, no telemetry, no phone-home.
+kern is a local, deterministic code-intelligence engine for AI agents. It runs entirely on your machine — no telemetry, no phone-home, and no network calls in its own operation (the only network use is fetching URLs you explicitly name; see §4).
 
 ## 1. Privacy Model
 
-- **100% local** — kern makes no network calls during normal operation.
+- **100% local** — kern makes no network calls of its own; the only network use is the explicit opt-in fetches listed in §4.
 - **No telemetry** — kern does not phone home, report usage, or send crash data.
 - **No third-party analytics** — no tracking pixels, no analytics SDKs, no data brokers.
 - All data stays on the user's machine. What you index is what stays.
@@ -60,7 +60,7 @@ No other external services are contacted.
 ## 6. Data Retention
 
 - **Index** — persists until manually cleared (`kern` cache invalidation)
-- **Audit logs** — append-only and tamper-evident; they grow until you remove them
+- **Audit logs** — append-only and tamper-evident (each record's hash covers its predecessor, so kern never truncates or rotates the chain); they grow until you archive them. Move `.kern/audit/chain.jsonl` aside to start a fresh chain and keep the archive for audit history — `kern doctor` warns once the chain passes 50 MB so growth never goes unnoticed.
 - **Memory lessons** — persistent until explicitly archived or deleted
 
 You are in full control of how long data is kept — kern never deletes or expires your data on its own.

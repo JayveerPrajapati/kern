@@ -27,10 +27,15 @@ type IndexStatus struct {
 	TreeSitterEnabled bool              `json:"tree_sitter_enabled"`
 	SQLite            bool              `json:"sqlite_enabled"`
 	// CallResolution reports distinct callee targets vs how many fail to
-	// resolve (external stdlib/vendor and untyped dynamic-language targets
-	// are expected and correct to stay unresolved). Zero on indexes built
-	// before the pass existed.
+	// resolve, split by cause: External (foreign-import-qualified
+	// stdlib/vendor targets, expected unresolved) and InRepo (bare
+	// dynamic-language receivers and project-local misses — the honest
+	// actionable share). Zero on indexes built before the pass existed.
 	CallResolution CallResStats `json:"call_resolution,omitempty"`
+	// Build reports how the persisted index was last produced (kind, wall
+	// duration, workers, reused per-file results) so build cost is visible
+	// without profiling. Kind "" on indexes built before this field existed.
+	Build BuildStats `json:"build,omitempty"`
 }
 
 // EnsureFreshResult is the JSON-ready outcome of EnsureFresh: the freshness
@@ -138,6 +143,9 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 	status.Packages = len(ix.Pkgs)
 	status.Version = ix.Version
 	status.CallResolution = ix.CallResolution
+	if ix.BuildStats.Kind != "" {
+		status.Build = ix.BuildStats
+	}
 	// Single proof computation. This used to derive the staleness decision
 	// up to three times — ix.Stale() computes a FreshnessProof internally,
 	// then the proof was computed again, then --strict recomputed it strictly

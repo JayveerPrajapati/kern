@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // WikiExport writes a markdown wiki into outDir: an index README plus one page
@@ -125,18 +126,18 @@ func wikiPage(ix *index.Index, dir string, syms []index.Symbol, obsidian bool) (
 // community label among the page's symbols ("none" when none has one), and
 // hub reports whether any symbol in the dir ranks as a hub.
 func obsidianFrontmatter(ix *index.Index, dir string, syms []index.Symbol) string {
-	labels := ix.CommunityLabels()
+	labels := ix.DeclarationCommunities()
 	label := "none"
 	for _, s := range syms {
-		if l := labels[s.FullName()]; l != "" {
+		if l := labels[s.DeclarationID()]; l != "" {
 			label = l
 			break
 		}
 	}
-	hubs := hubSet(ix)
+	hubs := topology.HubSet(ix)
 	hub := false
 	for _, s := range syms {
-		if hubs[s.FullName()] {
+		if hubs[s.DeclarationID()] {
 			hub = true
 			break
 		}

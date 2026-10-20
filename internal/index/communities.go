@@ -1,6 +1,50 @@
 package index
 
-import "sort"
+import (
+	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
+
+	"github.com/JayveerPrajapati/kern/internal/calleefilter"
+)
+
+func (ix *Index) DeclarationNames() map[string]string {
+	return newExportCatalog(ix).names
+}
+
+func declarationNames(symbols map[string]Symbol) map[string]string {
+	names := map[string]string{}
+	counts := map[string]int{}
+	for id, symbol := range symbols {
+		names[id] = symbol.FullName()
+		counts[names[id]]++
+	}
+	for id, symbol := range symbols {
+		if counts[names[id]] > 1 {
+			names[id] = filepath.ToSlash(filepath.Dir(symbol.File)) + "." + symbol.FullName()
+		}
+	}
+	counts = map[string]int{}
+	for _, name := range names {
+		counts[name]++
+	}
+	for id, symbol := range symbols {
+		if counts[names[id]] > 1 {
+			names[id] += " (" + filepath.ToSlash(symbol.File) + ":" + strconv.Itoa(symbol.Line) + ")"
+		}
+	}
+	counts = map[string]int{}
+	for _, name := range names {
+		counts[name]++
+	}
+	for id, name := range names {
+		if counts[name] > 1 {
+			names[id] = name + " [" + id + "]"
+		}
+	}
+	return names
+}
 
 const (
 	maxCommunityIterations = 30
@@ -8,26 +52,20 @@ const (
 	MaxCommunitySymbols    = 50000
 )
 
-// CommunityLabels clusters symbols with deterministic label propagation over
-// project-local call edges (external callees ignored). Keys are symbol full
-// names; values are community labels. Returns empty for repos over
-// MaxCommunitySymbols to avoid O(n*iter) latency.
+// CommunityLabels clusters project-local symbols via label propagation (test symbols excluded); empty over MaxCommunitySymbols.
 func (ix *Index) CommunityLabels() map[string]string {
 	if len(ix.Symbols) > MaxCommunitySymbols {
 		return map[string]string{}
 	}
-	// Build a set of project-local symbol full names so we can skip external
-	// callees (JDK types like List.of, Date, Optional.of) without relying on
-	// resolveName's bare-name fallback, which would let an external call
-	// "java.util.List.of" resolve to a project method named "of".
+	syms := slices.DeleteFunc(append([]Symbol(nil), ix.Symbols...), func(s Symbol) bool { return calleefilter.IsTestSymbol(s.File) })
 	localFull := map[string]bool{}
-	for _, s := range ix.Symbols {
+	for _, s := range syms {
 		localFull[s.FullName()] = true
 	}
 	adj := map[string][]string{}
 	adjSet := map[string]map[string]bool{}
 	nodes := []string{}
-	for _, s := range ix.Symbols {
+	for _, s := range syms {
 		caller := s.FullName()
 		for _, ce := range ix.Calls[caller] {
 			c := ce.Target
@@ -60,7 +98,81 @@ func (ix *Index) CommunityLabels() map[string]string {
 			nodes = append(nodes, caller, c)
 		}
 	}
+	return propagateLabels(adj, dedupeSorted(nodes))
+}
+
+// DeclarationCommunities clusters declarations by declaration ID using only
+// resolved, source-attributed call bindings, so same-named declarations never
+// share a membership. Persisted name-keyed labels (ix.Communities) remain a
+// display aggregate; this map is the identity-correct view.
+func (ix *Index) DeclarationCommunities() map[string]string {
+	cache := ix.getCache()
+	cache.communities.Do(func() {
+		cache.declComm = ix.declarationCommunities()
+	})
+	return cache.declComm
+}
+
+func (ix *Index) declarationCommunities() map[string]string {
+	if len(ix.Symbols) > MaxCommunitySymbols {
+		return map[string]string{}
+	}
+	catalog := newExportCatalog(ix)
+	local := map[string]bool{}
+	for id, symbol := range catalog.byID {
+		if !calleefilter.IsTestSymbol(symbol.File) {
+			local[id] = true
+		}
+	}
+	adj := map[string][]string{}
+	seen := map[[2]string]bool{}
+	var nodes []string
+	for _, call := range catalog.calls(nil) {
+		from, to := call.from.ID, call.to.ID
+		if call.edge.Resolution != "resolved" || from == to || !local[from] || !local[to] || seen[[2]string{from, to}] {
+			continue
+		}
+		seen[[2]string{from, to}] = true
+		adj[from] = append(adj[from], to)
+		if !seen[[2]string{to, from}] {
+			seen[[2]string{to, from}] = true
+			adj[to] = append(adj[to], from)
+		}
+		nodes = append(nodes, from, to)
+	}
 	nodes = dedupeSorted(nodes)
+	labels := propagateLabels(adj, nodes)
+	display := map[string]string{}
+	for id, representative := range labels {
+		display[id] = catalog.names[representative]
+	}
+	return display
+}
+
+// CommunityMembers returns the sorted member names of the community containing
+// the declaration, or nil when it has no local resolved call edges or its
+// community has fewer than minCommunitySize members.
+func (ix *Index) CommunityMembers(declarationID string) []string {
+	labels := ix.DeclarationCommunities()
+	label, ok := labels[declarationID]
+	if !ok {
+		return nil
+	}
+	catalog := newExportCatalog(ix)
+	var members []string
+	for id, other := range labels {
+		if other == label {
+			members = append(members, catalog.names[id])
+		}
+	}
+	if len(members) < minCommunitySize {
+		return nil
+	}
+	sort.Strings(members)
+	return members
+}
+
+func propagateLabels(adj map[string][]string, nodes []string) map[string]string {
 	if len(nodes) == 0 {
 		return map[string]string{}
 	}

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 )
 
 // F10 strict per-command flags: the shared parseFlags knows every flag in
@@ -20,12 +22,9 @@ func TestUnknownCommandFlagsExit2(t *testing.T) {
 		rest []string
 		want string // substring of the stderr error
 	}{
-		{"budget", []string{"--budget", "100"}, "unknown flag: --budget"}, // F10
-		{"search", []string{"--bogus", "dispatch"}, "unknown flag: --bogus"},
 		{"version", []string{"--json"}, "unknown flag: --json"},
 		{"ast", []string{"--bogus", "pattern"}, "unknown flag: --bogus"},
-		{"snapshot", []string{"--bogus"}, "unknown flag: --bogus"},
-		{"health", []string{"--bogus"}, "unknown flag: --bogus"},
+		{"search", []string{"--bogus", "dispatch"}, "unknown flag: --bogus"},
 		{"explore", []string{"--bogus", "sym"}, "unknown flag: --bogus"},
 	}
 	for _, tc := range cases {
@@ -84,20 +83,8 @@ func TestCommandFlagsAcceptDocumentedFlags(t *testing.T) {
 // them. The table mirrors the handler registrations below and MUST be
 // updated when a handler adds or drops a flag:
 //
-//	check          → internal/bpcli/cli/check.go           parseCheckFlags
-//	ci             → internal/bpcli/cli/ci.go              parseCIFlags
-//	fix            → internal/bpcli/cli/fix.go             runFix FlagSet
-//	guard          → cmd/kern/cmd_context.go               runGuard (shared parseFlags fields it reads)
-//	metrics        → internal/bpcli/cli/metrics_cmd.go     runMetrics FlagSet
-//	verify-receipt → internal/bpcli/cli/verify_receipt.go  parseVerifyReceiptFlags
-var handlerRegisteredFlags = map[string][]string{
-	"check":          {"agent-id", "all", "allow-unisolated", "approval-id", "ci", "fast", "format", "intent", "isolate-network", "json", "repo", "require-kern", "resilience", "source", "staged", "task", "tests"},
-	"ci":             {"artifact-file", "base", "head", "json", "no-cache", "no-human", "receipt", "repo", "strict-latency"},
-	"fix":            {"content", "file", "json", "repo"},
-	"guard":          {"agent-id", "file", "force", "json", "precision", "range", "sarif", "task", "threshold"},
-	"metrics":        {"json", "repo", "reset"},
-	"verify-receipt": {"check-diff", "in-toto", "json", "receipt-id", "repo", "sarif"},
-}
+//	guard          → internal/contextcli/guard.go            parseGuardFlags (per-command parser; the shared parseFlags fields it reads)
+var handlerRegisteredFlags = map[string][]string{}
 
 // TestHandlerFlagsPresentInCommandFlags: every flag a handler genuinely
 // registers/consumes must be declared in commandFlags, or the F10 strict
@@ -148,26 +135,29 @@ func TestFlagValidationStopsAtDoubleDash(t *testing.T) {
 // A nonexistent root positional is now a usage error (exit 2), and so is
 // an excess positional count.
 func TestF13AstProseRejectJunkRoot(t *testing.T) {
-	expectExit(t, 2, func() {
-		runAst([]string{"func", "no-such-dir-xyz"})
-	})
+	if code := graphcli.RunAst([]string{"func", "no-such-dir-xyz"}); code != 2 {
+		t.Fatalf("runAst exit code = %d, want 2 (usage error)", code)
+	}
 	expectExit(t, 2, func() {
 		runProse([]string{"func", "run"})
 	})
-	expectExit(t, 2, func() {
-		runAst([]string{"a", "b", "c"})
-	})
+	if code := graphcli.RunAst([]string{"a", "b", "c"}); code != 2 {
+		t.Fatalf("runAst exit code = %d, want 2 (usage error)", code)
+	}
 	expectExit(t, 2, func() {
 		runProse([]string{"a", "b", "c"})
 	})
 }
 
 // TestL1PreEditNoArgsExits2: a bare `kern pre-edit` is a usage error
-// (exit 2, documented usage), not a runtime failure (exit 1).
+// (exit 2, documented usage), not a runtime failure (exit 1). Wiring-level
+// pin: the dispatch row routes to the internal/mcp/preedit entry point,
+// which returns the usage exit code (the behavioral coverage moved with the
+// family to internal/mcp/preedit/cli_test.go).
 func TestL1PreEditNoArgsExits2(t *testing.T) {
-	expectExit(t, 2, func() {
-		runPreEdit(nil)
-	})
+	if code := dispatchCommand("pre-edit", nil); code != 2 {
+		t.Fatalf("dispatchCommand(pre-edit) = %d, want 2 (usage error)", code)
+	}
 }
 
 // TestL2PromptShowIsSubcommand: `kern prompt show` without a template is a
@@ -176,34 +166,5 @@ func TestL1PreEditNoArgsExits2(t *testing.T) {
 func TestL2PromptShowIsSubcommand(t *testing.T) {
 	expectExit(t, 2, func() {
 		runPrompt([]string{"show"})
-	})
-}
-
-// TestL10TasksListSuggestsTaskList: `kern tasks list` (unsupported spelling)
-// exits 2 and the message must point at the supported forms.
-func TestL10TasksListSuggestsTaskList(t *testing.T) {
-	stderr, code := captureStderrExit(t, func() {
-		runTasks([]string{"list"})
-	})
-	if code != 2 {
-		t.Fatalf("runTasks([list]) = %d, want 2", code)
-	}
-	if !strings.Contains(stderr, "kern task list") {
-		t.Fatalf("stderr = %q, want it to suggest 'kern task list'", stderr)
-	}
-}
-
-// TestP2D3RepairGuidanceShapeValidation: a shape-invalid finding (valid
-// JSON, no rule_id) must fail loud (exit 1) exactly like explain-finding —
-// never hollow guidance with exit 0. Syntax-malformed JSON stays exit 2.
-func TestP2D3RepairGuidanceShapeValidation(t *testing.T) {
-	expectExit(t, 1, func() {
-		runRepairGuidance([]string{"--finding", "{}"})
-	})
-	expectExit(t, 1, func() {
-		runRepairGuidance([]string{"--finding", `{"file":"x.go"}`})
-	})
-	expectExit(t, 2, func() {
-		runRepairGuidance([]string{"--finding", "{not json"})
 	})
 }

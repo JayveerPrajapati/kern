@@ -85,7 +85,7 @@ func TestSimulateRemoveSymbol(t *testing.T) {
 	if len(imp.Affected) == 0 {
 		t.Fatal("expected transitively affected symbols")
 	}
-	if !contains(imp.Affected, "mid") && !hasSuffix(imp.Affected, ".mid") {
+	if !contains(imp.Affected, nodeID(g, "mid")) {
 		t.Fatalf("expected mid among affected, got %v", imp.Affected)
 	}
 	if len(imp.Files) == 0 {
@@ -172,7 +172,7 @@ func TestSimulateChangeSignature(t *testing.T) {
 	if len(imp.Affected) == 0 {
 		t.Fatal("changing a signature should surface its callers")
 	}
-	if !contains(imp.Affected, "mid") && !hasSuffix(imp.Affected, ".mid") {
+	if !contains(imp.Affected, nodeID(g, "mid")) {
 		t.Fatalf("expected mid among affected for a signature change, got %v", imp.Affected)
 	}
 	if len(imp.Files) == 0 {
@@ -258,7 +258,7 @@ func TestRenameSymbolChangeKind(t *testing.T) {
 	if len(imp.Affected) == 0 {
 		t.Fatal("renaming helper should surface its callers")
 	}
-	if !contains(imp.Affected, "mid") && !hasSuffix(imp.Affected, ".mid") {
+	if !contains(imp.Affected, nodeID(g, "mid")) {
 		t.Fatalf("expected mid among affected for a rename, got %v", imp.Affected)
 	}
 }

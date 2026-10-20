@@ -48,8 +48,8 @@ func TestHandleHealthTool(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing or invalid 'tools' object: %v", data["tools"])
 	}
-	if registered, ok := toolsMap["registered"].(float64); !ok || registered < 50 {
-		t.Errorf("tools.registered = %v, expected >= 50", toolsMap["registered"])
+	if registered, ok := toolsMap["registered"].(float64); !ok || registered < 28 {
+		t.Errorf("tools.registered = %v, expected >= 28", toolsMap["registered"])
 	}
 
 	cacheMap, ok := data["cache"].(map[string]any)

@@ -7,11 +7,12 @@ import (
 	"testing"
 )
 
-// TestGateErrorDoesNotDiscloseRoots locks audit A6: a denied path's error
-// must not disclose the server's allowed roots — they are server
-// configuration a client must not learn from a denial. The denial names only
-// the denied key with generic guidance.
-func TestGateErrorDoesNotDiscloseRoots(t *testing.T) {
+// TestGateErrorNamesAllowedRootsAndEscapes pins F1: a denied path's error
+// must be ACTIONABLE — it names the denied key, the allowed roots and the
+// escape hatches (KERN_MCP_ROOTS to widen, KERN_MCP_PERMISSIVE=1 /
+// KERN_MCP_NO_CONFINE=1 to relax) so the caller can resolve the denial
+// instead of guessing.
+func TestGateErrorNamesAllowedRootsAndEscapes(t *testing.T) {
 	t.Parallel()
 	secretRoot := t.TempDir()
 	g := &Gate{roots: []string{secretRoot}, enabled: true}
@@ -19,14 +20,19 @@ func TestGateErrorDoesNotDiscloseRoots(t *testing.T) {
 	if err == nil {
 		t.Fatal("path outside the allowed roots must be denied")
 	}
-	if strings.Contains(err.Error(), secretRoot) {
-		t.Fatalf("denial must not disclose allowed roots, got: %v", err)
+	if !strings.Contains(err.Error(), secretRoot) {
+		t.Fatalf("denial must name the allowed roots, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "outside allowed roots") {
-		t.Fatalf("denial should carry generic guidance, got: %v", err)
+		t.Fatalf("denial should carry the confinement wording, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), `"root"`) {
 		t.Fatalf("denial should name the denied key, got: %v", err)
+	}
+	for _, escape := range []string{"KERN_MCP_ROOTS", "KERN_MCP_PERMISSIVE", "KERN_MCP_NO_CONFINE"} {
+		if !strings.Contains(err.Error(), escape) {
+			t.Fatalf("denial should document the %s escape, got: %v", escape, err)
+		}
 	}
 }
 

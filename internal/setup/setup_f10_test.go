@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // snapshotTree records path -> content hash for every file under root.
@@ -283,5 +285,40 @@ func TestWireBareWiresPolicyForAgentsItEnabled(t *testing.T) {
 	sort.Strings(missing)
 	if len(missing) > 0 {
 		t.Fatalf("detected agents still not wired after setup: %v", missing)
+	}
+}
+
+// TestWireDryRunPreviewsKeepFullRules pins the dry-run AGENTS.md label: in
+// a global-managed environment with no explicit thin choice, a repo whose
+// AGENTS.md carries the FULL rules keeps them (the keep-full contract —
+// WireThinRulesFile's guard against unrequested downgrades), and the
+// preview must announce the KEEP, not a thin write it would not perform.
+func TestWireDryRunPreviewsKeepFullRules(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("PATH", "/nonexistent")
+	dir := t.TempDir()
+	WireGlobalRules()
+	if !agentwire.HostGlobalManaged("AGENTS.md") {
+		t.Fatal("sanity: global rules wiring must make the AGENTS.md global slot managed")
+	}
+	writeFixture(t, dir, "AGENTS.md", fullRulesFixture())
+
+	sts := WireWith(dir, nil, false, false, WireOptions{DryRun: true})
+	var note string
+	for _, s := range sts {
+		if s.Agent == "AGENTS.md" {
+			note = s.Note
+		}
+	}
+	if note == "" {
+		t.Fatal("dry-run returned no AGENTS.md status")
+	}
+	if !strings.Contains(note, "would keep existing full rules") {
+		t.Fatalf("dry-run must preview the keep, not a thin write: %q", note)
+	}
+	if strings.Contains(note, "thin rules)") && !strings.Contains(note, "keep") {
+		t.Fatalf("dry-run must not announce a thin write it would not perform: %q", note)
 	}
 }

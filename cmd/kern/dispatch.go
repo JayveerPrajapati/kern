@@ -5,6 +5,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 )
 
 // resolveCommandAndFlags extracts the subcommand and its remaining arguments
@@ -22,8 +24,8 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 	cmd = os.Args[1]
 	rest = os.Args[2:]
 
-	if cmd == "--all" || ((cmd == "help" || cmd == "--help" || cmd == "-h") && hasFlag(rest, "--all")) {
-		usageAll(hasFlag(rest, "--flat"))
+	if cmd == "--all" || ((cmd == "help" || cmd == "--help" || cmd == "-h") && cliflags.HasFlag(rest, "--all")) {
+		usageAll(cliflags.HasFlag(rest, "--flat"))
 		os.Exit(0)
 	}
 
@@ -55,7 +57,7 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 	// probes treat exit 0 as "the command exists". The unknown subcommand
 	// gets the unknown-command error (exit 2); only kern's own --help/-h
 	// (no subcommand) falls back to the global usage with exit 0.
-	if cmd == "--help" || cmd == "-h" || hasFlag(rest, "--help") || hasFlag(rest, "-h") {
+	if cmd == "--help" || cmd == "-h" || cliflags.HasFlag(rest, "--help") || cliflags.HasFlag(rest, "-h") {
 		if !printCommandHelp(cmd) {
 			if cmd != "--help" && cmd != "-h" {
 				printUnknownCommand(cmd)
@@ -79,61 +81,17 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 // is covered either by a same-name dispatch case or by an alias entry, and
 // that every alias target is a real dispatch case.
 var mcpCLIAlias = map[string]string{
-	"kern_agent":                 "agent-message",
-	"kern_agents":                "team",
-	"kern_llm_providers":         "agents",
-	"kern_register_host_sampler": "register-host-sampler",
-	"kern_validate_staged":       "diff-gate",
-	"kern_validate_proposed":     "validate-proposed",
-	"kern_explain_finding":       "explain-finding",
-	"kern_fetch_raw_anchor":      "anchor",
-	"kern_ast_search":            "ast",
-	"kern_authorize_context":     "authorize-context",
-	"kern_compact_file":          "compact",
-	"kern_context_budget":        "budget",
-	"kern_context_envelope":      "context-envelope",
-	"kern_plan_context":          "explain-context",
-	"kern_orchestrate":           "orchestrate",
-	"kern_skill":                 "skills",
-	"kern_mcp_call":              "mcp-client",
-	"kern_diff_files":            "udiff",
-	"kern_do":                    "do",
-	"kern_doc":                   "docs",
-	"kern_entry_points":          "entry-points",
-	"kern_fts_search":            "fts",
-	"kern_guard_check":           "guard",
-	"kern_lock":                  "lock",
-	"kern_mask_pii":              "mask",
-	"kern_memory":                "memory",
-	"kern_optimize":              "optimize",
-	"kern_org":                   "org",
-	"kern_project_map":           "project",
-	"kern_repo_search":           "repos",
-	"kern_safe_delete":           "delete",
-	"kern_schema_validate":       "schema",
-	"kern_security":              "sec",
-	"kern_test_gaps":             "testgaps",
-	"kern_usage_guide":           "guide",
-	"kern_verify_output":         "verify",
-	"kern_what_if":               "impact",
-	"kern_check_draft":           "check-draft",
-	"kern_taint":                 "taint",
-	"kern_pre_edit":              "pre-edit",
-	"kern_prompt_fill":           "prompt-fill",
-	"kern_semantic":              "semantic-diff",
-	"kern_evidence":              "evidence",
-	"kern_context_watch":         "context-watch",
-	"kern_cross_repo_impact":     "cross-repo-impact",
-	"kern_policy_dsl":            "policy-dsl",
-	"kern_ast_transform":         "ast-transform",
-	"kern_synthesize_test":       "synthesize-test",
-	"kern_fit_context":           "fit-context",
-	"kern_refactor_transaction":  "refactor-transaction",
-	"kern_repair":                "repair-diagnostics",
-	"kern_lsp_bridge":            "lsp-bridge",
-	"kern_fw_trace":              "fw-trace",
-	"kern_mutation_test":         "mutate",
-	"kern_fragility_hotspots":    "fragility",
+	"kern_fetch_raw_anchor": "anchor",
+	"kern_ast_search":       "ast",
+	"kern_compact_file":     "compact",
+	"kern_plan_context":     "explain-context",
+	"kern_doc":              "docs",
+	"kern_mask_pii":         "mask",
+	"kern_memory":           "memory",
+	"kern_optimize":         "optimize",
+	"kern_project_map":      "project",
+	"kern_evidence":         "evidence",
+	"kern_fit_context":      "fit-context",
 }
 
 // printCommandHelp prints the one-line help for a subcommand and returns
@@ -259,11 +217,11 @@ func unknownFlagIn(cmd string, rest []string) string {
 			prevFlagTookValue = false
 			continue
 		}
-		if !isFlagToken(arg) {
+		if !cliflags.IsFlagToken(arg) {
 			continue
 		}
-		name, _, hasInline := splitFlag(arg)
-		if len(name) > 1 && name[0] == '-' && name[1] != '-' && isAlpha(name[1]) && name != "-h" {
+		name, _, hasInline := cliflags.SplitFlag(arg)
+		if len(name) > 1 && name[0] == '-' && name[1] != '-' && cliflags.IsAlpha(name[1]) && name != "-h" {
 			name = "--" + name[1:]
 		}
 		if !allowed[strings.TrimPrefix(name, "--")] {
@@ -291,8 +249,12 @@ func printUnknownCommand(cmd string) {
 // match query, in descending confidence order: exact-prefix matches first
 // (the strongest typo signal, e.g. "searc" → "search"), then
 // case-insensitive substring matches, then close edit-distance (Levenshtein)
-// matches. It returns nil when nothing is close enough, so the unknown-command
-// error stays a one-liner instead of guessing wildly.
+// matches. Fuzzy matches are shape-aware: the candidate must share the
+// query's first letter (so "try" can never suggest "why") and the allowed
+// distance scales with the query length (≤1 for short queries ≤4 chars —
+// a second typo on a 3-letter word usually lands on an unrelated command —
+// ≤2 for longer ones). It returns nil when nothing is close enough, so the
+// unknown-command error stays a one-liner instead of guessing wildly.
 func suggestCommands(query string) []string {
 	if query == "" {
 		return nil
@@ -306,7 +268,7 @@ func suggestCommands(query string) []string {
 			prefixes = append(prefixes, name)
 		case strings.Contains(n, q):
 			substrings = append(substrings, name)
-		case editDistance(q, n) <= max(2, len(q)/3):
+		case n[0] == q[0] && editDistance(q, n) <= fuzzyDistanceLimit(q):
 			fuzzy = append(fuzzy, name)
 		}
 	}
@@ -335,6 +297,18 @@ func suggestCommands(query string) []string {
 		}
 	}
 	return out
+}
+
+// fuzzyDistanceLimit returns the maximum edit distance a command name may
+// have from a mistyped query to still be suggested as a fuzzy match: 1 for
+// queries of up to 4 characters, 2 for longer ones. Short queries are more
+// likely to collide with semantically unrelated commands at distance 2 (the
+// "try" → "why" nonsense), so they demand a stricter match.
+func fuzzyDistanceLimit(q string) int {
+	if len(q) <= 4 {
+		return 1
+	}
+	return 2
 }
 
 // editDistance returns the Levenshtein edit distance between a and b

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -104,7 +105,7 @@ func (ix *Index) addFrameworkDIEdges() {
 					if len(bm) >= 3 {
 						rawType := bm[1]
 						methodName := bm[2]
-						retType := javaSimpleTypeName(rawType)
+						retType := langparse.JavaSimpleTypeName(rawType)
 						fullMethod := cls + "." + methodName
 
 						bp := beanProvider{
@@ -151,7 +152,7 @@ func (ix *Index) addFrameworkDIEdges() {
 				if len(ifield) >= 4 {
 					rawType := ifield[2]
 					fieldName := ifield[3]
-					typeName := javaSimpleTypeName(rawType)
+					typeName := langparse.JavaSimpleTypeName(rawType)
 
 					// Match providers by type
 					if providers, ok := beansByType[typeName]; ok {
@@ -232,7 +233,7 @@ func (ix *Index) addFrameworkDIEdges() {
 
 	// Dedupe calls across the whole index
 	for k := range ix.Calls {
-		ix.Calls[k] = dedupeCallEdges(ix.Calls[k])
+		ix.Calls[k] = langparse.DedupeCallEdges(ix.Calls[k])
 	}
 }
 

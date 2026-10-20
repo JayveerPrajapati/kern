@@ -50,9 +50,12 @@
 #   KERN_PUREGO=1           build from source with -tags notreesitter (pure-Go,
 #                           no C toolchain) when falling back to `go install`.
 #                           The default go-install build compiles tree-sitter
-#                           in (hard CGO) and needs a C compiler; prebuilt
-#                           tarballs are already the pure-Go build, so this
-#                           only affects the go-install fallback path.
+#                           in (hard CGO) and needs a C compiler, so this only
+#                           affects the go-install fallback path (prebuilt
+#                           installs prefer the tree-sitter `-full` asset).
+#   KERN_FORCE_PUREGO=1     skip the prebuilt `-full` (tree-sitter) asset probe
+#                           and use the pure-Go prebuilt asset
+#                           (kern-<os>-<arch>.tar.gz / .zip) instead.
 #
 # Behavior kept from the previous installer: prebuilt tarballs with a
 # `go install` fallback when no asset exists for the platform, both old
@@ -86,9 +89,52 @@ for arg in "$@"; do
 done
 [ "$OP" = "update" ] && OP="upgrade"
 
-step() { printf '  ✔ %s\n' "$*"; }
-warn() { printf '  ⚠ %s\n' "$*"; }
-die()  { printf '  ✖ %s\n' "$*" >&2; exit 1; }
+# --- Output style -----------------------------------------------------------
+# Colour only on a real terminal (NO_COLOR, KERN_PLAIN and TERM=dumb are
+# respected). Glyphs stay unicode unless the locale is explicitly not UTF-8 or
+# KERN_ASCII is set, so pipes and CI logs keep the historical "  ✔ ..." lines.
+C_G=""; C_Y=""; C_R=""; C_B=""; C_D=""; C_C=""; C_0=""
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ -z "${KERN_PLAIN:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  _esc="$(printf '\033')"
+  C_G="${_esc}[32m"; C_Y="${_esc}[33m"; C_R="${_esc}[31m"
+  C_B="${_esc}[1m"; C_D="${_esc}[2m"; C_C="${_esc}[36m"; C_0="${_esc}[0m"
+fi
+G_OK="✔"; G_WARN="⚠"; G_ERR="✖"; G_DOT="…"
+B_TL="╭"; B_TR="╮"; B_BL="╰"; B_BR="╯"; B_H="─"; B_V="│"
+_kern_loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+_ascii_out=0
+[ -n "${KERN_ASCII:-}" ] && _ascii_out=1
+case "$_kern_loc" in
+  ""|*[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;;
+  *) _ascii_out=1 ;;
+esac
+if [ "$_ascii_out" = "1" ]; then
+  G_OK="ok"; G_WARN="!"; G_ERR="x"; G_DOT="..."
+  B_TL="+"; B_TR="+"; B_BL="+"; B_BR="+"; B_H="-"; B_V="|"
+fi
+# Was the install dir already on PATH before ensure_path touches it?
+PATH_WAS_SET=0
+case ":${PATH}:" in *":${PREFIX}:"*) PATH_WAS_SET=1 ;; esac
+
+step() { printf '  %s%s%s %s\n' "$C_G" "$G_OK" "$C_0" "$*"; }
+warn() { printf '  %s%s%s %s\n' "$C_Y" "$G_WARN" "$C_0" "$*"; }
+die()  { printf '  %s%s%s %s\n' "$C_R" "$G_ERR" "$C_0" "$*" >&2; exit 1; }
+header() { printf '\n  %s%s%s\n' "$C_B" "$*" "$C_0"; }
+
+# rep CHAR COUNT prints CHAR repeated COUNT times.
+rep() {
+  _r=""; _i=0
+  while [ "$_i" -lt "$2" ]; do _r="${_r}$1"; _i=$((_i + 1)); done
+  printf '%s' "$_r"
+}
+# Boxes are 62 columns wide; content must be ASCII and at most 58 columns.
+box_top() {
+  _t="$1"
+  _n=$((57 - ${#_t}))
+  printf '  %s%s%s %s%s%s %s%s%s\n' "$C_D" "${B_TL}${B_H}" "$C_0" "$C_B" "$_t" "$C_0" "$C_D" "$(rep "$B_H" "$_n")${B_TR}" "$C_0"
+}
+box_line() { printf '  %s%s%s %-58s %s%s%s\n' "$C_D" "$B_V" "$C_0" "$1" "$C_D" "$B_V" "$C_0"; }
+box_bottom() { printf '  %s%s%s\n' "$C_D" "${B_BL}$(rep "$B_H" 60)${B_BR}" "$C_0"; }
 
 # os_arch prints <os>-<arch> for the release-asset naming, or fails.
 os_arch() {
@@ -303,10 +349,10 @@ verify() {
 gatekeeper_prepare() {
   [ "$1" = "darwin" ] || return 0
   command -v codesign >/dev/null 2>&1 || { warn "codesign not found — skipping re-sign"; return 0; }
-  codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
+  codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
   if command -v xattr >/dev/null 2>&1; then
-    xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
-    xattr -dr com.apple.provenance "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
+    xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+    xattr -dr com.apple.provenance "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
   fi
 }
 
@@ -343,7 +389,7 @@ probe_with_retry() {
   fi
   cat >&2 <<EOF
   ✖ kern-mcp is being killed by macOS Gatekeeper. Run manually, then re-probe:
-       codesign --force --sign - $PREFIX/kern $PREFIX/kern-mcp $PREFIX/kern-server
+       codesign --force --sign - $PREFIX/kern $PREFIX/kern-mcp
        xattr -dr com.apple.quarantine $PREFIX/kern-mcp
        xattr -dr com.apple.provenance $PREFIX/kern-mcp
      then verify:  printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}' | $PREFIX/kern-mcp
@@ -443,16 +489,14 @@ go_install() {
   fi
   warn "falling back to 'go install github.com/${REPO}/cmd/kern@${tag}'"
   go install $ts_tags "github.com/${REPO}/cmd/kern@${tag}" &&
-    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${tag}" &&
-    go install $ts_tags "github.com/${REPO}/cmd/kern-server@${tag}" || return 1
+    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${tag}" || return 1
   gobin="$(go env GOPATH)/bin"
-  if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ] && [ -f "$gobin/kern-server" ]; then
+  if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ]; then
     mkdir -p "$PREFIX"
     cp "$gobin/kern" "$PREFIX/kern"
     cp "$gobin/kern-mcp" "$PREFIX/kern-mcp"
-    cp "$gobin/kern-server" "$PREFIX/kern-server"
-    chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server"
-    step "Installed kern kern-mcp kern-server to $PREFIX (go install fallback at ${tag})"
+    chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
+    step "Installed kern kern-mcp to $PREFIX (go install fallback at ${tag})"
     post_install_verify "" go-install
     return 0
   fi
@@ -461,21 +505,72 @@ go_install() {
   return 1
 }
 
-# wire auto-detects installed agents and wires kern's MCP server + kern-first
-# rules into each (kern setup --detect --global). Idempotent. Kept from the
-# previous installer so both paths (prebuilt, go fallback) wire agents.
+# next_steps prints what to do after a fresh install that wired nothing.
+next_steps() {
+  echo
+  box_top "kern is installed"
+  box_line "Nothing was wired into your agents or git yet."
+  box_line ""
+  box_line "1. kern doctor          check install and index health"
+  box_line "2. kern setup --dry-run preview what wiring would write"
+  box_line "3. kern setup           wire detected agents (asks first)"
+  box_line ""
+  box_line "Wire all agents machine-wide: kern setup --global-only"
+  if [ "$PATH_WAS_SET" != "1" ]; then
+    box_line ""
+    box_line "Open a NEW terminal so the updated PATH applies."
+  fi
+  box_bottom
+}
+
+# wired_summary prints what a successful global wiring means.
+wired_summary() {
+  echo
+  box_top "kern is wired globally"
+  box_line "Every agent now has kern (MCP + hooks), machine-wide."
+  box_line "No repo was touched. A repo initializes itself the first"
+  box_line "time an agent works in it (kern_buddy builds the index)."
+  box_line ""
+  box_line "Restart your agent to load kern."
+  box_line ""
+  box_line "kern setup --dry-run preview what wiring would write"
+  box_line "kern doctor       check wiring and index health"
+  box_line "kern setup        add shared config to a team repo"
+  box_line ""
+  box_line "Opt out of auto-wiring: KERN_AUTO_WIRE=0 when installing"
+  if [ "$PATH_WAS_SET" != "1" ]; then
+    box_line ""
+    box_line "Open a NEW terminal so the updated PATH applies."
+  fi
+  box_bottom
+}
+
+# wire registers kern ONCE, machine-wide: user-level MCP for every agent,
+# global hooks, global rules and global git ignore (`kern setup --global-only
+# --global-rules`). It writes NO file in any repo — a repo initializes itself
+# when an agent first works in it (the global rules tell the agent to call
+# kern_buddy, and the MCP server builds the index on first use). Set
+# KERN_AUTO_WIRE=0 to install the binaries only. Idempotent; an upgrade
+# refreshes the same user-level assets (plugin and hook scripts ship inside
+# the binary). $1 = kern binary, $2 = install | upgrade.
 wire() {
   kern_bin="$1"
+  wire_mode="${2:-install}"
   if [ ! -x "$kern_bin" ]; then
-    warn "binary not executable at $kern_bin; skipping auto-wire — run 'kern setup --detect --global' manually"
+    warn "binary not executable at $kern_bin; skipping auto-wire — run 'kern setup --global-only' manually"
     return 0
   fi
-  proj_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  echo "  … auto-wiring kern into detected agents in: $proj_root (and globally)"
-  if "$kern_bin" setup --detect --root "$proj_root" --global 2>&1; then
-    step "agent wiring complete — 'kern setup --check' shows current wiring"
+  if [ "${KERN_AUTO_WIRE:-1}" = "0" ]; then
+    next_steps
+    return 0
+  fi
+  header "Wiring kern for every agent (user-level, no repo files)"
+  if "$kern_bin" setup --global-only --global-rules --yes 2>&1; then
+    step "global wiring complete — 'kern setup --check' shows current wiring"
+    wired_summary
   else
-    warn "auto-wiring skipped (no agents detected or setup failed) — run 'kern setup --detect --global' manually"
+    warn "global wiring failed — run 'kern setup --global-only' to see why"
+    next_steps
   fi
 }
 
@@ -484,6 +579,7 @@ wire() {
 # restored if any later step fails.
 install_release() {
   mode="$1"
+  header "kern installer (${mode})"
 
   platform="$(os_arch)" || platform=""
 
@@ -504,7 +600,7 @@ install_release() {
   if [ "$mode" = "upgrade" ] && [ -x "$PREFIX/kern" ]; then
     backup_dir="$tmpdir/backup"
     mkdir -p "$backup_dir"
-    for b in kern kern-mcp kern-server; do
+    for b in kern kern-mcp; do
       [ -f "$PREFIX/$b${exe}" ] && cp "$PREFIX/$b${exe}" "$backup_dir/$b${exe}"
     done
   fi
@@ -513,7 +609,7 @@ install_release() {
     warn "no prebuilt asset pattern for $(uname -s)/$(uname -m)"
     go_install "$tag" || die "no prebuilt asset and go-install fallback failed"
     install_ok=1
-    wire "$PREFIX/kern"
+    wire "$PREFIX/kern" "$mode"
     return 0
   fi
   os="${platform%-*}"
@@ -526,9 +622,50 @@ install_release() {
     file="kern-${platform}.tar.gz"
     exe=""
   fi
+
+  # Prefer the tree-sitter-enabled native build: the release ships a `-full`
+  # asset per native platform (linux/darwin amd64+arm64, windows amd64), so
+  # probe for it FIRST. A clean miss (rc=1, 4xx) falls back to the pure-Go
+  # cross-compiled asset; a server error (rc=2, 5xx) retries once then aborts
+  # (never a silent downgrade); any other probe failure falls back with a
+  # warning. KERN_FORCE_PUREGO=1 skips the probe entirely. The selected file
+  # is verified against SHA256SUMS below, so whichever asset is chosen is
+  # checksum-checked exactly the same way.
+  if [ "${KERN_FORCE_PUREGO:-0}" = "1" ]; then
+    warn "KERN_FORCE_PUREGO=1 — using the pure-Go build (${file})"
+  else
+    case "$os" in
+      windows) full_file="kern-${platform}-full.zip" ;;
+      *)       full_file="kern-${platform}-full.tar.gz" ;;
+    esac
+    full_url="${BASE_URL}/releases/download/${tag}/${full_file}"
+    printf '  %s probing for tree-sitter build %s\n' "$G_DOT" "$full_file"
+    fetch_asset "$full_url" "$tmpdir/${full_file}"
+    dl_rc=$?
+    if [ "$dl_rc" = "2" ]; then
+      warn "server error probing ${full_file} at ${tag} — retrying once"
+      fetch_asset "$full_url" "$tmpdir/${full_file}"
+      dl_rc=$?
+    fi
+    case "$dl_rc" in
+      0)
+        file="$full_file"
+        step "Using tree-sitter build: ${file}"
+        ;;
+      1)
+        warn "no -full (tree-sitter) asset for ${platform} at ${tag} — using the pure-Go build (${file})"
+        ;;
+      2)
+        die "the -full asset probe failed with a server error after one retry (${full_url}) — refusing to silently downgrade to the pure-Go build; retry the install later, or pin KERN_VERSION to a release that ships the asset"
+        ;;
+      *)
+        warn "could not probe ${full_file} — using the pure-Go build (${file})"
+        ;;
+    esac
+  fi
   url="${BASE_URL}/releases/download/${tag}/${file}"
 
-  printf '  … downloading %s\n' "$file"
+  printf '  %s downloading %s\n' "$G_DOT" "$file"
   fetch_asset "$url" "$tmpdir/${file}"
   dl_rc=$?
   if [ "$dl_rc" = "2" ]; then
@@ -542,7 +679,7 @@ install_release() {
       warn "no prebuilt asset for ${platform} at ${tag}"
       go_install "$tag" || die "no prebuilt asset and go-install fallback failed"
       install_ok=1
-      wire "$PREFIX/kern"
+      wire "$PREFIX/kern" "$mode"
       return 0
       ;;
     2)
@@ -578,28 +715,25 @@ install_release() {
   if [ -f "$tmpdir/kern-${platform}/kern${exe}" ]; then
     src="$tmpdir/kern-${platform}"
   fi
-  if [ ! -f "$src/kern${exe}" ] || [ ! -f "$src/kern-mcp${exe}" ] || [ ! -f "$src/kern-server${exe}" ]; then
+  if [ ! -f "$src/kern${exe}" ] || [ ! -f "$src/kern-mcp${exe}" ]; then
     die "extracted ${file} but expected binaries not found (looked in $src) — refusing to report success with nothing copied"
   fi
-  step "Extracted kern, kern-mcp, kern-server"
+  step "Extracted kern, kern-mcp"
 
   cp "$src/kern${exe}" "$PREFIX/kern${exe}" || die "copying kern to $PREFIX failed"
   cp "$src/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}" || die "copying kern-mcp to $PREFIX failed"
-  cp "$src/kern-server${exe}" "$PREFIX/kern-server${exe}" || die "copying kern-server to $PREFIX failed"
-  chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}" "$PREFIX/kern-server${exe}"
-  step "Installed kern kern-mcp kern-server to $PREFIX"
+  chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}"
+  step "Installed kern kern-mcp to $PREFIX"
 
   post_install_verify "$os"
 
   install_ok=1
-  echo
-  wire "$PREFIX/kern${exe}"
-  echo "kern is ready. Open your project in any agent — it auto-indexes on first use."
+  wire "$PREFIX/kern${exe}" "$mode"
 }
 
 restore_backup() {
   [ -n "${backup_dir:-}" ] || return 0
-  for b in kern kern-mcp kern-server; do
+  for b in kern kern-mcp; do
     [ -f "$backup_dir/$b${exe}" ] && cp "$backup_dir/$b${exe}" "$PREFIX/$b${exe}" && chmod +x "$PREFIX/$b${exe}"
   done
 }
@@ -700,7 +834,7 @@ cmd_status() {
   fi
   latest="$(get_version 2>/dev/null)"
   [ -n "$latest" ] && echo "  latest release: ${latest}"
-  for b in kern kern-mcp kern-server; do
+  for b in kern kern-mcp; do
     if [ -x "$PREFIX/$b" ]; then
       echo "  $b: present"
     else
@@ -718,7 +852,7 @@ cmd_uninstall() {
     exe=""
   fi
   echo "kern uninstall — removes:"
-  for b in kern kern-mcp kern-server; do
+  for b in kern kern-mcp; do
     [ -f "$PREFIX/$b${exe}" ] && echo "  $PREFIX/$b${exe}"
   done
   [ -f "$HOME/AGENTS.md" ] && grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-managed block in ~/AGENTS.md"
@@ -732,7 +866,7 @@ cmd_uninstall() {
       *) echo "aborted — nothing removed"; exit 0 ;;
     esac
   fi
-  for b in kern kern-mcp kern-server; do
+  for b in kern kern-mcp; do
     rm -f "$PREFIX/$b${exe}" && step "removed $PREFIX/$b${exe}"
   done
   # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block

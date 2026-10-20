@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 )
 
 func fixesExitCode(fn func()) (code int) {
@@ -79,10 +81,9 @@ func main() { _ = UserService() }
 `)
 	fixesChdir(t, dir, func() {
 		var out string
-		code := fixesExitCode(func() {
-			out = captureStdout(t, func() {
-				runSearch([]string{"user", "service", "--limit", "5"})
-			})
+		var code int
+		out = captureStdout(t, func() {
+			code = graphcli.RunSearch([]string{"user", "service", "--limit", "5"})
 		})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0 (multi-word query must not lstat a fake root)", code)
@@ -104,10 +105,9 @@ func FindUser() int { return 1 }
 func main() { _ = FindUser() }
 `)
 	var out string
-	code := fixesExitCode(func() {
-		out = captureStdout(t, func() {
-			runSearch([]string{"FindUser", dir, "--limit", "5"})
-		})
+	var code int
+	out = captureStdout(t, func() {
+		code = graphcli.RunSearch([]string{"FindUser", dir, "--limit", "5"})
 	})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (existing-dir root must still be honored)", code)
@@ -131,8 +131,9 @@ func UserService() int { return 1 }
 
 func main() { _ = UserService() }
 `)
-	stderr, code := fixesRunStderrExit(func() {
-		runSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5"})
+	var code int
+	stderr := captureStderr(t, func() {
+		code = graphcli.RunSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5"})
 	})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (no-match contract, same as kern explore)", code)
@@ -141,9 +142,7 @@ func main() { _ = UserService() }
 		t.Errorf("stderr missing no-match message: %q", stderr)
 	}
 	// The JSON surface is data, not an error: an empty result array stays exit 0.
-	jsonCode := fixesExitCode(func() {
-		runSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5", "--json"})
-	})
+	jsonCode := graphcli.RunSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5", "--json"})
 	if jsonCode != 0 {
 		t.Fatalf("exit code = %d, want 0 (empty --json result is data, not an error)", jsonCode)
 	}
@@ -164,8 +163,9 @@ func main() { _ = UserService() }
 `)
 	// "UserServce" (typo) matches no symbol exactly, but its "user" segment
 	// ranks UserService as a close candidate.
-	stderr, code := fixesRunStderrExit(func() {
-		runSearch([]string{"UserServce", dir, "--limit", "5"})
+	var code int
+	stderr := captureStderr(t, func() {
+		code = graphcli.RunSearch([]string{"UserServce", dir, "--limit", "5"})
 	})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (no-match contract)", code)
@@ -212,18 +212,16 @@ func Helper() string { return "h" }
 func main() { _ = Helper() }
 `)
 	var outFlags, outPos string
-	codeFlags := fixesExitCode(func() {
-		outFlags = captureStdout(t, func() {
-			runPath([]string{"--from", "main", "--to", "Helper", "--root", dir})
-		})
+	var codeFlags int
+	outFlags = captureStdout(t, func() {
+		codeFlags = graphcli.RunPath([]string{"--from", "main", "--to", "Helper", "--root", dir})
 	})
 	if codeFlags != 0 {
 		t.Fatalf("flag form exit code = %d, want 0 (stderr above)", codeFlags)
 	}
-	codePos := fixesExitCode(func() {
-		outPos = captureStdout(t, func() {
-			runPath([]string{"main", "Helper", dir})
-		})
+	var codePos int
+	outPos = captureStdout(t, func() {
+		codePos = graphcli.RunPath([]string{"main", "Helper", dir})
 	})
 	if codePos != 0 {
 		t.Fatalf("positional form exit code = %d, want 0 (stderr above)", codePos)
@@ -239,9 +237,7 @@ func main() { _ = Helper() }
 }
 
 func TestRunPathFromToFlagsRequireBoth(t *testing.T) {
-	_, code := fixesRunStderrExit(func() {
-		runPath([]string{"--from", "main", filepath.Join(t.TempDir(), "root")})
-	})
+	code := graphcli.RunPath([]string{"--from", "main", filepath.Join(t.TempDir(), "root")})
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2 (usage error for a lone --from)", code)
 	}

@@ -1,5 +1,7 @@
 # Semantic Retention — Benchmark Fixtures
 
+**Status:** [synthetic] — deterministic fixture corpus (not measured data)
+
 Sample test data for the semantic retention benchmark suite
 (`docs/benchmarks/semantic-retention.md`). The corpus is small, synthetic,
 versioned, and fully deterministic. It is designed to be consumed by a Go

@@ -215,9 +215,9 @@ func (p *testPlatform) WhatIf(kind whatif.ChangeKind, change, newTarget string) 
 	imp.Entities = AttachWhatIfEntities(p.graph, syms)
 	p.populateWhatIfEvidence(&imp, target)
 	imp.Evidence = intel.AnchorLine(p.ix, target)
-	text := RenderWhatIfText(kind, change, target, imp)
+	text := RenderWhatIfText(kind, change, displayName(p.graph, p.ix, target), imp)
 	if fuzzy && text != "" {
-		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, target, text)
+		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, displayName(p.graph, p.ix, target), text)
 	}
 	if f := graphNodeFile(p.graph, target); f != "" {
 		if line := calibrate.ConfidenceLine(p.root, calibrate.SubsystemOf(f)); line != "" {

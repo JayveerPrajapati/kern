@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 )
 
 func TestSearchJSONHasVersion(t *testing.T) {
@@ -17,7 +19,7 @@ func TestSearchJSONHasVersion(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		runSearch([]string{"SearchTarget", "--root", dir, "--json"})
+		graphcli.RunSearch([]string{"SearchTarget", "--root", dir, "--json"})
 	})
 
 	var parsed map[string]any
@@ -30,20 +32,5 @@ func TestSearchJSONHasVersion(t *testing.T) {
 	}
 	if parsed["total"] != float64(1) {
 		t.Errorf("expected total == 1, got %v", parsed["total"])
-	}
-}
-
-func TestHealthJSONHasVersion(t *testing.T) {
-	out := captureStdout(t, func() {
-		runHealth([]string{"--root", "."})
-	})
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		t.Fatalf("health output failed to parse as json: %v\nOutput:\n%s", err, out)
-	}
-
-	if _, ok := parsed["version"]; !ok {
-		t.Errorf("expected 'version' key in health output: %v", parsed)
 	}
 }

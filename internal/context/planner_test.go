@@ -28,6 +28,16 @@ func TestClassifyTask(t *testing.T) {
 	}
 }
 
+// TestRenderPlanNote pins that a plan carrying a low-confidence resolution
+// label renders it as a leading line (B2, QA 2026-10-15).
+func TestRenderPlanNote(t *testing.T) {
+	p := &Plan{TaskType: TaskFixBug, Budget: 100, TotalTokens: 5, Note: `resolved "x" -> Y (fuzzy match)`}
+	out := RenderPlan(p)
+	if !strings.Contains(out, `resolved "x" -> Y (fuzzy match)`) {
+		t.Errorf("RenderPlan must print the low-confidence note, got:\n%s", out)
+	}
+}
+
 func TestDefaultPolicies(t *testing.T) {
 	policies := DefaultPolicies()
 	if len(policies) != 7 {

@@ -273,6 +273,52 @@ func CloseCandidates(ix *index.Index, query string, limit int) []RepoHit {
 	return rankedSearchScored(ix, query, limit, false)
 }
 
+// lowerMirrorCache memoizes the lowercase name/full-name/file mirrors per
+// index instance (cachedLowerMirrors). Published indexes are immutable once
+// built — internal/web/web.go relies on this — so the mirrors are computed
+// once per index instead of once per search (~60k strings.ToLower +
+// FullName() allocations per call at ~20k symbols). sync.Map because the
+// search path fans out across goroutines (MCP servers, web handlers).
+var lowerMirrorCache sync.Map // *index.Index -> *lowerMirrors
+
+// lowerMirrors holds the per-symbol lowercase mirrors consumed by
+// rankedSearchScored: one strings.ToLower per Name, FullName() and File, in
+// ix.Symbols order, so the scoring loop never repeats that allocation.
+type lowerMirrors struct {
+	names []string
+	fulls []string
+	files []string
+}
+
+// cachedLowerMirrors returns ix's lowercase mirrors, building them on first
+// use and caching them for the index's lifetime. The len(lm.names) guard
+// re-computes defensively if a caller ever mutates an index in place: a
+// length change invalidates the cached mirrors, and the stale entry is
+// deleted first so the LoadOrStore below cannot hand it back. Content edits
+// that keep the length are outside the contract — the index is immutable
+// once published.
+func cachedLowerMirrors(ix *index.Index) *lowerMirrors {
+	if v, ok := lowerMirrorCache.Load(ix); ok {
+		lm := v.(*lowerMirrors)
+		if len(lm.names) == len(ix.Symbols) {
+			return lm
+		}
+		lowerMirrorCache.Delete(ix)
+	}
+	lm := &lowerMirrors{
+		names: make([]string, len(ix.Symbols)),
+		fulls: make([]string, len(ix.Symbols)),
+		files: make([]string, len(ix.Symbols)),
+	}
+	for i, s := range ix.Symbols {
+		lm.names[i] = strings.ToLower(s.Name)
+		lm.fulls[i] = strings.ToLower(s.FullName())
+		lm.files[i] = strings.ToLower(s.File)
+	}
+	actual, _ := lowerMirrorCache.LoadOrStore(ix, lm)
+	return actual.(*lowerMirrors)
+}
+
 func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []RepoHit {
 	if limit <= 0 {
 		limit = 50
@@ -296,19 +342,13 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 	// the api server work") still rank code first via the codeIntent
 	// demotion below, but headings stay reachable.
 	includeHeadings := isDocIntentQuery(query)
-	// Precompute the lowercase name/full-name/file for every symbol once, so
-	// the scoring loop below never repeats strings.ToLower (nor the
-	// FullName() concatenation it wraps) per symbol. Semantics are identical:
-	// the same lowered forms feed matchWord, and segCache stays keyed on the
-	// original Name (segment splitting is case-preserving upstream).
-	lowerNames := make([]string, len(ix.Symbols))
-	lowerFulls := make([]string, len(ix.Symbols))
-	lowerFiles := make([]string, len(ix.Symbols))
-	for i, s := range ix.Symbols {
-		lowerNames[i] = strings.ToLower(s.Name)
-		lowerFulls[i] = strings.ToLower(s.FullName())
-		lowerFiles[i] = strings.ToLower(s.File)
-	}
+	// Lowercase name/full-name/file mirrors are memoized per index instance
+	// (cachedLowerMirrors): the index is immutable once published, so the
+	// strings.ToLower (and FullName concatenation) work happens once per
+	// index, not once per search. Semantics are identical: the same lowered
+	// forms feed matchWord, and segCache stays keyed on the original Name
+	// (segment splitting is case-preserving upstream).
+	lm := cachedLowerMirrors(ix)
 	// joined is the query's words concatenated — the identifier form that
 	// queryWords' camelCase split started from ("stateMachine" -> joined
 	// "statemachine"). Used for exact-name scoring below and by the
@@ -319,15 +359,21 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 	// prose ("load index", "login handler"). Identifier-shaped queries get
 	// the strict no-match gate below; prose keeps the forgiving fuzzy path.
 	identifierShaped := len(strings.Fields(query)) == 1
+	// P1: a path-ish query names a FILE, not an identifier. The strict
+	// single-token gate below does not apply, and symbols whose file contains
+	// the path fragment get a strong boost so "src/tests" surfaces the
+	// symbols under src/tests/ ahead of unrelated name matches.
+	pathFrag := pathFragment(query)
+	pathQuery := pathFrag != ""
 	segCache := map[string][]string{}
 	var hits []RepoHit
 	for i, s := range ix.Symbols {
 		if s.Kind == "heading" && !includeHeadings {
 			continue
 		}
-		name := lowerNames[i]
-		full := lowerFulls[i]
-		file := lowerFiles[i]
+		name := lm.names[i]
+		full := lm.fulls[i]
+		file := lm.files[i]
 		segs, ok := segCache[s.Name]
 		if !ok {
 			segs = splitIdentifierSegments(s.Name)
@@ -340,6 +386,15 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 				score += sc
 				matched++
 			}
+		}
+		fragMatched := pathFrag != "" && strings.Contains(file, pathFrag)
+		if fragMatched {
+			// The path fragment IS the whole query: matching it counts as
+			// matching every word and outranks any unrelated name match
+			// (P1) — "src/tests" must surface the symbols under src/tests/
+			// ahead of a symbol merely named "Tests".
+			score += 120
+			matched = len(words)
 		}
 		if matched == 0 {
 			continue
@@ -380,7 +435,10 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 		// matched-all test hit carries at least ~240 raw (90 segment match +
 		// 150 all-match boost) before this penalty, staying above the 150
 		// high-confidence gate those resolvers require.
-		if IsTestFile(s.File) || IsFixtureFile(s.File) {
+		// P1: an EXPLICIT path query that matched the file waives the penalty
+		// — the user pointed at that exact path ("src/tests"), so the
+		// production-first ordering intent does not apply to it.
+		if (IsTestFile(s.File) || IsFixtureFile(s.File)) && !fragMatched {
 			score -= 100
 		}
 		hits = append(hits, RepoHit{Symbol: s, Score: score, MatchedAll: matched == len(words)})
@@ -397,7 +455,7 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 	// fires. Prose queries (spaces) and single-word queries (any hit is
 	// MatchedAll) are untouched. With gate=false (CloseCandidates) the gate is
 	// skipped so a did-you-mean list can still show partial fuzzy hits.
-	if gate && identifierShaped && !hasStrongIdentifierMatch(hits, joined) {
+	if gate && identifierShaped && !pathQuery && !hasStrongIdentifierMatch(hits, joined) {
 		return nil
 	}
 	sort.Slice(hits, func(i, j int) bool {
@@ -462,6 +520,39 @@ func queryWords(query string) []string {
 	return words
 }
 
+// isPathQuery reports whether a query names a file-path fragment rather than
+// a symbol: it contains a path separator ("src/tests", "internal\util") or
+// uses the explicit file: prefix ("file:cmd/kern/cmd_optimize.go"). Path
+// queries get the file-match boost in rankedSearchScored so symbols under the
+// named path outrank unrelated name matches (P1), and they skip the strict
+// single-token identifier gate — a path fragment is never a "garbage
+// identifier".
+func isPathQuery(q string) bool {
+	lq := strings.ToLower(strings.TrimSpace(q))
+	if strings.HasPrefix(lq, "file:") {
+		return true
+	}
+	return strings.Contains(lq, "/") || strings.Contains(lq, `\`)
+}
+
+// pathFragment returns the normalized path fragment of a path query: the
+// file: prefix stripped, separators folded to "/", lowercased and trimmed of
+// surrounding slashes. It is "" for non-path queries. The fragment is matched
+// as a SUBSTRING of a symbol's file path, so "src/tests" matches
+// "src/tests/helper.go" and "file:cmd/kern/cmd_optimize.go" matches the
+// symbols defined in exactly that file.
+func pathFragment(q string) string {
+	if !isPathQuery(q) {
+		return ""
+	}
+	frag := strings.TrimSpace(q)
+	if i := strings.Index(frag, ":"); i >= 0 && strings.HasPrefix(strings.ToLower(frag), "file:") {
+		frag = frag[i+1:]
+	}
+	frag = strings.ReplaceAll(frag, `\`, "/")
+	return strings.ToLower(strings.Trim(frag, "/"))
+}
+
 // matchWord scores how strongly one normalized query word matches a symbol.
 // Only the strongest tier for the word counts. Segment tiers are whole-word
 // evidence: an exact segment match outranks prefix/substring hits, and a
@@ -470,7 +561,11 @@ func queryWords(query string) []string {
 // fragment from a camelCase split (e.g. "ZzZzNopeNope" -> "zz") would
 // otherwise substring-match every symbol containing a coincidental 2-char
 // run. 2-char searches like "io" or "db" still work through the exact/
-// segment/prefix tiers above.
+// segment/prefix tiers above. The file tier (P1) sits between the full-name
+// and name substring tiers: a word present in a symbol's FILE is weaker than
+// the same word in its name, but far from useless — a path-ish query whose
+// word only appears in file paths still ranks those files' symbols above
+// unrelated name-substring noise.
 func matchWord(w, name, full, file string, segs []string) int {
 	switch {
 	case name == w:
@@ -490,7 +585,7 @@ func matchWord(w, name, full, file string, segs []string) int {
 	case len(w) >= 3 && strings.Contains(full, w):
 		return 45
 	case len(w) >= 3 && strings.Contains(file, w):
-		return 20
+		return 50
 	}
 	return 0
 }

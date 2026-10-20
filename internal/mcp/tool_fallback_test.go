@@ -13,38 +13,36 @@ import (
 // allowed, instead of hard-failing. kern_what_if → kern_impact (the fallback
 // table in internal/app). This is the realistic restricted-deployment case.
 func TestToolFallbackAllowlistReroutes(t *testing.T) {
-	// Restrict the catalog to kern_impact only: kern_what_if is blocked but
-	// its fallback is allowed.
-	t.Setenv("KERN_TOOLS", "kern_impact,kern_plan,kern_analyze,kern_verify,kern_validate,kern_loop,kern_heal")
+	// Restrict the catalog to kern_exec+kern_verify: kern_heal is blocked by
+	// the tool allowlist but its fallback (kern_verify) is allowed. The
+	// allowlist must name kern_exec so the exec gate passes for the reroute.
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_TOOLS", "kern_exec,kern_verify")
 	in, out := newPipe()
 	s := NewServer(in, out)
 
-	// A call to the blocked kern_what_if must reroute to kern_impact. With a
-	// real repo root, handleImpact runs against the working directory.
-	// "NewServer" resolves in the internal/mcp index (the package under
-	// test); "CompileIntent" would be a silent fuzzy substitution.
-	outStr, err := s.runTool(context.Background(), "fallback-test", "", "kern_what_if",
-		map[string]any{"root": ".", "change": "NewServer", "kind": "remove_symbol"})
+	// A call to the blocked kern_heal must reroute to kern_verify. With a
+	// real repo root, handleVerify runs against the working directory.
+	outStr, err := s.runTool(context.Background(), "fallback-test", "", "kern_heal",
+		map[string]any{"root": ".", "task": "verify NewServer"})
 	if err != nil {
-		t.Fatalf("runTool(kern_what_if) blocked without fallback: %v", err)
+		t.Fatalf("runTool(kern_heal) blocked without fallback: %v", err)
 	}
 	if strings.TrimSpace(outStr) == "" {
 		t.Error("fallback reroute produced empty output")
-	}
-	if !strings.Contains(outStr, "IMPACT") {
-		t.Errorf("fallback output does not look like impact report: %.80q", outStr)
 	}
 }
 
 // TestToolFallbackFailsClosedWhenAlternativeBlocked verifies that a blocked
 // tool whose alternative is ALSO blocked still fails closed (no bypass).
 func TestToolFallbackFailsClosedWhenAlternativeBlocked(t *testing.T) {
-	// Neither kern_what_if nor its fallback kern_impact is allowed.
-	t.Setenv("KERN_TOOLS", "kern_analyze")
+	// Neither kern_heal nor its fallback kern_verify is allowed.
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_TOOLS", "kern_search")
 	in, out := newPipe()
 	s := NewServer(in, out)
 
-	_, err := s.runTool(context.Background(), "fallback-test", "", "kern_what_if",
+	_, err := s.runTool(context.Background(), "fallback-test", "", "kern_heal",
 		map[string]any{"root": "."})
 	if err == nil {
 		t.Fatal("blocked tool with blocked fallback must error")

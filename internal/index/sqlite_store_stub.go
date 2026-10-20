@@ -21,6 +21,8 @@ type SQLiteStore struct{}
 // Close is a no-op in the stub build.
 func (s *SQLiteStore) Close() error { return nil }
 
+func (s *SQLiteStore) SetMeta(key, value string) error { return errSQLiteNotEnabled }
+
 // LookupSymbol is unavailable in the nosqlite stub build.
 func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) { return nil, errSQLiteNotEnabled }
 

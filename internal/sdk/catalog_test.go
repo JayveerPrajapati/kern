@@ -84,8 +84,8 @@ func TestCatalogDiscovery(t *testing.T) {
 	defer c.Close()
 
 	tools := c.Tools()
-	if len(tools) < 100 {
-		t.Fatalf("Tools() = %d entries, want the full catalog (>= 100)", len(tools))
+	if len(tools) < 30 {
+		t.Fatalf("Tools() = %d entries, want the full catalog (>= 30; 32 after the 2026-10-18 surface slim)", len(tools))
 	}
 	seen := map[string]bool{}
 	for _, ti := range tools {

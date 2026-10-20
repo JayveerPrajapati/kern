@@ -40,10 +40,11 @@ func TestValidateMCPSurfaceEnvValidCategoryAndEmpty(t *testing.T) {
 }
 
 // TestHighLevelToolCountIs36 pins the I8 truth: KERN_MCP_HIGH_LEVEL_ONLY=1
-// advertises exactly 36 tools (docs said 38 — stale literal; the code is the
-// source of truth). Any intentional change to the set updates this number.
+// advertises exactly 6 tools after the 2026-10-18 surface slim (the set is
+// derived from the catalog, never a keyboard). Any intentional change to the
+// set updates this number.
 func TestHighLevelToolCountIs36(t *testing.T) {
-	if got := len(highLevelTools); got != 36 {
-		t.Fatalf("highLevelTools has %d entries, want 36 (docs said 38 — stale)", got)
+	if got := len(highLevelTools); got != 6 {
+		t.Fatalf("highLevelTools has %d entries, want 6 (docs said 38 — stale)", got)
 	}
 }

@@ -2,15 +2,15 @@ package setup
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -35,10 +35,15 @@ func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 	t.Helper()
 	cmd := exec.Command("sh", script)
 	cmd.Stdin = strings.NewReader(stdin)
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	}
-	cmd.Env = append(os.Environ(), append([]string{"KERN_GUARD_CONFIRM_TIMEOUT=1"}, env...)...)
+	detachCmd(cmd)
+	// KERN_GUARD_ASSUME_KERN=1: the unit tests exercise the governed paths, so
+	// the "kern is unavailable -> fail open" probe is off unless a test
+	// overrides it (see TestKernGuardFailsOpen*). HOME is sandboxed to a temp
+	// dir by default (plain denials are audited as kern-guard-deny, and
+	// that must never land in the real ~/.kern/audit/bypass.jsonl); tests that
+	// assert on the audit trail pass HOME explicitly, which wins (last entry
+	// in the env list).
+	cmd.Env = append(os.Environ(), append([]string{"KERN_GUARD_CONFIRM_TIMEOUT=1", "KERN_GUARD_ASSUME_KERN=1", "HOME=" + t.TempDir()}, env...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -51,6 +56,40 @@ func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 		code = ee.ExitCode()
 	}
 	return code, stderr.String()
+}
+
+// TestKernGuardAllowOnceConsume pins the shell-guard side of the operator
+// one-time allow: an operator
+// allowance (minted tty-side by `kern guard allow <hash>`) for the exact
+// denied subject lets the NEXT identical tool call through ONCE — the
+// second identical call denies again, and the deny message names the hash
+// so the operator can mint the allowance in the first place.
+func TestKernGuardAllowOnceConsume(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq required for bash payload extraction")
+	}
+	script := writeGuardScriptFile(t)
+	payload := `{"tool_name":"bash","tool_input":{"command":"printf hi"}}`
+	subject := "printf hi"
+	sum := sha256.Sum256([]byte(subject))
+	hash := hex.EncodeToString(sum[:])
+	reg := filepath.Join(t.TempDir(), "allow-once.jsonl")
+	line := fmt.Sprintf(`{"hash":%q,"subject":"probe","created":"2026-10-08T00:00:00Z","used":""}`, hash)
+	if err := os.WriteFile(reg, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"KERN_GUARD_ALLOW_ONCE=" + reg}
+	// First call: the unused allowance is consumed — allow.
+	if code, _ := runGuard(t, script, payload, env); code != 0 {
+		t.Fatalf("first call with an unused allowance must allow, got exit %d", code)
+	}
+	// Second identical call: the allowance is inert — deny again, naming the
+	// hash so the operator can mint a fresh allowance if they choose to.
+	if code, stderr := runGuard(t, script, payload, env); code != 2 {
+		t.Fatalf("second identical call must deny (single-use), got exit %d, stderr %q", code, stderr)
+	} else if !strings.Contains(stderr, hash) {
+		t.Fatalf("deny message must name the subject hash for the operator, stderr %q", stderr)
+	}
 }
 
 // TestKernGuardScript exercises the embedded PreToolUse guard: guarded tools
@@ -110,7 +149,7 @@ func TestKernGuardScript(t *testing.T) {
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_verify",
-				"kern_exec",
+				"kern_meta",
 			},
 		},
 		{
@@ -147,7 +186,7 @@ func TestKernGuardScript(t *testing.T) {
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_verify",
-				"kern_exec",
+				"kern_meta",
 			},
 		},
 		{
@@ -176,7 +215,15 @@ func TestKernGuardScript(t *testing.T) {
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_verify",
-				"kern_exec",
+				"kern_meta",
+			},
+		},
+		{
+			name:     "antigravity run_command blocked",
+			stdin:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_verify",
 			},
 		},
 		{
@@ -206,21 +253,12 @@ func TestKernGuardScript(t *testing.T) {
 			},
 		},
 		{
-			name:     "antigravity run_command blocked",
-			stdin:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`,
-			wantExit: 2,
-			wantStderr: []string{
-				"kern_verify",
-				"kern_exec",
-			},
-		},
-		{
 			name:     "antigravity KERN_BYPASS=1 refused without terminal",
-			stdin:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m test"}}}`,
-			env:      []string{"KERN_BYPASS=1", "HOME=" + auditHome},
+			stdin:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"cat /some/file.go"}}}`,
+			env:      []string{"KERN_BYPASS=1", "KERN_GUARD_MODE=deny", "HOME=" + auditHome},
 			wantExit: 2,
 			wantStderr: []string{
-				"kern_verify",
+				"kern_explore",
 			},
 		},
 		{
@@ -251,7 +289,7 @@ func TestKernGuardScript(t *testing.T) {
 			wantExit:   0,
 			wantStderr: nil,
 		},
-		// --- simple-command exemption matrix (dcd4138 refinement) ---
+		// --- simple-command exemption matrix ---
 		// Trivial exact-token commands run raw.
 		{name: "trivial pwd allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd"}}`, wantExit: 0, wantStderr: nil},
 		{name: "trivial true allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"true"}}`, wantExit: 0, wantStderr: nil},
@@ -292,7 +330,7 @@ func TestKernGuardScript(t *testing.T) {
 		{name: "git status & git diff lone ampersand blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git status & git diff"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "pwd && echo hi compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd && echo hi"}}`, wantExit: 0},
 		{name: "pwd || whoami compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd || whoami"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "go vet redirect suggests kern_verify", stdin: `{"tool_name":"bash","tool_input":{"command":"go vet ./..."}}`, wantExit: 2, wantStderr: []string{"kern_verify", "go vet", "kern_exec"}},
+		{name: "go vet redirect suggests kern_verify", stdin: `{"tool_name":"bash","tool_input":{"command":"go vet ./..."}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify", "go vet"}},
 		{name: "git diff blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git diff"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "git show blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git show HEAD:main.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "git blame blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git blame file.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
@@ -308,13 +346,15 @@ func TestKernGuardScript(t *testing.T) {
 		{name: "pipe blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline | head -5"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "substitution blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"echo $(whoami)"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "semicolon compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"ls; rm -rf /tmp/x"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "redirect blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"grep foo file.go > out.txt"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		// Code reads via bash stay governed.
-		{name: "sed code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"sed -n '1,5p' file.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "cat code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"cat source.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		// Builds/tests/installs stay governed.
-		{name: "make blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"make"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "go test blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"go test ./..."}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "redirect blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"grep foo file.go > out.txt"}}`, wantExit: 2, wantStderr: []string{"kern_verify", "kern_search"}},
+		// Code reads via bash stay governed (the auto-redirect default
+		// answers them via kern; KERN_GUARD_MODE=deny pins the deny path).
+		{name: "sed code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"sed -n '1,5p' file.go"}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify", "kern_explore"}},
+		{name: "cat code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"cat source.go"}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify", "kern_explore"}},
+		// Builds/tests/installs stay governed (the auto-redirect default
+		// routes them to kern verify; KERN_GUARD_MODE=deny pins the deny).
+		{name: "make blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"make"}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "go test blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"go test ./..."}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		// --- simple-read exemption matrix ---
 		{name: "read non-code allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, readme), wantExit: 0, wantStderr: nil},
 		// A small (<2KB) code file is part of the symbol context — always governed.
@@ -345,6 +385,94 @@ func TestKernGuardScript(t *testing.T) {
 	}
 }
 
+// TestKernGuardAutoRedirect pins the auto-redirect default: simple
+// content-intent commands run
+// their kern equivalent via $KERN_BIN and exit 0, leaving a kern-guard-redirect
+// audit record. Auto-redirect is the DEFAULT (env unset);
+// KERN_GUARD_MODE=deny restores the uniform deny (exit 2, audited
+// kern-guard-deny). Ambiguous commands (compounds) deny even in auto-redirect
+// mode. The fake kern binary records its argv so the invocation
+// (compact <path>) is pinned without needing a real kern install.
+func TestKernGuardAutoRedirect(t *testing.T) {
+	script := writeGuardScriptFile(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// mkFakeKern installs a fake kern binary that logs its argv to outLog and
+	// exits 0, so the redirect path is fully hermetic.
+	mkFakeKern := func(t *testing.T) (kernBin, outLog string) {
+		t.Helper()
+		outLog = filepath.Join(t.TempDir(), "kern-args.log")
+		kernBin = filepath.Join(t.TempDir(), "kern")
+		fakeScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nprintf 'kern result: %%s\\n' \"$*\"\n", outLog)
+		if err := os.WriteFile(kernBin, []byte(fakeScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return kernBin, outLog
+	}
+
+	t.Run("default mode redirects to kern and exits 0", func(t *testing.T) {
+		home := t.TempDir()
+		kernBin, outLog := mkFakeKern(t)
+		payload := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":"cat %s"}}`, src)
+		code, stderr := runGuard(t, script, payload, []string{"KERN_BIN=" + kernBin, "HOME=" + home})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0 (redirected to kern by default), stderr %q", code, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("redirect must not print the deny message on stderr, got %q", stderr)
+		}
+		got, err := os.ReadFile(outLog)
+		if err != nil {
+			t.Fatalf("fake kern was not invoked: %v", err)
+		}
+		invoked := strings.TrimSpace(string(got))
+		if !strings.Contains(invoked, "compact") || !strings.Contains(invoked, src) {
+			t.Fatalf("kern invoked with %q, want compact <source path>", invoked)
+		}
+		recs := auditLines(t, home)
+		if len(recs) != 1 || recs[0]["event"] != "kern-guard-redirect" {
+			t.Fatalf("audit = %v, want exactly one kern-guard-redirect record", recs)
+		}
+		if recs[0]["tool"] != "bash" || recs[0]["pwd"] == "" || recs[0]["ts"] == "" {
+			t.Fatalf("audit record missing fields: %v", recs[0])
+		}
+	})
+
+	t.Run("explicit KERN_GUARD_MODE=deny restores the deny", func(t *testing.T) {
+		home := t.TempDir()
+		payload := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":"cat %s"}}`, src)
+		code, stderr := runGuard(t, script, payload, []string{"KERN_GUARD_MODE=deny", "HOME=" + home})
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2 (deny when KERN_GUARD_MODE=deny)", code)
+		}
+		if !strings.Contains(stderr, "kern_explore") {
+			t.Fatalf("deny should suggest kern_explore for cat, got %q", stderr)
+		}
+		recs := auditLines(t, home)
+		if len(recs) != 1 || recs[0]["event"] != "kern-guard-deny" {
+			t.Fatalf("audit = %v, want exactly one kern-guard-deny record", recs)
+		}
+	})
+
+	t.Run("ambiguous command falls through to the deny", func(t *testing.T) {
+		// A compound command cannot be cleanly mapped — it must deny even in
+		// auto-redirect mode, and the fake kern must NOT be invoked.
+		home := t.TempDir()
+		kernBin, outLog := mkFakeKern(t)
+		payload := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":"cat %s | head -5"}}`, src)
+		code, _ := runGuard(t, script, payload, []string{"KERN_BIN=" + kernBin, "HOME=" + home})
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2 (compound command is ambiguous, denies)", code)
+		}
+		if _, err := os.Stat(outLog); err == nil {
+			t.Fatalf("fake kern must not run for an ambiguous command")
+		}
+	})
+}
+
 // auditLines reads the bypass.jsonl under home and returns its records.
 func auditLines(t *testing.T, home string) []map[string]string {
 	t.Helper()
@@ -366,7 +494,7 @@ func auditLines(t *testing.T, home string) []map[string]string {
 	return recs
 }
 
-// TestKernGuardBypassAudited pins the deep-dive C2 contract (2026-10-03):
+// TestKernGuardBypassAudited pins the bypass-refusal contract:
 // honoring KERN_ENFORCE=0 / KERN_BYPASS=1 must leave a machine-wide audit
 // record in ~/.kern/audit/bypass.jsonl naming the bypassed tool, while (a)
 // unguarded tools are NOT audited (the bypass never governed them), (b) a
@@ -377,7 +505,7 @@ func TestKernGuardBypassAudited(t *testing.T) {
 
 	// All bypass attempts here run with PIPED stdin (runGuard) — no human at a
 	// terminal, so the bypass is REFUSED: the guarded tool still blocks (exit
-	// 2) and the refusal is audited with mode=refused:no-tty (audit-table-2 B).
+	// 2) and the refusal is audited with mode=refused:no-tty.
 
 	t.Run("KERN_BYPASS=1 refusal records the tool and mode", func(t *testing.T) {
 		code, _ := runGuard(t, script, `{"tool_name":"Read","tool_input":{"file_path":"/x/y.go"}}`, []string{"KERN_BYPASS=1", "HOME=" + home})

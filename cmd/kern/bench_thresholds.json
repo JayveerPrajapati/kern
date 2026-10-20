@@ -1,0 +1,8 @@
+{
+  "_comment": "Versioned gate config for `kern bench --check`. Ceilings are generous multipliers over the 2026-10-19 measured baseline on the kern repo (warm load 174 ms, worst query 91 ms, cold/warm speedup 4.6x) so the gate fails on REGRESSIONS, never on machine noise — a machine several times slower than the baseline still passes. The speedup floor guards the persisted-store fast path: a warm Load that falls through to a full Build collapses the ratio to ~1x. min_results fails a query that returns nothing (a wiring regression, not a latency). KERN_BENCH_THRESHOLDS points at an override file for testing.",
+  "warm_load_ms_max": 2000,
+  "query_ms_max": 1000,
+  "cold_vs_warm_min": 2,
+  "warn_factor": 0.5,
+  "min_results": 1
+}

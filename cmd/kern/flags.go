@@ -3,8 +3,9 @@ package main
 import (
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 )
 
 // flags holds the parsed command-line flags shared across subcommands.
@@ -29,6 +30,7 @@ type flags struct {
 	csv                  bool
 	byTool               bool // --by-tool (stats: per-tool token ledger table)
 	byAgent              bool // --by-agent (stats: per-agent token ledger table)
+	byRoot               bool // --by-root (stats: per-project usage diagnostics)
 	llm                  string
 	bpe                  bool
 	root                 string
@@ -38,6 +40,10 @@ type flags struct {
 	ci                   bool // --ci (check: machine-readable CI verdict on stdout, exit 0/1)
 	verify               bool
 	detect               bool
+	allAgents            bool // --all-agents (setup: wire every supported agent, not only the detected ones)
+	plain                bool // --plain (setup: legacy plain-text output, no boxes/glyphs/colour)
+	globalOnly           bool // --global-only (setup: wire user-level MCP/hooks/rules only; write no file in any repo)
+	remove               bool // --remove (setup: undo the machine-wide wiring; kern-owned entries only)
 	global               bool
 	globalRules          bool   // --global-rules (setup: manage kern rules in each host's GLOBAL instructions slot)
 	indexOnly            bool   // --index-only (onboard: skip ALL agent wiring, build the index only)
@@ -58,8 +64,6 @@ type flags struct {
 	lines                int
 	depth                int
 	range_               string
-	changelog            string // --changelog (commitmsg: render a release-notes draft for a git range)
-	changelogSet         bool   // true when --changelog was given (even with an empty value)
 	commits              int
 	thresholds           string
 	graphml              bool
@@ -93,6 +97,8 @@ type flags struct {
 	semantic             bool
 	lang                 string
 	stdin                string
+	execOutput           string // --output (exec: summary|tail:N|lines:A-B|full; the kern_verify contract)
+	execAnchor           string // --anchor (exec: re-slice a kept run without re-executing)
 	bridgesOnly          bool
 	noinstructions       bool
 	maxTokens            int
@@ -109,6 +115,7 @@ type flags struct {
 	message              string
 	dryRun               bool
 	reset                bool
+	net                  bool // --net (stats): report net savings after rules-injection + slice re-read costs
 	name                 string
 	pattern              string
 	query                string
@@ -180,6 +187,7 @@ type flags struct {
 	// defaults and help text are preserved exactly (see parseFlags doc). ----
 	agent             string   // --agent (authorize-context, agent-fingerprint, agent-coordination, agent-role-rbac)
 	autoGap           bool     // --auto-gap (synthesize-test)
+	auto              bool     // --auto (memory remember/add: tag the lesson as an automatic capture; memory prune: confirm removing auto captures)
 	base              string   // --base (semantic-merge)
 	body              string   // --body (ast-transform)
 	budgetSet         bool     // true when --budget was given (context-watch string form)
@@ -278,7 +286,7 @@ type flags struct {
 //	stream:                           --action "status" "action: status, chunk, channels, emit"; --channel "" "channel name"; --payload "" "payload string"; --chunk-size "1000" "chunk size"; --progress-token "" "progress token"; --percent "" "percent"; --message "" "message"
 //	ast-transform:                    --action "implement_interface" "action: implement_interface, add_field, add_method"; --file "" "target file path"; --target "" "target symbol/struct name"; --interface "" "interface to implement"; --field "" "field name"; --field-type "" "field type"; --tag "" "struct field tag"; --sig "" "method signature"; --body "" "method body"; --apply false "apply edits to file"; --root "." "project root"
 //	semantic-merge:                   --file "" "target file path"; --base "" "base version code or file path"; --local "" "local version code or file path"; --remote "" "remote version code or file path"; --apply false "apply clean merge to file"; --json false "output JSON format"; --root "." "project root"
-//	synthesize-test:                  --target "" "target function or method name"; --file "" "target file path"; --auto-gap false "auto-select top untested hotspot"; --apply false "write synthesized test to test file"; --json false "output JSON format"; --root "." "project root"
+//	synthesize-test:                  a source is required: a positional file (or --file), or --auto-gap; --target "" "target function or method name"; --file "" "target file path"; --auto-gap false "auto-select top untested hotspot"; --apply false "write synthesized test to test file"; --json false "output JSON format"; --root "." "project root"
 //	runtime drift/status:             --root "." "project root"; --json false "emit JSON"
 //	evidence export:                  --root "." "project root"; --agent-id "default" "agent ID the authorization is scoped to"; --task "" "task ID the authorization is scoped to"; --out "-" "output path (\"-\" = stdout)"; --json true "emit JSON (the only form; default true)"; --sign false "sign the bundle with the project key (.kern/keys/, created on first use)"
 //	evidence verify:                  --file "" "bundle JSON file (default: read from stdin)"; --url "" "bundle URL to fetch and verify without cloning"; --root "" "repo root to verify the audit chain against (default: bundle's repo_root)"; --expect-fingerprint "" "require the bundle to be signed by this key fingerprint (the trust anchor)"
@@ -397,15 +405,15 @@ func parseFlags(args []string) (flags, []string, error) {
 		}
 	}
 	for i := 0; i < len(args); i++ {
-		name, inline, hasInline := splitFlag(args[i])
+		name, inline, hasInline := cliflags.SplitFlag(args[i])
 		// Single-dash long flags (`-json`, `-root`, `-addr`) are accepted
 		// by normalizing them to their double-dash form (`--json`, ...), so
 		// both spellings work like Go tooling users expect. Only tokens
-		// that look like a single-dash letter flag (isFlagToken logic) and
+		// that look like a single-dash letter flag (cliflags.IsFlagToken logic) and
 		// are not the short help form `-h` are rewritten; `-k`/`-terse-code`
 		// normalize to their dual-form cases below, and negative numbers
 		// (`-1`) or a bare `-` are untouched (still positionals).
-		if len(name) > 1 && name[0] == '-' && name[1] != '-' && isAlpha(name[1]) && name != "-h" {
+		if len(name) > 1 && name[0] == '-' && name[1] != '-' && cliflags.IsAlpha(name[1]) && name != "-h" {
 			name = "--" + name[1:]
 		}
 		switch name {
@@ -455,6 +463,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setBool(&f.terseCode, "--terse-code", inline, hasInline)
 		case "--reset":
 			setBool(&f.reset, "--reset", inline, hasInline)
+		case "--net":
+			setBool(&f.net, "--net", inline, hasInline)
 		case "--sarif":
 			setBool(&f.sarif, "--sarif", inline, hasInline)
 		case "--threshold":
@@ -469,6 +479,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setBool(&f.byTool, "--by-tool", inline, hasInline)
 		case "--by-agent":
 			setBool(&f.byAgent, "--by-agent", inline, hasInline)
+		case "--by-root":
+			setBool(&f.byRoot, "--by-root", inline, hasInline)
 		case "--bpe":
 			setBool(&f.bpe, "--bpe", inline, hasInline)
 		case "--root":
@@ -549,6 +561,14 @@ func parseFlags(args []string) (flags, []string, error) {
 			setBool(&f.secrets, "--secrets", inline, hasInline)
 		case "--detect":
 			setBool(&f.detect, "--detect", inline, hasInline)
+		case "--all-agents":
+			setBool(&f.allAgents, "--all-agents", inline, hasInline)
+		case "--plain":
+			setBool(&f.plain, "--plain", inline, hasInline)
+		case "--global-only":
+			setBool(&f.globalOnly, "--global-only", inline, hasInline)
+		case "--remove":
+			setBool(&f.remove, "--remove", inline, hasInline)
 		case "--global":
 			setBool(&f.global, "--global", inline, hasInline)
 		case "--index-only":
@@ -674,9 +694,6 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.limit, "--limit", inline, hasInline)
 		case "--range":
 			setStr(&i, &f.range_, inline, hasInline)
-		case "--changelog":
-			setStr(&i, &f.changelog, inline, hasInline)
-			f.changelogSet = true
 		case "--lines", "--line":
 			// --line is the documented singular form (lsp-bridge help); the
 			// parser previously rejected it because only --lines existed.
@@ -706,6 +723,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.lang, inline, hasInline)
 		case "--stdin":
 			setStr(&i, &f.stdin, inline, hasInline)
+		case "--output":
+			setStr(&i, &f.execOutput, inline, hasInline)
+		case "--anchor":
+			setStr(&i, &f.execAnchor, inline, hasInline)
 		case "--no-instructions":
 			setBool(&f.noinstructions, "--no-instructions", inline, hasInline)
 		case "--max-tokens":
@@ -765,6 +786,8 @@ func parseFlags(args []string) (flags, []string, error) {
 		// ---- Migrated FlagSet flags (unified parser) ----
 		case "--agent":
 			setStr(&i, &f.agent, inline, hasInline)
+		case "--auto":
+			setBool(&f.auto, "--auto", inline, hasInline)
 		case "--auto-gap":
 			setBool(&f.autoGap, "--auto-gap", inline, hasInline)
 		case "--base":
@@ -863,7 +886,7 @@ func parseFlags(args []string) (flags, []string, error) {
 			// characters (e.g. `--bogus`) or a single `-` followed by a letter
 			// (e.g. `-x`). Negative numbers (`-1`), a bare `-` (stdin), and
 			// plain positionals are NOT flags and still go to rest.
-			if isFlagToken(arg) {
+			if cliflags.IsFlagToken(arg) {
 				parseErr = fmt.Errorf("unknown flag: %s", name)
 			} else {
 				rest = append(rest, arg)
@@ -871,55 +894,4 @@ func parseFlags(args []string) (flags, []string, error) {
 		}
 	}
 	return f, rest, parseErr
-}
-
-// isFlagToken reports whether arg looks like a CLI flag: `--` followed by
-// more characters, or a single `-` followed by an ASCII letter. Negative
-// numbers, a bare "-" (stdin) and plain positionals are not flags.
-func isFlagToken(arg string) bool {
-	return len(arg) > 2 && strings.HasPrefix(arg, "--") ||
-		len(arg) > 1 && arg[0] == '-' && isAlpha(arg[1])
-}
-
-// splitFlag splits a flag token into (name, inlineValue, hasInlineValue):
-// `--flag=value` becomes ("--flag", "value", true). Non-flag tokens (and
-// flag tokens without '=') pass through unsplit.
-func splitFlag(arg string) (name, val string, hasVal bool) {
-	if isFlagToken(arg) {
-		if eq := strings.IndexByte(arg, '='); eq >= 0 {
-			return arg[:eq], arg[eq+1:], true
-		}
-	}
-	return arg, "", false
-}
-
-// isAlpha reports whether b is an ASCII letter.
-func isAlpha(b byte) bool {
-	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
-}
-
-// stdlibFlagErr renders a parseFlags error in the stdlib flag package's
-// phrasing for the few handlers whose stderr message is pinned to that
-// format (runSynthesizeTest: TestRunSynthesizeTestBadFlagExits2 asserts the
-// "flag provided but not defined" wording). Parsing is still fully unified
-// through parseFlags — only the error message rendering differs.
-func stdlibFlagErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	if rest, ok := strings.CutPrefix(err.Error(), "unknown flag: "); ok {
-		return fmt.Errorf("flag provided but not defined: %s", rest)
-	}
-	return err
-}
-
-// hasFlag reports whether the given flag appears in args. Used for the
-// `stats performance --reset` early-check in main() before parseFlags runs.
-func hasFlag(args []string, flag string) bool {
-	for _, a := range args {
-		if a == flag {
-			return true
-		}
-	}
-	return false
 }

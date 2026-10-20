@@ -1,11 +1,10 @@
 // Package governance owns the governance-family MCP tool bodies
 // (kern_lock action=acquire|release|status, kern_usage_guide,
-// kern_rename, kern_authorize_context) as plain functions.
+// kern_rename) as plain functions.
 package governance
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +15,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
-	"github.com/JayveerPrajapati/kern/internal/mcp/gov"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
@@ -220,73 +218,5 @@ func Rename(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		}
 		return rename.Render(rep), nil
 
-	}
-}
-
-// AuthorizeContext implements the kern_authorize_context tool:
-// the authorized-context primitive. It computes the symbols and call edges an
-// agent may legally read for a task, scoped by the agent's firewall identity
-// and an optional task scope, and returns the permitted scope plus an
-// auditable authorization proof. On denial it returns both the proof JSON and
-// an error so the denial itself is auditable. The firewall is built per call
-// (the MCP server holds no global firewall state).
-func AuthorizeContext(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	{
-		agentID := mcpargs.ArgString(args, "agent_id")
-		if agentID == "" {
-			return "", fmt.Errorf("agent_id is required")
-		}
-		task := mcpargs.ArgString(args, "task")
-		if task == "" {
-			return "", fmt.Errorf("task is required")
-		}
-		root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
-		ix, err := h.LoadIndex(ctx, root)
-		if err != nil {
-			return "", err
-		}
-
-		// Per-call firewall: resolve the agent into it when registered; an
-		// unregistered agent is denied at the authentication stage by the
-		// primitive itself.
-		fw := governance.NewFirewall()
-		if agent, aerr := governance.GetAgent(agentID); aerr == nil {
-			fw = fw.WithAgents(agent)
-		}
-
-		// Optional task scope object: {paths, denied_paths, services, envs,
-		// artifacts}. Absent scope = permissive default.
-		scope := gov.TaskScopeFromArgs(args, task)
-
-		req := governance.Request{
-			Task:         task,
-			AgentID:      agentID,
-			Scope:        scope,
-			Root:         root,
-			SymbolFilter: mcpargs.ArgString(args, "symbol_filter"),
-		}
-		resp, aerr := governance.AuthorizeContext(req, ix, fw)
-		// Structured provenance on the envelope: the symbols are the allowed
-		// scope — exactly what the response returns. toolCallResponse appends
-		// the one-line index summary derived from this same field.
-		policySource := provenance.PolicySourceDefaultScoped
-		if scope != nil {
-			policySource = provenance.PolicySourceTaskScope
-		}
-		syms := make([]provenance.SymbolProvenance, 0, len(resp.Scope.Symbols))
-		for _, r := range resp.Scope.Symbols {
-			syms = append(syms, provenance.SymbolProvenance{Name: r.Name, Qualified: r.Qualified, File: r.File, Line: r.Line})
-		}
-		h.StampGoverned(ctx, ix, policySource, resp.Proof, syms)
-		b, merr := json.MarshalIndent(resp, "", "  ")
-		if merr != nil {
-			return "", merr
-		}
-		out := string(b)
-		if aerr != nil {
-			// Denial: return both the auditable proof and the error.
-			return out, fmt.Errorf("authorize-context denied: %w", aerr)
-		}
-		return out, nil
 	}
 }

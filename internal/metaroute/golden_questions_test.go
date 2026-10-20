@@ -17,20 +17,20 @@ func TestClassifyMetaRequest_GoldenQuestions(t *testing.T) {
 	cases := []classifyCase{
 		// Live-probed misroutes, now correct.
 		{"flow_trace_through_system", "trace the flow of dispatch through the system", "kern_explore", map[string]string{"symbol": "dispatch"}},
-		{"why_is_code_slow", "why is the code slow", "kern_fragility_hotspots", nil},
+		{"why_is_code_slow", "why is the code slow", "kern_search", nil},
 		{"connect_end_to_end", "how do authentication and session handling connect end to end", "kern_path", map[string]string{"from": "authentication", "to": "session"}},
-		{"dependency_cycles", "are there dependency cycles", "kern_cycles", nil},
-		{"performance_hotspots", "where are the performance hotspots", "kern_fragility_hotspots", nil},
-		{"fragile_components", "find fragile components", "kern_fragility_hotspots", nil},
-		{"perf_keywords_hotspot", "find performance hotspots and profile slow paths", "kern_fragility_hotspots", nil},
+		{"dependency_cycles", "are there dependency cycles", "kern_graph", nil},
+		{"performance_hotspots", "where are the performance hotspots", "kern_search", nil},
+		{"fragile_components", "find fragile components", "kern_search", nil},
+		{"perf_keywords_hotspot", "find performance hotspots and profile slow paths", "kern_search", nil},
 
 		// Eval phrasings.
 		{"eval_trace_flow_of", "trace the flow of dispatch", "kern_explore", map[string]string{"symbol": "dispatch"}},
-		{"eval_dependency_cycles", "dependency cycles", "kern_cycles", nil},
-		{"eval_performance_hotspots", "performance hotspots", "kern_fragility_hotspots", nil},
-		{"eval_layering", "layering", "kern_cycles", nil},
-		{"layering_question", "check the layering of this project", "kern_cycles", nil},
-		{"layering_what_is", "what is the layering like", "kern_cycles", nil},
+		{"eval_dependency_cycles", "dependency cycles", "kern_graph", nil},
+		{"eval_performance_hotspots", "performance hotspots", "kern_search", nil},
+		{"eval_layering", "layering", "kern_graph", nil},
+		{"layering_question", "check the layering of this project", "kern_graph", nil},
+		{"layering_what_is", "what is the layering like", "kern_graph", nil},
 
 		// Flow routing: two-symbol → kern_path, one-symbol → kern_explore,
 		// zero-symbol → kern_explain.
@@ -45,17 +45,17 @@ func TestClassifyMetaRequest_GoldenQuestions(t *testing.T) {
 		// their ORIGINAL casing (intel.Resolve is case-sensitive).
 		{"flow_with_handle_symbols", "how do handleCycles and handlePath connect end to end", "kern_path", map[string]string{"from": "handleCycles", "to": "handlePath"}},
 		{"flow_one_symbol_camel", "trace the flow of NewServer", "kern_explore", map[string]string{"symbol": "NewServer"}},
-		{"flow_zero_symbol", "follow the flow", "kern_explain", nil},
+		{"flow_zero_symbol", "follow the flow", "kern_search", nil},
 		{"flow_through_one_symbol", "trace how data flows through dispatch", "kern_explore", map[string]string{"symbol": "dispatch"}},
 
 		// Negative / hijack guards — existing routes must win.
-		{"workflow_not_hijacked", "run the workflow for auth", "kern_entry_points", nil},
+		{"workflow_not_hijacked", "run the workflow for auth", "kern_search", nil},
 		{"run_this_workflow_not_hijacked", "run this workflow", "kern_run", nil},
-		{"pprof_trace_not_hijacked", "trace this pprof stack", "kern_trace", nil},
-		{"login_handler_not_hijacked", "find the login handler", "kern_entry_points", nil},
+		{"pprof_trace_not_hijacked", "trace this pprof stack", "kern_path", nil},
+		{"login_handler_not_hijacked", "find the login handler", "kern_search", nil},
 		{"impact_not_hijacked", "what breaks if I change dispatch", "kern_impact", nil},
-		{"flow_end_to_end_no_connect_keeps_entry_points", "how does the bundle upload flow work end to end?", "kern_entry_points", nil},
-		{"flow_end_to_end_symbol_keeps_near", "how does the UploadBundle flow work end to end?", "kern_near", map[string]string{"symbol": "UploadBundle", "depth": "4"}},
+		{"flow_end_to_end_no_connect_keeps_entry_points", "how does the bundle upload flow work end to end?", "kern_search", nil},
+		{"flow_end_to_end_symbol_keeps_near", "how does the UploadBundle flow work end to end?", "kern_graph", map[string]string{"symbol": "UploadBundle"}},
 		// Route-path flow questions belong to the structure arm (route
 		// search), never the flow arm — the flow arm defers to the structure
 		// arm whenever the request carries an HTTP route.
@@ -71,7 +71,7 @@ func TestClassifyMetaRequest_GoldenQuestions(t *testing.T) {
 		{"graph_callers", "who calls NewServer", "kern_graph", map[string]string{"symbol": "NewServer", "format": "one-line"}},
 		{"cli_guard_search", "how does CLI command dispatch work in this repo?", "kern_search", nil},
 		{"arch_overview", "show me the architecture", "kern_arch", nil},
-		{"dead_code_arm", "is there dead code in this repo", "kern_dead", nil},
+		{"dead_code_arm", "is there dead code in this repo", "kern_search", nil},
 		{"implementation_plan_arm", "show me the implementation plan", "kern_plan", nil},
 	}
 	for _, tc := range cases {

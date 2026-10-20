@@ -14,12 +14,13 @@ import (
 // random suffix, so the resulting names are "kern-sandbox-<random>".
 const sandboxPrefix = "kern-sandbox-"
 
-// blueprintSandboxPrefix is the temp-dir prefix of the blueprint worktree
-// sandbox (os.MkdirTemp("", "blueprint-sandbox-") in
-// internal/blueprint/sandbox/sandbox.go, with a registered git worktree at
-// <dir>/work). A process dying mid-run leaks the dir exactly like a snapshot
-// copy, so the sweep covers it too; a stale .git worktree registration is
-// pruned lazily by git, so plain removal is safe.
+// blueprintSandboxPrefix is the temp-dir prefix of the blueprint-family
+// worktree sandbox (os.MkdirTemp("", "blueprint-sandbox-") in
+// internal/blueprint/sandbox/sandbox.go, deleted with the family in the P4
+// pivot, a05c91c7). A process dying mid-run leaks the dir exactly like a
+// snapshot copy, so the sweep still covers dirs leaked by pre-deletion
+// builds; a stale .git worktree registration is pruned lazily by git, so
+// plain removal is safe.
 const blueprintSandboxPrefix = "blueprint-sandbox-"
 
 // isOrphanSandboxDir reports whether name carries one of the kern-owned

@@ -12,7 +12,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/orgapprovals"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
@@ -472,10 +471,8 @@ func (s *TaskService) postPRComment(t *agent.Task, prNumber int, repo prprovider
 // action. Deploy checks the governance firewall before proceeding; if approval
 // is required it returns agent.ErrApprovalRequired wrapping the pending
 // approval ID — the caller must resolve the approval (e.g. via kern approve)
-// and call Deploy again — UNLESS an org root is configured (KERN_ORG_ROOT)
-// and a matching org approval (orgapprovals.Consume) clears the gate: the
-// org-wide pre-approval is single-use and consumed atomically. The
-// NoopDeployer (simulated, default) skips the gate to preserve v1 behavior.
+// and call Deploy again. The NoopDeployer (simulated, default) skips the gate
+// to preserve v1 behavior.
 func (s *TaskService) Deploy(taskID string, version string) (*agent.Task, error) {
 	t, ok := s.Get(taskID)
 	if !ok {
@@ -504,48 +501,18 @@ func (s *TaskService) Deploy(taskID string, version string) (*agent.Task, error)
 				s.fail(t, "governance: "+err.Error())
 				return t, fmt.Errorf("deploy: governance check failed: %w", err)
 			}
-			// orgApproved is set when an org-wide approval (P13 stage 3)
-			// cleared the gate: it overrides BOTH the pending-approval
-			// return and the generic denial below (the org approval IS the
-			// authorization for this deploy).
-			orgApproved := false
 			if !allowed && approval != nil {
-				// P13 stage 3 — org-wide approval override: with an org root
-				// configured (KERN_ORG_ROOT), a matching org approval
-				// pre-approves this action across projects BEFORE the
-				// per-project approval requirement is surfaced. Consume is
-				// atomic single-use under the org store's flock — two
-				// concurrent deploys can never double-spend one org approval
-				// — and the consumed approval is audited on the org audit
-				// trail (when the enterprise server wired the hook). No org
-				// root → Consume is inert (none, no error) and the
-				// per-project flow is byte-for-byte unchanged. A corrupt org
-				// store fails closed: the per-project approval stays
-				// authoritative.
-				if orgAppr, ok, cerr := orgapprovals.Consume(governance.OrgRoot(), "deploy", "production"); cerr == nil && ok {
-					log.Printf("kern app: task %s: deploy cleared by org approval %s (granted by %s)", t.ID, orgAppr.ID, orgAppr.GrantedBy)
-					orgApproved = true
-				} else {
-					if cerr != nil {
-						// A corrupt/unreadable org store fails closed into the
-						// per-project path (same outcome as no match).
-						log.Printf("kern app: task %s: org approval consume failed: %v", t.ID, cerr)
-					}
-					// Park the task — do NOT transition to Deploying yet. The caller
-					// resolves the approval and calls Deploy again; the firewall's
-					// single-use approved key makes the second Check pass.
-					s.publish(eventbus.TaskApprovalRequested, t.ID, map[string]string{
-						"approval_id": approval.ID,
-						"risk":        string(risk.Level),
-						"action":      "production.deploy",
-					})
-					s.publish(eventbus.ApprovalRequested, approval.ID, map[string]string{
-						"task": t.ID, "action": "production.deploy", "risk": string(risk.Level),
-					})
-					return t, fmt.Errorf("%w: %s", agent.ErrApprovalRequired, approval.ID)
-				}
+				s.publish(eventbus.TaskApprovalRequested, t.ID, map[string]string{
+					"approval_id": approval.ID,
+					"risk":        string(risk.Level),
+					"action":      "production.deploy",
+				})
+				s.publish(eventbus.ApprovalRequested, approval.ID, map[string]string{
+					"task": t.ID, "action": "production.deploy", "risk": string(risk.Level),
+				})
+				return t, fmt.Errorf("%w: %s", agent.ErrApprovalRequired, approval.ID)
 			}
-			if !allowed && !orgApproved {
+			if !allowed {
 				s.fail(t, "governance: deploy denied")
 				return t, fmt.Errorf("deploy: denied by governance (risk %s)", risk.Level)
 			}

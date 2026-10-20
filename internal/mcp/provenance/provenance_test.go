@@ -55,6 +55,29 @@ func TestRawProvenance(t *testing.T) {
 	}
 }
 
+// TestSymbolsCappedAfterMax pins the deep-verify L1 F1-2 bound: the structured
+// Symbols listing is capped at maxResponseSymbols (the content text remains
+// the complete listing), with symbols_truncated marking the cut.
+func TestSymbolsCappedAfterMax(t *testing.T) {
+	commit := func(string) string { return "abc123" }
+	big := make([]SymbolProvenance, maxResponseSymbols+72)
+	for i := range big {
+		big[i] = SymbolProvenance{Name: "s"}
+	}
+	p := Raw(nil, commit, big)
+	if len(p.Symbols) != maxResponseSymbols {
+		t.Fatalf("Symbols = %d, want cap %d", len(p.Symbols), maxResponseSymbols)
+	}
+	if !p.SymbolsTruncated {
+		t.Fatal("SymbolsTruncated = false, want true above the cap")
+	}
+	small := big[:3]
+	p2 := Raw(nil, commit, small)
+	if len(p2.Symbols) != 3 || p2.SymbolsTruncated {
+		t.Fatalf("small set: len=%d truncated=%v, want 3/false", len(p2.Symbols), p2.SymbolsTruncated)
+	}
+}
+
 func TestGovernedPolicyMapping(t *testing.T) {
 	allowed := func() governance.AuthorizationProof {
 		return governance.AuthorizationProof{

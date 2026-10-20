@@ -289,7 +289,11 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 			if cmd != "" {
 				evidence = []string{cmd}
 			}
-			appr, err := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, evidence, "")
+			var kinds []string
+			if cmd != "" {
+				kinds = []string{ApprovalKindExecCommand}
+			}
+			appr, err := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, evidence, "", kinds...)
 			if err != nil {
 				f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 				return false, r, nil, fmt.Errorf("governance: approval for %s:%s could not be persisted: %w", resource, action, err)

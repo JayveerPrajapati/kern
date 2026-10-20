@@ -1,4 +1,7 @@
 name: ci
+# The single PR/push entry point. Make `ci-ok` the ONLY required status check in
+# branch protection: it fails unless every job below succeeded, so adding or
+# renaming a job never requires touching the protection rules.
 on:
   push:
     branches: [main]
@@ -19,6 +22,12 @@ jobs:
     name: Lint & Security Checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # govulncheck analyzes the STDLIB of the active toolchain: stdlib CVEs
+    # (GO-2026-6599/6600/6617...) must be judged against a patched Go, not the
+    # go.mod minimum. The go.mod `go` directive stays the language-version
+    # floor; the pinned GOTOOLCHAIN (auto-downloaded here) is what gets scanned.
+    env:
+      GOTOOLCHAIN: go1.27.2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -28,22 +37,71 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.13.2
+          version: v2.15.0
           args: --timeout=10m
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
         run: govulncheck ./...
 
-  # A2: full (non-short) E2E gate. The primary `test` job runs -short, which
+  # Syntax- and expression-check every workflow and composite action. Catches
+  # the class of bug where a workflow parses fine but a step can never run (an
+  # `if:` reading a context that does not exist) before it ships. Pinned by
+  # version; Go's module checksum database verifies the download.
+  actionlint:
+    name: Lint workflows (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
+
+  # The minimal governance gate for kern's own repository (formerly its own
+  # kern-gate.yml running `kern check --ci`): `kern verify` runs the unified
+  # security + architecture gates over the checked-out state and exits
+  # non-zero on a FAIL verdict (the exit-code contract: FAIL=1, WARN=0).
+  kern-gate:
+    name: kern verify (governance gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run governance gate
+        run: go run ./cmd/kern verify --types security,architecture
+
+  # A2: full (non-short) E2E gate. The reusable `test` job runs -short, which
   # skips ~25 test functions (the 20-step vertical slice, acceptance matrix,
   # replay/resume, 3/4 cicd governance-gate tests, all MCP
   # interface-consistency tests). This job runs those suites for real,
   # with the kern binary built from this checkout and KERN_REQUIRE_BINARY=1.
+  #
+  # The suites are independent (each builds its own kern and uses its own
+  # temp dirs), so they run as a matrix in parallel. The former `blueprint`
+  # suite row was removed with the blueprint family (P4 pivot): its packages
+  # now live in the standalone blueprint repo.
   e2e:
-    name: Full E2E & Blueprint Gates
+    name: E2E (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: app+mcp
+            parallel: "1"
+            packages: ./internal/app/... ./internal/mcp/...
+          - suite: loop+verification
+            parallel: "2"
+            packages: ./internal/loop/... ./internal/verification/...
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -52,21 +110,89 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # setup-tools already builds kern from this checkout (`go install
+      # ./cmd/kern`), so the tests use that binary instead of building it again.
       - uses: ./.github/actions/setup-tools
-      - name: Build kern from checkout
-        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
-      - name: Full E2E suite (non-short) — app, mcp
-        run: go test -p 1 -timeout 30m ./internal/app/... ./internal/mcp/...
+      - name: Full suite (non-short)
+        run: KERN_BINARY="$(command -v kern)" go test -p ${{ matrix.parallel }} -timeout 30m ${{ matrix.packages }}
         env:
-          KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"
-      - name: Full blueprint suite (non-short)
-        run: go test -p 1 -timeout 30m ./internal/blueprint/...
+
+  # Machine-wide install smoke on every OS. The live-release installer cannot
+  # exercise `kern setup --global-only` (the published release predates it),
+  # so this builds kern from the checkout and runs the whole lifecycle against
+  # a throwaway HOME: wire -> check -> read-only preview (`kern setup --dry-run`) -> real git commit
+  # and push with the global hooks active -> remove. It proves, on real macOS
+  # and Windows runners, that wiring writes no repo files, the global hooks
+  # fail open without kern and still refuse a force-push to main, and
+  # `kern setup --remove` leaves nothing behind.
+  #
+  # The Windows leg is non-blocking until its first full run has been triaged
+  # (this script has only run on macOS/Linux). Flip continue-on-error off once
+  # it is green.
+  global-install-smoke:
+    name: global install smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Wire, try, commit, push, remove (throwaway HOME)
+        run: bash scripts/ci-global-smoke.sh
+
+  # The packages the install work touches, on the OSes users actually run.
+  # macOS is blocking. Windows is non-blocking until its first full run has
+  # been triaged: these suites have only ever run on macOS/Linux, so failures
+  # there are expected to be test-portability gaps to fix, not regressions.
+  platform-tests:
+    name: scoped tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test install-related packages
+        shell: bash
+        run: go test -short -timeout 20m ./internal/setup/ ./internal/index/ ./internal/project/ ./internal/doctor/ ./internal/gitblocks/ ./internal/docbudget/
+      - name: Test cmd/kern (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: go test -short -timeout 20m ./cmd/kern/
+
+  # The one required check. `if: always()` so it still runs (and fails) when a
+  # needed job failed or was cancelled, instead of showing as "skipped" and
+  # letting the PR merge.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [test, lint-and-vuln, actionlint, kern-gate, e2e, global-install-smoke, platform-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required job succeeded
         env:
-          KERN_BINARY: ${{ runner.temp }}/kern
-          KERN_REQUIRE_BINARY: "1"
-      - name: Full E2E suite (non-short) — loop, verification
-        run: go test -p 2 -timeout 30m ./internal/loop/... ./internal/verification/...
-        env:
-          KERN_BINARY: ${{ runner.temp }}/kern
-          KERN_REQUIRE_BINARY: "1"
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = "success" ] || { echo "::error::a required job finished as '$r'"; exit 1; }
+          done

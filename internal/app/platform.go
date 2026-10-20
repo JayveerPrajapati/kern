@@ -169,7 +169,7 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 	// one). The CLI only ever reads these files; the running firewall writes them.
 	auditDir := filepath.Join(root, ".kern", "audit")
 	_ = os.MkdirAll(auditDir, 0o755)
-	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock"))
+	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(governance.MirrorFor(auditDir))
 	// Replay persisted entries into memory, then verify the tamper-evident
 	// chain. A broken chain is evidence to investigate — not a reason to refuse
 	// to start: warn loudly on stderr and continue. When NOTHING verifies —
@@ -185,6 +185,17 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 				fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit)\n", n)
 			} else {
 				fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit)\n", brk+1, n)
+			}
+			// Discriminate a benign format downgrade (HMAC secret
+			// unavailable when the entries were written, or an unlocked
+			// degraded write) from genuine tampering: a downgraded entry
+			// verifies under a weaker formula, so the chain break is
+			// explainable — not a silent modification. This mirrors the
+			// `kern audit` CLI discrimination and makes the platform
+			// startup warning actionable instead of forensic guesswork.
+			tiers := fw.AuditLog().ChainTierReport()
+			if tiers.Downgraded > 0 {
+				fmt.Fprintf(os.Stderr, "WARNING: %d entr%s verify only under a weaker unkeyed hash format than earlier keyed entries — a format downgrade, which is how a forged entry would look (or the HMAC key was unavailable when they were written). Check the broken entries' Annotation for the write-path cause (kern audit)\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1])
 			}
 		}
 	}
@@ -285,12 +296,74 @@ func (p *Platform) Analyze(change string) (domain.ContextPacket, string, error) 
 		return domain.ContextPacket{}, "", fmt.Errorf("analyze: %w", err)
 	}
 	text := context.RenderText(pkt)
-	if fuzzy && text != "" {
-		// The requested symbol was fuzzy-resolved to a different one: surface
-		// the mapping so the substitution is never silent.
-		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, sym, text)
+	if note := p.resolutionNote(change, sym, fuzzy); note != "" && text != "" {
+		// Low-confidence resolution (fuzzy match, or a prose word that only
+		// resolved because a symbol shares its name): surface the mapping so
+		// the substitution is never silent.
+		text = note + "\n" + text
 	}
 	return pkt, text, nil
+}
+
+// displayName maps a graph node identity to the agent-usable name rendered
+// text should show. A declaration identity (decl:<sha>) is machine
+// bookkeeping — callers and resolution banners must name the symbol, not its
+// hash (QA 6.6). The graph node's label wins, then its symbol, then the
+// index declaration's full name; anything else (bare names, package-scoped
+// refs, file/module node IDs) passes through unchanged.
+func (p *Platform) displayName(ref string) string {
+	if p.graph != nil {
+		if node, ok := p.graph.NodeByID(ref); ok {
+			if node.Label != "" {
+				return node.Label
+			}
+			if node.Symbol != nil && node.Symbol.Name != "" {
+				if node.Symbol.Qualified != "" {
+					return node.Symbol.Qualified
+				}
+				return node.Symbol.Name
+			}
+		}
+	}
+	if p.ix != nil {
+		for _, s := range p.ix.Symbols {
+			if s.DeclarationID() == ref {
+				return s.FullName()
+			}
+		}
+	}
+	return ref
+}
+
+// resolutionNote returns the low-confidence resolution label for a change
+// that resolved to sym: "" when the resolution is clean (exact symbol, or a
+// deliberate bare name), the fuzzy-match line when resolution was fuzzy, or
+// a name-collision note when prose resolved to a symbol whose bare name is
+// a common English word ("test", "server", "Add", ...) — a word that only
+// resolved because a symbol shares its name. B2, QA 2026-10-15. sym may be
+// a decl:<sha> identity (resolveSymbol maps through DeclarationID for
+// receiver-qualified bare names); the rendered note always shows the
+// agent-usable name, never the hash (QA 6.6).
+func (p *Platform) resolutionNote(change, sym string, fuzzy bool) string {
+	if fuzzy {
+		return fmt.Sprintf("resolved %q -> %s (fuzzy match)", change, p.displayName(sym))
+	}
+	if strings.ContainsAny(change, " \t") && whatif.IsCommonWord(symbolBareName(p.displayName(sym))) {
+		return fmt.Sprintf("note: %q resolved to %s by name collision with a common word — low confidence, may be unrelated", change, p.displayName(sym))
+	}
+	return ""
+}
+
+// ResolutionNote returns Analyze's low-confidence resolution label for a
+// change ("" when clean). Exposed so plan-context consumers building on
+// Analyze (kern_plan_context) can surface the same honesty without
+// re-parsing the full analyze report.
+func (p *Platform) ResolutionNote(change string) string {
+	sym, fuzzy, err := p.resolveSymbol(change)
+	if err != nil {
+		return ""
+	}
+	return p.resolutionNote(change, sym, fuzzy)
 }
 
 // analyzeChangeResolvable analyzes a proposed change, trying the change text
@@ -358,11 +431,18 @@ func (p *Platform) WhatIf(kind whatif.ChangeKind, change, newTarget string) (wha
 	// deterministic sources so the impact is complete.
 	populateWhatIfEvidence(p, &imp, target)
 	imp.Evidence = intel.AnchorLine(p.ix, target)
-	text := tasklife.RenderWhatIfText(kind, change, target, imp)
+	display := imp
+	display.Affected = tasklife.DisplayNames(p.graph, imp.Affected)
+	display.UntestedAffected = tasklife.DisplayNames(p.graph, imp.UntestedAffected)
+	display.BrokenCallSites = tasklife.DisplayNames(p.graph, imp.BrokenCallSites)
+	// The text renderer must name the change target, not its decl:<sha>
+	// identity (QA 6.6); the structured whatif.Impact keeps the raw ID for
+	// machine consumers.
+	text := tasklife.RenderWhatIfText(kind, change, p.displayName(target), display)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
 		// the mapping so the substitution is never silent.
-		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, target, text)
+		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, p.displayName(target), text)
 	}
 	// Calibration (Feature Batch C): append the per-subsystem confidence line
 	// at the end of the rendered report (best-effort; omitted on any error).
@@ -530,6 +610,9 @@ func (p *Platform) resolveSymbol(change string) (string, bool, error) {
 		// one side of an ambiguous bare name), so the ambiguity error
 		// below stays intact for those.
 		if p.ix != nil {
+			if _, declaration, ok := intel.ResolveEntry(p.ix, change); ok && declaration != nil && p.graph.Resolvable(declaration.DeclarationID()) {
+				return declaration.DeclarationID(), true, nil
+			}
 			if full, ok := intel.Resolve(p.ix, change); ok && full != change {
 				for _, cand := range []string{full, symbolBareName(full), p.packageScopedID(full, change)} {
 					if cand != "" && cand != change && p.graph.Resolvable(cand) {
@@ -801,12 +884,6 @@ func (p *Platform) packageScopedID(full, query string) string {
 	if p.ix == nil {
 		return ""
 	}
-	pkgByFile := make(map[string]string, len(p.ix.Pkgs))
-	for path, pk := range p.ix.Pkgs {
-		for _, f := range pk.Files {
-			pkgByFile[f] = path
-		}
-	}
 	// dirPrefix is the query's qualifier before its last separator
 	// ("bpcli/mcp" in "bpcli/mcp.NewServer"); "" for a bare name.
 	dirPrefix := ""
@@ -820,14 +897,7 @@ func (p *Platform) packageScopedID(full, query string) string {
 		if s.FullName() != full {
 			continue
 		}
-		pkg := pkgByFile[s.File]
-		if pkg == "" {
-			pkg = filepath.Dir(s.File)
-		}
-		id := full
-		if pkg != "" && pkg != "." {
-			id = pkg + "." + full
-		}
+		id := s.DeclarationID()
 		if firstID == "" {
 			firstID = id
 		}
@@ -839,8 +909,8 @@ func (p *Platform) packageScopedID(full, query string) string {
 }
 
 // fileMatchesPathPrefix reports whether the directory part of file ends
-// with the '/'-separated segments of prefix ("internal/bpcli/mcp/server.go"
-// carries the prefix "bpcli/mcp").
+// with the '/'-separated segments of prefix ("internal/mcp/context/server.go"
+// carries the prefix "mcp/context").
 func fileMatchesPathPrefix(file, prefix string) bool {
 	if prefix == "" {
 		return true

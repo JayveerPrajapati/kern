@@ -21,6 +21,7 @@ import (
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 	"github.com/JayveerPrajapati/kern/internal/secscan"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -275,7 +276,7 @@ func GuardCheck(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	}
 	violations, skipped := guard.CheckBoundariesPrecise(ix, b, files, false)
 	if b != nil && b.Pure {
-		violations = append(violations, intel.CheckPurity(ix, files)...)
+		violations = append(violations, topology.CheckPurity(ix, files)...)
 	}
 	relay.PublishPersisted(root, guard.GuardEvents(violations, unconfigured || skipped["boundaries-not-configured"] > 0))
 	threshold := 0

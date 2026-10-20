@@ -18,8 +18,8 @@ primitives.
 ### 1.1 Primary users
 
 - AI coding agents that call kern via the MCP protocol (`tools/call`).
-- Developers who invoke the `kern` CLI directly (`kern check`, `kern exec`,
-  `kern audit`, `kern verify-receipt`, …).
+- Developers who invoke the `kern` CLI directly (`kern verify`, `kern exec`,
+  `kern audit`, `kern evidence`, …).
 
 ### 1.2 Attack surface
 
@@ -29,7 +29,7 @@ primitives.
 | CLI commands | `kern` subcommands operating on the workspace | local process |
 | File system | Reading/indexing/mutating files under the workspace root | local filesystem |
 | Network | HTTP MCP mode (loopback-only), opt-in Ollama/OpenAI/doc-fetch | TCP, loopback |
-| Execution | `kern_exec`, `kern_sandbox`, `kern_execute` run host commands | local process |
+| Execution | `kern_exec` runs host code | local process |
 
 ### 1.3 Key security properties
 
@@ -58,7 +58,7 @@ directly — so every handler must enforce its own constraints.
 
 | Vector | Description | Example |
 |---|---|---|
-| Tool call injection | Agent under prompt injection calls a powerful tool it should not use | Calling `kern_sandbox` with a destructive command |
+| Tool call injection | Agent under prompt injection calls a powerful tool it should not use | Calling `kern_exec` with destructive code |
 | Path traversal | Path-typed arguments containing `..` or absolute paths outside the workspace | `path: "../../etc/shadow"` |
 | Symlink escape | A symlink inside the workspace pointing outside it | `link -> /etc` then `read(link/passwd)` |
 | Tool allowlist bypass | Invoking a tool not on the `KERN_TOOLS` allowlist | `tools/call` with an unlisted name |
@@ -87,7 +87,7 @@ from the client.
 
 ### 2.3 Execution
 
-`kern_exec`, `kern_sandbox`, and `kern_execute` run arbitrary host commands.
+`kern_exec` runs arbitrary host code.
 This is the highest-impact surface: a successful attack is arbitrary code
 execution as the user running kern.
 
@@ -95,7 +95,7 @@ execution as the user running kern.
 |---|---|
 | Arbitrary command execution | Client causes `kern_exec` to run a hostile command |
 | Shell injection | Command string assembled from attacker-controlled input |
-| Sandbox escape | Command in `kern_sandbox` modifies files outside the snapshot root (NOT prevented: the snapshot sandbox is rollback-on-failure, not isolation — commands run with full user privileges and out-of-root writes are never rolled back; only path *arguments* are confined, not the running command) |
+| Sandbox escape | Code executed by `kern_exec` writes files outside the workspace root (NOT prevented: the snapshot sandbox is rollback-on-failure, not isolation — commands run with full user privileges and out-of-root writes are never rolled back; only path *arguments* are confined, not the running command) |
 
 ### 2.4 Network
 
@@ -114,7 +114,7 @@ By default kern makes **no** network calls. Opt-in network surfaces:
 | Dependencies | Third-party Go modules compiled into the binary |
 | Build artifacts | Tampering with a released binary or its receipts |
 | Release signing | Optional GPG signing supported when release secrets are configured (see `docs/security/signed-releases.md`) |
-| Receipt verification | `kern verify-receipt` validates SARIF / in-toto attestations and the local audit-chain hash (`internal/blueprint/cli/verify_receipt.go`, `internal/blueprint/receipt/`) |
+| Receipt verification | `kern evidence verify` validates tamper-evident SHA-256-sealed bundles and the audit-chain snapshot they carry (`internal/evidence/`; the former in-toto/SARIF receipt pipeline was deleted with the blueprint family) |
 
 ---
 
@@ -160,7 +160,7 @@ Three independent gates apply:
    allowed", so exec is *refused* unless the operator opts in via
    `KERN_ALLOW_EXEC=1` (`execAllowlistGate`, `internal/governance/exec.go`).
 2. **Allowlist contents gate.** When `KERN_TOOLS` is set, the specific exec
-   tool being invoked (`kern_exec`, `kern_sandbox`, `kern_execute`) must be
+   tool being invoked (`kern_exec`) must be
    named in it; a non-empty but unrelated allowlist does not re-enable exec.
 3. **Change-firewall gate.** `command.execute` is scored by the risk model
    (`execFirewallCheck` → `Firewall.Check(agentID, "command", "execute")`,
@@ -206,10 +206,9 @@ Command output and LLM-bound text are scrubbed before they leave the machine.
 Applied to execution output at `internal/mcp/handlers_exec.go:72` and `:335`
 (`pii.Mask(out).Text`); exposed to clients as `kern_mask_pii`.
 
-### 3.4 Sandbox (snapshot / rollback — NOT isolation)
+### 3.4 Governed execution runtime (network-isolated, not privilege-isolated)
 
-`kern_sandbox` snapshots the tree before running a risky command and rolls
-back on failure. **The sandbox is rollback-on-failure, not isolation:**
+`kern_exec` runs code in an isolated runtime. Isolation blocks network egress by default, but the process still runs with the caller's **full user privileges**:
 
 - Sandboxed commands run with the caller's **full user privileges** — they
   are not confined, jailed, or restricted at the OS level.
@@ -255,14 +254,16 @@ The kern-first interception layer is **host-dependent, and honestly so**:
 - **Instruction-only hosts** (no hook or plugin capability): only the
   managed rules files ask the agent to prefer kern.
 
-**Commit/CI gate bypass requires a human.** For `kern check` (the git
-commit and CI gate) `KERN_BYPASS=1` / `KERN_ENFORCE=0` are honored only when
+**Commit/CI gate bypass requires a human.** For `kern verify --staged` (the
+git commit gate) `KERN_BYPASS=1` / `KERN_ENFORCE=0` are honored only when
 stdin is an interactive terminal (`isatty`, not the `/dev/null` character
 device trick) **and** the user types `YES` within 15 seconds
-(`humanBypassDecision`, `internal/bpcli/cli/check.go`). From a pipe, daemon or
-CI runner the variables are ignored, the gates enforce, and the refusal is
-audited. Residual limit: an agent that can allocate a pseudo-terminal can
-satisfy the terminal probe (residual risk 11).
+(the pre-commit hook's typed human gate, inherited from the former
+`internal/bpcli/cli/check.go` humanBypassDecision — the blueprint family was
+deleted, the tty-gated confirmation semantics survived in the hook path).
+From a pipe, daemon or CI runner the variables are ignored, the gates
+enforce, and the refusal is audited. Residual limit: an agent that can
+allocate a pseudo-terminal can satisfy the terminal probe (residual risk 11).
 
 **Operator escape hatch (deliberate, audited):** the *operator* (never the
 governed agent) can consciously relax interception for a session by setting
@@ -289,8 +290,8 @@ need raw built-ins should use this hatch rather than fighting the guard
   `VerifyChainReport()` (`internal/governance/audit.go:534`).
 - **Authorization proofs** — evidence bundles carry a SHA-256-sealed audit
   chain snapshot and authorized-scope lineage (`internal/evidence/bundle.go`);
-  `kern verify-receipt` checks the audit-chain hash against the local chain
-  (`internal/blueprint/cli/verify_receipt.go`).
+  `kern evidence verify` checks the bundle digest (and the embedded
+  audit-chain snapshot) against the local chain.
 
 ### 3.6 Loopback-only HTTP binding
 
@@ -320,8 +321,6 @@ the loopback interface:
   An incomplete config (only one of cert/key set) is rejected — the server
   never silently downgrades to plaintext. The loopback-only bind and Origin
   checks apply regardless.
-- The separate `kern-server` binary is the intended path for network access
-  (default `127.0.0.1:8090`, `cmd/kern-server/main.go:43`).
 
 ### 3.7 Tool allowlist
 
@@ -361,9 +360,7 @@ The MCP client (the AI agent host) is **semi-trusted**:
   explicit `agent_id` fall back to a registered default agent so they are
   governed (workspace-scoped) instead of denied
   (`governance.EnsureDefaultAgent()`, `internal/mcp/http.go`).
-- The firewall evaluates `agentID × resource × action` against policies;
-  `kern_authorize_context` computes the exact symbol/call-edge set an agent
-  may legally read (`docs/authorized-context.md`).
+- The firewall evaluates `agentID × resource × action` against policies.
 
 ---
 
@@ -371,19 +368,19 @@ The MCP client (the AI agent host) is **semi-trusted**:
 
 | # | Risk | Notes |
 |---|---|---|
-| 1 | **Plaintext HTTP by default** | The HTTP MCP transport serves plaintext on loopback by default; TLS is optional (`--tls-cert`/`--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`). The *auto* transport (an unspecified address) uses a **0600 unix socket** — reachable only by the owning user — and explicit TCP binds are loopback-only with Origin checks, but a local attacker who can sniff loopback traffic or trick a browser into connecting to `127.0.0.1` gets unauthenticated access to an explicitly TCP-bound server. Setting `KERN_MCP_AUTH_TOKEN` makes `POST /mcp` require `Authorization: Bearer <token>` (constant-time compare; `/health` stays open) — use it with TCP binds or shared hosts. Operators who need the transport outside loopback should enable TLS and put it behind an authenticated proxy; `kern-server` is the supported path for network access. |
-| 2 | **Optional GPG signing** | Release binaries support optional GPG detached signatures when signing keys are configured (`docs/security/signed-releases.md`); binary integrity is verified via `kern verify-receipt` and in-toto/SARIF attestations. |
-| 3 | **Exec tools are powerful** | `kern_exec` / `kern_sandbox` / `kern_execute` run arbitrary host commands as the invoking user. They are opt-in (allowlist + `KERN_ALLOW_EXEC`), fail closed, and can be approval-gated at `HIGH`/`CRITICAL` risk, but a misconfigured `KERN_ALLOW_EXEC=1` + `KERN_EXEC_RISK=LOW` deployment hands an attacker code execution. Operators should keep exec risk at `MEDIUM` or above and review approval requests. |
-| 4 | **Sandbox size limits** | The 100 MiB per-file snapshot cap means very large files are not snapshotted; if such a file is modified or deleted by a run, rollback cannot restore it and refuses loudly. The cap is configurable via `KERN_SANDBOX_MAX_SNAPSHOT_BYTES`, but a raised cap increases memory pressure. |
+| 1 | **Plaintext HTTP by default** | The HTTP MCP transport serves plaintext on loopback by default; TLS is optional (`--tls-cert`/`--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`). The *auto* transport (an unspecified address) uses a **0600 unix socket** — reachable only by the owning user — and explicit TCP binds are loopback-only with Origin checks, but a local attacker who can sniff loopback traffic or trick a browser into connecting to `127.0.0.1` gets unauthenticated access to an explicitly TCP-bound server. Setting `KERN_MCP_AUTH_TOKEN` makes `POST /mcp` require `Authorization: Bearer <token>` (constant-time compare; `/health` stays open) — use it with TCP binds or shared hosts. Operators who need the transport outside loopback should enable TLS and put it behind an authenticated proxy. |
+| 2 | **Optional GPG signing** | Release binaries support optional GPG detached signatures when signing keys are configured (`docs/security/signed-releases.md`); binary integrity is verified via the release checksums and the evidence-bundle digests (`kern evidence verify`; the former in-toto/SARIF attestations were deleted with the blueprint family). |
+| 3 | **Exec tools are powerful** | `kern_exec` runs arbitrary host code as the invoking user. They are opt-in (allowlist + `KERN_ALLOW_EXEC`), fail closed, and can be approval-gated at `HIGH`/`CRITICAL` risk, but a misconfigured `KERN_ALLOW_EXEC=1` + `KERN_EXEC_RISK=LOW` deployment hands an attacker code execution. Operators should keep exec risk at `MEDIUM` or above and review approval requests. |
+| 4 | **Execution output and timeouts** | `kern_exec` retains bounded stdout and enforces timeouts. These bounds protect memory and liveness, not privilege isolation. |
 | 5 | **Symlink races (TOCTOU)** | Confinement resolves symlinks at check time; a symlink swapped between check and use is not covered. This is the standard TOCTOU limitation and is accepted for a local tool. |
 | 6 | **Phase filtering is not a security boundary** | `KERN_MCP_PHASE` only changes `tools/list` advertisement; a client that knows a tool name can call it. Only `KERN_TOOLS` restricts execution. |
 | 7 | **Local process trust** | Any local process with the user's privileges can already read the workspace and environment; kern adds no defense against that actor. |
-| 8 | **Sandbox is rollback, not isolation** | `kern_sandbox` commands run with full user privileges and can read file-borne secrets (`~/.aws/credentials`, `~/.ssh/id_rsa`); writes outside the snapshot root are never rolled back. Only the snapshot root is restored on failure. Do not treat the sandbox as containment for untrusted code. |
+| 8 | **Execution is network-isolated, not privilege-isolated** | `kern_exec` code runs with full user privileges and can read file-borne secrets (`~/.aws/credentials`, `~/.ssh/id_rsa`). It can write outside the workspace unless OS-level containment is supplied. Do not treat the runtime as a sandbox for untrusted code. |
 | 9 | **Same-user actor can forge exec approvals** | The approval HMAC key is a 0600 file in the user's config dir. Anything running as the same OS user (including a coding agent with file access) can read it and stamp a forged "approved" record, defeating the human-approval guarantee for that actor. No software-only storage fixes this: the server process that verifies approvals runs as the same user, so a keychain entry or a second file would be readable the same way. **Mitigation is OS-level separation**: run untrusted agents in a container, VM or separate OS account with no access to the operator's config dir, and keep approvals on the operator's side of that boundary. |
 | 10 | **Allowlisted toolchain commands run repo-controlled code** | `kern_verify command=...` accepts single-line toolchain commands (`go test`, `npm test`, `make`, `pytest`, ...) and rejects pipes, redirects and `$(`. Those commands execute whatever the repository defines (test files, Makefile targets, package scripts), so the allowlist is **not** a containment boundary against a malicious repository. Flags that make a toolchain run a caller-chosen program (`go -exec/-toolexec/-vettool`, Gradle `--init-script`/`-I`) are refused (`denyFlags` in `internal/verifycmd/verify_classify.go`). Approvals are scoped to the project through the per-root store (`<root>/.kern/approvals.json`) and the command-text hash, but are **not** bound to `PATH`, the environment or the resolved binary, so identical text can resolve to a different executable. Use a container or VM for untrusted repos. |
 | 11 | **Pseudo-terminal defeats the bypass TTY probe** | The human-confirmation gate checks that stdin is a terminal. An agent that can allocate a pty (for example via `script` or Python's `pty`) can present a terminal and type `YES` itself. Treat the gate as protection against accidental or non-interactive bypass, not against a hostile same-user agent. |
 | 12 | **`kern update` executes a downloaded installer** | `kern update` fetches `install.sh` (or `install.ps1`) from the project's GitHub `main` and runs it; the script verifies release-asset checksums but the script itself is not pinned or signed. `KERN_INSTALL_SCRIPT_URL` overrides the source (config authorship). Pin with `KERN_VERSION` and review the script when updating in sensitive environments. |
-| 13 | **Confinement is keyed on argument names** | The MCP confinement gate confines values whose argument key is a known path key (`root`, `dir`, `repo`, `file`, `files`, `output`, keys containing `path`, ...). A tool that accepts a path under a different key is only protected if its handler validates it. `TestEveryPathLikeToolArgIsConfined` (`internal/mcp/gate_pathkeys_test.go`) walks every catalog schema and fails when a path-like argument is neither matched by `isPathKey`, registered per tool in `toolPathArgs` (e.g. `kern_diff_files` `a`/`b`), nor listed in `nonPathArgs` with a reason, so a new tool cannot ship an unconfined path silently. `kern_explore` accepts a file path as `symbol` but resolves it only against indexed files (probed: `/etc/hosts` and `../../../etc/hosts` return "unknown symbol"). |
+| 13 | **Confinement is keyed on argument names** | The MCP confinement gate confines values whose argument key is a known path key (`root`, `dir`, `repo`, `file`, `files`, `output`, keys containing `path`, ...). A tool that accepts a path under a different key is only protected if its handler validates it. `TestEveryPathLikeToolArgIsConfined` (`internal/mcp/gate_pathkeys_test.go`) walks every catalog schema and fails when a path-like argument is neither matched by `isPathKey`, registered per tool in `toolPathArgs`, nor listed in `nonPathArgs` with a reason, so a new tool cannot ship an unconfined path silently. `kern_explore` accepts a file path as `symbol` but resolves it only against indexed files (probed: `/etc/hosts` and `../../../etc/hosts` return "unknown symbol"). |
 
 ---
 

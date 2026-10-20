@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
@@ -199,14 +200,14 @@ func TestConditionalFetchCacheKeyIgnoresEtag(t *testing.T) {
 	t.Parallel()
 	base := map[string]any{"root": "/repo", "path": "/repo/main.go"}
 	withEtag := map[string]any{"root": "/repo", "path": "/repo/main.go", "etag": "deadbeef", "agent_id": "alice"}
-	if cacheKeyFor("kern_compact_file", base, "/repo", "noindex") != cacheKeyFor("kern_compact_file", withEtag, "/repo", "noindex") {
+	if cacheKeyFor(context.Background(), "kern_compact_file", base, "/repo", "noindex") != cacheKeyFor(context.Background(), "kern_compact_file", withEtag, "/repo", "noindex") {
 		t.Fatal("etag/identity args must not change the D1 cache key")
 	}
 	withMaxOutput := map[string]any{"root": "/repo", "path": "/repo/main.go", "max_output": "100"}
-	if cacheKeyFor("kern_compact_file", base, "/repo", "noindex") == cacheKeyFor("kern_compact_file", withMaxOutput, "/repo", "noindex") {
+	if cacheKeyFor(context.Background(), "kern_compact_file", base, "/repo", "noindex") == cacheKeyFor(context.Background(), "kern_compact_file", withMaxOutput, "/repo", "noindex") {
 		t.Fatal("max_output must change the D1 cache key (the etag is view-bound, F-2)")
 	}
-	if cacheKeyFor("kern_compact_file", base, "/repo", "noindex") == cacheKeyFor("kern_compact_file", map[string]any{"root": "/repo", "path": "/repo/other.go"}, "/repo", "noindex") {
+	if cacheKeyFor(context.Background(), "kern_compact_file", base, "/repo", "noindex") == cacheKeyFor(context.Background(), "kern_compact_file", map[string]any{"root": "/repo", "path": "/repo/other.go"}, "/repo", "noindex") {
 		t.Fatal("a real argument difference must change the cache key")
 	}
 }
@@ -239,7 +240,7 @@ func TestConditionalFetchShortCircuitNotStored(t *testing.T) {
 
 	// The D1 entry (kern_compact_file builds no index → identity "noindex")
 	// must still hold the FULL text, never the short response.
-	key := toolCacheKeyPrefix + cacheKeyFor("kern_compact_file", base, resolveRoot(root), "noindex")
+	key := toolCacheKeyPrefix + cacheKeyFor(context.Background(), "kern_compact_file", base, resolveRoot(root), "noindex")
 	var entry toolCacheEntry
 	if err := cache.Load(key, &entry); err != nil {
 		t.Fatalf("expected the full response stored in D1, got %v", err)
@@ -293,7 +294,7 @@ func TestConditionalFetchWorkingSetAndMetaRoute(t *testing.T) {
 	if !func() bool { r, _ := classifyMetaRequest("workingset"); return r == "kern_context" }() {
 		t.Fatalf("bare 'workingset' request must route to the workingset marker")
 	}
-	if cacheableForCall("kern_meta", map[string]any{"request": "my working set"}) {
+	if cacheableForCall(context.Background(), "kern_meta", map[string]any{"request": "my working set"}) {
 		t.Fatal("the workingset route must never be D1-cacheable")
 	}
 
@@ -317,54 +318,6 @@ func TestConditionalFetchWorkingSetAndMetaRoute(t *testing.T) {
 // serves FULL text — never a stale "unchanged" verdict — and the outer
 // kern_compose envelope (a NON-eligible tool) must not attach an inner
 // step's etag/unchanged result fields.
-func TestConditionalFetchComposeStepsDoNotLeakEtag(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := testRoot(t)
-	if err := os.WriteFile(filepath.Join(root, "main.go"),
-		[]byte("package main\n\nfunc foo() string { return \"hi\" }\nfunc bar() int { return 1 }\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Learn step 1's etag from a standalone kern_context call: the compose
-	// step hashes the same raw handler text over the same deterministic
-	// index, so its step-1 etag equals this value.
-	ctxArgs, _ := json.Marshal(map[string]any{"root": root, "symbol": "foo"})
-	respCtx := serveOne(t, writeReq("tools/call", 1, `{"name":"kern_context","arguments":`+string(ctxArgs)+`}`))
-	if _, isErr := toolResultText(t, respCtx); isErr {
-		t.Fatalf("unexpected error: %+v", respCtx)
-	}
-	e1, _ := resultField(t, respCtx, "etag").(string)
-	if e1 == "" {
-		t.Fatal("kern_context response must carry an etag")
-	}
-
-	// Compose: step 2 = kern_explore bar carrying etag=e1 (step 1's etag).
-	// With the scope-leak bug, step 2 would reuse step 1's etag and wrongly
-	// short-circuit to "unchanged"; it must serve the FULL explore text.
-	pipeline, _ := json.Marshal([]map[string]any{
-		{"tool": "kern_context", "args": map[string]any{"root": root, "symbol": "foo"}},
-		{"tool": "kern_explore", "args": map[string]any{"root": root, "symbol": "bar", "etag": e1}},
-	})
-	compArgs, _ := json.Marshal(map[string]any{"root": root, "pipeline": string(pipeline)})
-	respComp := serveOne(t, writeReq("tools/call", 2, `{"name":"kern_compose","arguments":`+string(compArgs)+`}`))
-	out, isErr := toolResultText(t, respComp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if strings.Contains(out, "unchanged (etag ") {
-		t.Fatalf("compose step 2 must serve FULL text; got a stale unchanged short-circuit: %q", out)
-	}
-	if !strings.Contains(out, "bar") {
-		t.Fatalf("expected step 2's explore content in the compose output, got %q", out)
-	}
-	// The outer compose envelope is NOT etag-eligible: it must never carry an
-	// inner step's etag/unchanged fields.
-	if resultField(t, respComp, "etag") != nil {
-		t.Fatalf("non-eligible kern_compose envelope must not carry an etag: %+v", respComp)
-	}
-	if resultField(t, respComp, "unchanged") != nil {
-		t.Fatalf("non-eligible kern_compose envelope must not carry unchanged: %+v", respComp)
-	}
-}
 
 // TestConditionalFetchEtagTiedToServeView (F-2): the etag is bound to the
 // serve-time view (max_output budget) — a different serve view is different
@@ -423,48 +376,6 @@ func TestConditionalFetchEtagTiedToServeView(t *testing.T) {
 // matches), the outer kern_compose envelope must STILL carry the inner step's
 // provenance — the unchanged flag belongs to the inner step, and the
 // non-eligible outer tool must not inherit it when deciding provenance.
-func TestConditionalFetchComposeEnvelopeKeepsProvenanceOnLastStepShortCircuit(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := testRoot(t)
-	if err := os.WriteFile(filepath.Join(root, "main.go"),
-		[]byte("package main\n\nfunc foo() string { return \"hi\" }\nfunc bar() int { return 1 }\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Learn the LAST step's real etag from a standalone kern_explore call so
-	// the composed step's etag MATCHES and short-circuits.
-	expArgs, _ := json.Marshal(map[string]any{"root": root, "symbol": "bar"})
-	respExp := serveOne(t, writeReq("tools/call", 1, `{"name":"kern_explore","arguments":`+string(expArgs)+`}`))
-	if _, isErr := toolResultText(t, respExp); isErr {
-		t.Fatalf("unexpected error: %+v", respExp)
-	}
-	e2, _ := resultField(t, respExp, "etag").(string)
-	if e2 == "" {
-		t.Fatal("kern_explore response must carry an etag")
-	}
-
-	pipeline, _ := json.Marshal([]map[string]any{
-		{"tool": "kern_context", "args": map[string]any{"root": root, "symbol": "foo"}},
-		{"tool": "kern_explore", "args": map[string]any{"root": root, "symbol": "bar", "etag": e2}},
-	})
-	compArgs, _ := json.Marshal(map[string]any{"root": root, "pipeline": string(pipeline)})
-	respComp := serveOne(t, writeReq("tools/call", 2, `{"name":"kern_compose","arguments":`+string(compArgs)+`}`))
-	out, isErr := toolResultText(t, respComp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	// The last inner step short-circuits, so its unchanged text appears in the
-	// envelope — but the envelope must STILL carry the provenance field and
-	// the summary line (F-3).
-	if !strings.Contains(out, "unchanged (etag ") {
-		t.Fatalf("expected the last step to short-circuit inside the compose envelope, got %q", out)
-	}
-	if resultField(t, respComp, "provenance") == nil {
-		t.Fatalf("the compose envelope must carry provenance even when the last inner step short-circuits: %+v", respComp)
-	}
-	if !strings.Contains(out, "[kern] index:") {
-		t.Fatalf("expected the provenance summary line in the envelope text, got %q", out)
-	}
-}
 
 // TestConditionalFetchGovernedNeverShortCircuits (F-10 / HIGH-2): the
 // governed/REST passthrough (CallToolGoverned) runs runTool with a bare ctx —
@@ -504,5 +415,134 @@ func TestConditionalFetchGovernedNeverShortCircuits(t *testing.T) {
 	}
 	if !strings.Contains(out, "foo") {
 		t.Fatalf("the governed passthrough must serve the FULL text, got %q", out)
+	}
+}
+
+// TestCallToolGovernedResultConditionalFetch (C2/F3): the structured
+// governed path speaks the conditional-fetch protocol — a fresh serve
+// carries the etag, a matching etag returns a structured unchanged verdict
+// with the one-liner output, and a foreign etag re-serves the full text.
+// The working-set record (trust-but-verify, C1/P1) is proven implicitly:
+// the matching claim is accepted only because the fresh serve recorded it.
+func TestCallToolGovernedResultConditionalFetch(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := testRoot(t)
+	f := filepath.Join(root, "main.go")
+	if err := os.WriteFile(f, []byte("package main\n\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForRoot(strings.NewReader(""), io.Discard, root)
+	defer s.Close()
+
+	// Fresh serve: full text, etag minted, no unchanged verdict.
+	r1, err := s.CallToolGovernedResult(context.Background(), "kern_compact_file", map[string]any{"root": root, "path": f})
+	if err != nil {
+		t.Fatalf("governed result call failed: %v", err)
+	}
+	if !strings.Contains(r1.Output, "foo") || r1.Etag == "" || r1.Unchanged {
+		t.Fatalf("fresh serve: want full text + etag + !unchanged, got %+v (output %.80q)", r1, r1.Output)
+	}
+
+	// Matching etag (no_cache forces the recompute path past D1): the
+	// structured unchanged verdict — one-liner output, same etag.
+	r2, err := s.CallToolGovernedResult(context.Background(), "kern_compact_file", map[string]any{"root": root, "path": f, "etag": r1.Etag, "no_cache": "1"})
+	if err != nil {
+		t.Fatalf("governed result re-call failed: %v", err)
+	}
+	if !r2.Unchanged || r2.Etag != r1.Etag || !strings.Contains(r2.Output, "unchanged (etag ") {
+		t.Fatalf("matching etag: want unchanged verdict + one-liner, got %+v (output %.80q)", r2, r2.Output)
+	}
+
+	// Foreign etag: full text re-serve, no unchanged verdict.
+	r3, err := s.CallToolGovernedResult(context.Background(), "kern_compact_file", map[string]any{"root": root, "path": f, "etag": strings.Repeat("0", 64), "no_cache": "1"})
+	if err != nil {
+		t.Fatalf("governed result foreign-etag call failed: %v", err)
+	}
+	if r3.Unchanged || !strings.Contains(r3.Output, "foo") {
+		t.Fatalf("foreign etag: want full text re-serve, got %+v (output %.80q)", r3, r3.Output)
+	}
+}
+
+// TestMaybePreRenderShortCircuit (C2/F4, W6): a registry-verified etag claim
+// skips the handler render when — and only when — the index identity and
+// serve view are unchanged since the etag was minted. A foreign etag must
+// force the full render, and so must a content change (file deleted — the
+// probe-gated identity flips once past the freshness cooldown). File-backed
+// tools that never load an index (kern_compact_file) record Identity "" and
+// therefore never take the pre-render path — a documented safe degradation.
+func TestMaybePreRenderShortCircuit(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := testRoot(t)
+	f := filepath.Join(root, "main.go")
+	if err := os.WriteFile(f, []byte("package main\n\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForRoot(strings.NewReader(""), io.Discard, root)
+	defer s.Close()
+
+	// Fresh serve with an INDEX-BACKED eligible tool: mints the etag,
+	// records the working-set entry with the index identity and serve view
+	// (the handler's loadIndex stamps scope.ix).
+	exploreArgs := map[string]any{"root": root, "symbol": "foo"}
+	r1, err := s.CallToolGovernedResult(context.Background(), "kern_explore", exploreArgs)
+	if err != nil {
+		t.Fatalf("governed result call failed: %v", err)
+	}
+	if r1.Etag == "" {
+		t.Fatal("eligible response must carry an etag")
+	}
+	entry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey(exploreArgs))
+	if !ok {
+		t.Fatal("fresh serve must record the working-set entry")
+	}
+	if entry.Identity == "" || entry.View == "" {
+		t.Fatalf("recorded entry must carry identity+view for the pre-render gate, got %+v", entry)
+	}
+
+	ctx := context.WithValue(context.Background(), indexScopeKey{}, &indexScope{})
+
+	// Registry-verified claim, unchanged identity+view: the one-liner
+	// WITHOUT rendering.
+	short := s.maybePreRenderShortCircuit(ctx, "kern_explore", map[string]any{"root": root, "symbol": "foo", "etag": r1.Etag})
+	if short == "" || !strings.Contains(short, "unchanged (etag ") {
+		t.Fatalf("verified claim with unchanged identity+view must pre-render short-circuit, got %q", short)
+	}
+
+	// Foreign etag: full render.
+	short = s.maybePreRenderShortCircuit(ctx, "kern_explore", map[string]any{"root": root, "symbol": "foo", "etag": strings.Repeat("0", 64)})
+	if short != "" {
+		t.Fatalf("foreign etag must not pre-render short-circuit, got %q", short)
+	}
+
+	// Content change: delete the file, sleep past the freshness-probe
+	// cooldown, then claim — the identity flips (probe-gated lookup returns
+	// a different identity or "noindex"), so the full render must run even
+	// though the registry entry still matches the claimed etag.
+	if err := os.Remove(f); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5500 * time.Millisecond)
+	short = s.maybePreRenderShortCircuit(ctx, "kern_explore", map[string]any{"root": root, "symbol": "foo", "etag": r1.Etag})
+	if short != "" {
+		t.Fatalf("changed identity must not pre-render short-circuit, got %q", short)
+	}
+
+	// File-backed eligible tool (kern_compact_file): no index load →
+	// Identity "" → the pre-render gate never fires (safe degradation; the
+	// post-render maybeShortCircuit still serves it). Rewrite the file
+	// first (deleted above) so the serve succeeds.
+	if err := os.WriteFile(f, []byte("package main\n\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfServe := map[string]any{"root": root, "path": f}
+	if _, err := s.CallToolGovernedResult(context.Background(), "kern_compact_file", cfServe); err != nil {
+		t.Fatalf("compact_file serve failed: %v", err)
+	}
+	cfEntry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey(cfServe))
+	if !ok {
+		t.Fatal("compact_file serve must record a working-set entry")
+	}
+	if cfEntry.Identity != "" {
+		t.Fatalf("file-backed tool with no index in scope must record Identity \"\" (no pre-render), got %q", cfEntry.Identity)
 	}
 }

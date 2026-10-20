@@ -37,7 +37,38 @@ func StatusSnapshot(src Source) map[string]any {
 		"deployments":  len(src.Deployments("")),
 		"commits":      len(src.Commits()),
 		"services":     svcs,
+		"fetch_errors": fetchErrorsOf(src),
 	}
+}
+
+// fetchErrorsOf returns the live transport-failure count (0 for sources
+// without the capability or without failures), so the canonical status JSON
+// distinguishes "reachable, no data" from "unreachable".
+func fetchErrorsOf(src Source) int {
+	n, _, ok := FetchErrorInfo(src)
+	if !ok {
+		return 0
+	}
+	return n
+}
+
+// fetchErrorReporter is the optional live-source capability that distinguishes
+// an unreachable endpoint from a quiet one: transport failures counted per
+// poll. Local snapshot sources do not implement it (no fetching).
+type fetchErrorReporter interface {
+	FetchErrors() (int, string)
+}
+
+// FetchErrorInfo returns the transport-failure count and last error for
+// sources that report them (live pollers), ok=false otherwise. StatusSnapshot
+// and doctor use it so "wired but every poll fails" never reads as healthy.
+func FetchErrorInfo(src Source) (n int, last string, ok bool) {
+	fer, is := src.(fetchErrorReporter)
+	if !is {
+		return 0, "", false
+	}
+	n, last = fer.FetchErrors()
+	return n, last, true
 }
 
 // DriftSnapshot renders the canonical drift JSON: runtime routes vs the

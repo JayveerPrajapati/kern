@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -163,12 +164,12 @@ func TestReadStdinNonTTY(t *testing.T) {
 	_, _ = w.WriteString("chore: fix pipe input\n")
 	_ = w.Close()
 	os.Stdin = r
-	b, err := readStdin()
+	b, err := cliflags.ReadStdin()
 	if err != nil {
-		t.Fatalf("readStdin(pipe): %v", err)
+		t.Fatalf("cliflags.ReadStdin(pipe): %v", err)
 	}
 	if string(b) != "chore: fix pipe input\n" {
-		t.Errorf("readStdin(pipe) = %q", b)
+		t.Errorf("cliflags.ReadStdin(pipe) = %q", b)
 	}
 	_ = r.Close()
 
@@ -182,8 +183,8 @@ func TestReadStdinNonTTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stdin = f
-	if b, err := readStdin(); err != nil || len(b) != 0 {
-		t.Fatalf("readStdin(empty file) = %q, %v; want empty, nil", b, err)
+	if b, err := cliflags.ReadStdin(); err != nil || len(b) != 0 {
+		t.Fatalf("cliflags.ReadStdin(empty file) = %q, %v; want empty, nil", b, err)
 	}
 	_ = f.Close()
 
@@ -195,8 +196,8 @@ func TestReadStdinNonTTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stdin = devNull
-	if b, err := readStdin(); err != nil || b != nil {
-		t.Fatalf("readStdin(char device) = %q, %v; want nil, nil (no blocking)", b, err)
+	if b, err := cliflags.ReadStdin(); err != nil || b != nil {
+		t.Fatalf("cliflags.ReadStdin(char device) = %q, %v; want nil, nil (no blocking)", b, err)
 	}
 	_ = devNull.Close()
 }

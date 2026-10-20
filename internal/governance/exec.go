@@ -78,6 +78,18 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 	if command != "" {
 		key = execCommandKey(command)
 	}
+	// Rejection stickiness: a human REJECTED this exact command key
+	// before, so a byte-identical retry must be hard-denied instead of
+	// minting a fresh approval — otherwise an agent can spam new approvals
+	// for a command a human already refused. A DIFFERENT command hashes to
+	// a different key and mints normally; an empty root has no persisted
+	// store to consult. The stickiness is bounded by the rejection TTL and
+	// escapable by the operator (`kern approval clear <id>`), so the deny
+	// message names the record, the expiry window, and the clear command
+	// instead of sending the operator to edit approvals.json by hand.
+	if rejected := execRejectedFor(root, key); rejected != nil {
+		return fmt.Errorf("governance: command execution denied: this exact command was previously rejected by a human (approval %s; the rejection is bound to the command's SHA-256, so a byte-identical retry cannot re-request); rejections stop blocking %s after the decision — clear it now with: kern approval clear %s --root %s, or modify the command", rejected.ID, execRejectionTTLText(), rejected.ID, root)
+	}
 	fw := newExecFirewall(root, command)
 	granted := execApprovedFor(root, key)
 	if granted != nil {
@@ -120,7 +132,7 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 			// R6: in-memory approval — no other process can resolve it, so
 			// the `kern approve <id>` hint would be a dead end. Give honest
 			// guidance instead.
-			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; no persistent approval store for this call — allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score, classNote)
+			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; no persistent approval store for this call — an operator can allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score, classNote)
 		}
 		if serr := stampExecApproval(root, ap); serr != nil {
 			return fmt.Errorf("governance: command execution requires human approval, but the approval could not be integrity-protected: %w", serr)
@@ -136,7 +148,7 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 		// evidence (twice, this agent): agents naturally append output-
 		// shaping (| tail, && version-checks) to retries and mint fresh
 		// approvals instead of consuming the granted one.
-		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; approval %s pending — resolve with: kern approve %s; the grant is bound to this command's SHA-256, so the retry MUST be byte-identical (appending pipes, redirects, or extra && segments mints a NEW approval) — retry exactly: %s; the calling agent can await the decision with `kern approval wait %s`%s", risk.Level, risk.Score, classNote, ap.ID, ap.ID, command, ap.ID, compoundPreExecNote(command))
+		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; approval %s pending (allowed for: %s) — resolve with: kern approve %s; the grant is bound to this command's SHA-256, so the retry MUST be byte-identical (appending pipes, redirects, or extra && segments mints a NEW approval) — retry exactly: %s; the calling agent can await the decision with `kern approval wait %s`%s", risk.Level, risk.Score, classNote, ap.ID, command, ap.ID, command, ap.ID, compoundPreExecNote(command))
 	}
 	if RequiresApproval(risk.Level) {
 		// Approval-required but no approval could be surfaced: fail closed.
@@ -168,8 +180,11 @@ func execAllowlistGate(tool string) error {
 	// 1. Empty-allowlist gate: an unset KERN_TOOLS means "all tools allowed",
 	// which must not implicitly allow host command execution. Strict parsing:
 	// only KERN_ALLOW_EXEC=1 opts in; any other value is treated as unset.
+	// The opt-in is framed as operator-at-process-start (F2): the env is
+	// fixed when the server launches, so the hint addresses the human who
+	// owns the terminal, not the calling agent (which cannot change it).
 	if len(allowlist) == 0 && os.Getenv("KERN_ALLOW_EXEC") != "1" {
-		return errors.New("command execution blocked: no KERN_TOOLS allowlist is set and KERN_ALLOW_EXEC is not enabled; refusing to run ungoverned host commands (set KERN_ALLOW_EXEC=1 to opt in, or list the tool in KERN_TOOLS)")
+		return errors.New("command execution blocked: no KERN_TOOLS allowlist is set and KERN_ALLOW_EXEC is not enabled; refusing to run ungoverned host commands (an operator can opt in at process start with KERN_ALLOW_EXEC=1, or list the tool in KERN_TOOLS)")
 	}
 
 	// 2. Allowlist-contents gate. Only enforced when an allowlist is configured.
@@ -277,7 +292,11 @@ func RequestExecApproval(wf *ApprovalWorkflow, command string, toolName ...strin
 	if command != "" {
 		evidence = []string{command}
 	}
-	ap, err := wf.RequestWithBinding(key, execAgentID, risk.Mitigation, risk.Level, nil, evidence, "")
+	var kinds []string
+	if command != "" {
+		kinds = []string{ApprovalKindExecCommand}
+	}
+	ap, err := wf.RequestWithBinding(key, execAgentID, risk.Mitigation, risk.Level, nil, evidence, "", kinds...)
 	if err != nil {
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval, but the approval could not be persisted: %w", err)
 	}
@@ -335,9 +354,9 @@ func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 // value defaults to MEDIUM.
 //
 // Independent of the configured level, a command that ClassifyDangerousCommand
-// marks destructive/pipe-install/installer is escalated to HIGH (approval
-// required) unless the operator explicitly set KERN_EXEC_RISK=LOW — the
-// documented opt-out that disables class escalation. KERN_TOOLS/KERN_ALLOW_EXEC
+// marks destructive/pipe-install/network-fetch/installer is escalated to HIGH
+// (approval required) unless the operator explicitly set KERN_EXEC_RISK=LOW —
+// the documented opt-out that disables class escalation. KERN_TOOLS/KERN_ALLOW_EXEC
 // make exec possible at all; they do NOT exempt dangerous classes from
 // approval (audit-table-2 A).
 func execPolicies(command string) []domain.Policy {

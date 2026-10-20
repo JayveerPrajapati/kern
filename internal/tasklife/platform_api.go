@@ -60,33 +60,40 @@ type PlatformAPI interface {
 // tasklife stays self-contained); it operates on the PlatformAPI surface only.
 func resolveSymbol(api PlatformAPI, change string) (string, bool, error) {
 	if !strings.ContainsAny(change, " \t") {
-		if api.Graph() == nil || api.Graph().Resolvable(change) {
+		if api.Graph() == nil {
 			return change, false, nil
 		}
-		// intel.ResolveEntry — the same entry resolver kern explore uses —
-		// accepts references the graph resolver alone rejects, notably a bare
-		// method name shared by several receivers ("dispatch" ->
-		// "Server.dispatch"), and applies the full refinement explore applies:
-		// a bare name that first lands on a test or fixture symbol (the
-		// fixture store.New beating the production app.New — P2 entry parity)
-		// is re-pointed at a production definition, and a package qualifier
-		// is honored. The refinement happens BEFORE the mapping loop below so
-		// the graph check gates the refined result. Map the answer to a form
-		// the graph accepts: the FullName, its bare name, or the
-		// package-scoped node ID. full may equal the query for a bare name
-		// defined in several packages (a bare func's FullName is its bare
-		// name); the package-scoped node ID still disambiguates it, so it is
-		// tried even then — with non-testdata definitions preferred (Fix 3).
-		// The ambiguity itself stays visible via the render's definition NOTE.
+		// Entry parity (P2, QA 2026-10-19): explore and impact must analyze
+		// the SAME symbol so their caller counts agree. The graph's own
+		// bare-name resolution can pick an arbitrary first-match among
+		// several same-named definitions (labelIndex/nameIndex order —
+		// "Reset" resolved to one definition while explore's ResolveEntry
+		// picks the largest-footprint production definition), making the two
+		// surfaces report different caller counts for the same query.
+		// ResolveEntry — the exact entry resolver kern explore uses — applies
+		// the full refinement (production re-point, largest-footprint pick,
+		// package qualifier), so its candidate is preferred whenever it maps
+		// to a graph-resolvable node that DIFFERS from the graph's raw pick.
+		// fuzzy=true surfaces the mapping note in the impact render, and the
+		// ambiguity stays visible via the render's definition NOTE.
 		if api.Index() != nil {
 			if _, d, ok := intel.ResolveEntry(api.Index(), change); ok && d != nil {
+				rawID, rawOK := api.Graph().ResolveNodeID(change)
 				full := d.FullName()
-				for _, cand := range []string{full, symbolBareName(full), packageScopedID(api.Index(), full, change)} {
-					if cand != "" && cand != change && api.Graph().Resolvable(cand) {
-						return cand, true, nil
+				for _, cand := range []string{d.DeclarationID(), full, symbolBareName(full), packageScopedID(api.Index(), full, change)} {
+					if cand == "" || cand == change || !api.Graph().Resolvable(cand) {
+						continue
 					}
+					if rawOK && rawID == cand {
+						// Graph pick == explore pick: nothing to refine.
+						break
+					}
+					return cand, true, nil
 				}
 			}
+		}
+		if api.Graph().Resolvable(change) {
+			return change, false, nil
 		}
 		return "", false, fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
 			change, closestCandidates(api.Index(), change))
@@ -208,12 +215,6 @@ func packageScopedID(ix *index.Index, full, query string) string {
 	if ix == nil {
 		return ""
 	}
-	pkgByFile := make(map[string]string, len(ix.Pkgs))
-	for path, pk := range ix.Pkgs {
-		for _, f := range pk.Files {
-			pkgByFile[f] = path
-		}
-	}
 	// dirPrefix is the query's qualifier before its last separator
 	// ("bpcli/mcp" in "bpcli/mcp.NewServer"); "" for a bare name.
 	dirPrefix := ""
@@ -227,14 +228,7 @@ func packageScopedID(ix *index.Index, full, query string) string {
 		if s.FullName() != full {
 			continue
 		}
-		pkg := pkgByFile[s.File]
-		if pkg == "" {
-			pkg = filepath.Dir(s.File)
-		}
-		id := full
-		if pkg != "" && pkg != "." {
-			id = pkg + "." + full
-		}
+		id := s.DeclarationID()
 		// Test and fixture symbols (Fix 3 / P2 entry parity): a name defined
 		// in BOTH production and a test/fixture symbol must resolve to the
 		// production definition — the live defects were "dispatch" resolving
@@ -266,8 +260,8 @@ func packageScopedID(ix *index.Index, full, query string) string {
 }
 
 // fileMatchesPathPrefix reports whether the directory part of file ends
-// with the '/'-separated segments of prefix ("internal/bpcli/mcp/server.go"
-// carries the prefix "bpcli/mcp").
+// with the '/'-separated segments of prefix ("internal/mcp/context/server.go"
+// carries the prefix "mcp/context").
 func fileMatchesPathPrefix(file, prefix string) bool {
 	if prefix == "" {
 		return true

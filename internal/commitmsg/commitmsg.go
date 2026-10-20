@@ -705,6 +705,94 @@ func topModifiedDecl(files []fileChange) (string, int) {
 	return best, hits
 }
 
+// subjectLineCandidates returns the added lines eligible to name a subject:
+// non-empty, non-comment lines with quoted string literals stripped (6.5).
+// A hunk that opens with a comment must not leak its prose into the subject
+// ("// lane ..." produced "chore(lib): lane"). Order (files, then added
+// lines) is preserved so the rules' first-wins semantics are unchanged.
+func subjectLineCandidates(files []fileChange) []string {
+	var out []string
+	for _, f := range files {
+		for _, l := range f.added {
+			if s := stripSubjectNoise(l); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// stripSubjectNoise removes comment and quoted-string content from an added
+// line so subject candidates never come from prose (6.5). Returns "" for a
+// line that is entirely comment. Comment tokens: Go/C++/JS "//",
+// Python/shell "#", SQL "--". Quoted strings (double, single, backtick) are
+// stripped whole — their content is incidental prose, never a headline.
+// Leading whitespace is preserved so column-0 checks (declOf) keep seeing
+// indentation.
+func stripSubjectNoise(line string) string {
+	if line == "" {
+		return ""
+	}
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "--") {
+		return ""
+	}
+	// Strip quoted string literals BEFORE comment scanning: a URL or message
+	// inside a literal (e.g. "https://x") must not be treated as a comment.
+	t = stripQuoted(t)
+	// Strip a trailing comment ("code // prose", "code # prose", "code --
+	// prose").
+	if i := commentIndex(t); i >= 0 {
+		t = strings.TrimSpace(t[:i])
+	}
+	if t == "" {
+		return ""
+	}
+	lead := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	return lead + t
+}
+
+// stripQuoted removes double-quoted, backtick and (paired) single-quoted
+// string literals from s. A lone single quote is likely an apostrophe
+// ("it's"), not a string delimiter, so single quotes are only stripped when
+// the line has an even count.
+func stripQuoted(s string) string {
+	singleOK := strings.Count(s, "'")%2 == 0
+	var b strings.Builder
+	in := byte(0) // 0 = outside, otherwise the active delimiter
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if in != 0 {
+			if c == '\\' && i+1 < len(s) {
+				i++ // skip escaped char inside the literal
+				continue
+			}
+			if c == in {
+				in = 0
+			}
+			continue
+		}
+		if c == '"' || c == '`' || (c == '\'' && singleOK) {
+			in = c
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// commentIndex returns the index of the first comment token ("//", "#" or
+// "--") in s, or -1. Callers strip quoted strings first.
+func commentIndex(s string) int {
+	best := -1
+	for _, tok := range []string{"//", "#", "--"} {
+		if i := strings.Index(s, tok); i >= 0 && (best < 0 || i < best) {
+			best = i
+		}
+	}
+	return best
+}
+
 func subjectNoun(files []fileChange, singleArea bool) string {
 	if singleArea {
 		// 1. Exported declarations take highest precedence (Err sentinels are
@@ -733,41 +821,34 @@ func subjectNoun(files []fileChange, singleArea bool) string {
 	if best, hits := topModifiedDecl(files); hits >= 2 {
 		return splitIdent(best)
 	}
-	// 2. Added call or method identifiers
-	for _, f := range files {
-		for _, l := range f.added {
-			trimmed := strings.TrimSpace(l)
-			if trimmed == "" {
-				continue
-			}
-			if id := declIdent(trimmed); id != "" && !isStopWord(id) {
-				return splitIdent(id)
-			}
+	// 2. Added call or method identifiers (comments and quoted strings
+	// stripped — a comment's prose must never name the subject, 6.5)
+	for _, l := range subjectLineCandidates(files) {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		if id := declIdent(trimmed); id != "" && !isStopWord(id) {
+			return splitIdent(id)
 		}
 	}
 	// 3. Action phrases (e.g. "add support", "prevent blocking", "optimize performance")
-	for _, f := range files {
-		words := tokenizeWords(strings.Join(f.added, " "))
-		for i := 0; i < len(words); i++ {
-			if isChangeWord(words[i]) && i+1 < len(words) && !isStopWord(words[i+1]) {
-				return words[i] + " " + words[i+1]
-			}
+	words := tokenizeWords(strings.Join(subjectLineCandidates(files), " "))
+	for i := 0; i < len(words); i++ {
+		if isChangeWord(words[i]) && i+1 < len(words) && !isStopWord(words[i+1]) {
+			return words[i] + " " + words[i+1]
 		}
 	}
 	// 4. Any added declaration
-	for _, f := range files {
-		for _, l := range f.added {
-			if n, ok := declOf(l); ok && !isTestFunc(n) {
-				return splitIdent(n)
-			}
+	for _, l := range subjectLineCandidates(files) {
+		if n, ok := declOf(l); ok && !isTestFunc(n) {
+			return splitIdent(n)
 		}
 	}
-	for _, f := range files {
-		for _, l := range f.added {
-			for _, w := range tokenizeWords(l) {
-				if !isStopWord(w) {
-					return w
-				}
+	for _, l := range subjectLineCandidates(files) {
+		for _, w := range tokenizeWords(l) {
+			if !isStopWord(w) {
+				return w
 			}
 		}
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 )
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns the
@@ -110,7 +112,7 @@ func TestRunDoctorJSON(t *testing.T) {
 func TestRunDoctor_IncludesPrecisionCheck(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)
-	runIndex([]string{root}) // build so precision has an index to report on
+	graphcli.RunIndex([]string{root}) // build so precision has an index to report on
 	out := captureStdout(t, func() { runDoctor([]string{root}) })
 	if !strings.Contains(out, "[") || !strings.Contains(out, "precision") {
 		t.Fatalf("doctor output missing precision check:\n%s", out)
@@ -124,14 +126,14 @@ func TestRunIndexStatusJSON(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)
 	// Before build: NOT BUILT.
-	out := captureStdout(t, func() { runIndex([]string{root, "--status", "--json"}) })
+	out := captureStdout(t, func() { graphcli.RunIndex([]string{root, "--status", "--json"}) })
 	m := assertValidJSON(t, out)
 	if m["built"] != false {
 		t.Fatalf("expected built=false before build: %v", m)
 	}
 	// After build: BUILT with symbols and stale=false.
-	runIndex([]string{root})
-	out = captureStdout(t, func() { runIndex([]string{root, "--status", "--json"}) })
+	graphcli.RunIndex([]string{root})
+	out = captureStdout(t, func() { graphcli.RunIndex([]string{root, "--status", "--json"}) })
 	m = assertValidJSON(t, out)
 	if m["built"] != true {
 		t.Fatalf("expected built=true after build: %v", m)
@@ -159,56 +161,16 @@ func TestRunIndexStatusJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "extra.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out = captureStdout(t, func() { runIndex([]string{root, "--status", "--json"}) })
+	out = captureStdout(t, func() { graphcli.RunIndex([]string{root, "--status", "--json"}) })
 	m = assertValidJSON(t, out)
 	if m["stale"] != true {
 		t.Fatalf("expected stale=true after adding a file: %v", m)
 	}
 }
 
-func TestRunValidateJSON(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1")
-	root := jsonCliFixture(t)
-	// Success path only: a failing validation exits the process, which cannot
-	// be asserted in-process. The JSON shape is shared with the failure path.
-	out := captureStdout(t, func() { runValidate([]string{root, "--json"}) })
-	m := assertValidJSON(t, out)
-	if m["ok"] != true {
-		t.Fatalf("expected ok=true: %v", m)
-	}
-	if m["duration_ms"].(float64) < 0 {
-		t.Fatalf("expected non-negative duration_ms: %v", m)
-	}
-}
-
-func TestRunSandboxJSON(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1")
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
-	root := jsonCliFixture(t)
-	// kern flags must precede the `--` separator; everything after it is the
-	// sandboxed command, verbatim (shell flags like -c included).
-	out := captureStdout(t, func() { runSandbox([]string{"--json", root, "--", "echo", "hi"}) })
-	m := assertValidJSON(t, out)
-	if m["ok"] != true {
-		t.Fatalf("expected ok=true: %v", m)
-	}
-	if !strings.Contains(m["output"].(string), "hi") {
-		t.Fatalf("expected output to contain hi: %v", m)
-	}
-}
-
-// TestRunSandboxSeparatorSplitsBeforeFlags locks the `--` separator fix: a
-// shell flag after the separator must not be rejected as an unknown kern flag.
-func TestRunSandboxSeparatorSplitsBeforeFlags(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1")
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
-	root := jsonCliFixture(t)
-	out := captureStdout(t, func() { runSandbox([]string{root, "--", "sh", "-c", "exit 0"}) })
-	if !strings.Contains(out, "kern: succeeded") {
-		t.Fatalf("expected sandbox success with shell flags after --; got:\n%s", out)
-	}
-}
-
+// TestRunWhatIfJSON: the exec-family JSON tests (validate/sandbox) moved to
+// the internal landing packages with the family (internal/execution,
+// internal/sandbox — workstream 3.6-A tranche 4).
 func TestRunWhatIfJSON(t *testing.T) {
 	root := jsonCliFixture(t)
 	out := captureStdout(t, func() { runImpact([]string{"helper", "--root", root, "--json"}) })
@@ -239,8 +201,8 @@ func TestRunImpactJSON(t *testing.T) {
 func TestRunTestGapsJSON(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)
-	runIndex([]string{root})
-	out := captureStdout(t, func() { runTestgaps([]string{root, "--json"}) })
+	graphcli.RunIndex([]string{root})
+	out := captureStdout(t, func() { graphcli.RunTestgaps([]string{root, "--json"}) })
 	m := assertValidJSON(t, out)
 	if _, ok := m["coverage"]; !ok {
 		t.Fatalf("expected coverage object: %v", m)

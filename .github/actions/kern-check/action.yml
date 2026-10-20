@@ -1,7 +1,7 @@
 name: kern-check
 description: >
-  Runs kern change-firewall verification (kern check --ci) to validate boundary
-  rules, blast radius, risk thresholds, and security invariants in CI.
+  Runs kern governance verification (kern verify) to validate security and
+  architecture invariants in CI.
 
 inputs:
   version:
@@ -9,9 +9,9 @@ inputs:
     required: false
     default: latest
   args:
-    description: Additional flags passed to kern check (default '--ci').
+    description: Additional flags passed to kern verify (default '--types security,architecture').
     required: false
-    default: --ci
+    default: --types security,architecture
   kern-bin:
     description: Existing path to kern binary if already installed.
     required: false
@@ -20,10 +20,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run kern check
+    - name: Run kern verify
       uses: ./
       with:
         version: ${{ inputs.version }}
-        command: check
+        command: verify
         args: ${{ inputs.args }}
         kern-bin: ${{ inputs.kern-bin }}

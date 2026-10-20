@@ -87,7 +87,11 @@ func (s *Server) handleLarges(ctx context.Context, args map[string]any) (string,
 	return s.graphCall(ctx, args, graph.Larges)
 }
 func (s *Server) handleArch(ctx context.Context, args map[string]any) (string, error) {
-	return s.graphCall(ctx, args, graph.Arch)
+	ix, err := s.loadIndex(ctx, argString(args, "root"))
+	if err != nil {
+		return "", err
+	}
+	return graph.Arch(ctx, ix, s.sessionFor(argString(args, "root")), args)
 }
 func (s *Server) handleSurprising(ctx context.Context, args map[string]any) (string, error) {
 	return s.graphCall(ctx, args, graph.Surprising)

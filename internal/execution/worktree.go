@@ -273,7 +273,13 @@ func moveUnhashableAside(root string) [][2]string {
 // restoreMoved moves files hidden by moveUnhashableAside back into place.
 func restoreMoved(moves [][2]string) {
 	for i := len(moves) - 1; i >= 0; i-- {
-		_ = os.Rename(moves[i][1], moves[i][0])
+		if err := os.Rename(moves[i][1], moves[i][0]); err != nil {
+			// Fail loud: a socket/FIFO/device left in the temp dir is a
+			// user-visible filesystem change. The inode survives (bound
+			// sockets keep working), but the original path is gone until
+			// manually restored.
+			fmt.Fprintf(os.Stderr, "kern execute: WARNING: could not restore %s (left at %s): %v\n", moves[i][0], moves[i][1], err)
+		}
 	}
 }
 
@@ -443,7 +449,13 @@ func restoreGitAside(hidden, original string) {
 	}
 	delete(gitAsideRegistry, hidden)
 	gitAsideMu.Unlock()
-	_ = os.Rename(hidden, original)
+	if err := os.Rename(hidden, original); err != nil {
+		// Fail loud: the repo is left without its .git until the aside is
+		// restored. The orphaned-aside detection on the next execution start
+		// (warnOrphanedGitAsides) is the safety net, but the operator must
+		// hear about it now, not at the next run.
+		fmt.Fprintf(os.Stderr, "kern execute: WARNING: could not restore %s from %s: %v\n", original, hidden, err)
+	}
 }
 
 // restoreAllGitAsides restores every registered aside. Used by the signal
@@ -452,7 +464,12 @@ func restoreAllGitAsides() {
 	gitAsideMu.Lock()
 	defer gitAsideMu.Unlock()
 	for hidden, original := range gitAsideRegistry {
-		_ = os.Rename(hidden, original)
+		if err := os.Rename(hidden, original); err != nil {
+			// The handler is about to exit the process; warn so the operator
+			// knows the repo may be missing its .git (the orphaned-aside
+			// detection on the next execution start is the safety net).
+			fmt.Fprintf(os.Stderr, "kern execute: WARNING: could not restore %s from %s: %v\n", original, hidden, err)
+		}
 	}
 	gitAsideRegistry = map[string]string{}
 }

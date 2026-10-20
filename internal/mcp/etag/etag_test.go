@@ -41,7 +41,7 @@ func TestHashStability(t *testing.T) {
 // TestUnchangedResponseText pins the short-circuit body (ADR-0012 item 2).
 func TestUnchangedResponseText(t *testing.T) {
 	e := Hash("same", "1.0.0")
-	want := "unchanged (etag " + e + ")"
+	want := "unchanged (etag " + e + ") — identical to your earlier read; reuse your earlier copy. If this content is not in your context, call again without the etag argument to receive the full payload."
 	if got := UnchangedResponseText(e); got != want {
 		t.Fatalf("UnchangedResponseText = %q, want %q", got, want)
 	}

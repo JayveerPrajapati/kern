@@ -114,8 +114,10 @@ type nsState struct {
 // a missing file reads as zeros, so every index written before counters
 // existed is fully backward compatible.
 type nsCounters struct {
-	Hits   int64 `json:"hits"`
-	Misses int64 `json:"misses"`
+	Hits       int64 `json:"hits"`
+	Misses     int64 `json:"misses"`
+	SavedBytes int64 `json:"saved_bytes"`
+	Evictions  int64 `json:"evictions"`
 }
 
 // countersPersistInterval throttles the on-disk write of the persisted
@@ -169,20 +171,20 @@ func saveCounters(ns string, c *nsCounters) error {
 	return os.Rename(tmp, path)
 }
 
-// bumpPersisted records one persisted hit (hit=true) or miss for ns and
-// persists the counters file (throttled to once per second). It never
-// returns an error — counter accounting must never fail a lookup. Callers
-// must NOT hold the namespace lock (the file write is blocking disk I/O).
-func (st *nsState) bumpPersisted(ns string, hit bool) {
+// bumpPersisted records one persisted accounting event for ns (hit, miss,
+// saved bytes and/or evictions) and persists the counters file (throttled to
+// once per second). It never returns an error — counter accounting must never
+// fail a lookup. Callers must NOT hold the namespace lock (the file write is
+// blocking disk I/O).
+func (st *nsState) bumpPersisted(ns string, hits, misses, saved, evicted int64) {
 	st.mu.Lock()
 	if st.pc == nil {
 		st.pc = loadCounters(ns)
 	}
-	if hit {
-		st.pc.Hits++
-	} else {
-		st.pc.Misses++
-	}
+	st.pc.Hits += hits
+	st.pc.Misses += misses
+	st.pc.SavedBytes += saved
+	st.pc.Evictions += evicted
 	snapshot := *st.pc
 	now := time.Now()
 	write := st.pcSavedAt.IsZero() || now.Sub(st.pcSavedAt) >= countersPersistInterval
@@ -440,6 +442,13 @@ func Store(ns, input string, v any) error {
 	st.es = next
 	st.mu.Unlock()
 
+	// Persisted eviction accounting runs OUTSIDE the namespace lock:
+	// bumpPersisted locks it again (blocking disk I/O must never run under
+	// a lock held here, and the lock is non-reentrant).
+	if len(evicted) > 0 {
+		st.bumpPersisted(ns, 0, 0, 0, int64(len(evicted)))
+	}
+
 	// Disk I/O outside the lock: reclaim evicted payloads, then persist the
 	// index snapshot. A save that races a newer one may lag on disk (memory
 	// is the source of truth; disk is best-effort persistence, and the
@@ -481,7 +490,7 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 	if len(sq) == 0 {
 		st.mu.Unlock()
 		st.misses.Add(1)
-		st.bumpPersisted(ns, false)
+		st.bumpPersisted(ns, 0, 1, 0, 0)
 		return "", 0, false, nil
 	}
 	cut := thr
@@ -521,7 +530,7 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 			_ = st.persist(ns, next, dead)
 		}
 		st.misses.Add(1)
-		st.bumpPersisted(ns, false)
+		st.bumpPersisted(ns, 0, 1, 0, 0)
 		return "", 0, false, nil
 	}
 	// Copy the payload key + matched input: the payload cache.Load below is
@@ -571,12 +580,12 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 		st.mu.Unlock()
 		_ = st.persist(ns, next, dead)
 		st.misses.Add(1)
-		st.bumpPersisted(ns, false)
+		st.bumpPersisted(ns, 0, 1, 0, 0)
 		return "", 0, false, nil
 	}
 	st.hits.Add(1)
 	st.saved.Add(int64(bytes))
-	st.bumpPersisted(ns, true)
+	st.bumpPersisted(ns, 1, 0, int64(bytes), 0)
 	return in, best, true, nil
 }
 
@@ -751,6 +760,36 @@ type NamespaceStats struct {
 	SavedBytes int64 `json:"saved_bytes"` // payload bytes served on hits (savings estimate)
 }
 
+// mergePersistedCounters folds the durable cross-process counters into s. The
+// atomics on nsState are per-process and reset on restart, so a fresh process
+// (e.g. `kern semcache stats`, `kern cache`) would otherwise report zero
+// lookups for a cache that IS compounding — the counters file exists precisely
+// so the accounting survives restarts (see nsCounters). Pass the live pc when
+// the namespace is active in this process (its in-memory total may lead the
+// throttled disk write), else it is loaded from disk. Persisted totals always
+// dominate: every bump increments both the atomics and st.pc, and pc
+// additionally carries prior processes' totals.
+func mergePersistedCounters(s *NamespaceStats, ns string, pc *nsCounters) {
+	if pc == nil {
+		pc = loadCounters(ns)
+	}
+	if pc == nil {
+		return
+	}
+	if pc.Hits > s.Hits {
+		s.Hits = pc.Hits
+	}
+	if pc.Misses > s.Misses {
+		s.Misses = pc.Misses
+	}
+	if pc.SavedBytes > s.SavedBytes {
+		s.SavedBytes = pc.SavedBytes
+	}
+	if pc.Evictions > s.Evictions {
+		s.Evictions = pc.Evictions
+	}
+}
+
 // Stats returns per-namespace accounting. As a side effect it sweeps every
 // on-disk namespace for entries older than the TTL and reclaims their
 // index+payloads: an untouched namespace never sees a Lookup, so pruneStale
@@ -768,7 +807,9 @@ func Stats() (map[string]NamespaceStats, error) {
 		if st.es != nil {
 			s.Entries = len(st.es)
 		}
+		pc := st.pc
 		st.mu.Unlock()
+		mergePersistedCounters(&s, ns, pc)
 		out[ns] = s
 		return true
 	})
@@ -814,6 +855,7 @@ func Stats() (map[string]NamespaceStats, error) {
 			}
 			s := out[ns]
 			s.Entries = len(kept)
+			mergePersistedCounters(&s, ns, nil)
 			out[ns] = s
 			continue
 		}

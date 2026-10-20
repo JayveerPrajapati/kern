@@ -16,7 +16,7 @@ type SurfaceTouchRecord struct {
 	// repeated `kern check` runs stay idempotent.
 	Commit string
 	// CatalogTouched reports whether the commit changed the MCP catalog
-	// manifest (internal/mcp/catalog/ — the source of truth behind
+	// manifest (internal/mcpcatalog/ — the source of truth behind
 	// mcp.ToolNames()).
 	CatalogTouched bool
 	// PluginTouched reports whether the commit changed either copy of the

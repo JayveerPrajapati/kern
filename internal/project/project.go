@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // Session bundles a project root with its on-demand symbol index and a stats
@@ -28,6 +28,7 @@ type Session struct {
 	lastStoreModTime time.Time // modtime of sqlite/json on disk when index was loaded
 	staleUntil       time.Time // cooldown: skip staleness walk until this time
 	stale            bool      // mark index stale on file-event notification
+	probing          bool      // single-flight: one off-lock staleness probe in flight per session
 	watcher          *fileWatcher
 	saveWG           sync.WaitGroup // B6: in-flight background index saves (drained by Close)
 	// B1 single-flight state: one rebuild runs at a time, OFF the session
@@ -36,17 +37,18 @@ type Session struct {
 	// buildErr carry the finished build's outcome to those waiters. They are
 	// deliberately separate from s.ix — Invalidate() nulls s.ix, and a waiter
 	// must still receive the build that just completed.
-	rebuilding  bool
-	buildResult *index.Index
-	buildErr    error
-	cond        *sync.Cond
+	rebuilding   bool
+	buildStarted time.Time // when the in-flight rebuild began (IndexWithin reports elapsed time)
+	buildResult  *index.Index
+	buildErr     error
+	cond         *sync.Cond
 	// Derived computation cache: deterministic functions of the index, cleared
 	// in Invalidate(). Populated lazily by the accessor methods below.
-	arch         *intel.Architecture
-	communities  []intel.Community
-	hubs         []intel.Hub
+	arch         *topology.Architecture
+	communities  []topology.Community
+	hubs         []topology.Hub
 	hubsLimit    int
-	bridges      []intel.Bridge
+	bridges      []topology.Bridge
 	bridgesLimit int
 }
 
@@ -85,7 +87,11 @@ func New(root, session string) *Session {
 		lastStoreModTime: latestStoreModTime(root),
 	}
 	s.cond = sync.NewCond(&s.mu)
-	s.watcher = newFileWatcher(root, func(string) { s.Invalidate() })
+	// Never recursively watch a broad root ($HOME, a filesystem root, a
+	// documents folder): with kern wired globally an agent can start there.
+	if index.UnsafeAutoIndexRoot(root) == "" {
+		s.watcher = newFileWatcher(root, func(string) { s.Invalidate() })
+	}
 	return s
 }
 
@@ -153,33 +159,63 @@ func (s *Session) Index() (*index.Index, error) {
 	// pointer), and the git slow path stages into a throwaway index file, so
 	// concurrent checks do not contend.
 	if s.ix != nil && !s.stale {
-		ix := s.ix
-		s.mu.Unlock()
-
-		stale := ix.Stale()
-
-		s.mu.Lock()
-		// Reconcile with the current state: the session may have changed
-		// while the check ran (Invalidate, a concurrent rebuild, or an
-		// external store write).
-		//
-		// 1. A concurrent rebuild finished while we were checking and the
-		//    session now serves a fresh index — serve it instead of
-		//    triggering a second rebuild.
+		// D1: single-flight the staleness probe per cooldown window. A burst
+		// of calls that all arrive after the cooldown expired would otherwise
+		// each run the expensive probe (content walk / git proof on a dirty
+		// tree) concurrently. The first caller in the window probes; the rest
+		// wait on the cond and reuse the memoized verdict (staleUntil on
+		// fresh, session invalidation on stale) — the same memo ProbeFresh
+		// serves. The memo can never extend staleness beyond the cooldown:
+		// the fresh verdict sets the SAME staleUntil the pre-change code set,
+		// and a stale verdict never reads as fresh.
+		for s.probing {
+			s.cond.Wait()
+		}
+		// The in-flight probe (or a concurrent rebuild/invalidation) may have
+		// settled the window while we waited: serve the settled state.
 		if s.ix != nil && !s.stale && time.Now().Before(s.staleUntil) {
 			cur := s.ix
 			s.mu.Unlock()
 			return cur, nil
 		}
-		// 2. The check judged the SAME index we copied still fresh, and the
-		//    session state is unchanged — record the cooldown and serve it.
-		if !stale && s.ix == ix && !s.stale {
-			s.staleUntil = time.Now().Add(s.freshnessCooldown())
+		if s.ix != nil && !s.stale {
+			ix := s.ix
+			s.probing = true
 			s.mu.Unlock()
-			return ix, nil
+
+			stale := probeStale(ix)
+
+			s.mu.Lock()
+			s.probing = false
+			// Reconcile with the current state: the session may have changed
+			// while the check ran (Invalidate, a concurrent rebuild, or an
+			// external store write).
+			//
+			// 1. A concurrent rebuild finished while we were checking and the
+			//    session now serves a fresh index — serve it instead of
+			//    triggering a second rebuild.
+			if s.ix != nil && !s.stale && time.Now().Before(s.staleUntil) {
+				cur := s.ix
+				s.cond.Broadcast()
+				s.mu.Unlock()
+				return cur, nil
+			}
+			// 2. The check judged the SAME index we copied still fresh, and the
+			//    session state is unchanged — record the cooldown and serve it.
+			if !stale && s.ix == ix && !s.stale {
+				s.staleUntil = time.Now().Add(s.freshnessCooldown())
+				s.cond.Broadcast()
+				s.mu.Unlock()
+				return ix, nil
+			}
+			// Otherwise the index is stale (or the session state changed):
+			// fall through to the rebuild/await path below with the lock
+			// held. Probe waiters are deliberately NOT woken here — they
+			// stay asleep until the rebuild's own broadcast, so they observe
+			// the rebuilt index instead of re-probing the stale one (the
+			// rebuild path below always broadcasts: the rebuilder at
+			// completion, or the in-flight rebuilder it serves).
 		}
-		// Otherwise the index is stale (or the session state changed): fall
-		// through to the rebuild/await path below with the lock held.
 	}
 
 	if s.rebuilding {
@@ -205,6 +241,7 @@ func (s *Session) Index() (*index.Index, error) {
 
 	// We are the rebuilder.
 	s.rebuilding = true
+	s.buildStarted = time.Now()
 	root := s.Root
 	s.mu.Unlock()
 
@@ -247,6 +284,13 @@ func (s *Session) Index() (*index.Index, error) {
 // more expensive than a clean Build (the policy). The explicit
 // `kern index` CLI command is unaffected (it calls index.Build directly).
 func (s *Session) rebuildIndex(root string) (*index.Index, error) {
+	// An AUTOMATIC first build (no persisted index anywhere): refuse broad
+	// roots such as $HOME or a filesystem root so a globally wired agent
+	// started in the wrong directory cannot index the whole machine. This
+	// runs before any store is opened (opening SQLite creates <root>/.kern).
+	if reason := index.UnsafeAutoIndexRoot(root); reason != "" && !index.HasPersistedIndex(root) {
+		return nil, &index.UnsafeRootError{Root: root, Reason: reason}
+	}
 	var prev *index.Index
 	if index.SQLiteEnabled() {
 		// SQLite is the persistent store for concurrent access (WAL). Prefer
@@ -287,7 +331,9 @@ func (s *Session) rebuildIndex(root string) (*index.Index, error) {
 	}
 	if ix == nil {
 		var berr error
+		done := markIndexing(root)
 		ix, berr = index.Build(root)
+		done()
 		if berr != nil {
 			return nil, berr
 		}
@@ -325,6 +371,14 @@ const staleCooldown = 1 * time.Second
 // safety net for events the watcher missed, instead of once per second.
 const staleCooldownNative = 5 * time.Second
 
+// probeStale runs the session's off-lock staleness probe for a served index
+// (the Index and ProbeFresh paths). A package var so tests can swap in a
+// counting or blocking wrapper (mirroring index.readFile) to prove the
+// single-flight memo runs the probe once per cooldown window. It is only the
+// cooldown-gated session probe; rebuildIndex's load-time staleness checks
+// call ix.Stale() directly and are unaffected.
+var probeStale = func(ix *index.Index) bool { return ix.Stale() }
+
 // freshnessCooldown returns the staleness re-check window for this session:
 // relaxed when a file-event watcher is running (events bypass the window via
 // Invalidate), tight otherwise (B5).
@@ -341,6 +395,95 @@ func (s *Session) CachedIndex() (*index.Index, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ix, s.ix != nil && !s.stale
+}
+
+// ProbeFresh validates the cached index against the tree WITHOUT building,
+// using the same rate-limited staleness probe as Index: while the freshness
+// cooldown holds, the cached identity is trusted; once it expires, the
+// check runs off the session lock (like Index — it can cost hundreds of ms
+// of git subprocesses on a dirty tree). The probe is single-flighted per
+// cooldown window (D1): a burst of cacheable calls that all arrive after
+// the cooldown expired run the expensive probe ONCE — the first caller in
+// the window probes, the rest wait on the cond and reuse the memoized
+// verdict (staleUntil on fresh, session invalidation on stale). The memo is
+// the same staleUntil the pre-change code set, so it can never extend
+// staleness beyond the pre-existing cooldown. A stale result invalidates
+// the cached index exactly like Invalidate() so the next Index() rebuilds
+// and identity peeks (CachedIndex) report nothing. The D1 tool cache uses
+// this to avoid replaying responses keyed to an index that no longer
+// matches the tree (ADR-0012; watcher-less hosts, where nothing else breaks
+// the replay cycle). A session with no cached index reports true vacuously
+// — there is no identity to distrust. It never triggers a build.
+func (s *Session) ProbeFresh() bool {
+	s.mu.Lock()
+	if s.ix == nil {
+		s.mu.Unlock()
+		return true
+	}
+	if s.stale {
+		s.mu.Unlock()
+		return false
+	}
+	if time.Now().Before(s.staleUntil) {
+		s.mu.Unlock()
+		return true
+	}
+	// D1 single-flight: another probe is already running this window — wait
+	// for its memoized verdict instead of probing again. Woken by the
+	// runner's broadcast, the loop re-enters the checks above on the settled
+	// state: the runner extended staleUntil on fresh, or invalidated (ix nil
+	// + stale) on a stale verdict. The re-check order mirrors the entry
+	// checks exactly, so a waiter observes the post-probe state with the
+	// same semantics a fresh caller would.
+	for s.probing {
+		s.cond.Wait()
+	}
+	if s.ix == nil {
+		s.mu.Unlock()
+		return true
+	}
+	if s.stale {
+		s.mu.Unlock()
+		return false
+	}
+	if time.Now().Before(s.staleUntil) {
+		s.mu.Unlock()
+		return true
+	}
+	ix := s.ix
+	s.probing = true
+	s.mu.Unlock()
+
+	stale := probeStale(ix)
+
+	s.mu.Lock()
+	s.probing = false
+	defer s.mu.Unlock()
+	if s.ix != ix || s.stale {
+		// A rebuild or invalidation landed while the probe ran: trust the
+		// new state (a fresh build), or stay distrusted (stale). No
+		// cooldown bookkeeping of ours either way.
+		s.cond.Broadcast()
+		return !s.stale
+	}
+	if stale {
+		// The probe found the tree changed: invalidate (mirroring
+		// Invalidate) so the next Index() rebuilds.
+		s.ix = nil
+		s.staleUntil = time.Time{}
+		s.stale = true
+		s.arch = nil
+		s.communities = nil
+		s.hubs = nil
+		s.hubsLimit = 0
+		s.bridges = nil
+		s.bridgesLimit = 0
+		s.cond.Broadcast()
+		return false
+	}
+	s.staleUntil = time.Now().Add(s.freshnessCooldown())
+	s.cond.Broadcast()
+	return true
 }
 
 // Invalidate drops the cached index so the next Index() call rebuilds it.
@@ -362,25 +505,25 @@ func (s *Session) Invalidate() {
 
 // Architecture returns the cached architecture analysis, computing it once
 // and reusing it until the index is invalidated.
-func (s *Session) Architecture(ix *index.Index) intel.Architecture {
+func (s *Session) Architecture(ix *index.Index) topology.Architecture {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.arch != nil {
 		return *s.arch
 	}
-	a := intel.AnalyzeArchitecture(ix)
+	a := topology.AnalyzeArchitecture(ix)
 	s.arch = &a
 	return a
 }
 
 // CommunitiesList returns the cached community list, computing it once.
-func (s *Session) CommunitiesList(ix *index.Index) []intel.Community {
+func (s *Session) CommunitiesList(ix *index.Index) []topology.Community {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.communities != nil {
 		return s.communities
 	}
-	s.communities = intel.Communities(ix)
+	s.communities = topology.Communities(ix)
 	return s.communities
 }
 
@@ -404,6 +547,7 @@ func (s *Session) Record(op stats.Operation, source, model string, before, after
 	_ = rec.Record(stats.Entry{
 		Session:      s.Session,
 		Operation:    op,
+		Root:         s.Root,
 		Source:       source,
 		Model:        model,
 		BeforeTokens: before,

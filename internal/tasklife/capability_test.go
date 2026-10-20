@@ -94,8 +94,8 @@ func TestCapabilityPrecheck(t *testing.T) {
 }
 
 func TestFallbackFor(t *testing.T) {
-	if got := FallbackFor("kern_what_if"); got != "kern_impact" {
-		t.Errorf("FallbackFor(kern_what_if) = %q, want kern_impact", got)
+	if got := FallbackFor("kern_heal"); got != "kern_verify" {
+		t.Errorf("FallbackFor(kern_heal) = %q, want kern_verify", got)
 	}
 	if got := FallbackFor("kern_analyze"); got != "" {
 		t.Errorf("FallbackFor(kern_analyze) = %q, want empty", got)

@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"html"
 	"path/filepath"
 	"sort"
@@ -22,16 +23,18 @@ var graphFS embed.FS
 // verbatim without double-escaping.
 var graphHTMLTmpl = template.Must(template.ParseFS(graphFS, "export_graph.html"))
 
-// GraphNode is a single symbol node in a neighbourhood graph.
+// GraphNode is a declaration or a scoped unresolved reference in a graph.
 type GraphNode struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Role      string `json:"role,omitempty"` // def, caller, callee
-	File      string `json:"file,omitempty"`
-	Line      int    `json:"line,omitempty"`
-	Pkg       string `json:"pkg,omitempty"`       // top-level dir of File (whole-repo mode)
-	Community string `json:"community,omitempty"` // label-propagation community (whole-repo mode)
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"`
+	Role       string   `json:"role,omitempty"` // def, caller, callee
+	File       string   `json:"file,omitempty"`
+	Line       int      `json:"line,omitempty"`
+	Pkg        string   `json:"pkg,omitempty"`       // top-level dir of File (whole-repo mode)
+	Community  string   `json:"community,omitempty"` // label-propagation community (whole-repo mode)
+	Resolution string   `json:"resolution,omitempty"`
+	Candidates []string `json:"candidates,omitempty"`
 }
 
 // Edge confidence tiers describe how reliably an edge was derived.
@@ -72,73 +75,57 @@ type GraphEdge struct {
 	To              string `json:"to"`
 	Confidence      string `json:"confidence,omitempty"`       // high/medium/low (internal)
 	ConfidenceLabel string `json:"confidence_label,omitempty"` // EXTRACTED/INFERRED/AMBIGUOUS (standard)
+	Reference       string `json:"reference,omitempty"`
+	SourceFile      string `json:"source_file,omitempty"`
+	Resolution      string `json:"resolution,omitempty"`
+	Synth           string `json:"synth,omitempty"`
+	Binding         string `json:"binding,omitempty"`
 }
 
 // GraphResult is the structured neighbourhood of a symbol.
 type GraphResult struct {
-	Root  string              `json:"root"`
-	Nodes []GraphNode         `json:"nodes"`
-	Edges []GraphEdge         `json:"edges"`
-	Stats tokstats.TokenStats `json:"stats,omitempty"`
+	SchemaVersion   int                 `json:"schema_version"`
+	Root            string              `json:"root"`
+	RootIDs         []string            `json:"root_ids,omitempty"`
+	UnresolvedCalls int                 `json:"unresolved_calls,omitempty"`
+	Nodes           []GraphNode         `json:"nodes"`
+	Edges           []GraphEdge         `json:"edges"`
+	Stats           tokstats.TokenStats `json:"stats,omitempty"`
 }
 
 // Neighborhood returns the definition, callers, and callees of a symbol as a
 // structured graph (used by --json, --graphml and --html exports).
 func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
-	g := GraphResult{Root: symbol}
-	defs := ix.symbolsFor(symbol)
+	g := GraphResult{SchemaVersion: GraphSchemaVersion, Root: symbol}
+	catalog := newExportCatalog(ix)
+	defs := catalog.roots(symbol)
 	if len(defs) == 0 {
-		if d, ok := resolveName(ix, symbol); ok {
-			defs = []Symbol{d}
-		} else {
-			return g, false
-		}
+		return g, false
 	}
-	root := defs[0]
 	byID := map[string]GraphNode{}
-	rootID := root.FullName()
-	for _, d := range defs {
-		byID[d.FullName()] = GraphNode{
-			ID: d.FullName(), Name: d.FullName(), Kind: d.Kind,
-			Role: "def", File: d.File, Line: d.Line,
-		}
+	roots := map[string]bool{}
+	for _, def := range defs {
+		node := declarationNode(def, "def")
+		byID[node.ID] = node
+		roots[node.ID] = true
+		g.RootIDs = append(g.RootIDs, node.ID)
 	}
-	for _, c := range ix.CallersFor(root) {
-		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "caller"})
-		conf := edgeConfidenceFor(ix, c, rootID, root.File)
-		g.Edges = append(g.Edges, GraphEdge{
-			From: c, To: rootID,
-			Confidence:      conf,
-			ConfidenceLabel: confidenceLabel(conf),
-		})
-	}
-	for _, c := range ix.CallsFor(root) {
-		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "callee"})
-		conf := edgeConfidenceFor(ix, rootID, c, root.File)
-		g.Edges = append(g.Edges, GraphEdge{
-			From: rootID, To: c,
-			Confidence:      conf,
-			ConfidenceLabel: confidenceLabel(conf),
-		})
-	}
-	// resolve file:line for caller/callee nodes that have a definition
-	for id, n := range byID {
-		if n.File != "" || id == rootID {
+	for _, call := range catalog.calls(defs) {
+		if !exportTouchesRoot(call.from, roots) && !exportTouchesRoot(call.to, roots) {
 			continue
 		}
-		if d, ok := resolveName(ix, n.Name); ok {
-			n.Kind, n.File, n.Line = d.Kind, d.File, d.Line
-			byID[id] = n
+		call.from.Role, call.to.Role = "caller", "callee"
+		byID[call.from.ID] = mergeNode(byID[call.from.ID], call.from)
+		byID[call.to.ID] = mergeNode(byID[call.to.ID], call.to)
+		g.Edges = append(g.Edges, call.edge)
+		if call.edge.Resolution != "resolved" {
+			g.UnresolvedCalls++
 		}
 	}
-	ids := make([]string, 0, len(byID))
-	for id := range byID {
-		ids = append(ids, id)
+	for _, node := range byID {
+		g.Nodes = append(g.Nodes, node)
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		g.Nodes = append(g.Nodes, byID[id])
-	}
+	g.sort()
 	// Collect the distinct node files in NODE ORDER for the savings
 	// denominator: TokenSavingsForNeighborhood concatenates them into the
 	// full-text baseline, and the walk order matters to the BPE count (a
@@ -164,99 +151,45 @@ func (ix *Index) WholeGraph(limit int) GraphResult {
 	if limit <= 0 {
 		limit = 400
 	}
-	labels := ix.Communities
-	if len(labels) == 0 {
-		labels = ix.CommunityLabels()
-	}
-	// B5 (deep-dive 2026-10-03): the ranking degree and the emitted edges
-	// must describe the SAME graph. The raw Calls/Callers buckets include
-	// unresolved external targets (assert.Equal, fmt.Sprintf, fluent
-	// fragments) that can never be emitted as edges between indexed
-	// symbols — counting them let noise-shaped names outrank genuinely
-	// connected ones. Degree counts only edges whose other endpoint
-	// resolves to a defined symbol.
-	defined := make(map[string]bool, len(ix.Symbols))
-	for _, s := range ix.Symbols {
-		defined[s.FullName()] = true
-	}
-	degree := func(id string) int {
-		d := 0
-		for _, ce := range ix.Calls[id] {
-			if ce.Target != id && defined[ce.Target] {
-				d++
-			}
-		}
-		for _, c := range ix.Callers[id] {
-			if c != id && defined[c] {
-				d++
-			}
-		}
-		return d
-	}
-	// FullName is not unique across languages (bash/python/go each define
-	// "main", pack/brief/engine each define "Build"), so dedupe candidates
-	// by name before capping or the degree cut would be full of collisions.
-	seen := map[string]bool{}
-	var cands []struct {
-		s   Symbol
-		deg int
-	}
-	for _, s := range ix.Symbols {
-		id := s.FullName()
-		if seen[id] {
+	labels := ix.DeclarationCommunities()
+	g := GraphResult{SchemaVersion: GraphSchemaVersion}
+	catalog := newExportCatalog(ix)
+	calls := catalog.calls(nil)
+	degree := map[string]int{}
+	for _, call := range calls {
+		if call.edge.Resolution != "resolved" {
+			g.UnresolvedCalls++
 			continue
 		}
-		seen[id] = true
-		cands = append(cands, struct {
-			s   Symbol
-			deg int
-		}{s, degree(id)})
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].deg != cands[j].deg {
-			return cands[i].deg > cands[j].deg
+		if call.from.ID != call.to.ID {
+			degree[call.from.ID]++
+			degree[call.to.ID]++
 		}
-		return cands[i].s.FullName() < cands[j].s.FullName()
+	}
+	for _, def := range catalog.byID {
+		node := declarationNode(def, "def")
+		node.Pkg, node.Community = topDir(ix.Root, def.File), labels[def.DeclarationID()]
+		g.Nodes = append(g.Nodes, node)
+	}
+	sort.Slice(g.Nodes, func(first, second int) bool {
+		if degree[g.Nodes[first].ID] != degree[g.Nodes[second].ID] {
+			return degree[g.Nodes[first].ID] > degree[g.Nodes[second].ID]
+		}
+		return exportNodeLess(g.Nodes[first], g.Nodes[second])
 	})
-	if len(cands) > limit {
-		cands = cands[:limit]
+	if len(g.Nodes) > limit {
+		g.Nodes = g.Nodes[:limit]
 	}
-	byID := map[string]GraphNode{}
-	for _, c := range cands {
-		id := c.s.FullName()
-		byID[id] = GraphNode{
-			ID: id, Name: id, Kind: c.s.Kind, Role: "def",
-			File: c.s.File, Line: c.s.Line,
-			Pkg: topDir(ix.Root, c.s.File), Community: labels[id],
+	kept := map[string]bool{}
+	for _, node := range g.Nodes {
+		kept[node.ID] = true
+	}
+	for _, call := range calls {
+		if call.edge.Resolution == "resolved" && kept[call.from.ID] && kept[call.to.ID] {
+			g.Edges = append(g.Edges, call.edge)
 		}
 	}
-	g := GraphResult{}
-	for _, c := range cands {
-		id := c.s.FullName()
-		for _, ce := range ix.Calls[id] {
-			callee := ce.Target
-			if _, ok := byID[callee]; !ok {
-				continue
-			}
-			// Prefer the parser's per-edge confidence (H/M/L) over the
-			// resolution heuristic; lowercased to the internal tiers the
-			// confidenceLabel switch expects.
-			conf := strings.ToLower(ce.Confidence.String())
-			g.Edges = append(g.Edges, GraphEdge{
-				From: id, To: callee,
-				Confidence:      conf,
-				ConfidenceLabel: confidenceLabel(conf),
-			})
-		}
-	}
-	ids := make([]string, 0, len(byID))
-	for id := range byID {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		g.Nodes = append(g.Nodes, byID[id])
-	}
+	g.sort()
 	return g
 }
 
@@ -299,7 +232,7 @@ func (ix *Index) ResolveDottedMethod(qualifier, method string) []Symbol {
 			exact = append(exact, s)
 		case strings.HasSuffix(s.Receiver, "."+qualifier):
 			suffix = append(suffix, s)
-		case strings.Contains(qualifier, ".") && baseName(qualifier) == s.Receiver:
+		case strings.Contains(qualifier, ".") && langparse.BaseName(qualifier) == s.Receiver:
 			nested = append(nested, s)
 		}
 	}
@@ -417,16 +350,28 @@ func (g GraphResult) GraphGraphML() string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="name" for="node" attr.name="name" attr.type="string"/>
   <key id="kind" for="node" attr.name="kind" attr.type="string"/>
   <key id="role" for="node" attr.name="role" attr.type="string"/>
   <key id="file" for="node" attr.name="file" attr.type="string"/>
   <key id="line" for="node" attr.name="line" attr.type="int"/>
   <key id="confidence" for="edge" attr.name="confidence" attr.type="string"/>
   <key id="confidence_label" for="edge" attr.name="confidence_label" attr.type="string"/>
+  <key id="resolution" for="all" attr.name="resolution" attr.type="string"/>
+  <key id="candidates" for="node" attr.name="candidates" attr.type="string"/>
+  <key id="reference" for="edge" attr.name="reference" attr.type="string"/>
+  <key id="source_file" for="edge" attr.name="source_file" attr.type="string"/>
+  <key id="synth" for="edge" attr.name="synth" attr.type="string"/>
+  <key id="binding" for="edge" attr.name="binding" attr.type="string"/>
   <graph id="kern" edgedefault="directed">
 `)
 	for _, n := range g.Nodes {
-		fmt.Fprintf(&b, "    <node id=%q>\n      <data key=\"kind\">%s</data>\n", n.ID, xmlEsc(n.Kind))
+		fmt.Fprintf(&b, "    <node id=\"%s\">\n      <data key=\"name\">%s</data>\n      <data key=\"kind\">%s</data>\n", xmlEsc(n.ID), xmlEsc(n.Name), xmlEsc(n.Kind))
+		fmt.Fprintf(&b, "      <data key=\"resolution\">%s</data>\n", xmlEsc(n.Resolution))
+		if len(n.Candidates) > 0 {
+			candidates, _ := json.Marshal(n.Candidates)
+			fmt.Fprintf(&b, "      <data key=\"candidates\">%s</data>\n", xmlEsc(string(candidates)))
+		}
 		if n.Role != "" {
 			fmt.Fprintf(&b, "      <data key=\"role\">%s</data>\n", xmlEsc(n.Role))
 		}
@@ -439,11 +384,9 @@ func (g GraphResult) GraphGraphML() string {
 		b.WriteString("    </node>\n")
 	}
 	for _, e := range g.Edges {
-		if e.Confidence == confHigh {
-			fmt.Fprintf(&b, "    <edge source=%q target=%q/>\n", e.From, e.To)
-		} else {
-			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">%s</data>\n      <data key=\"confidence_label\">%s</data>\n    </edge>\n", e.From, e.To, xmlEsc(e.Confidence), xmlEsc(e.ConfidenceLabel))
-		}
+		fmt.Fprintf(&b, "    <edge source=\"%s\" target=\"%s\">\n", xmlEsc(e.From), xmlEsc(e.To))
+		fmt.Fprintf(&b, "      <data key=\"confidence\">%s</data>\n      <data key=\"confidence_label\">%s</data>\n", xmlEsc(e.Confidence), xmlEsc(e.ConfidenceLabel))
+		fmt.Fprintf(&b, "      <data key=\"resolution\">%s</data>\n      <data key=\"reference\">%s</data>\n      <data key=\"source_file\">%s</data>\n      <data key=\"synth\">%s</data>\n      <data key=\"binding\">%s</data>\n    </edge>\n", xmlEsc(e.Resolution), xmlEsc(e.Reference), xmlEsc(e.SourceFile), xmlEsc(e.Synth), xmlEsc(e.Binding))
 	}
 	b.WriteString("  </graph>\n</graphml>\n")
 	return b.String()
@@ -453,37 +396,34 @@ func (g GraphResult) GraphGraphML() string {
 // interoperability (file interop only — no server push, consistent with
 // kern's local-first design). Output is byte-deterministic for identical
 // input: nodes are emitted sorted by full name, edges sorted by
-// (source, target). Edge confidence reuses the GraphML path's internal
-// high/medium/low tier mapping (GraphEdge.Confidence); GraphEdge carries no
-// synthetic-edge provenance, so none is reflected here either.
+// (source, target, provenance). Relationships match declaration/reference IDs,
+// never display names; extraction confidence and binding resolution are separate.
 func (g GraphResult) GraphCypher() string {
 	var b strings.Builder
 	b.WriteString("// Cypher export for Neo4j interoperability (file interop only — no server push).\n")
 	nodes := append([]GraphNode(nil), g.Nodes...)
-	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	sort.Slice(nodes, func(first, second int) bool { return exportNodeLess(nodes[first], nodes[second]) })
 	for _, n := range nodes {
-		fmt.Fprintf(&b, "CREATE (:Symbol {name: \"%s\", kind: \"%s\", file: \"%s\", line: %d});\n",
-			cypherEsc(n.Name), cypherEsc(n.Kind), cypherEsc(n.File), n.Line)
+		candidates, _ := json.Marshal(n.Candidates)
+		if len(n.Candidates) == 0 {
+			candidates = []byte("[]")
+		}
+		fmt.Fprintf(&b, "CREATE (:Symbol {id: \"%s\", name: \"%s\", kind: \"%s\", file: \"%s\", line: %d, resolution: \"%s\", candidates: %s});\n",
+			cypherEsc(n.ID), cypherEsc(n.Name), cypherEsc(n.Kind), cypherEsc(n.File), n.Line, cypherEsc(n.Resolution), candidates)
 	}
 	edges := append([]GraphEdge(nil), g.Edges...)
-	sort.SliceStable(edges, func(i, j int) bool {
-		if edges[i].From != edges[j].From {
-			return edges[i].From < edges[j].From
-		}
-		return edges[i].To < edges[j].To
-	})
+	sort.Slice(edges, func(first, second int) bool { return exportEdgeLess(edges[first], edges[second]) })
 	for _, e := range edges {
-		fmt.Fprintf(&b, "MATCH (a:Symbol {name: \"%s\"}), (b:Symbol {name: \"%s\"}) CREATE (a)-[:CALLS {confidence: \"%s\"}]->(b);\n",
-			cypherEsc(e.From), cypherEsc(e.To), cypherEsc(e.Confidence))
+		fmt.Fprintf(&b, "MATCH (a:Symbol {id: \"%s\"}), (b:Symbol {id: \"%s\"}) CREATE (a)-[:CALLS {confidence: \"%s\", resolution: \"%s\", reference: \"%s\", source_file: \"%s\", synth: \"%s\", binding: \"%s\"}]->(b);\n",
+			cypherEsc(e.From), cypherEsc(e.To), cypherEsc(e.Confidence), cypherEsc(e.Resolution), cypherEsc(e.Reference), cypherEsc(e.SourceFile), cypherEsc(e.Synth), cypherEsc(e.Binding))
 	}
 	return b.String()
 }
 
 // cypherEsc escapes a string for a double-quoted Cypher string literal.
-// Within double quotes Cypher treats only backslash and double-quote
-// specially, so those are the only characters escaped.
+// Control characters are escaped as well as backslash and double-quote.
 func cypherEsc(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
 	return r.Replace(s)
 }
 

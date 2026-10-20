@@ -2,8 +2,9 @@ import { type Plugin, tool } from "@opencode-ai/plugin"
 import { resolve, relative } from "node:path"
 import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 import { writeFile, rm, readFile, readdir, stat } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { randomBytes } from "node:crypto"
+import { homedir, tmpdir } from "node:os"
+import { createHash, randomBytes } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 // Resolve the kern binary. Prefer an explicit env var, then the project's
 // bin/ directory, then PATH.
@@ -242,6 +243,32 @@ async function grepFallback(pattern: string, path: string | undefined, include: 
   return out.join("\n")
 }
 
+// Operator one-time allow, mirroring the shell guard's
+// allow_once_consume. The CLI (`kern guard allow <hash>`, tty-gated so only
+// a human can mint an entry) records the allowance in
+// ~/.kern/guard/allow-once.jsonl; the next identical subject on a shadow
+// deny surface consumes it and passes once. Misses and any error return
+// false (deny as usual) — a failed mark must never ALLOW (fail-closed).
+const guardAllowOncePath = (): string =>
+  process.env.KERN_GUARD_ALLOW_ONCE ?? resolve(homedir(), ".kern/guard/allow-once.jsonl")
+const hashSubject = (s: string): string => createHash("sha256").update(s).digest("hex")
+const consumeAllowOnce = async (subject: string): Promise<boolean> => {
+  if (!subject) return false
+  const h = hashSubject(subject)
+  const p = guardAllowOncePath()
+  let text: string
+  try { text = await readFile(p, "utf8") } catch { return false }
+  const lines = text.split("\n")
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.includes(h) || !line.includes('"used":""')) continue
+    lines[i] = line.replace('"used":""', `"used":"${new Date().toISOString()}"`)
+    try { await writeFile(p, lines.join("\n"), "utf8") } catch { return false }
+    return true
+  }
+  return false
+}
+
 // Code extensions eligible for kern routing (symbolic compaction). Everything
 // else — markdown, config, data, dotfiles, extensionless files — reads raw:
 // `kern compact` returns empty for non-code files anyway.
@@ -278,13 +305,41 @@ return false
 // expansion ($), or newline (multi-line compound) means the full governed
 // path. git diff/show/blame are NOT exempt: they emit file content, so they
 // stay governed like any other code read.
-const TRIVIAL_COMMANDS = new Set(["pwd", "date", "whoami", "true", "echo", "ls", "which"])
-const READONLY_GIT = new Set(["status", "log"])
+const TRIVIAL_COMMANDS = new Set(["pwd", "date", "whoami", "true", "echo", "ls", "which", "wc"])
+const READONLY_GIT = new Set(["status", "log", "rev-parse", "diff", "show", "branch", "remote", "add", "commit"])
+const GIT_STAT_FLAGS = new Set(["--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--summary", "--dirstat", "--no-patch", "-s"])
+const GIT_BRANCH_LIST_FLAGS = new Set(["--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list"])
+// git diff/show qualify only when they print statistics or file names: a
+// stat-style flag is present, nothing emits a patch or writes a file, and
+// (for show) no rev:path argument prints file content.
+function isStatOnlyGit(sub: string, args: string[]): boolean {
+let stat = false
+for (const arg of args) {
+if (GIT_STAT_FLAGS.has(arg) || arg.startsWith("--stat=") || arg.startsWith("--dirstat=")) { stat = true; continue }
+if (arg === "-p" || arg === "--patch" || arg === "-u" || arg === "--patch-with-stat" || arg === "--patch-with-raw" ||
+arg.startsWith("-U") || arg.startsWith("--unified") || arg.startsWith("--word-diff") || arg.startsWith("--color-words") ||
+arg.startsWith("--output") || arg === "--ext-diff" || arg === "--textconv" ||
+(/^-[a-zA-Z]+$/.test(arg) && (arg.includes("p") || arg.includes("u")))) return false
+if (sub === "show" && arg.includes(":")) return false
+}
+return stat
+}
 // Read-only kern diagnostics exempt from governed routing: EXACT invocation
 // only — "kern update" (or any subcommand/flag beyond these four bare forms)
 // stays governed. The four are content-free, so the governed wrapper adds
 // latency without value.
-const READONLY_KERN = new Set(["kern version", "kern --version", "kern doctor", "kern health"])
+const READONLY_KERN = new Set([
+  "kern version",
+  "kern --version",
+  "kern doctor",
+  "kern health",
+  "kern guard",
+  "kern guard --help",
+  "kern guard -h",
+  "kern mcp tools",
+  "kern mcp tools list",
+  "kern mcp tools --json",
+])
 // Flags that make `git log` emit file content (patch bodies / raw diffs).
 const GIT_LOG_PATCH_FLAGS = ["-p", "--patch", "-u", "--raw"]
 function isSimpleCommand(cmd: string): boolean {
@@ -294,9 +349,27 @@ if (READONLY_KERN.has(trimmed)) return true
 const parts = trimmed.split(/\s+/)
 if (parts.length === 0) return false
 if (parts[0] === "git") {
-if (parts.length < 2 || !READONLY_GIT.has(parts[1])) return false
-if (parts[1] === "log") {
-for (const arg of parts.slice(2)) {
+// `git -C <dir> <sub>` operates on another working tree: skip the -C
+// <dir> pair (dir must be a real non-flag token) and classify the
+// subcommand exactly like the in-tree form.
+let i = 1
+if (parts[i] === "-C") {
+if (parts.length < i + 2 || !parts[i + 1] || /^-/.test(parts[i + 1])) return false
+i += 2
+}
+if (parts.length < i + 1 || !READONLY_GIT.has(parts[i])) return false
+const rest = parts.slice(i + 1)
+if (parts[i] === "diff" || parts[i] === "show") return isStatOnlyGit(parts[i], rest)
+if (parts[i] === "branch") return rest.every((a) => GIT_BRANCH_LIST_FLAGS.has(a))
+if (parts[i] === "remote") {
+if (rest.length === 0) return true
+if (rest.length === 1 && (rest[0] === "-v" || rest[0] === "--verbose")) return true
+return rest[0] === "get-url"
+}
+if (parts[i] === "add") return !rest.some((a) => a === "-f" || a === "--force" || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(a))
+if (parts[i] === "commit") return !rest.some((a) => a === "--no-verify" || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(a))
+if (parts[i] === "log") {
+for (const arg of rest) {
 // exact patch flags, --patch* long forms, and single-dash letter
 // bundles containing p/u (e.g. -pu) all emit file content
 if (arg === "-p" || arg === "--patch" || arg === "-u" || arg === "--raw" ||
@@ -307,7 +380,176 @@ return false
 }
 return true
 }
-return TRIVIAL_COMMANDS.has(parts[0])
+ return TRIVIAL_COMMANDS.has(parts[0])
+}
+
+// shellTokenize splits a command segment into tokens, quote-aware: single-
+// and double-quoted spans stay one token (env values like A='b c' must not
+// split mid-quote), backslash escapes join their next character (ca\ + t
+// tokenizes as "cat"), and $'…' ANSI-C quoting is unquoted. Parity with the
+// Go-side shellTokens classifier.
+function shellTokenize(seg: string): string[] {
+  const toks: string[] = []
+  let cur = ""
+  let has = false
+  let quote: string | null = null
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]
+    if (quote) {
+      if (c === quote) quote = null
+      else cur += c
+      continue
+    }
+    if (c === "'" || c === '"') {
+      quote = c
+      has = true
+      continue
+    }
+    if (c === "$" && (seg[i + 1] === "'" || seg[i + 1] === '"')) {
+      continue // $'…' ANSI-C span: the quote arm takes over next iteration
+    }
+    if (c === "\\" && i + 1 < seg.length) {
+      cur += seg[i + 1]
+      i++
+      has = true
+      continue
+    }
+    if (/\s/.test(c)) {
+      if (cur !== "" || has) {
+        toks.push(cur)
+        cur = ""
+        has = false
+      }
+      continue
+    }
+    cur += c
+  }
+  if (cur !== "" || has) toks.push(cur)
+  return toks
+}
+
+// Prefix commands whose ARGUMENTS must be skipped before the real command
+// name appears (sudo -u x cat, env -i cat, nice -n 5 cat, xargs cat,
+// watch -n 2 cat, time/nohup/strace/stdbuf cat ...).
+const PREFIX_CMDS = new Set([
+  "sudo", "doas", "env", "nice", "nohup", "time", "xargs", "watch", "strace", "ltrace", "stdbuf",
+])
+// Prefix-command flags that consume the NEXT token as their value
+// (sudo -u x, nice -n 5, env --unset NAME, watch -n 2, strace -o file...).
+// Only flags that reliably take a value across the prefix commands are
+// listed: over-listing a boolean flag (env -i) would swallow the real
+// command name and MISS the content-intent hit.
+const PREFIX_VALUE_FLAGS = new Set([
+  "-u", "-n", "-o", "-g", "-p",
+  "--user", "--prompt", "--group", "--nice-level", "--env", "--unset", "--input", "--output",
+])
+// stripPrefixTokens removes leading env-assignment tokens (VAR=value), prefix
+// commands (sudo/doas/env/nice/nohup/time/xargs/watch/strace/...) and their
+// flag arguments, so `ZZZ=1 grep`, `sudo -u x cat` and `xargs cat` all
+// classify by their real command — parity with kern-guard.sh's
+// position-independent matching (the whole-command first-token-only
+// check was spoofable via env prefixes; F-011: prefix flags, quoted env
+// values and wrapper commands extended the same hole).
+function stripPrefixTokens(tokens: string[]): string[] {
+  let i = 0
+  let inPrefixArgs = false
+  while (i < tokens.length) {
+    const t = tokens[i]
+    if (inPrefixArgs) {
+      if (PREFIX_VALUE_FLAGS.has(t) && i + 1 < tokens.length) {
+        i += 2
+        continue
+      }
+      if (t.startsWith("-")) {
+        i++
+        continue
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+        i++ // env-style assignment inside a prefix chain (sudo VAR=v cmd)
+        continue
+      }
+      inPrefixArgs = false // the real command
+      continue
+    }
+    if (PREFIX_CMDS.has(t)) {
+      inPrefixArgs = true
+      i++
+      continue
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+      i++
+      continue
+    }
+    break
+  }
+  return tokens.slice(i)
+}
+
+// splitCommandSegments splits a command on &&, ||, ;, | and NEWLINE
+// separators, respecting single- and double-quoted spans so `grep "a|b" f`
+// stays one segment while a two-line script cannot hide content tools on
+// line 2 (F-011: newlines were not segmented).
+function splitCommandSegments(cmd: string): string[] {
+  const segs: string[] = []
+  let cur = ""
+  let quote: string | null = null
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]
+    if (quote) {
+      if (c === quote) quote = null
+      cur += c
+      continue
+    }
+    if (c === "'" || c === '"') {
+      quote = c
+      cur += c
+      continue
+    }
+    if ((c === "&" || c === "|") && cmd[i + 1] === c) {
+      segs.push(cur)
+      cur = ""
+      i++
+      continue
+    }
+    if (c === ";" || c === "|" || c === "\n" || c === "\r") {
+      segs.push(cur)
+      cur = ""
+      continue
+    }
+    cur += c
+  }
+  segs.push(cur)
+  return segs
+}
+
+const CONTENT_INTENT_CMDS = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
+const SHELL_WRAPPER_CMDS = new Set(["sh", "bash", "zsh", "dash", "ksh"])
+
+// contentIntentHit reports whether ANY &&/||/;/|/newline-separated segment
+// of cmd — after quote-aware tokenization, stripping env/prefix commands
+// and their flags, and looking inside an `sh -c`/`sh -lc` wrapper — runs a
+// content-reading tool. Position-independent parity with kern-guard.sh
+// (the former whole-command first-token-only match was spoofable
+// via env prefixes, compound segments and sh -c wrappers; F-011: multiline
+// scripts, prefix flags, flag bundles, backslash obfuscation and absolute
+// path names closed the residual vectors).
+function contentIntentHit(cmd: string, depth = 0): boolean {
+  for (const rawSeg of splitCommandSegments(cmd)) {
+    const toks = stripPrefixTokens(shellTokenize(rawSeg))
+    if (toks.length === 0) continue
+    const name = toks[0].split("/").pop() || toks[0] // /bin/cat, ./cat → cat
+    if (CONTENT_INTENT_CMDS.has(name)) return true
+    if (
+      depth < 2 &&
+      toks.length > 2 &&
+      /^-[a-zA-Z]*c/.test(toks[1]) && // -c, -lc, -ic, -cs bundles
+      SHELL_WRAPPER_CMDS.has(toks[0])
+    ) {
+      const script = toks.slice(2).join(" ")
+      if (script !== "" && contentIntentHit(script, depth + 1)) return true
+    }
+  }
+  return false
 }
 
 // Raw read: verbatim file contents (or a directory listing), mirroring the
@@ -331,113 +573,39 @@ async function readFallback(filePath: string): Promise<string> {
 // their own tools when KERN_MCP_PHASE is set. KERN_TOOLS narrows to an
 // explicit allowlist; KERN_MCP_SINGLE_TOOL=1 reduces the surface to kern_meta.
 const TOOL_PHASES: Record<string, string> = {
-  kern_agent: "edit",
-  kern_agents: "cross",
-  kern_analyze: "plan",
-  kern_approve: "edit",
 kern_arch: "explore",
   kern_ast_search: "explore",
-  kern_ast_transform: "edit",
-  kern_audit: "verify",
-  kern_authorize_context: "cross",
-  kern_bridges: "explore",
   kern_buddy: "explore",
-  kern_changes: "verify",
-  kern_check_draft: "verify",
-  kern_churn: "explore",
-  kern_cochange: "explore",
-  kern_commitmsg: "edit",
-  kern_communities: "explore",
   kern_compact_file: "explore",
-  kern_compose: "cross",
   kern_context: "explore",
-  kern_context_budget: "plan",
-  kern_context_envelope: "explore",
-  kern_context_watch: "cross",
-  kern_correlate: "cross",
-  kern_cross_repo_impact: "plan",
-  kern_dead: "explore",
-  kern_deploy: "edit",
-  kern_diff_files: "verify",
-  kern_do: "cross",
   kern_doc: "cross",
-  kern_entry_points: "explore",
   kern_evidence: "verify",
   kern_exec: "edit",
-  kern_execute: "edit",
-  kern_explain: "explore",
   kern_explore: "explore",
   kern_fetch_raw_anchor: "cross",
   kern_fit_context: "plan",
-  kern_flight: "cross",
-  kern_fragility_hotspots: "plan",
-  kern_frameworks: "explore",
-  kern_fw_trace: "explore",
-  kern_fts_search: "explore",
   kern_graph: "explore",
-  kern_guard_check: "edit",
   kern_heal: "edit",
-  kern_health: "cross",
-  kern_hubs: "explore",
   kern_impact: "plan",
-  kern_incident: "cross",
-  kern_inherits: "explore",
-  kern_larges: "explore",
-  kern_learn: "cross",
-  kern_lock: "edit",
-  kern_loop: "cross",
-  kern_lsp_bridge: "explore",
   kern_mask_pii: "cross",
   kern_memory: "cross",
   kern_meta: "meta",
-  kern_modernize: "cross",
-  kern_mutation_test: "verify",
-  kern_near: "explore",
-  kern_onboard: "cross",
   kern_optimize: "cross",
-  kern_org: "cross",
-  kern_pack: "plan",
   kern_path: "explore",
   kern_plan: "plan",
   kern_plan_context: "plan",
-  kern_policy_dsl: "verify",
-  kern_pre_edit: "plan",
-  kern_precache: "verify",
   kern_probe: "explore",
   kern_project_map: "explore",
-  kern_prompt_fill: "cross",
-  kern_refactor_transaction: "edit",
-  kern_rename: "edit",
-  kern_repair: "edit",
-  kern_repo_search: "explore",
-  kern_resolve: "explore",
-  kern_retrieve: "explore",
   kern_review: "verify",
   kern_run: "cross",
-  kern_runtime: "explore",
-  kern_safe_delete: "edit",
-  kern_sandbox: "edit",
-  kern_schema_validate: "verify",
   kern_search: "explore",
-  kern_security: "verify",
-  kern_semantic: "edit",
   kern_semcache: "cross",
   kern_stats: "cross",
-  kern_stream: "cross",
   kern_swap: "plan",
-  kern_synthesize_test: "verify",
-  kern_taint: "verify",
-  kern_test_gaps: "plan",
-  kern_trace: "plan",
-  kern_usage_guide: "plan",
-  kern_validate: "verify",
   kern_verify: "verify",
-  kern_verify_output: "verify",
-  kern_what_if: "plan",
   kern_why: "explore",
-  kern_workflow: "cross",
 }
-// defaultTools mirrors internal/mcp/toolpolicy.go's 6-tool default surface so the
+// defaultTools mirrors internal/mcp/toolpolicy.go's 29-tool default surface so the
 // plugin advertises the same tools the MCP server does when no env vars are
 // set. KERN_MCP_FULL=1, KERN_MCP_PHASE, and KERN_TOOLS all lift the default
 // (matching the server's behavior).
@@ -448,6 +616,29 @@ const DEFAULT_TOOLS = new Set([
   "kern_search", // ranked symbol search
   "kern_verify", // unified verification
   "kern_buddy", // session onboarding digest
+  "kern_exec", // governed execution — fails closed without KERN_ALLOW_EXEC/KERN_TOOLS (D5)
+  "kern_compact_file", // compact symbolic file summary (tier=full verbatim)
+  "kern_run", // run an intent through the full task pipeline
+  "kern_optimize", // compress context: action=prompt|log|output
+  "kern_context", // minimal relevant source slice for a symbol
+  "kern_memory", // project brain memory (add/list/recall/remove)
+  "kern_evidence", // signed-evidence toolkit (verify/explain/export/anchor)
+  "kern_probe", // micro-context router: task → symbol bundle
+  "kern_plan", // deterministic implementation plan for a change
+  "kern_doc", // project docs: action=search|fetch|index
+  "kern_project_map", // compressed whole-project symbol map
+  "kern_ast_search", // AST-level symbol search
+  "kern_stats", // before/after token savings and cost estimates
+  "kern_why", // rationale and doc-reference report for a symbol
+  "kern_heal", // self-correction loop on failing files (snapshot)
+  "kern_fit_context", // fit files/symbols into a token budget
+  "kern_plan_context", // deterministically plan which context to include
+  "kern_path", // shortest call path between two symbols
+  "kern_semcache", // inspect/manage the semantic cache
+  "kern_swap", // swap fenced code blocks to per-file signatures
+  "kern_mask_pii", // locally scan text for secrets/PII
+  "kern_fetch_raw_anchor", // re-read truncated anchor output
+  "kern_review", // token-optimised code-review context
 ])
 
 // filterToolSurface applies the same advertisement rules as the MCP server's
@@ -469,15 +660,51 @@ function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial
     const p = TOOL_PHASES[name] ?? ""
     if (active && p !== "meta" && p !== "cross" && p !== active) continue
     if (allowlist.length > 0 && !allowlist.includes(name)) continue
-// No env override → default to the same 6-tool surface as the MCP
+// No env override → default to the same 29-tool surface as the MCP
 // server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
 // and must always stay advertised to keep precedence over the
 // built-ins they replace.
 	if (name.startsWith("kern_") && !full && !active && allowlist.length === 0 && !DEFAULT_TOOLS.has(name)) continue
-    out[name] = def
+    // wrapCaller (C1/P2): record the ToolContext caller for every tool that
+    // passes the filter — kern_* tools and the shadows alike — so etagKey
+    // can scope the conditional-fetch cache per reader.
+    out[name] = wrapCaller(def)
   }
   return out
 }
+
+// --- Caller-scoped etag cache (C1/P2, W3 client leg) ---
+// opencode's ToolContext (the second execute argument) identifies the
+// caller: sessionID + agent. A subagent runs with its own session/agent and
+// a fresh context holds no earlier copy to reuse, so the shared etag cache
+// must be keyed per caller — otherwise a subagent's identical read gets the
+// tiny "unchanged" reply with no bytes behind it. The caller is captured
+// once at the single registration point (wrapCaller inside
+// filterToolSurface, which every tool — kern_* and the read/glob/grep/bash
+// shadows — passes through) and carried down to etagKey via
+// AsyncLocalStorage instead of threading a parameter through ~120 execute
+// signatures. Hosts or hook paths that run without a ToolContext store
+// (undefined) fall back to the legacy shared bucket: exactly the behavior
+// before this change.
+const callerALS = new AsyncLocalStorage<{ session: string; agent: string }>()
+
+// wrapCaller wraps one tool definition's execute so the caller identity is
+// recorded for the duration of the call (and everything it awaits). The
+// wrapped execute returns the original promise; ALS propagation follows
+// every await inside it.
+function wrapCaller(def: unknown): unknown {
+  if (!def || typeof def !== "object" || typeof (def as any).execute !== "function") return def
+  const inner = (def as any).execute as (args: any, ctx?: any) => Promise<unknown>
+  ;(def as any).execute = async (args: any, ctx?: any) => {
+    const caller =
+      ctx && typeof ctx.agent === "string" && typeof ctx.sessionID === "string"
+        ? { session: ctx.sessionID, agent: ctx.agent }
+        : undefined
+    return callerALS.run(caller, () => inner(args, ctx))
+  }
+  return def
+}
+
 export default (async ({ directory, $ }) => {
   const bin = kernBin(directory)
 
@@ -510,28 +737,66 @@ export default (async ({ directory, $ }) => {
   // canonical call key collapses repeat reads to a handful of tokens (the
   // model reuses its earlier copy) instead of the full payload. Bounded
   // like envelopeCache: clear-on-overflow keeps memory flat.
-  const etagCache = new Map<string, string>() // canonical call key -> last-seen etag
-  const ETAG_CACHE_MAX = 64
-  // Canonical key for an etag-eligible call: the CLI subcommand plus its
-  // meaningful arguments. The --etag flag and its value are excluded so the
-  // key is stable whether or not the cached etag was appended.
+  const etagCache = new Map<string, string>() // caller-scoped call key -> last-seen etag
+  // Bound (C1/P2, W4): KERN_ETAG_CACHE_MAX tunes the cache size (default
+  // 256, capped 4096). Eviction is true LRU — delete the oldest entry on
+  // overflow — replacing the former clear-on-overflow full wipe that
+  // silently re-opened full reads after 64 distinct views.
+  const ETAG_CACHE_MAX = (() => {
+    const n = parseInt(process.env.KERN_ETAG_CACHE_MAX || "", 10)
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 4096) : 256
+  })()
+  // CLI subcommands mirroring etag-eligible MCP tools (kern_explore,
+  // kern_context, kern_compact_file, kern_retrieve — internal/mcp/etag
+  // EligibleTools): only these print an `etag:` footer and consume --etag.
+  const ETAG_ELIGIBLE_TOOLS = new Set(["explore", "context", "compact", "retrieve", "search", "why", "inherits", "graph"])
+  // Canonical key for an etag-eligible call: the CALLER (C1/P2 —
+  // ToolContext sessionID/agent via callerALS, so a subagent's identical
+  // read never borrows the parent's cached "unchanged" verdict) plus the
+  // CLI subcommand and its meaningful arguments. JSON.stringify of the
+  // filtered array (not a "|" join): args may legally contain "|" (paths),
+  // which would collide across distinct calls. The --etag exclusion keeps
+  // the key identical whether or not the cached etag was appended.
   function etagKey(args: string[]): string {
-    // JSON.stringify of the filtered array (not a "|" join): args may legally
-    // contain "|" (paths), which would collide across distinct calls. The
-    // --etag exclusion keeps the key identical whether or not the cached etag
-    // was appended.
-    return JSON.stringify(args.filter((a, i) => a !== "--etag" && args[i - 1] !== "--etag"))
+    const c = callerALS.getStore()
+    const caller = c ? `${c.session}/${c.agent}` : ""
+    return JSON.stringify([caller, ...args.filter((a, i) => a !== "--etag" && args[i - 1] !== "--etag")])
   }
   // Record an etag learned from a CLI stderr footer (a line `etag: <64-hex>`)
   // under the call's canonical key. A full response refreshes the entry; a
   // matched conditional fetch prints no footer and leaves it untouched.
+  // True LRU (C1/P2, W4): a JS Map preserves insertion order, so re-setting
+  // a key moves it to the back (most-recent), and overflow deletes the
+  // OLDEST entry — never the former clear() full wipe.
+  function etagTouch(key: string, etag: string): void {
+    etagCache.delete(key)
+    etagCache.set(key, etag)
+  }
+  // etagGet: touch-on-hit lookup so a hot entry never ages out.
+  function etagGet(key: string): string | undefined {
+    const hit = etagCache.get(key)
+    if (hit !== undefined) etagTouch(key, hit)
+    return hit
+  }
   function rememberEtag(key: string, stderr: string): void {
     const m = /^etag: ([0-9a-f]{64})\r?$/m.exec(stderr)
     if (!m) return
-    etagCache.set(key, m[1])
-    if (etagCache.size > ETAG_CACHE_MAX) etagCache.clear()
+    etagTouch(key, m[1])
+    if (etagCache.size > ETAG_CACHE_MAX) etagCache.delete(etagCache.keys().next().value as string)
   }
   const run = async (args: string[], timeoutMs?: number): Promise<string> => {
+    // ETag conditional-fetch loop (B2, ADR-0012): read the cached etag for
+    // this call's canonical key and auto-append --etag so a repeat read of
+    // the same view short-circuits to the tiny `unchanged (etag <E>)` reply
+    // instead of the full payload. Callers that already append --etag (the
+    // native tool handlers, the read shadow) are left untouched by the
+    // includes() guard; only eligible mirror subcommands can ever have a
+    // cached etag, and the eligibility guard stays explicit.
+    const key = etagKey(args)
+    const cached = etagGet(key)
+    if (cached && ETAG_ELIGIBLE_TOOLS.has(args[0]) && !args.includes("--etag")) {
+      args = [...args, "--etag", cached]
+    }
     // Bun's shell escapes each interpolated array element as one argument.
     // The ceiling is the agent's requested budget (or the 2-minute default);
     // the shell kills the child on expiry (exit 124).
@@ -548,7 +813,7 @@ export default (async ({ directory, $ }) => {
     // the full payload. A matched conditional fetch prints no footer, so the
     // cached etag persists untouched. stdout stays byte-identical for
     // existing consumers (the footer never lands in the tool result).
-    rememberEtag(etagKey(args), out.stderr.toString())
+    rememberEtag(key, out.stderr.toString())
     return out.stdout.toString()
   }
 
@@ -632,8 +897,8 @@ export default (async ({ directory, $ }) => {
   // the payload instead of treating the exit code as a hard failure.
 async function runPayload(args: string[], timeoutMs?: number, preserveExit = false): Promise<string> {
     // Several kern CLI commands print their full report to stdout and then
-    // exit non-zero BY DESIGN as a CI signal (kern changes/review exit 1 when
-    // risk > 0, kern security on error findings, kern validate on FAILED,
+    // exit non-zero BY DESIGN as a CI signal (kern review exits 1 when
+    // risk > 0, kern sec on error findings, kern verify on FAIL,
     // kern guard check exits 3 on violations, kern build/heal/sandbox/exec on
     // command failure). The report must survive as the tool result. Capture it
     // via sh -c with output redirection and a forced exit 0: some host `$`
@@ -720,9 +985,19 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
   // showed only "Failed with exit code 2" with zero output). Say so instead
   // of returning an empty payload.
   function governedBashBanner(exitCode: number, text: string): string {
-    const denied = /blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)
+    // Classify by the documented exit-code contract (kern exitcode): 3 =
+    // denied/blocked by governance, 124 = timeout, anything else = failure.
+    // A text-regex heuristic mislabeled benign findings (the word "timeout"
+    // in usage hints like "raise with --timeout N" tripped the deny banner).
+    // The harness strips the TS signature and runs the body under node, so
+    // the body must stay plain-JS compatible (no TS-only syntax).
+    let kind = "failed"
+    if (exitCode === 3) kind = "denied"
+    else if (exitCode === 124) kind = "timeout"
+    else if (/execution denied|denied by governance|not permitted by policy|approval required/i.test(text)) kind = "denied"
+    const label = kind === "denied" ? "[kern] governed command denied/blocked" : kind === "timeout" ? "[kern] command timed out" : "[kern] command failed"
     const why = text.trim() === "" ? "\ncommand produced no output — rejected before execution or the runner failed to start; classify the segments and retry the governed part directly" : ""
-    return `${denied ? "[kern] governed command denied/blocked" : "[kern] command failed"} (exit code ${exitCode}):\n${text}${why}`
+    return `${label} (exit code ${exitCode}):\n${text}${why}`
   }
   // --- governed-bash banner end ---
 
@@ -732,7 +1007,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       const text = lesson.replace(/\s+/g, " ").trim()
       if (!text) return
       const clipped = text.length > maxLen ? text.slice(0, maxLen).trimEnd() + "…" : text
-      await run(["remember", clipped])
+      await run(["remember", "--auto", clipped])
     } catch {
       /* swallow */
     }
@@ -805,6 +1080,21 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
     return promise
   }
 
+  // Pre-warm the index at plugin load. This plugin calls the kern CLI, which
+  // never triggers the MCP server's own preload, so the first tool call would
+  // otherwise wait for the whole index build (and the 3s context injection
+  // would kill a build it started). `kern buddy` goes through the guarded
+  // auto-index path (it refuses $HOME, filesystem roots and documents folders)
+  // and costs a few hundred ms when the index is already fresh. Fire-and-forget:
+  // a failure never reaches the host. Opt-outs mirror the shell hook guard.
+  if (
+    process.env.KERN_PRELOAD !== "0" &&
+    process.env.KERN_DISABLED !== "1" &&
+    !existsSync(resolve(directory, ".kern", "off"))
+  ) {
+    void run(["buddy"], 600_000).catch(() => { /* best effort */ })
+  }
+
   return {
     tool: filterToolSurface({
       kern_optimize: tool({
@@ -860,7 +1150,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
 async execute(args) {
 const flags: string[] = ["compact", args.path]
 if (args.tier) flags.push("--tier", args.tier)
-const cached = etagCache.get(etagKey(flags))
+const cached = etagGet(etagKey(flags))
 if (cached) flags.push("--etag", cached)
 return run(flags)
 },
@@ -879,8 +1169,8 @@ return run(flags)
         async execute(args) {
           const flags: string[] = ["fit-context"]
           if (args.max_tokens) flags.push("--max-tokens", String(args.max_tokens))
-          if (args.files) flags.push("--files", args.files)
-          if (args.symbols) flags.push("--symbols", args.symbols)
+          if (args.files) flags.push("--file", args.files)
+          if (args.symbols) flags.push("--symbol", args.symbols)
           if (args.query) flags.push("--query", args.query)
           if (args.format) flags.push("--format", args.format)
           if (args.root) flags.push("--root", args.root)
@@ -915,60 +1205,6 @@ return run(flags)
           return run(flags)
         },
       }),
-      // CLI:
-      //   kern pack [root] [--max-tokens N] [--out FILE]
-      //   kern pack --graph [--symbol X] [--out FILE]
-      kern_pack: tool({
-        description:
-          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, token-budget-sized. graph=true packs the call-graph snapshot instead (adjacency + signatures + per-file SHA-256, ~1-5% of raw token cost); symbol selects a subgraph (empty = whole), ignored when graph=false.",
-        args: {
-          root: tool.schema.string().optional(),
-          max_tokens: tool.schema.string().optional(),
-          no_instructions: tool.schema.string().optional(),
-          out: tool.schema.string().optional(),
-          graph: tool.schema.string().optional(),
-          symbol: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["pack"]
-          flags.push("--max-tokens", String(args.max_tokens || 8000))
-          if (truthy(args.no_instructions)) flags.push("--no-instructions")
-          if (truthy(args.graph)) flags.push("--graph")
-          if (args.symbol) flags.push("--symbol", args.symbol)
-          if (args.out) flags.push("--out", args.out)
-          flags.push(args.root ?? ".")
-          return run(flags)
-        },
-      }),
-      kern_deploy: tool({
-description:
-"Deploy a task through TaskService.Deploy so the governance firewall, the human-approval gate (real deploys require approval), and lifecycle events all apply — the same path as `kern deploy <task-id>` and POST /v1/tasks/{id}/deploy. Returns the updated task state and deployment ref.",
-args: {
-task_id: tool.schema.string(),
-version: tool.schema.string().optional(),
-root: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["deploy", args.task_id]
-if (args.version) flags.push("--version", args.version)
-if (args.root) flags.push("--root", args.root)
-return run(flags)
-},
-}),
-kern_runtime: tool({
-description:
-"Production-intelligence snapshot: kern_runtime with action=status reports which runtime source is wired (live adapter via KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json) plus per-service profiles (events/errors/error rate); action=drift compares runtime routes against code-declared routes (template-aware). JSON output, mirroring `kern runtime status|drift --json`.",
-args: {
-action: tool.schema.string().optional(),
-root: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["runtime", args.action === "drift" ? "drift" : "status"]
-if (args.root) flags.push("--root", args.root)
-flags.push("--json")
-return run(flags)
-},
-}),
       kern_stats: tool({
         description:
           "Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.",
@@ -1005,24 +1241,6 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_changes: tool({
-        description:
-          "Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
-        args: {
-          root: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          json: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["changes"]
-          if (args.root) flags.push(args.root)
-          if (args.range) flags.push("--range", args.range)
-          if (args.file) flags.push("--file", args.file)
-          if (truthy(args.json)) flags.push("--json")
-          return runPayload(flags)
-        },
-      }),
       kern_review: tool({
         description:
           "Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
@@ -1041,56 +1259,6 @@ return run(flags)
           return runPayload(flags)
         },
       }),
-      kern_hubs: tool({
-        description:
-          "Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["hubs"]
-          if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_test_gaps: tool({
-        description:
-          "Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none).",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["testgaps"]
-          if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_mutation_test: tool({
-        description:
-          "Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, and applies boundary shifts to verify test suite regression sensitivity and pinpoint surviving mutants (false-positive tests).",
-        args: {
-          root: tool.schema.string().optional(),
-          files: tool.schema.string().optional(),
-          max_mutants: tool.schema.string().optional(),
-          dry_run: tool.schema.string().optional(),
-          test_command: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["mutate"]
-          if (args.files) flags.push("--files", args.files)
-          if (args.max_mutants) flags.push("--max", String(args.max_mutants))
-          if (args.dry_run) flags.push("--dry-run")
-          if (args.test_command) flags.push("--cmd", args.test_command)
-          if (args.format) flags.push("--format", args.format)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
       kern_path: tool({
         description:
           "Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.",
@@ -1105,50 +1273,6 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_cycles: tool({
-        description:
-          "Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence.",
-        args: {
-          root: tool.schema.string().optional(),
-          json: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["cycles"]
-          if (args.root) flags.push(args.root)
-          if (args.json) flags.push("--json")
-          return run(flags)
-        },
-      }),
-      kern_dead: tool({
-        description:
-          "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["dead"]
-          if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_larges: tool({
-        description:
-          "Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring.",
-        args: {
-          root: tool.schema.string().optional(),
-          min_lines: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["larges"]
-          if (args.root) flags.push(args.root)
-          if (args.min_lines) flags.push("--lines", String(args.min_lines))
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
       kern_arch: tool({
         description:
           "Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple.",
@@ -1158,54 +1282,6 @@ return run(flags)
         async execute(args) {
           const flags: string[] = ["arch"]
           if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_communities: tool({
-        description:
-          "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["communities"]
-          if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_churn: tool({
-        description:
-          "Change-frequency risk: which files were touched by the most commits in a range, whether they are being edited right now, and how risky they are in the call graph.",
-        args: {
-          root: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["churn"]
-          if (args.root) flags.push(args.root)
-          if (args.range) flags.push("--range", args.range)
-          return run(flags)
-        },
-      }),
-      kern_fragility_hotspots: tool({
-        description:
-          "Causal Defect & Fragility Hotspot Memory: correlates git defect/fix commit history with the AST symbol call graph to compute causal fragility hotspot ratings and warn before mutating high-risk components.",
-        args: {
-          root: tool.schema.string().optional(),
-          target: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-          commits: tool.schema.string().optional(),
-          min_fixes: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["fragility"]
-          if (args.target) flags.push("--target", args.target)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          if (args.commits) flags.push("--commits", String(args.commits))
-          if (args.min_fixes) flags.push("--min-fixes", String(args.min_fixes))
-          if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
       }),
@@ -1248,93 +1324,8 @@ return run(flags)
           if (args.depth !== undefined) flags.push("--depth", String(args.depth))
           if (args.max !== undefined) flags.push("--max", String(args.max))
           if (args.root) flags.push(args.root)
-          const cached = etagCache.get(etagKey(flags))
+          const cached = etagGet(etagKey(flags))
           if (cached) flags.push("--etag", cached)
-          return run(flags)
-        },
-      }),
-      kern_bridges: tool({
-        description:
-          "Bridge detection: symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["bridges"]
-          if (args.root) flags.push(args.root)
-          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_lsp_bridge: tool({
-        description:
-          "Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, vtsls, rust-analyzer, clangd, etc.) for exact compiler-grade type definitions, hover documentation, cross-file references, and document symbols without bundling language runtimes into kern.",
-        args: {
-          file: tool.schema.string(),
-          line: tool.schema.string().optional(),
-          column: tool.schema.string().optional(),
-          action: tool.schema.string().optional(),
-          server_cmd: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["lsp-bridge", "--file", args.file]
-          if (args.line) flags.push("--line", String(args.line))
-          if (args.column) flags.push("--column", String(args.column))
-          if (args.action) flags.push("--action", args.action)
-          if (args.server_cmd) flags.push("--server-cmd", args.server_cmd)
-          if (args.format) flags.push("--format", args.format)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_cochange: tool({
-        description:
-          "Co-change coupling: which files are actually edited in the same commits (from git history), independent of the call graph. Use before a commit to see what else must change in lockstep.",
-        args: {
-          root: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["cochange"]
-          if (args.root) flags.push(args.root)
-          if (args.range) flags.push("--range", args.range)
-          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_fts_search: tool({
-        description:
-          "FTS5 full-text search over the persisted SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet'). The SQLite store is compiled in by default (disable with -tags nosqlite).",
-        args: {
-          query: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["fts", args.query]
-          if (args.root) flags.push(args.root)
-          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      kern_near: tool({
-        description:
-          "Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.",
-        args: {
-          symbol: tool.schema.string(),
-          depth: tool.schema.string().optional(),
-          max: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["near", args.symbol]
-          if (args.depth) flags.push("--depth", String(args.depth))
-          if (args.max) flags.push("--max", String(args.max))
-          if (args.root) flags.push(args.root)
           return run(flags)
         },
       }),
@@ -1384,19 +1375,6 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_repo_search: tool({
-        description:
-          "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first.",
-        args: {
-          query: tool.schema.string(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["search", args.query, "--repos"]
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
       kern_why: tool({
         description:
           "Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'.",
@@ -1406,19 +1384,6 @@ return run(flags)
         },
         async execute(args) {
           const flags: string[] = ["why", args.symbol]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_inherits: tool({
-        description:
-          "Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.",
-        args: {
-          symbol: tool.schema.string(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["inherits", args.symbol]
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1433,24 +1398,11 @@ return run(flags)
         async execute(args) {
           const flags: string[] = ["context", args.symbol]
           if (args.root) flags.push(args.root)
-          const cached = etagCache.get(etagKey(flags))
+          const cached = etagGet(etagKey(flags))
           if (cached) flags.push("--etag", cached)
           return run(flags)
         },
       }),
-      kern_context_budget: tool({
-        description:
-          "Fit text into a token budget: deduplicate lines, keep the head plus important lines (errors, stack frames), then trim. Use to manage a crowded context window before adding more content.",
-        args: {
-          text: tool.schema.string(),
-          max_tokens: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["budget", args.text]
-          if (args.max_tokens) flags.push("--max", String(args.max_tokens))
-          return run(flags)
-        },
-}),
 kern_probe: tool({
         description:
           "Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.",
@@ -1462,74 +1414,6 @@ kern_probe: tool({
         async execute(args) {
           const flags: string[] = ["probe", args.task]
           if (args.max_tokens) flags.push("--max", String(args.max_tokens))
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_retrieve: tool({
-        description:
-          "Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles.",
-        args: {
-          query: tool.schema.string().optional(),
-          symbol: tool.schema.string().optional(),
-          level: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-          depth: tool.schema.string().optional(),
-          max_nodes: tool.schema.string().optional(),
-          lines: tool.schema.string().optional(),
-          max_tokens: tool.schema.string().optional(),
-          with_freshness: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["retrieve"]
-          if (args.query) flags.push("--query", args.query)
-          if (args.symbol) flags.push("--symbol", args.symbol)
-          if (args.level) flags.push("--level", args.level)
-          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
-          if (args.depth !== undefined) flags.push("--depth", String(args.depth))
-          if (args.max_nodes !== undefined) flags.push("--max", String(args.max_nodes))
-          if (args.lines !== undefined) flags.push("--lines", String(args.lines))
-          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (truthy(args.with_freshness)) flags.push("--fresh")
-          if (args.root) flags.push(args.root)
-          const cached = etagCache.get(etagKey(flags))
-          if (cached) flags.push("--etag", cached)
-          return run(flags)
-        },
-      }),
-      kern_resolve: tool({
-        description:
-          "Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness via content hash.",
-        args: {
-          handle: tool.schema.string(),
-          level: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          max_tokens: tool.schema.string().optional(),
-          with_freshness: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["resolve", args.handle]
-          if (args.level) flags.push("--level", args.level)
-          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (truthy(args.with_freshness)) flags.push("--fresh")
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_context_envelope: tool({
-        description:
-          "Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning. Use when a client needs the structured packet, not rendered text.",
-        args: {
-          change: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          max_tokens: tool.schema.string().optional(),
-          with_freshness: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["context-envelope", args.change]
-          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (truthy(args.with_freshness)) flags.push("--fresh")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1549,204 +1433,6 @@ kern_probe: tool({
           if (truthy(args.json)) flags.push("--json")
           if (args.root) flags.push(args.root)
           return run(flags)
-        },
-      }),
-      kern_orchestrate: tool({
-        description:
-          "Run the silent context pipeline over an intent: classify the task type, assemble the context packet, select evidence by the task policy, fit it to a token budget, stamp the context envelope, and return a content-hash-sealed escalation handle — all deterministically and in one call.",
-        args: {
-          intent: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          budget: tool.schema.string().optional(),
-          mode: tool.schema.string().optional(),
-          skill: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["orchestrate", args.intent]
-          if (args.budget !== undefined) flags.push("--max-tokens", String(args.budget))
-          if (args.mode) flags.push("--mode", args.mode)
-          if (args.skill) flags.push("--with-skill", args.skill)
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_skill: tool({
-        description:
-          "Catalog or load the bundled agent skills: catalog (default) lists every skill with its description; load returns a named skill's full runbook.",
-        args: {
-          action: tool.schema.string().optional(),
-          skill: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["skills"]
-          if (args.action === "load" && args.skill) flags.push("show", args.skill)
-          return run(flags)
-        },
-      }),
-
-      kern_agent: tool({
-        description:
-          "Agent-plane operations. action=message sends to an agent's coordination inbox; action=interrupt cancels a running task; action=fingerprint detects tool-call loops and behavioral drift; action=coordination runs the workspace protocol (handoffs, resource locks, inbox); action=rbac enforces role-based tool access. Sub-actions via the subaction arg.",
-        args: {
-          action: tool.schema.string().describe("message|interrupt|fingerprint|coordination|rbac"),
-          subaction: tool.schema.string().describe("coordination sub-action (handoff, claim, release, inbox, status) or rbac sub-action (evaluate, grant, revoke, list)").optional(),
-          to_agent: tool.schema.string().optional(),
-          notes: tool.schema.string().optional(),
-          from_agent: tool.schema.string().optional(),
-          task_id: tool.schema.string().optional(),
-          reason: tool.schema.string().optional(),
-          agent_id: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-          resource: tool.schema.string().optional(),
-          ttl_seconds: tool.schema.string().optional(),
-          payload: tool.schema.any().optional(),
-          role: tool.schema.string().optional(),
-          tool: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          switch (args.action) {
-            case "message":
-              if (!args.to_agent || !args.notes) return "error: kern_agent action=message requires to_agent and notes"
-              const flags: string[] = ["agent-message", "--to", args.to_agent]
-              if (args.from_agent) flags.push("--from", args.from_agent)
-              if (args.task_id) flags.push("--task", args.task_id)
-              flags.push(args.notes)
-              return run(flags)
-            case "interrupt":
-              if (!args.task_id) return "error: kern_agent action=interrupt requires task_id"
-              const iflags: string[] = ["agent-interrupt", args.task_id]
-              if (args.reason) iflags.push(args.reason)
-              return run(iflags)
-            case "fingerprint":
-              const fflags: string[] = ["agent-fingerprint"]
-              if (args.agent_id) fflags.push("--agent", args.agent_id)
-              if (args.format) fflags.push("--format", args.format)
-              return run(fflags)
-            case "coordination":
-              const cflags: string[] = ["agent-coordination"]
-              if (args.subaction) cflags.push("--action", args.subaction)
-              if (args.agent_id) cflags.push("--agent", args.agent_id)
-              if (args.from_agent) cflags.push("--from", args.from_agent)
-              if (args.to_agent) cflags.push("--to", args.to_agent)
-              if (args.task_id) cflags.push("--task", args.task_id)
-              if (args.resource) cflags.push("--resource", args.resource)
-              if (args.ttl_seconds) cflags.push("--ttl", String(args.ttl_seconds))
-              if (args.notes) cflags.push("--notes", args.notes)
-              if (args.root) cflags.push("--root", args.root)
-              return run(cflags)
-            case "rbac":
-            default:
-              const rflags: string[] = ["agent-role-rbac"]
-              if (args.subaction) rflags.push("--action", args.subaction)
-              if (args.agent_id) rflags.push("--agent", args.agent_id)
-              if (args.role) rflags.push("--role", args.role)
-              if (args.tool) rflags.push("--tool", args.tool)
-              if (args.root) rflags.push("--root", args.root)
-              return run(rflags)
-          }
-        },
-      }),
-
-      kern_mcp_call: tool({
-        description:
-          "Bridge a tool from an external MCP server configured via kern mcp-client add (config .kern/mcp-servers.json). Pass the raw wire tool name or the public name (mcp__<server>__<tool>).",
-        args: {
-          server: tool.schema.string(),
-          tool: tool.schema.string(),
-          arguments: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["mcp-client", "call", args.server, args.tool]
-          if (args.arguments) flags.push(args.arguments)
-          return run(flags)
-        },
-      }),
-
-      kern_trace: tool({
-        description:
-          "Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.",
-        args: {
-          trace: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["trace"]
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return withTempFile("trace.input.txt", args.trace, (file) => {
-            const rest: string[] = [...flags, file]
-            if (args.root) rest.push(args.root)
-            return run(rest)
-          })
-        },
-      }),
-      kern_lock: tool({
-        description:
-          "Workspace lock management (flock-based). action=acquire takes an advisory lock on a scope (errors if held); action=release frees it; action=status lists locks with holder PIDs. Note: the CLI runs in its own process, so the OS releases the flock when the call ends — the marker persists until release.",
-        args: {
-          action: tool.schema.string().describe("acquire|release|status"),
-          scope: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          switch (args.action) {
-            case "release":
-              if (!args.scope) return "error: kern_lock action=release requires scope"
-              const uflags: string[] = ["unlock", args.scope]
-              if (args.root) uflags.push(args.root)
-              return run(uflags)
-            case "status":
-              const sflags: string[] = ["status"]
-              if (args.root) sflags.push(args.root)
-              return run(sflags)
-            case "acquire":
-            default:
-              if (!args.scope) return "error: kern_lock action=acquire requires scope"
-              const flags: string[] = ["lock", "--hold", args.scope]
-              if (args.root) flags.push(args.root)
-              return run(flags)
-          }
-        },
-      }),
-      kern_guard_check: tool({
-        description:
-          "Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem.",
-        args: {
-          root: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["guard", "check"]
-          if (args.root) flags.push(args.root)
-          if (args.file) flags.push("--file", args.file)
-          if (args.range) flags.push("--range", args.range)
-          return runPayload(flags)
-        },
-      }),
-      kern_authorize_context: tool({
-        description:
-          "Authorized-context primitive (P0.1): compute the exact set of symbols and call edges an agent may legally read for a task, filtered by the agent's identity (firewall context.read permission) and an optional task scope, and return it with an auditable authorization proof (decision, fingerprint, index freshness). Use before retrieval when a task must not leak out-of-scope code.",
-        args: {
-          agent_id: tool.schema.string(),
-          task: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          symbol_filter: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["authorize-context", "--agent", args.agent_id, "--task", args.task]
-          if (args.root) flags.push("--root", args.root)
-          if (args.symbol_filter) flags.push("--symbol", args.symbol_filter)
-          return runPayload(flags)
-        },
-      }),
-      kern_usage_guide: tool({
-        description:
-          "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
-        args: {},
-        async execute() {
-          return run(["guide"])
         },
       }),
       kern_memory: tool({
@@ -1793,7 +1479,7 @@ kern_probe: tool({
               return run(cflags)
             case "list":
             default:
-              const lflags: string[] = ["memory"]
+              const lflags: string[] = ["memory", "list"]
               if (args.root) lflags.push("--root", args.root)
               return run(lflags)
           }
@@ -1810,57 +1496,6 @@ kern_probe: tool({
           const flags: string[] = ["mask"]
           if (args.mask_names) flags.push("--names", args.mask_names)
           return withTempFile("pii.input.txt", args.text, (file) => run([...flags, file]))
-        },
-      }),
-      kern_security: tool({
-        description:
-          "Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes.",
-        args: {
-          root: tool.schema.string().optional(),
-          severity: tool.schema.string().optional(),
-          max: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["sec"]
-          if (args.root) flags.push(args.root)
-          if (args.severity) flags.push("--severity", args.severity)
-          if (args.max) flags.push("--max", String(args.max))
-          if (args.format === "json") flags.push("--json")
-          return runPayload(flags)
-        },
-      }),
-      kern_safe_delete: tool({
-        description:
-          "Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code.",
-        args: {
-          symbol: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["delete", args.symbol]
-          if (args.root) flags.push(args.root)
-          if (args.format === "json") flags.push("--json")
-          return runPayload(flags)
-        },
-      }),
-      kern_rename: tool({
-        description:
-          "Structural rename on the AST index of a Go package-level symbol: previews every definition/reference with file:line:col edits; apply=true applies them. Real go/ast parse: strings, comments, field names, literal keys and import aliases are untouched. Transactional; backups under .kern/rename-backup/, rollback on failure. Method and non-Go symbols are refused.",
-        args: {
-          symbol: tool.schema.string(),
-          new_name: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["rename", args.symbol, args.new_name]
-          if (args.root) flags.push(args.root)
-          if (truthy(args.apply)) flags.push("--apply")
-          if (args.format === "json") flags.push("--json")
-          return run(flags)
         },
       }),
       kern_exec: tool({
@@ -1923,33 +1558,6 @@ kern_probe: tool({
           }
         },
       }),
-      kern_commitmsg: tool({
-        description:
-          "Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.",
-        args: {
-          root: tool.schema.string().optional(),
-          staged: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["commitmsg"]
-          if (truthy(args.staged)) flags.push("--staged")
-          if (args.range) flags.push("--range", args.range)
-          return run(flags)
-        },
-      }),
-      kern_precache: tool({
-        description:
-          "Speculative pre-caching: scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["precache", "--once"]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
       kern_swap: tool({
         description:
           "Budget swapping: in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document.",
@@ -1965,17 +1573,6 @@ kern_probe: tool({
           if (args.max_tokens) flags.push("--max", String(args.max_tokens))
           if (args.root) flags.push(args.root)
           return withTempFile("swap-input.txt", args.text, (file) => run([...flags, file]))
-        },
-      }),
-      kern_diff_files: tool({
-        description:
-          "Delta streaming: compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical.",
-        args: {
-          a: tool.schema.string(),
-          b: tool.schema.string(),
-        },
-        async execute(args) {
-          return run(["udiff", args.a, args.b])
         },
       }),
       kern_heal: tool({
@@ -1998,40 +1595,9 @@ kern_probe: tool({
           return runPayload(flags, args.timeout)
         },
       }),
-      kern_validate: tool({
-        description:
-          "Auto-validation: detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.",
-        args: {
-          root: tool.schema.string().optional(),
-          command: tool.schema.string().optional(),
-          timeout: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["validate"]
-          if (args.command) flags.push("--cmd", args.command)
-          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
-          if (args.root) flags.push(args.root)
-          // validate exits 1 on build failure with the errors on stdout —
-          // use runPayload so the output is surfaced, not dropped.
-          return runPayload(flags, args.timeout)
-        },
-      }),
-      kern_analyze: tool({
-        description:
-          "HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change'.",
-        args: {
-          root: tool.schema.string().optional(),
-          change: tool.schema.string(),
-        },
-        async execute(args) {
-          const flags: string[] = ["analyze"]
-          if (args.root) flags.push("--root", args.root)
-          return run([...flags, args.change])
-        },
-      }),
       kern_plan: tool({
         description:
-          "HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.",
+          "Produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.",
         args: {
           root: tool.schema.string().optional(),
           change: tool.schema.string(),
@@ -2042,23 +1608,9 @@ kern_probe: tool({
           return run([...flags, args.change])
         },
       }),
-      kern_execute: tool({
-        description:
-          "HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository.",
-        args: {
-          root: tool.schema.string().optional(),
-          patch: tool.schema.string(),
-        },
-        async execute(args) {
-          const flags: string[] = ["execute"]
-          if (args.root) flags.push("--root", args.root)
-          // execute exits 1 with the task report on stdout — runPayload keeps it
-          return withTempFile("execute.patch", args.patch, (file) => runPayload([...flags, file]))
-        },
-      }),
       kern_verify: tool({
         description:
-          "HIGH-LEVEL (ADR-0006): verify a change (build, unit tests, security, architecture, dependency) — returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance opt-in: cve/license/secrets (advisory; missing binary reports SKIPPED). Command mode: command=YOUR build/test/lint cmd with output=summary|failures|tail:N|lines:A-B|full; re-slice the kept full run with anchor.",
+          "Verify a change (build, unit tests, security, architecture, dependency) — returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance opt-in: cve/license/secrets (advisory; missing binary reports SKIPPED). Command mode: command=YOUR build/test/lint cmd with output=summary|failures|tail:N|lines:A-B|full; re-slice the kept full run with anchor.",
         args: {
           root: tool.schema.string().optional(),
           types: tool.schema.string().optional(),
@@ -2084,52 +1636,6 @@ kern_probe: tool({
           return runPayload(flags)
         },
       }),
-kern_incident: tool({
-description:
-"HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits). Feature Batch D: correlate=true runs the incident→twin→code engine and renders its report; runbook=<json> adds a heal playbook.",
-args: {
-root: tool.schema.string().optional(),
-alert: tool.schema.string().optional(),
-snapshot: tool.schema.string().optional(),
-correlate: tool.schema.boolean().optional(),
-runbook: tool.schema.string().optional(),
-list_playbooks: tool.schema.boolean().optional(),
-},
-async execute(args) {
-const flags: string[] = ["incident"]
-if (args.root) flags.push("--root", args.root)
-if (args.runbook) {
-flags.push("--runbook", args.runbook)
-return run(flags)
-}
-if (args.list_playbooks) {
-flags.push("--list-playbooks")
-return run(flags)
-}
-if (args.correlate) flags.push("--correlate")
-if (args.alert) flags.push(args.alert)
-if (args.snapshot) flags.push(args.snapshot)
-return run(flags)
-},
-}),
-      kern_what_if: tool({
-        description:
-          "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
-        args: {
-          root: tool.schema.string().optional(),
-          change: tool.schema.string(),
-          kind: tool.schema.string().optional(),
-          new_target: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["what-if"]
-          if (args.root) flags.push("--root", args.root)
-          flags.push(args.change)
-          if (args.kind) flags.push(args.kind)
-          if (args.new_target) flags.push(args.new_target)
-          return run(flags)
-        },
-      }),
       kern_impact: tool({
         description:
           "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only. Set risk=true to render the governance risk assessment for the change instead (the former kern_risk output).",
@@ -2147,169 +1653,6 @@ risk: tool.schema.string().optional(),
           if (args.risk === "true") flags.push("--risk")
           if (args.kind) flags.push(args.kind)
           if (args.new_target) flags.push(args.new_target)
-          return run(flags)
-        },
-      }),
-                    kern_flight: tool({
-        description:
-          "Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight.",
-        args: {
-          root: tool.schema.string().optional(),
-          task: tool.schema.string(),
-        },
-        async execute(args) {
-          const flags: string[] = ["flight", "show"]
-          if (args.root) flags.push("--root", args.root)
-          flags.push(args.task)
-          return run(flags)
-        },
-      }),
-                    kern_agents: tool({
-        description:
-          "HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["team"]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_validate_staged: tool({
-description:
-"Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings. Use before committing.",
-args: {
-root: tool.schema.string().optional(),
-source: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["diff-gate"]
-if (args.root) flags.push("--root", args.root)
-if (args.source) flags.push("--source", args.source)
-// diff-gate exits 1/2 with the findings report on stdout — runPayload keeps it
-return runPayload(flags)
-},
-}),
-kern_validate_proposed: tool({
-description:
-"Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is a JSON array of {path, content, op}. Returns per-gate PASS/BLOCK findings.",
-args: {
-root: tool.schema.string().optional(),
-source: tool.schema.string().optional(),
-files: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["validate-proposed"]
-if (args.root) flags.push("--root", args.root)
-if (args.source) flags.push("--source", args.source)
-if (args.files) flags.push("--files", args.files)
-// validate-proposed exits 1 with the report on stdout — runPayload keeps it
-return runPayload(flags)
-},
-}),
-kern_explain_finding: tool({
-description:
-"Blueprint change firewall: explain a gate finding (rule id, severity, category, file, line, message) in plain language.",
-args: {
-root: tool.schema.string().optional(),
-finding: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["explain-finding"]
-if (args.root) flags.push("--root", args.root)
-if (args.finding) flags.push("--finding", args.finding)
-return run(flags)
-},
-}),
-      kern_repair: tool({
-        description:
-          "Deterministic repair engine. action=diagnostics is the Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste. action=guidance is the blueprint change firewall: repair guidance for a gate finding — suggested fix and rule reference.",
-        args: {
-          action: tool.schema.string().describe("diagnostics|guidance"),
-          compiler_output: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          finding: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          switch (args.action) {
-            case "guidance":
-              const flags: string[] = ["repair-guidance"]
-              if (args.root) flags.push("--root", args.root)
-              if (args.finding) flags.push("--finding", args.finding)
-              return run(flags)
-            case "diagnostics":
-            default:
-              if (!args.compiler_output) return "error: kern_repair action=diagnostics requires compiler_output"
-              const dflags: string[] = ["repair-diagnostics", "--compiler-output", args.compiler_output]
-              if (args.apply) dflags.push("--apply", args.apply)
-              if (args.root) dflags.push("--root", args.root)
-              return run(dflags)
-          }
-        },
-      }),
-kern_llm_providers: tool({
-description:
-"List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. Full wired-agent history: kern agents (CLI) and kern doctor.",
-args: {
-root: tool.schema.string().optional(),
-probe: tool.schema.boolean().optional(),
-},
-async execute(args) {
-const flags: string[] = ["agents"]
-if (args.root) flags.push("--root", args.root)
-if (args.probe) flags.push("--probe")
-return run(flags)
-},
-}),
-kern_register_host_sampler: tool({
-        description:
-          "Register (or unregister) a host sampler command for LLM delegation: the LLM chain's host leg runs it via sh -c (user prompt on stdin, system prompt in $KERN_SYSTEM_PROMPT); stdout is the reply. Empty command unregisters. key namespaces the registration so sessions/agents/repos coexist. For hosts without MCP sampling, set KERN_HOST_SAMPLER_CMD and the server self-registers.",
-        args: {
-          command: tool.schema.string(),
-          key: tool.schema.string().optional(),
-          timeout: tool.schema.string().optional(),
-          model: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["register-host-sampler"]
-          if (args.command) flags.push(args.command)
-          if (args.key) flags.push("--key", args.key)
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
-          if (args.model) flags.push("--model", args.model)
-          return run(flags)
-        },
-      }),
-      kern_loop: tool({
-        description:
-          "HIGH-LEVEL (Workflow E): run the closed autonomy loop on an intent string, returning the stage timeline and the deployed / observed-healthy / learned outcome. mode=observe (default) runs the no-op stages gated by the autonomy level; mode=autonomous (the former kern_do) wires the LLM coder and planner as handlers (default L2 sandboxed changes; L3 PR creation, L4 deploy-with-approval).",
-        args: {
-          root: tool.schema.string().optional(),
-          intent: tool.schema.string(),
-          level: tool.schema.string().optional(),
-mode: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["loop", args.intent]
-          if (args.level) flags.push("--level", args.level)
-if (args.mode) flags.push("--mode", args.mode)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_do: tool({
-        description:
-          "HIGH-LEVEL (Workflow E): run the closed autonomy loop on an intent string in autonomous mode — wires the LLM coder and planner as handlers (default L2 sandboxed changes; L3 PR creation, L4 deploy-with-approval) and returns the deployed / observed-healthy / learned outcome.",
-        args: {
-          root: tool.schema.string().optional(),
-          intent: tool.schema.string(),
-          level: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["do", args.intent]
-          if (args.level) flags.push("--level", args.level)
-          if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
       }),
@@ -2337,372 +1680,6 @@ kern_run: tool({
           const flags: string[] = ["run", args.intent]
           if (args.root) flags.push("--root", args.root)
           return run(flags)
-        },
-      }),
-      kern_workflow: tool({
-        description:
-          "HIGH-LEVEL: select and coordinate the agent team without the external caller manually sequencing it. Classifies the intent, registers the kind-specific workflow, wires the standard team, and drives the steps to the human approval gate. The run parks at the gate with an approval ID; resolve it via kern_approve then call kern_workflow again with the same task_id to resume.",
-        args: {
-          root: tool.schema.string().optional(),
-          intent: tool.schema.string(),
-          task_id: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          if (args.task_id) {
-            const flags: string[] = ["workflow", "--task", args.task_id]
-            if (args.root) flags.push("--root", args.root)
-            return run(flags)
-          }
-          const flags: string[] = ["workflow", args.intent]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_onboard: tool({
-        description:
-          "Session onboarding: ensure the working directory is indexed and registered for kern (build/refresh the index, register the repo, write AGENTS.md if missing) and report status. Call at session start in a new repo instead of re-selecting files manually.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["onboard"]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_audit: tool({
-        description:
-          "HIGH-LEVEL: return the tamper-evident governance audit log for the project (every firewall decision/approval). CLI-equivalent: kern audit. Backs the AUDIT intent workflow.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["audit"]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_approve: tool({
-        description:
-          "HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approvals. With an id, approves it; set reject=true to reject instead. CLI-equivalent: kern approve. Agents hit this when kern_run/kern_workflow parks at the human approval gate.",
-        args: {
-          root: tool.schema.string().optional(),
-          id: tool.schema.string().optional(),
-          reject: tool.schema.string().optional(),
-          reason: tool.schema.string().optional(),
-          approver: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["approve"]
-          if (args.id) flags.push(args.id)
-          if (args.reject === "true") flags.push("--reject")
-          if (args.reason) flags.push("--reason", args.reason)
-          if (args.approver) flags.push("--approver", args.approver)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-kern_correlate: tool({
-description:
-"HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — from runtime source and git history, not LLM. Feature Batch D: code=true extends the report with the incident→twin→code correlation (implicated source files + symbols via the digital twin).",
-args: {
-root: tool.schema.string().optional(),
-alert: tool.schema.string(),
-code: tool.schema.boolean().optional(),
-// snapshot is intentionally absent: the kern CLI correlate command
-// takes only <alert-json> and --root, so the arg would be dropped.
-},
-async execute(args) {
-const flags: string[] = ["correlate", args.alert]
-if (args.root) flags.push("--root", args.root)
-if (args.code) flags.push("--code")
-return run(flags)
-},
-}),
-      kern_learn: tool({
-        description:
-          "HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
-        args: {
-          root: tool.schema.string().optional(),
-          threshold: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["learn"]
-          if (args.threshold) flags.push(args.threshold)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_modernize: tool({
-        description:
-          "HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["modernize"]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_schema_validate: tool({
-        description:
-          "Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation.",
-        args: {
-          data: tool.schema.string(),
-          schema: tool.schema.string(),
-        },
-        async execute(args) {
-          return withTempFile("schema-data.json", args.data, (dataFile) =>
-            withTempFile("schema-def.json", args.schema, (schemaFile) =>
-              runPayload(["schema", dataFile, "--schema", schemaFile])
-            )
-          )
-        },
-      }),
-      kern_verify_output: tool({
-        description:
-          "Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference.",
-        args: {
-          text: tool.schema.string(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["verify"]
-          // verify exits 1 with the full report on stdout — runPayload keeps it
-          return withTempFile("verify-input.txt", args.text, (file) => {
-            const rest: string[] = [...flags, file]
-            if (args.root) rest.push(args.root)
-            return runPayload(rest)
-          })
-        },
-      }),
-      kern_check_draft: tool({
-        description:
-          "Validate an agent's draft code against the project index (lighter than LSP, deterministic): Go parse errors, relative imports that do not resolve under root, calls to symbols that are neither declared in the draft nor indexed, and method calls on package aliases not found in the indexed package. Non-Go languages are skipped conservatively.",
-        args: {
-          code: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          lang: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["check-draft"]
-          if (args.lang) flags.push("--lang", args.lang)
-          // check-draft exits 1 with the findings on stdout — runPayload keeps them
-          return withTempFile("draft.go", args.code, (file) => {
-            const rest = [...flags, file]
-            if (args.root) rest.push(args.root)
-            return runPayload(rest)
-          })
-        },
-      }),
-      kern_taint: tool({
-        description:
-          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) called transitively from a framework entry point or with source expressions (request params, bodies, CLI args) in the file. The optional range argument scopes findings to files changed in a \'from..to\' git range. Deterministic, bounded BFS.",
-        args: {
-          root: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["taint"]
-          if (args.file) flags.push("--file", args.file)
-          if (args.range) flags.push("--range", args.range)
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-kern_entry_points: tool({
-        description:
-          "List framework entry points found in the index: handlers, controllers and route targets. Use to know what endpoints a codebase exposes.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["entries"]
-          if (args.limit) flags.push("--limit", String(args.limit))
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_frameworks: tool({
-        description:
-          "Detect the frameworks and libraries a project uses (Spring, Rails, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["fw"]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_fw_trace: tool({
-        description:
-          "Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework execution pipelines (Route -> Middleware -> Handler DTO -> Injected Service -> DB Model) across Gin, Express, FastAPI, Spring Boot, and NestJS.",
-        args: {
-          root: tool.schema.string().optional(),
-          filter: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["fw-trace"]
-          if (args.filter) flags.push("--filter", args.filter)
-          if (args.format) flags.push("--format", args.format)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_sandbox: tool({
-        description:
-          "Run a risky command inside the project with a filesystem snapshot: if the command fails, the tree is restored to the pre-run snapshot; if it passes, changes are kept. Use for destructive or uncertain operations.",
-        args: {
-          command: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          timeout: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const parts = args.command.trim().split(/\s+/).filter(Boolean)
-          if (parts.length === 0) return "error: empty command"
-          const flags: string[] = ["sandbox"]
-          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
-          if (args.root) flags.push(args.root)
-          flags.push("--", ...parts)
-          return runPayload(flags, args.timeout)
-        },
-      }),
-      kern_health: tool({
-        description:
-          "Returns a real-time health and self-observability snapshot of the kern MCP server: index freshness, symbol counts, cache hit-rate, audit chain length, active tools, and in-flight operations. Enables AI agents to self-diagnose server state and avoid blind retries.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["health"]
-          if (args.root) flags.push("--root", args.root)
-          // health can exit 1 with the report on stdout — runPayload keeps it
-          return runPayload(flags)
-        },
-      }),
-      kern_compose: tool({
-        description:
-          "Executes an ordered pipeline of kern tools in a single RPC round-trip, passing intermediate outputs to downstream steps using $variable bindings. Drastically reduces agent latency and token overhead for multi-step workflows.",
-        args: {
-          pipeline: tool.schema.any(),
-          timeout: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["compose"]
-          if (typeof args.pipeline === "string") {
-            flags.push("--pipeline", args.pipeline)
-          } else {
-            flags.push("--pipeline", JSON.stringify(args.pipeline))
-          }
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_pre_edit: tool({
-        description:
-          "Predicts the blast radius, direct callers, untested dependencies, and boundary risks of modifying a specific file or symbol BEFORE changes are made. Saves agents from making risky changes or incurring expensive rollback cycles.",
-        args: {
-          file: tool.schema.string().optional(),
-          lines: tool.schema.string().optional(),
-          symbol: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["pre-edit"]
-          if (args.file) flags.push("--file", args.file)
-          if (args.lines) flags.push("--lines", args.lines)
-          if (args.symbol) flags.push("--symbol", args.symbol)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_prompt_fill: tool({
-        description:
-          "Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate.",
-        args: {
-          template: tool.schema.string(),
-          task: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          slots: tool.schema.any().optional(),
-          inject_memory: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["prompt-fill", "--template", args.template]
-          if (args.task) flags.push("--task", args.task)
-          if (args.file) flags.push("--file", args.file)
-          if (args.inject_memory) flags.push("--inject-memory", args.inject_memory)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_refactor_transaction: tool({
-        description:
-          "Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modifications in an isolated sandbox worktree with automated compilation verification. Guarantees atomic rollback on compilation errors with 0 broken multi-file refactor commits.",
-        args: {
-          edits: tool.schema.any(),
-          root: tool.schema.string().optional(),
-          compile_command: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["refactor-transaction"]
-          if (args.edits) flags.push("--edits", typeof args.edits === "string" ? args.edits : JSON.stringify(args.edits))
-          if (args.compile_command) flags.push("--compile-command", args.compile_command)
-          if (args.apply) flags.push("--apply", args.apply)
-          if (args.format) flags.push("--format", args.format)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_semantic: tool({
-        description:
-          "AST-level semantic operations. action=diff computes a functional symbol diff (modified functions, changed signatures, impacted callers) instead of raw line noise; action=merge performs an AST-aware 3-way merge (base/local/remote) that resolves non-overlapping declarations and flags precise semantic conflicts.",
-        args: {
-          action: tool.schema.string().describe("diff|merge"),
-          from: tool.schema.string().optional(),
-          to: tool.schema.string().optional(),
-          range: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          base: tool.schema.string().optional(),
-          local: tool.schema.string().optional(),
-          remote: tool.schema.string().optional(),
-          base_file: tool.schema.string().optional(),
-          local_file: tool.schema.string().optional(),
-          remote_file: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          switch (args.action) {
-            case "merge":
-              const flags: string[] = ["semantic-merge"]
-              if (args.file) flags.push("--file", args.file)
-              if (args.base) flags.push("--base", args.base)
-              if (args.local) flags.push("--local", args.local)
-              if (args.remote) flags.push("--remote", args.remote)
-              if (truthy(args.apply)) flags.push("--apply")
-              if (args.format === "json") flags.push("--json")
-              if (args.root) flags.push("--root", args.root)
-              return run(flags)
-            case "diff":
-            default:
-              const dflags: string[] = ["semantic-diff"]
-              if (args.from) dflags.push("--from", args.from)
-              if (args.to) dflags.push("--to", args.to)
-              if (args.range) dflags.push("--range", args.range)
-              if (args.root) dflags.push("--root", args.root)
-              return run(dflags)
-          }
         },
       }),
       kern_evidence: tool({
@@ -2738,316 +1715,10 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_org: tool({
-        description:
-          "Enterprise org admin (C11) by entity: projects; agents (action=list|register); teams (list|show|create|remove); memory (list|add — org-level shared memory); tasks (aggregated visibility); search (cross-project symbol search, q required); audit (org audit log); user (add|list|role|disable|audit — actor_id required; MCP-only, forwards to the org namespace).",
-        args: {
-          entity: tool.schema.string().describe("projects|agents|teams|memory|tasks|search|audit|user"),
-          action: tool.schema.string().optional(),
-          id: tool.schema.string().optional(),
-          name: tool.schema.string().optional(),
-          type: tool.schema.string().optional(),
-          q: tool.schema.string().optional(),
-          content: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-          members: tool.schema.string().optional(),
-          user_id: tool.schema.string().optional(),
-          role: tool.schema.string().optional(),
-          actor_id: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          switch (args.entity) {
-            case "projects":
-              const flags: string[] = ["org", "projects"]
-              if (args.root) flags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-              return run(flags)
-            case "agents":
-              const aflags: string[] = ["org", "agents", args.action === "register" ? "register" : "list"]
-              if (args.action === "register") {
-                if (args.id) aflags.push(args.id)
-                if (args.name) aflags.push(args.name)
-                if (args.type) aflags.push("--type", args.type)
-              }
-              if (args.root) aflags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) aflags.push("--project", p) })
-              return run(aflags)
-            case "teams":
-              const taction = args.action || "list"
-              const tflags: string[] = ["org", "teams", taction]
-              if (taction === "show" || taction === "remove") {
-                if (args.id) tflags.push(args.id)
-              }
-              if (taction === "create") {
-                if (args.id) tflags.push(args.id)
-                if (args.name) tflags.push(args.name)
-                if (args.projects) tflags.push("--projects", args.projects)
-                if (args.members) tflags.push("--members", args.members)
-              }
-              if (args.root) tflags.push("--root", args.root)
-              return run(tflags)
-            case "memory":
-              const mflags: string[] = ["org", "memory", args.action === "add" ? "add" : "list"]
-              if (args.action === "add") {
-                if (args.content) mflags.push(args.content)
-                if (args.type) mflags.push("--type", args.type)
-              }
-              if (args.root) mflags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) mflags.push("--project", p) })
-              return run(mflags)
-            case "tasks":
-              const t2flags: string[] = ["org", "tasks"]
-              if (args.root) t2flags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) t2flags.push("--project", p) })
-              return run(t2flags)
-            case "search":
-              const sflags: string[] = ["org", "search"]
-              if (args.q) sflags.push(args.q)
-              if (args.root) sflags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) sflags.push("--project", p) })
-              return run(sflags)
-            case "audit":
-              const auflags: string[] = ["org", "audit"]
-              if (args.root) auflags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) auflags.push("--project", p) })
-              return run(auflags)
-            case "user":
-            default:
-              const uflags: string[] = ["org", "users", args.action || "list"]
-              if (args.action) {
-                if (args.user_id) uflags.push(args.user_id)
-                if (args.role) uflags.push(args.role)
-              }
-              if (args.actor_id) uflags.push("--actor", args.actor_id)
-              if (args.root) uflags.push("--root", args.root)
-              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) uflags.push("--project", p) })
-              return run(uflags)
-          }
-        },
-      }),
-      kern_context_watch: tool({
-        description:
-          "Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow.",
-        args: {
-          text: tool.schema.string(),
-          budget: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["context-watch"]
-          if (args.budget) flags.push("--budget", String(args.budget))
-          if (args.format) flags.push("--format", args.format)
-          return withTempFile("context-watch.txt", args.text, (file) => {
-            const rest: string[] = [...flags, "--text", args.text]
-            return run(rest)
-          })
-        },
-      }),
-      kern_explain: tool({
-        description:
-          "Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call.",
-        args: {
-          target: tool.schema.string(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["explain", args.target]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_cross_repo_impact: tool({
-        description:
-          "Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences.",
-        args: {
-          target_symbol: tool.schema.string(),
-          linked_repos: tool.schema.any().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["cross-repo-impact", args.target_symbol]
-          if (Array.isArray(args.linked_repos)) {
-            for (const r of args.linked_repos) {
-              flags.push("--repo", String(r))
-            }
-          }
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_policy_dsl: tool({
-        description:
-          "Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size).",
-        args: {
-          policy: tool.schema.string().optional(),
-          files: tool.schema.any().optional(),
-          diff: tool.schema.string().optional(),
-          imports: tool.schema.any().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["policy-dsl"]
-          if (args.policy) flags.push("--policy", args.policy)
-          if (args.diff) flags.push("--diff", args.diff)
-          if (Array.isArray(args.files)) {
-            for (const f of args.files) {
-              flags.push("--file", String(f))
-            }
-          }
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_surprising: tool({
-        description:
-          "Surprising connections: cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at.",
-        args: {
-          root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["surprising"]
-          if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", String(args.limit))
-          return run(flags)
-        },
-      }),
-      // CLI:
-      //   kern snapshot [root] [--symbol X] [--out FILE]
-      //   kern snapshot verify <file> [--strict]
-      kern_snapshot: tool({
-        description:
-          "Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output: GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown).",
-        args: {
-          action: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          symbol: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["snapshot"]
-          if (args.action === "verify") {
-            flags.push("verify")
-            if (args.file) flags.push(args.file)
-            if (args.root) flags.push(args.root)
-            if (args.strict) flags.push("--strict")
-            return run(flags)
-          }
-          if (args.root) flags.push(args.root)
-          if (args.symbol) flags.push("--symbol", args.symbol)
-          if (args.limit) flags.push("--limit", String(args.limit))
-if (args.out) flags.push("--out", args.out)
-return run(flags)
-},
-}),
-// CLI:
-//   kern prose <words> [root] [--limit N]
-kern_prose: tool({
-description:
-"Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first.",
-args: {
-query: tool.schema.string(),
-root: tool.schema.string().optional(),
-limit: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["prose", args.query]
-if (args.root) flags.push(args.root)
-if (args.limit) flags.push("--limit", String(args.limit))
-return run(flags)
-},
-}),
-kern_stream: tool({
-        description:
-          "Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.",
-        args: {
-          action: tool.schema.string().optional(),
-          channel: tool.schema.string().optional(),
-          payload: tool.schema.string().optional(),
-          chunk_size: tool.schema.string().optional(),
-          progress_token: tool.schema.string().optional(),
-          percent: tool.schema.string().optional(),
-          message: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["stream"]
-          if (args.action) flags.push("--action", args.action)
-          if (args.channel) flags.push("--channel", args.channel)
-          if (args.payload) flags.push("--payload", args.payload)
-          if (args.chunk_size) flags.push("--chunk-size", String(args.chunk_size))
-          if (args.progress_token) flags.push("--progress-token", args.progress_token)
-          if (args.percent) flags.push("--percent", String(args.percent))
-          if (args.message) flags.push("--message", args.message)
-          return run(flags)
-        },
-      }),
-      kern_ast_transform: tool({
-        description:
-          "Executes deterministic AST-level transformations on code: scaffolding interface method stubs, adding struct fields, or inserting methods without fragile whitespace or regex diff errors.",
-        args: {
-          action: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          code: tool.schema.string().optional(),
-          target_symbol: tool.schema.string().optional(),
-          interface_name: tool.schema.string().optional(),
-          receiver_name: tool.schema.string().optional(),
-          receiver_type: tool.schema.string().optional(),
-          field_name: tool.schema.string().optional(),
-          field_type: tool.schema.string().optional(),
-          field_tag: tool.schema.string().optional(),
-          method_signature: tool.schema.string().optional(),
-          method_body: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["ast-transform"]
-          if (args.action) flags.push("--action", args.action)
-          if (args.file) flags.push("--file", args.file)
-          if (args.target_symbol) flags.push("--target", args.target_symbol)
-          if (args.interface_name) flags.push("--interface", args.interface_name)
-          if (args.field_name) flags.push("--field", args.field_name)
-          if (args.field_type) flags.push("--field-type", args.field_type)
-          if (args.field_tag) flags.push("--tag", args.field_tag)
-          if (args.method_signature) flags.push("--sig", args.method_signature)
-          if (args.method_body) flags.push("--body", args.method_body)
-          if (truthy(args.apply)) flags.push("--apply")
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_synthesize_test: tool({
-        description:
-          "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures. Pass sinks=<comma-separated rule ids> to scaffold a deterministic test per tainted security sink instead (the former kern_taint generate=true output).",
-        args: {
-          target: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          code: tool.schema.string().optional(),
-          auto_gap: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-sinks: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["synthesize-test"]
-          if (args.target) flags.push("--target", args.target)
-          if (args.file) flags.push("--file", args.file)
-          if (truthy(args.auto_gap)) flags.push("--auto-gap")
-          if (truthy(args.apply)) flags.push("--apply")
-          if (args.format === "json") flags.push("--json")
-          if (args.sinks) flags.push("--sinks", args.sinks)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
       // --- Shadow built-ins: route read/grep/glob/bash to kern transparently ---
       // A plugin tool with the same name as a built-in takes precedence, so the
       // agent's "read the file" call hits kern_compact_file under the hood.
-      // Contract Y (fail-closed parity with the shell guard): code-content
+      // Fail-closed parity with the shell guard: code-content
       // intents BLOCK with the guard's redirect message — a grep with an
       // include filter or regex metacharacters, a code-file read when kern is
       // unavailable, and a bash command whose first token is a content-reading
@@ -3082,7 +1753,7 @@ if (await isSimpleRead(args.filePath)) {
           flags.push(args.filePath)
           // Same canonical key as kern_compact_file (compact|<path>), so a
           // repeat read of the same file collapses to the unchanged reply.
-          const cached = etagCache.get(etagKey(flags))
+          const cached = etagGet(etagKey(flags))
           if (cached) flags.push("--etag", cached)
           try {
             const compacted = await run(flags)
@@ -3096,15 +1767,33 @@ if (await isSimpleRead(args.filePath)) {
             logAdoption("read", true)
             const pointerLine = "[kern] code file — symbolic summary served. verbatim: kern_compact_file tier=full · symbol slice: kern_context <symbol>"
             return `${compacted}\n${pointerLine}`
-          } catch {
-            // kern unavailable on a CODE file — block with the guard's
-            // redirect message (Contract Y fail-closed; never a raw read).
-            // Non-code reads never reach here: isSimpleRead already served
-            // them raw, and the empty-compact fallback above is the non-code
-            // path. This catch is the code path only.
-            logAdoption("read", false)
-            throw new Error("Use kern_explore with the file path as symbol (symbolic summary; add tier=full for the verbatim file, or start_line/end_line for a line window) instead of the built-in read; kern_compact_file does the same when KERN_MCP_FULL=1. Call kern_explore with {\"symbol\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard.")
-          }
+} catch {
+// kern unavailable on a CODE file — block with the guard's
+// redirect message (fail-closed; never a raw read).
+// Non-code reads never reach here: isSimpleRead already served
+// them raw, and the empty-compact fallback above is the non-code
+// path. This catch is the code path only.
+logAdoption("read", false)
+// An operator-minted allowance (kern guard allow <hash>,
+// tty-gated on the CLI side) unlocks this exact path once.
+if (await consumeAllowOnce(args.filePath)) {
+return readFallback(args.filePath)
+}
+// Auto-redirect: run the kern equivalent instead of
+// denying — the subject (file path) is cleanly extractable here. Default
+// mode: unchanged, the deny below stays.
+if (process.env.KERN_GUARD_MODE === "auto-redirect") {
+try {
+const out = await run(["compact", args.filePath])
+logAdoption("read", true)
+return `${out}\n[kern] read redirected to kern_compact_file`
+} catch {
+// kern unavailable — fall through to the deny below
+}
+}
+const subjHash = hashSubject(args.filePath)
+throw new Error(`Use kern_explore with the file path as symbol (symbolic summary; add tier=full for the verbatim file, or start_line/end_line for a line window) instead of the built-in read; kern_compact_file does the same when KERN_MCP_FULL=1. Call kern_explore with {\"symbol\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+}
         },
       }),
       glob: tool({
@@ -3139,7 +1828,7 @@ if (await isSimpleRead(args.filePath)) {
       }),
 grep: tool({
 description:
-"Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default. Patterns with an include filter or regex metacharacters are blocked — use kern_ast_search (symbols) or bash grep with raw=true (operator-gated).",
+"Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default. Patterns with an include filter or regex metacharacters are blocked — use kern_ast_search (symbols) or bash: kern ast <pattern> (CLI regex; plain bash grep is denied by the same guard).",
 args: {
 pattern: tool.schema.string(),
 path: tool.schema.string().optional(),
@@ -3162,20 +1851,56 @@ const out = await run(flags)
 logAdoption("grep", true)
 return out
 } catch {
-// kern unavailable — block (Contract Y): never a node-fs scan.
+// kern unavailable — block: never a node-fs scan. An
+// operator-minted allowance for this exact pattern unlocks it once.
 logAdoption("grep", false)
-throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
+if (await consumeAllowOnce(args.pattern)) {
+return grepFallback(args.pattern, args.path, args.include)
+}
+// Auto-redirect: run the kern equivalent instead of
+// denying — the subject (pattern) is cleanly extractable here. Default
+// mode: unchanged, the deny below stays.
+if (process.env.KERN_GUARD_MODE === "auto-redirect") {
+try {
+const out = await run(["docs", args.pattern])
+logAdoption("grep", true)
+return `${out}\n[kern] grep redirected to kern_doc`
+} catch {
+// kern unavailable — fall through to the deny below
+}
+}
+const subjHash = hashSubject(args.pattern)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
 }
 if (args.include || /[[\]\\^$.|?*+()]/.test(args.pattern)) {
-// Block with the guard's message (Contract Y): kern ast/docs searches
+// Block with the guard's message: kern ast/docs searches
 // have no include filter and take symbol queries, not regex — and no
 // real grep runs here (the guard never raw-scans; the message documents
 // the operator-gated bash raw=true escape). The same regex-metachar
 // condition that used to fall through to a second grepFallback branch is
-// covered here, so that dead branch is gone.
+// covered here, so that dead branch is gone. An operator-minted
+// allowance for this exact pattern unlocks it once.
 logAdoption("grep", false)
-throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
+if (await consumeAllowOnce(args.pattern)) {
+return grepFallback(args.pattern, args.path, args.include)
+}
+// Auto-redirect: run the kern equivalent instead of
+// denying — the subject (pattern) is cleanly extractable here. The redirect
+// is deliberately lossy for regex/include patterns (kern takes symbol
+// queries); the operator opted into that with the explicit env gate. Default
+// mode: unchanged, the deny below stays.
+if (process.env.KERN_GUARD_MODE === "auto-redirect") {
+try {
+const out = await run(["ast", args.pattern])
+logAdoption("grep", true)
+return `${out}\n[kern] grep redirected to kern_search`
+} catch {
+// kern unavailable — fall through to the deny below
+}
+}
+const subjHash = hashSubject(args.pattern)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
 // Symbol query path: no include filter, no regex metacharacters — this is
 // what kern_ast_search is for.
@@ -3186,16 +1911,21 @@ const out = await run(flags)
 logAdoption("grep", true)
 return out + "\n[kern] grep routed to kern_search (symbol query, not regex)"
 } catch {
-// kern unavailable — block (Contract Y): a node-fs scan would bypass
-// the guard entirely.
+// kern unavailable — block: a node-fs scan would bypass
+// the guard entirely. An operator-minted allowance for this exact
+// pattern unlocks it once.
 logAdoption("grep", false)
-throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.")
+if (await consumeAllowOnce(args.pattern)) {
+return grepFallback(args.pattern, args.path, args.include)
+}
+const subjHash = hashSubject(args.pattern)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
         },
       }),
       bash: tool({
         description:
-          "Run a shell command. Simple content-free commands (git status, git log without -p, pwd, ls, which, echo, date) and read-only kern diagnostics (kern version/doctor/health) run raw. Content-intent commands (grep, cat, head, sed, ...) are blocked — use kern_ast_search / kern_search instead. Everything else runs through kern build (governed, compact). timeout in MS (default 120000, max 1800000).",
+          "Run a shell command. Content-free commands (git status, git log w/o -p, pwd, ls, echo, date) and read-only kern diagnostics run raw. Content-intent commands (grep, cat, head, sed, ...) are blocked (fail-closed) — use kern_explore/kern_search for code reads. Everything else runs through kern build (governed, compact). timeout in MS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -3216,18 +1946,63 @@ throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, 
             return runRaw(args.command, args.workdir, args.timeout)
           }
           // Content-intent commands never execute raw through built-ins —
-          // parity with the shell guard (Contract Y): a command whose first
-          // token is a content-reading tool blocks with the guard's redirect
-          // message instead of running through kern build. Word-boundary
-          // match on the first token only (the guard blocks the whole
-          // compound regardless of position; first-token is the honest
-          // signal for `cd X && grep ...` vs `cd X && npm test`).
-          const contentIntents = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
-          const firstTok = cmd.split(/\s+/)[0]
-          if (contentIntents.has(firstTok)) {
-            logAdoption("bash", false)
-            throw new Error("Use kern_verify instead of the built-in bash — it is the sanctioned path for go build / go vet / go test. Run your own build/test/lint command with kern_verify {\"command\":\"go test ./...\",\"output\":\"summary\"} (output: summary|failures|tail:N|lines:A-B|full; the full run is kept, so re-slice it with {\"anchor\":\"<id>\",\"output\":\"lines:A-B\"}), or call it with no arguments for build+test+security in one verdict. For governed one-off commands use kern_exec (KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard.\\nkern alternative: kern_context/kern_explore/kern_search for symbol context · content-free compounds like 'git status && git log' are allowed through")
-          }
+          // parity with the shell guard: a command where ANY
+          // &&/||/;/|-separated segment (after env/sudo/env prefix
+          // stripping, one level inside an `sh -c "..."` wrapper included)
+          // runs a content-reading tool blocks with the guard's redirect
+          // message instead of running through kern build (the former
+          // whole-command first-token-only match was spoofable via env
+          // prefixes, compound segments and sh -c wrappers).
+if (contentIntentHit(cmd)) {
+logAdoption("bash", false)
+// Operator allow-once (kern guard allow <hash>, tty-gated on the CLI
+// side) unlocks this exact command once — same consumption as the
+// read/grep shadows; the guard's exit 0 equivalent is the raw run.
+if (await consumeAllowOnce(cmd)) {
+return runRaw(args.command, args.workdir, args.timeout)
+}
+// Auto-redirect is the default: run the kern
+// equivalent of a simple content-intent command and serve its output
+// instead of denying — audited via logAdoption (routed=true). Only first
+// tokens with a faithful kern mapping and NO shell metacharacters
+// (compounds/pipes/expansion/quoting are ambiguous) redirect; anything
+// else keeps the deny below. KERN_GUARD_MODE=deny restores the
+// uniform deny; an explicit =auto-redirect is honored for
+// compatibility (mirrors kern-guard.sh).
+if (process.env.KERN_GUARD_MODE !== "deny" && !/[\n|&;<>$`"']/.test(cmd)) {
+const firstToken = cmd.split(/\s+/)[0] ?? ""
+const nonFlagToks = cmd.split(/\s+/).filter((t) => t !== "" && !t.startsWith("-"))
+const pattern = nonFlagToks[0] ?? ""
+const filePath = nonFlagToks.length > 0 ? nonFlagToks[nonFlagToks.length - 1] : ""
+const redirectFlags: string[] = /^(grep|rg|ag)$/.test(firstToken) && pattern !== "" ? ["ast", pattern]
+  : /^(cat|head|tail|sed|awk|less|more)$/.test(firstToken) && filePath !== "" ? ["compact", filePath]
+  : firstToken === "find" ? ["buddy"]
+  : /^(go|make)$/.test(firstToken) ? ["verify", "--command", cmd, "--output", "summary"]
+  : []
+if (redirectFlags.length > 0) {
+try {
+const out = await run(redirectFlags)
+logAdoption("bash", true)
+return `${out}\n[kern] bash redirected to ${redirectFlags[0]}`
+} catch {
+// kern unavailable or the mapping failed — fall through to the deny below
+}
+}
+}
+const clippedCmd = cmd.length > 80 ? cmd.slice(0, 80) + "…" : cmd
+    const subjHash = hashSubject(cmd)
+    // Per-command replacement map (byte-parity with kern-guard.sh):
+    // first token -> exact default-surface tool. Env-prefixed / sudo-wrapped
+    // / compound commands resolve to their first token; the kern_meta
+    // default routes anything else.
+    const firstToken = cmd.split(/\s+/)[0] ?? ""
+    const repl = /^(grep|rg|ag)$/.test(firstToken) ? "kern_search (query=<symbol>)"
+      : /^(cat|head|tail|sed|awk|less|more)$/.test(firstToken) ? "kern_explore (symbol=<file path>, tier=full, start_line/end_line)"
+      : firstToken === "find" ? "kern_buddy"
+      : /^(go|make)$/.test(firstToken) ? "kern_verify (command=<cmd>, output=summary)"
+      : "kern_meta (request=<what you need>)"
+     throw new Error(`kern guard: blocked '${clippedCmd}' — not in the passthrough set; use ${repl} instead (build/test: kern_verify, unsure: kern_meta). Compounds/pipes: split into single commands — each segment is classified separately. Escapes: KERN_BYPASS=1 / KERN_ENFORCE=0. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+}
           // kern build runs any command (sh -c) in the project dir, gated by
           // the governance firewall, and returns compact output. kern exec is
           // NOT used for this: it executes code in an isolated temp sandbox
@@ -3254,10 +2029,10 @@ throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, 
             // returns its output + an exit-code line instead of throwing into
             // the host's bare "Failed with exit code N" rendering (which drops
             // the payload AND the denial reason — observed live).
-            const { text, exitCode } = await runWithExit(flags, args.timeout)
-            logAdoption("bash", true)
-            if (exitCode === 0) return text
-            return governedBashBanner(exitCode, text)
+const { text, exitCode } = await runWithExit(flags, args.timeout)
+logAdoption("bash", true)
+if (exitCode === 0) return text
+return governedBashBanner(exitCode, text)
           } catch (err) {
             // Never silently bypass the exec firewall: if the governed path
             // was DENIED (no KERN_TOOLS allowlist / no KERN_ALLOW_EXEC, or an
@@ -3270,22 +2045,25 @@ throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, 
             // the kern binary itself is missing.
             const e = err as { message?: string; stdout?: Buffer | Uint8Array; stderr?: Buffer | Uint8Array }
             const text = [e.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n")
-            if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) {
-              // Served by kern's governed path (denial/timeout) — still
-              // kern-routed. Return the diagnostic instead of throwing: the
-              // host renders thrown tool errors as a bare failure with no
-              // payload, dropping the denial/timeout reason (observed live).
-              logAdoption("bash", true)
-              return text || (err instanceof Error ? err.message : String(err))
-            }
-            if (!existsSync(bin)) {
-              logAdoption("bash", false)
-              return runRaw(args.command, args.workdir, args.timeout)
-            }
-            // Genuine governed-path failure with the kern binary present —
-            // same delivery: the diagnostic becomes the tool result.
-            logAdoption("bash", true)
-            return text || (err instanceof Error ? err.message : String(err))
+if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) {
+// Served by kern's governed path (denial/timeout) — still
+// kern-routed. Return the diagnostic instead of throwing: the
+// host renders thrown tool errors as a bare failure with no
+// payload, dropping the denial/timeout reason (observed live).
+logAdoption("bash", true)
+return text || (err instanceof Error ? err.message : String(err))
+}
+if (!existsSync(bin)) {
+// kern itself is unavailable — no governed path. Content-intent
+// commands never reach here (the deny above fires regardless of
+// kern availability); everything else falls back raw as before.
+logAdoption("bash", false)
+return runRaw(args.command, args.workdir, args.timeout)
+}
+// Genuine governed-path failure with the kern binary present —
+// same delivery: the diagnostic becomes the tool result.
+logAdoption("bash", true)
+return text || (err instanceof Error ? err.message : String(err))
           }
         },
       }),
@@ -3357,6 +2135,41 @@ throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, 
       if (input.tool !== "bash" && input.tool !== "read" && input.tool !== "grep") {
         return
       }
+      // JSON is data, not log noise — the log-stripper strips structural
+      // braces out of it and silently corrupts it (live: `kern mcp tools
+      // --json` and reads of large .json files came back unparseable). Guard
+      // on the trimmed first byte BEFORE the command-class checks below so
+      // every JSON-shaped output is exempted regardless of which tool
+      // produced it.
+      const trimmedText = text.trimStart()
+      if (trimmedText.startsWith("{") || trimmedText.startsWith("[")) {
+        return
+      }
+      // Governed-bash output wraps the child output in a "cmd: <command>"
+      // header line; a JSON document behind that header is still data, not
+      // log noise (live: a governed `kern audit --json` came back mangled by
+      // the log-stripper). Exempt it too.
+      if (trimmedText.startsWith("cmd: ")) {
+        const nl = trimmedText.indexOf("\n")
+        const rest = nl >= 0 ? trimmedText.slice(nl + 1).trimStart() : ""
+        if (rest.startsWith("{") || rest.startsWith("[")) {
+          return
+        }
+      }
+      // A bash command that IS a kern read-only view (buddy digest, search,
+      // explore, impact, graph, ast, stats, mcp tools, version, doctor,
+      // health) returns kern-shaped structured text, not log noise — running
+      // the log-stripper over it interleaves its sections into garbage
+      // (deep-verify L3 F3-8: a long `kern buddy` digest came back mangled
+      // while the raw output was clean). Verify/build outputs stay
+      // compressible: they wrap real command logs.
+      if (input.tool === "bash") {
+        const bashArgs = input.args as { command?: string } | undefined
+        const bashCmd = typeof bashArgs?.command === "string" ? bashArgs.command : ""
+        if (/^\s*kern\s+(--version|version|doctor|health|buddy|search|explore|impact|graph|ast|stats|mcp tools)\b/.test(bashCmd)) {
+          return
+        }
+      }
       // Verbatim-request exemptions: a full=true read (or raw=true grep/bash)
       // only yields raw content under the operator's KERN_BYPASS=1 — only
       // then skip lossy compression (the flags are otherwise ignored).
@@ -3398,8 +2211,12 @@ throw new Error("Use kern_search (code symbols — patterns are SYMBOL queries, 
         }
         if (!text || text.length < 16 || text.length > 600) return
         if (text.endsWith("?")) return
+        // Mirror internal/hook/hook.go rememberPrompt (F2): command-ish
+        // lines (leading "/") and system-reminder noise never enter memory.
+        if (text.startsWith("/")) return
+        if (/<system-reminder>|\[system-reminder\]/i.test(text)) return
         const lower = text.toLowerCase()
-        if (/\b(remember|forget)\b|^\/(remember|forget)\b/.test(lower)) return
+        if (/\b(remember|forget)\b/.test(lower)) return
         const now = Date.now()
         if (text === lastChatText || now - lastChatAt < 60_000) return
         lastChatAt = now

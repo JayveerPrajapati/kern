@@ -1,24 +1,25 @@
 package setup
 
 import (
-	"embed"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
-//go:embed assets/plugin/kern.ts
-var pluginFS embed.FS
+// pluginFS is the embedded opencode plugin filesystem (the canonical kern.ts
+// asset lives in internal/agentwire).
+var pluginFS = agentwire.PluginFS()
 
 // PluginAsset returns the embedded canonical opencode plugin source.
 // Exported so doctor can byte-compare installed copies against it without
 // duplicating the embed.
 func PluginAsset() ([]byte, error) {
-	return pluginFS.ReadFile("assets/plugin/kern.ts")
+	return agentwire.PluginAsset()
 }
 
 // GlobalPluginPaths returns every location the opencode plugin may be loaded
@@ -26,26 +27,43 @@ func PluginAsset() ([]byte, error) {
 // config-root path (~/.opencode — opencode 1.18.x loads plugins from the
 // config root, not the XDG dir; a stale copy there silently wins).
 func GlobalPluginPaths() []string {
-	paths := []string{globalPluginPath()}
-	if h, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(h, ".opencode", "plugins", "kern.ts"))
-	}
-	return paths
+	return agentwire.GlobalPluginPaths()
 }
 
-//go:embed assets/AGENTS.md
-var rulesFS embed.FS
+// rulesFS is the embedded canonical rules filesystem (assets/AGENTS.md lives
+// in internal/agentwire).
+var rulesFS = agentwire.RulesFS()
 
 // Status reports one agent's wiring state.
-type Status struct {
-	Agent     string
-	Installed bool
-	// Skipped marks a deliberate no-op (agent not installed, config dir
-	// absent). It is not an error: setup must not exit non-zero for skips,
-	// only for real failures.
-	Skipped bool
-	Path    string
-	Note    string
+type Status = agentwire.Status
+
+// SkillNames lists the canonical kern skills bundled with setup.
+// Implemented in internal/agentwire.
+var SkillNames = agentwire.SkillNames
+
+// ReadSkill returns the content of the bundled skill SKILL.md.
+func ReadSkill(name string) ([]byte, error) {
+	return agentwire.ReadSkill(name)
+}
+
+// ExtractDescriptionAndBody parses frontmatter description and markdown body from SKILL.md.
+func ExtractDescriptionAndBody(data []byte) (string, string) {
+	return agentwire.ExtractDescriptionAndBody(data)
+}
+
+// WireProjectSkills installs kern skills into the project skill directories.
+func WireProjectSkills(root string) []Status {
+	return agentwire.WireProjectSkills(root)
+}
+
+// WireGlobalSkills installs kern skills into all detected agent global directories.
+func WireGlobalSkills() []Status {
+	return agentwire.WireGlobalSkills()
+}
+
+// CheckSkills reports whether project and global skills are present.
+func CheckSkills(root string) []Status {
+	return agentwire.CheckSkills(root)
 }
 
 // detectedAgent maps each agent identifier to a detection function.
@@ -108,6 +126,37 @@ func DetectAgents(root string) []string {
 	return detected
 }
 
+// detectedSet returns the set of detected agent names for presence-aware
+// display. It lets the setup output tell "this surface is wired" apart from
+// "this agent is actually installed on this system" — pre-wiring writes
+// configs for agents that may not exist yet.
+func detectedSet(root string) map[string]bool {
+	present := make(map[string]bool, len(agentDetectors))
+	for _, a := range DetectAgents(root) {
+		present[a] = true
+	}
+	return present
+}
+
+// agentPresenceNote returns an honest annotation for a status row whose
+// Agent names a known agent that DetectAgents does not find on this system.
+// Pre-wiring (--global / --all-agents) deliberately writes configs for every
+// supported agent so a later install needs no re-run; labeling the ones that
+// are not actually installed keeps the display honest without changing what
+// setup writes. Rows that are not known agents (mcp, gitignore, skills,
+// custom adapters, …) are never annotated.
+func agentPresenceNote(agent string, present map[string]bool) string {
+	if agent == "" || present[agent] {
+		return ""
+	}
+	for _, d := range agentDetectors {
+		if d.agent == agent {
+			return " (agent not installed on this system)"
+		}
+	}
+	return ""
+}
+
 func isAgentPresent(root string, d agentDetector) bool {
 	for _, p := range d.paths {
 		var path string
@@ -131,7 +180,15 @@ func isAgentPresent(root string, d agentDetector) bool {
 // wireInstructions writes the kern-first policy block into each detected
 // agent's instruction file, creating the file if missing. Each written
 // file receives an idempotency marker so re-running setup doesn't duplicate.
-func wireInstructions(root string, agents []string) []Status {
+// The variant matches WireAgentRules: when the instruction file's host GLOBAL
+// slot carries the kern-managed block (the full rules then load once
+// globally), the thin wiring-only text is used so the same rules are not
+// loaded twice in one session; otherwise the full rules are written. wired
+// names the agents this run wired, used by the thin variant's wiring-facts
+// line. explicitThin mirrors WireAgentRules: a thin variant resolved by the
+// global-managed DEFAULT never downgrades an existing FULL rules file
+// (keep-full contract); only an explicit choice does.
+func wireInstructions(root string, agents []string, wired string, explicitThin bool) []Status {
 	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
 	if err != nil {
 		return []Status{{Agent: "instructions", Note: err.Error()}}
@@ -148,9 +205,26 @@ func wireInstructions(root string, agents []string) []Status {
 			out = append(out, Status{Agent: agent + "-instruction", Note: err.Error()})
 			continue
 		}
-		status := writeInstructionFile(path, rulesText)
-		status.Agent = agent + "-instruction"
-		out = append(out, status)
+		text := rulesText
+		if agentwire.HostGlobalManaged(file) {
+			text = agentwire.ThinAGENTSmd(wired)
+		}
+		// Keep-full contract: a thin variant resolved by the global-managed default must
+		// not downgrade an existing FULL rules file — an unrequested default
+		// never silently deletes the full usage rules.
+		keepFull := false
+		if text != rulesText && !explicitThin {
+			if cur, rerr := os.ReadFile(path); rerr == nil && strings.Contains(string(cur), agentwire.FullRulesHeader) {
+				keepFull = true
+			}
+		}
+		if keepFull {
+			out = append(out, Status{Agent: agent + "-instruction", Installed: true, Path: path, Note: "kept existing full rules (pass --agents-md thin to switch)"})
+		} else {
+			status := writeInstructionFile(path, text)
+			status.Agent = agent + "-instruction"
+			out = append(out, status)
+		}
 		// Migrate a superseded path (e.g. the pre-F10
 		// .cursor/instructions/kern.mdc) so the policy lives in exactly
 		// one place once the current path is written.
@@ -203,10 +277,7 @@ func instructionPolicyPresent(path string) bool {
 // file. Existing files keep their current permissions (configs with tokens are
 // often 0600 and must not be widened); new files default to 0600.
 func writePerm(path string) os.FileMode {
-	if info, err := os.Stat(path); err == nil {
-		return info.Mode().Perm()
-	}
-	return 0o600
+	return agentwire.WritePerm(path)
 }
 
 // instructionMarkerOpen / instructionMarkerClose bracket the kern-managed block
@@ -214,8 +285,20 @@ func writePerm(path string) os.FileMode {
 // remove-and-rewrite the block on every setup run so an upgrade always writes
 // fresh rules rather than skipping when stale rules are detected.
 const (
-	instructionMarkerOpen  = "<!-- kern-instruction: managed by kern setup; do not edit between markers -->"
-	instructionMarkerClose = "<!-- /kern-instruction -->"
+	instructionMarkerOpen  = agentwire.InstructionMarkerOpen
+	instructionMarkerClose = agentwire.InstructionMarkerClose
+
+	// cursorFrontmatter is the YAML frontmatter Cursor requires at the top of
+	// an .mdc rule file. It must sit on line 1, outside the kern-managed
+	// marker block; alwaysApply: true makes the rule apply to every session
+	// without a user toggle. Defined in internal/agentwire (CursorFrontmatter).
+	cursorFrontmatter = agentwire.CursorFrontmatter
+
+	// globalRulesMarkerOpen / globalRulesMarkerClose bracket the managed
+	// block in the host GLOBAL instruction slots written by
+	// `kern setup --global-rules` (internal/agentwire).
+	globalRulesMarkerOpen  = agentwire.GlobalRulesMarkerOpen
+	globalRulesMarkerClose = agentwire.GlobalRulesMarkerClose
 )
 
 // writeInstructionFile writes the kern-first policy block to a single
@@ -253,7 +336,7 @@ func writeInstructionFile(path, rulesText string) Status {
 // ensureInstructionFrontmatter guarantees a Cursor .mdc rule file carries
 // the YAML frontmatter Cursor requires on line 1, outside the managed
 // markers — without it Cursor will not load the rule at all. Same contract
-// as the global path's ensureMDCFrontmatter, but keyed on the project
+// as the global path's EnsureMDCFrontmatter, but keyed on the project
 // instruction markers. Idempotent: a file that already has the frontmatter
 // ahead of the markers is returned byte-for-byte unchanged.
 func ensureInstructionFrontmatter(path, content string) string {
@@ -265,45 +348,6 @@ func ensureInstructionFrontmatter(path, content string) string {
 		return content
 	}
 	return cursorFrontmatter + "\n\n" + content
-}
-
-// wireRulesFile writes the embedded kern rules block to a single rule file
-// (AGENTS.md). On every run it removes any existing kern section and re-inserts
-// the fresh embedded rules, preserving all user content outside the block.
-// This is overwrite-always: an upgrade with new rules always replaces the old
-// block rather than skipping when a "kern usage rules" header is present.
-// The same per-agent files (CLAUDE.md, GEMINI.md, …) can also be written by
-// writeInstructionFile using a marked block (instructionMarkerOpen/Close).
-// To avoid duplicate blocks when both paths run, wireRulesFile strips BOTH the
-// unmarked kern section AND any marked instruction block before re-inserting.
-func wireRulesFile(root, name string) Status {
-	path := filepath.Join(root, name)
-	content := ""
-	if b, err := os.ReadFile(path); err == nil {
-		content = string(b)
-	}
-	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
-	if err != nil {
-		return Status{Agent: name, Path: path, Note: err.Error()}
-	}
-	cleaned := strutil.RemoveMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
-	cleaned, err = removeKernSection(cleaned)
-	if err != nil {
-		return Status{Agent: name, Path: path, Note: err.Error()}
-	}
-	// If the block is unchanged (same content after remove+reinsert), skip the
-	// write to avoid needlessly bumping mtime. This mirrors the global path.
-	final, err := mergeAppend(cleaned, string(rules))
-	if err != nil {
-		return Status{Agent: name, Path: path, Note: err.Error()}
-	}
-	if content != "" && final == content {
-		return Status{Agent: name, Installed: true, Path: path, Note: "rules already current"}
-	}
-	if err := os.WriteFile(path, []byte(final), writePerm(path)); err != nil {
-		return Status{Agent: name, Path: path, Note: err.Error()}
-	}
-	return Status{Agent: name, Installed: true, Path: path, Note: "rules written"}
 }
 
 // wireEditorExclusions hides .kern from file trees in global editor settings

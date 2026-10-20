@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"io/fs"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/calibrate"
@@ -241,46 +243,72 @@ func (e *Engine) Verify(types []string) verdict.VerificationResult {
 		}
 	}
 
+	// The checks are independent: each writes its own res field, shares
+	// nothing but the immutable engine state (root/options/runAt), and the
+	// index-based ones (security/architecture/dependency/reuse) read the
+	// engine's lazily-loaded index through a mutex. Running them
+	// CONCURRENTLY turns the wall time from the SUM of all checks into the
+	// MAX — the CLI default set (build, test, security, architecture,
+	// dependency, reuse, e2e, static-analysis, performance) previously ran
+	// strictly one-after-another, and even the fast tier's build+test pair
+	// paid both sequentially. The subprocess checks (go build / go test /
+	// go vet / benchmarks) are safe to overlap: the Go build cache is
+	// internally locked, and each check persists its audit log under a
+	// distinct verify-<type> file. Field writes below are single-owner per
+	// goroutine; everything after the Wait is sequential aggregation
+	// (claims, verdict fold, render) that observes the completed fields.
+	var wg sync.WaitGroup
+	check := func(fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn()
+		}()
+	}
 	if run["build"] {
-		res.Build = e.VerifyBuild()
+		check(func() { res.Build = e.VerifyBuild() })
 	}
 	if run["test"] {
-		res.UnitTests = e.VerifyTests()
+		check(func() { res.UnitTests = e.VerifyTests() })
 	}
 	if run["security"] {
-		res.Security = e.VerifySecurity()
+		check(func() { res.Security = e.VerifySecurity() })
 	}
 	if run["architecture"] {
-		res.Architecture = e.VerifyArchitecture()
+		check(func() { res.Architecture = e.VerifyArchitecture() })
 	}
 	if run["dependency"] {
-		res.Dependency = e.VerifyDependency("")
+		check(func() { res.Dependency = e.VerifyDependency("") })
 	}
 	if run["reuse"] {
-		reuseRes := e.VerifyReuse()
-		res.Reuse = &reuseRes
+		check(func() {
+			reuseRes := e.VerifyReuse()
+			res.Reuse = &reuseRes
+		})
 	}
 	if run["e2e"] {
-		res.E2ETests = e.VerifyE2ETests()
+		check(func() { res.E2ETests = e.VerifyE2ETests() })
 	}
 	if run["static-analysis"] {
-		res.StaticAnalysis = e.VerifyStaticAnalysis()
+		check(func() { res.StaticAnalysis = e.VerifyStaticAnalysis() })
 	}
 	if run["performance"] {
-		res.Performance = e.VerifyPerformance()
+		check(func() { res.Performance = e.VerifyPerformance() })
 	}
 	if run["cve"] {
-		res.CVE = e.VerifyCVE()
+		check(func() { res.CVE = e.VerifyCVE() })
 	}
 	if run["license"] {
-		res.License = e.VerifyLicense()
+		check(func() { res.License = e.VerifyLicense() })
 	}
 	if run["secrets"] {
-		res.Secrets = e.VerifySecrets()
+		check(func() { res.Secrets = e.VerifySecrets() })
 	}
 	if run["ci"] {
-		res.CI = e.VerifyCI()
-	} else {
+		check(func() { res.CI = e.VerifyCI() })
+	}
+	wg.Wait()
+	if !run["ci"] {
 		// CI was not requested: report the honest zero state instead of the
 		// zero-value struct serializing as {"ok": false}, which reads like a
 		// failed CI run in --json output. The verdict fold below only fails
@@ -520,6 +548,18 @@ func (e *Engine) VerifyBuild() *verdict.BuildResult {
 	} else {
 		detected, err := validate.DetectKind(e.root, "build")
 		if err != nil {
+			if errors.Is(err, validate.ErrNoKindCommand) && validate.DeclaresSteps(e.root) {
+				// A step manifest (package.json scripts / Makefile targets)
+				// exists but declares no build step: absence of a build step
+				// is not a failure — report an honest skip, never a vacuous
+				// "build: OK" (6.1). Projects WITHOUT a step manifest keep
+				// the D1 degradation (Detect fallback), e.g. go vet on a
+				// stray *_test.go-only directory.
+				res.OK = true
+				res.Output = verdict.SkipPrefix + "no build step detected (nothing to build)"
+				res.Claims = append(res.Claims, evidence.FromBuildResult(e.root, res.OK, res.Output))
+				return res
+			}
 			detected, err = validate.Detect(e.root)
 		}
 		if err != nil {
@@ -1091,7 +1131,7 @@ func (e *Engine) VerifySecurity() *verdict.SecurityResult {
 	// is excluded from the Critical/High/Low risk ladder, so the counts
 	// reflect only live problems. Count stays the raw total (including
 	// suppressed) so the report shows the full picture.
-	reg := loadSuppressionRegistry(e.root)
+	reg := LoadSuppressionRegistry(e.root)
 	unsuppressedCritical := 0
 	for _, f := range findings {
 		vf := verdict.Finding{
@@ -1351,7 +1391,7 @@ func listSourceFiles(root string) []string {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !index.QuickExt(rel) {
+		if rerr != nil || !langparse.QuickExt(rel) {
 			return nil
 		}
 		files = append(files, rel)

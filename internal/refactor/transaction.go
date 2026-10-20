@@ -11,12 +11,24 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // FileEdit represents a modification to a specific file.
 type FileEdit struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+}
+
+// editSnapshot records what the transaction observed about one live file at
+// snapshot time, so the apply phase can detect a concurrent edit before any
+// write lands.
+type editSnapshot struct {
+	path     string // repo-relative path
+	orig     string // live content observed at snapshot time ("" if the file did not exist)
+	existed  bool   // whether the live file existed at snapshot time
+	content  string // new content to write on apply
+	resolved string // symlink-resolved live path, filled during apply preflight
 }
 
 // TransactionRequest configures a multi-file transactional refactoring batch.
@@ -40,26 +52,12 @@ type TransactionResult struct {
 	VerificationSkipped bool `json:"verification_skipped,omitempty"`
 }
 
-// minimalExecEnv builds the environment for the spawned compile child. The
-// full operator environment (secrets) must never reach the child: pass only
-// PATH (to find the toolchain), HOME (go's default GOCACHE/GOPATH/GOENV
-// locations), TMPDIR (go temp files) and the Go toolchain vars the compile
-// step genuinely needs when the operator set them (custom GOPATH/GOCACHE/
-// GOMODCACHE/GOPROXY/GOTOOLCHAIN). GOENV itself is deliberately excluded: go
-// reads it from $HOME/.config/go/env via HOME, so `go env -w` settings
-// survive the narrowing.
-func minimalExecEnv() []string {
-	env := []string{"PATH=" + os.Getenv("PATH")}
-	for _, k := range []string{"HOME", "TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN"} {
-		if v := os.Getenv(k); v != "" {
-			env = append(env, k+"="+v)
-		}
-	}
-	return env
-}
-
 // ExecuteTransaction applies batch modifications in an isolated workspace,
-// verifies compilation, and commits atomically to the live root only on success.
+// verifies compilation, and commits atomically to the live root only on
+// success. Symlink containment is delegated to fsutil: ConfinePath validates
+// a path stays inside the real (symlink-resolved) root; NearestExisting
+// yields the canonical target so the apply write cannot be redirected by a
+// swapped symlink — the defense-in-depth behind the lexical "../" checks.
 func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*TransactionResult, error) {
 	if req.Root == "" {
 		req.Root = "."
@@ -78,13 +76,10 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 		}, nil
 	}
 
-	// Validate every edit before touching the sandbox: an empty path would
-	// surface as a confusing "write .: is a directory" deep inside the
-	// transaction engine, and a relative path escaping the root ("../..")
-	// would write outside the confined project tree on apply. Absolute
-	// paths are confined to the root (normalized to repo-relative). This
-	// mirrors the guards internal/mcp/handlers_refactor.go applies — the
-	// engine fails closed even when a caller bypasses the MCP layer.
+	// Validate every edit before touching the sandbox: empty paths, relative
+	// escapes ("../..") and absolute-outside-root paths are rejected;
+	// absolute inside-root paths are normalized to repo-relative. The engine
+	// fails closed even when a caller bypasses the MCP layer guards.
 	for i := range req.Edits {
 		if strings.TrimSpace(req.Edits[i].Path) == "" {
 			return nil, fmt.Errorf("edits[%d].path is required (each edit is {path, content} with the new complete file content)", i)
@@ -109,7 +104,6 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 	}
 	defer func() { _ = os.RemoveAll(sandboxDir) }()
 
-	// Copy repository contents to sandbox (respecting basic files)
 	if err := copyWorktree(absRoot, sandboxDir); err != nil {
 		return nil, fmt.Errorf("copy worktree to sandbox: %w", err)
 	}
@@ -117,6 +111,7 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 	// 2. Generate unified diff and apply edits to sandbox
 	var modifiedPaths []string
 	var diffBuilder strings.Builder
+	var snapshots []editSnapshot
 
 	for _, edit := range req.Edits {
 		relPath := filepath.Clean(edit.Path)
@@ -126,13 +121,31 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 			}
 		}
 
-		origFull := filepath.Join(absRoot, relPath)
+		// Snapshot the live file for the TOCTOU preflight (read errors tolerated:
+		// treated as new file).
+		origFull, err := fsutil.ConfinePath(absRoot, relPath, "edits")
+		if err != nil {
+			return nil, err
+		}
 		origContent := ""
+		existed := false
 		if data, err := os.ReadFile(origFull); err == nil {
 			origContent = string(data)
+			existed = true
 		}
+		snapshots = append(snapshots, editSnapshot{
+			path:    relPath,
+			orig:    origContent,
+			existed: existed,
+			content: edit.Content,
+		})
 
-		sandboxFull := filepath.Join(sandboxDir, relPath)
+		// The sandbox copy has no live symlinks; ConfinePath still fails closed
+		// here (defense in depth) and yields the canonical path.
+		sandboxFull, err := fsutil.ConfinePath(sandboxDir, relPath, "edits")
+		if err != nil {
+			return nil, err
+		}
 		if err := os.MkdirAll(filepath.Dir(sandboxFull), 0o755); err != nil {
 			return nil, fmt.Errorf("mkdir for %s: %w", relPath, err)
 		}
@@ -172,7 +185,7 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 		// environment (all secrets). Mirror the host-sampler allowlist
 		// (PATH, HOME, TMPDIR) plus the Go toolchain vars the compile step
 		// genuinely needs when the operator set them.
-		cmd.Env = minimalExecEnv()
+		cmd.Env = fsutil.MinimalExecEnv()
 
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
@@ -195,20 +208,40 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 
 	// 4. If Apply is true, atomically commit validated modifications to live tree
 	if req.Apply {
-		for _, edit := range req.Edits {
-			relPath := filepath.Clean(edit.Path)
-			if filepath.IsAbs(relPath) {
-				if rel, err := filepath.Rel(absRoot, relPath); err == nil && !strings.HasPrefix(rel, "..") {
-					relPath = rel
+		// TOCTOU preflight: re-verify every live file against the snapshot
+		// BEFORE the first write lands (all-or-nothing commit). ConfinePath
+		// re-validates containment; NearestExisting gives the canonical
+		// write target so a swapped symlink cannot redirect the write.
+		for i := range snapshots {
+			snap := &snapshots[i]
+			full, err := fsutil.ConfinePath(absRoot, snap.path, "edits")
+			if err != nil {
+				return nil, err
+			}
+			snap.resolved, err = fsutil.NearestExisting(full, "edits")
+			if err != nil {
+				return nil, err
+			}
+			if snap.existed {
+				data, err := os.ReadFile(full)
+				if err != nil || !bytes.Equal(data, []byte(snap.orig)) {
+					return nil, fmt.Errorf("apply aborted: %s changed on disk since the transaction snapshot (concurrent edit); re-run the refactor", snap.path)
+				}
+			} else {
+				if _, err := os.Stat(full); err == nil {
+					return nil, fmt.Errorf("apply aborted: %s changed on disk since the transaction snapshot (concurrent edit); re-run the refactor", snap.path)
 				}
 			}
+		}
 
-			liveFull := filepath.Join(absRoot, relPath)
-			if err := os.MkdirAll(filepath.Dir(liveFull), 0o755); err != nil {
-				return nil, fmt.Errorf("apply mkdir %s: %w", relPath, err)
+		// Write phase: use the preflight-resolved paths (no re-resolution, no
+		// re-verification — the checks above already ran for every edit).
+		for _, snap := range snapshots {
+			if err := os.MkdirAll(filepath.Dir(snap.resolved), 0o755); err != nil {
+				return nil, fmt.Errorf("apply mkdir %s: %w", snap.path, err)
 			}
-			if err := os.WriteFile(liveFull, []byte(edit.Content), 0o644); err != nil {
-				return nil, fmt.Errorf("apply write %s: %w", relPath, err)
+			if err := os.WriteFile(snap.resolved, []byte(snap.content), 0o644); err != nil {
+				return nil, fmt.Errorf("apply write %s: %w", snap.path, err)
 			}
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -77,6 +78,25 @@ type AuditEntry struct {
 	// hash; when empty the entry hashes byte-identically to the legacy
 	// format, so chains written by older binaries still verify.
 	Principal string `json:"Principal,omitempty"`
+	// DurationMs records how long the audited operation took (tool_call
+	// entries: the wall-clock duration of the MCP tool call; other actions:
+	// unset). Latency-visibility work (L3): the per-call duration is
+	// queryable from the tamper-evident chain instead of only from in-memory
+	// metrics aggregates. Optional; absent for legacy entries. When > 0 it
+	// is folded into the chain hash; when 0 the entry hashes
+	// byte-identically to the legacy format, so chains written by older
+	// binaries still verify.
+	DurationMs int64 `json:"DurationMs,omitempty"`
+	// Annotation is a diagnostic note about HOW this entry was written when
+	// the write path degraded (proceeded without the cross-process lock, or
+	// the HMAC secret was unavailable so the hash fell back to plain
+	// SHA-256). It is deliberately NOT part of the hash chain (writeAuditChainFields
+	// never reads it), so a degraded write stays verifiable by its own
+	// formula and the annotation explains why a later verification reports a
+	// broken/downgraded chain instead of leaving it forensic guesswork.
+	// Empty for every normal (keyed, locked) write and for all legacy
+	// entries, so the persisted bytes of existing chains are unchanged.
+	Annotation string `json:"Annotation,omitempty"`
 }
 
 // AuditLog records governance decisions in memory. It optionally persists each
@@ -93,6 +113,7 @@ type AuditLog struct {
 	store      storage.Store // optional persistence; nil = in-memory only
 	hashChain  string        // hash of the previous entry (tamper detection)
 	lockPath   string        // cross-process advisory lock file ("" = legacy, unlocked)
+	mirrorPath string        // out-of-repo JSONL mirror of persisted entries ("" = off)
 	merkleTree *MerkleTree   // incremental Merkle tree for parallel, lock-free audit verification
 
 	// Retention (B8): the in-memory log is capped at maxAuditEntries so a
@@ -102,8 +123,9 @@ type AuditLog struct {
 	// it — and the counters below keep lifetime totals so governance metrics
 	// stay O(1) regardless of the cap. Guarded by mu.
 	totalRecords int64
-	blocks       int64 // Result "blocked" or "denied"
-	overrides    int64 // Result "approved"
+	blocks       int64        // Result "blocked" or "denied"
+	overrides    int64        // Result "approved"
+	dropped      atomic.Int64 // entries lost to persistence failure (see noteDropped)
 }
 
 // maxAuditEntries caps the in-memory audit log (B8). Older entries are
@@ -135,6 +157,58 @@ func (l *AuditLog) WithLockPath(path string) *AuditLog {
 	defer l.mu.Unlock()
 	l.lockPath = path
 	return l
+}
+
+// WithMirror attaches an out-of-repo JSONL mirror path. Every entry that
+// persists to the primary store is also appended (best-effort) to the
+// mirror, so a wipe of the repository — including its .kern/audit —
+// leaves a survivable forensic copy under the user's home. Mirror
+// failures never fail the primary persist; they are logged loudly.
+func (l *AuditLog) WithMirror(path string) *AuditLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.mirrorPath = path
+	return l
+}
+
+// auditMirrorDir is the base of the out-of-repo mirror tree. Package-level
+// so tests can redirect it away from the real home directory.
+var auditMirrorDir = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".kern", "audit", "mirror"), nil
+}
+
+// MirrorFor derives the out-of-repo mirror path for a project audit
+// directory: ~/.kern/audit/mirror/<sha256(abs(auditDir))[:16]>.jsonl —
+// stable per project root, no collisions between projects. Returns ""
+// when the mirror is disabled (KERN_AUDIT_MIRROR=0) or the paths cannot
+// be resolved. KERN_AUDIT_MIRROR=1 forces the mirror ON even under `go
+// test` (the default under tests is OFF: t.TempDir audit stores would
+// otherwise mint unbounded mirror files in the real home directory).
+func MirrorFor(auditDir string) string {
+	switch os.Getenv("KERN_AUDIT_MIRROR") {
+	case "0":
+		return ""
+	case "1":
+		// forced on — fall through
+	default:
+		if testing.Testing() {
+			return ""
+		}
+	}
+	base, err := auditMirrorDir()
+	if err != nil || base == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(auditDir)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return filepath.Join(base, fmt.Sprintf("%x.jsonl", sum[:8]))
 }
 
 // storedEntriesLocked lists + numeric-sorts persisted entries (skipping
@@ -222,14 +296,16 @@ func auditSeq(id string) (int, bool) {
 }
 
 // Advisory-lock retry policy (L-e): the audit lock is best-effort, but a
-// bounded retry keeps the unlocked window small. The lock acquisition is
+// bounded retry keeps the acquisition window small. The lock acquisition is
 // NON-BLOCKING — a contended lock resolves within this budget instead of
-// blocking a governance write forever. On exhaustion the two write paths
-// differ deliberately: AppendExternal FAILS loudly (external callers must
-// know the chain link was not written; the decision they record is already
-// durable elsewhere and the gap is repairable via `kern audit repair`),
-// while the Record path keeps liveness — a failed lock must never drop an
-// audit write, so it proceeds unlocked and warns.
+// blocking a governance write forever. On exhaustion BOTH write paths fail
+// closed: AppendExternal returns the error (external callers must know the
+// chain link was not written; the decision they record is already durable
+// elsewhere and the gap is repairable via `kern audit repair`), and the
+// Record path drops the entry with the loss counted + marked in the global
+// sidecar (surfaced by `kern doctor`) — an unlocked chain write can fork the
+// tamper-evident chain, and a fork is indistinguishable from tampering, so a
+// governance write failing loudly beats an unlocked chain.
 const (
 	auditLockRetries    = 3
 	auditLockRetrySleep = 75 * time.Millisecond
@@ -274,8 +350,10 @@ func auditLockWithWriterMu(path string) (func(), error) {
 // the next write chains from its actual predecessor whoever wrote it. Returns
 // the unlock func (nil when no lock is configured) and an error when the
 // cross-process lock could not be acquired within the bounded retry budget —
-// the caller decides whether to fail loudly (AppendExternal) or proceed
-// unlocked with a warning (the Record path's liveness posture). Must hold l.mu.
+// FAIL CLOSED: the tamper-evident chain is never degraded to unlocked writes,
+// and the caller decides how loudly to surface the failure (AppendExternal
+// returns the error; the Record path drops the entry with the loss counted
+// and marked in the global sidecar). Must hold l.mu.
 //
 // When the store implements storage.TailReader (an append-only log), the tail
 // is read from its single last entry in O(1) instead of re-listing every
@@ -289,17 +367,23 @@ func (l *AuditLog) refreshTailLocked() (func(), error) {
 	}
 	var unlock func()
 	if l.lockPath != "" {
+		// The lock file's parent directory must exist before the lock can be
+		// opened. Create it up front so a missing directory (a fresh store,
+		// or a lock path whose parent was never created) self-heals instead
+		// of degrading the write to unlocked — an unlocked audit write can
+		// fork the tamper-evident chain, and a fork is indistinguishable
+		// from tampering at verification time.
+		if err := os.MkdirAll(filepath.Dir(l.lockPath), 0o755); err != nil {
+			return nil, fmt.Errorf("audit lock %s: create lock directory: %w", l.lockPath, err)
+		}
 		// The acquisition is non-blocking and bounded: a contended lock must
-		// resolve (fail loudly, or degrade unlocked on the Record path)
-		// within auditLockRetries × auditLockRetrySleep instead of blocking a
-		// governance write forever — the approval decision is already durable
-		// in .kern/approvals.json, and a skipped chain link is repairable via
-		// `kern audit repair`. Only genuine contention (flock.ErrLocked) is
-		// the hang risk: an open failure (missing parent dir, permissions)
-		// keeps the legacy liveness posture (proceed unlocked and warn — the
-		// store write itself creates the directory). auditLockWithWriterMu
-		// serializes in-process writers on the flock lifecycle so sequential
-		// same-process calls never contend with themselves.
+		// resolve (fail loudly) within auditLockRetries ×
+		// auditLockRetrySleep instead of blocking a governance write
+		// forever — the approval decision is already durable in
+		// .kern/approvals.json, and a skipped chain link is repairable via
+		// `kern audit repair`. auditLockWithWriterMu serializes in-process
+		// writers on the flock lifecycle so sequential same-process calls
+		// never contend with themselves.
 		var lockErr error
 		for attempt := 1; attempt <= auditLockRetries; attempt++ {
 			unlock, lockErr = auditLockWithWriterMu(l.lockPath)
@@ -311,21 +395,18 @@ func (l *AuditLog) refreshTailLocked() (func(), error) {
 			}
 		}
 		if unlock == nil {
-			if errors.Is(lockErr, flock.ErrLocked) {
-				// Contention exhausted: fail loudly — the caller's decision
-				// is already durable elsewhere and the skipped chain link is
-				// repairable via `kern audit repair`.
-				auditLockWarnOnce.Do(func() {
-					log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); audit writes will fail or proceed unlocked — chain gaps are repairable via `kern audit repair`", l.lockPath, auditLockRetries, lockErr)
-				})
-				return nil, fmt.Errorf("audit lock %s could not be acquired after %d attempts (last error: %v)", l.lockPath, auditLockRetries, lockErr)
-			}
-			// Open failure (not contention): keep liveness — proceed
-			// unlocked and warn once, exactly like the legacy behavior.
+			// FAIL CLOSED: an unacquirable audit lock — contention exhausted
+			// OR an open failure (permissions, read-only fs, a path whose
+			// parent cannot be created) — must never degrade the tamper-
+			// evident chain to unlocked writes. The caller decides how
+			// loudly to fail: AppendExternal returns the error, and the
+			// Record path drops the entry with the loss counted + marked in
+			// the global sidecar (surfaced by `kern doctor`) instead of
+			// writing it unlocked.
 			auditLockWarnOnce.Do(func() {
-				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); proceeding unlocked — concurrent writers may fork the tamper-evident chain", l.lockPath, auditLockRetries, lockErr)
+				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); the tamper-evident chain will NOT be written unlocked — chain gaps are repairable via `kern audit repair`", l.lockPath, auditLockRetries, lockErr)
 			})
-			return nil, nil
+			return nil, fmt.Errorf("audit lock %s could not be acquired after %d attempts (last error: %v)", l.lockPath, auditLockRetries, lockErr)
 		}
 	}
 	// Fast path: an append-only store reports its tail directly, so a write
@@ -435,12 +516,33 @@ func (l *AuditLog) OverridesCount() int64 {
 func (l *AuditLog) persist(entry AuditEntry) {
 	unlock, lockErr := l.refreshTailLocked()
 	if lockErr != nil {
-		// Liveness posture preserved for the Record path: a contended lock
-		// must never drop the audit write, so the entry is still persisted
-		// (unlocked) and the failure is logged loudly — the chain gap is
-		// repairable via `kern audit repair`.
-		log.Printf("kern governance: audit write proceeding WITHOUT the cross-process lock (concurrent writers may fork the tamper-evident chain): %v", lockErr)
-	} else if unlock != nil {
+		// FAIL CLOSED: the audit chain is the tamper-evidence mechanism and
+		// must never be written unlocked — an unlocked concurrent writer can
+		// fork the chain, and a fork is indistinguishable from tampering at
+		// verification time. The entry stays available in memory and the
+		// loss is counted + marked in the global sidecar (~/.kern/audit/
+		// dropped.jsonl, surfaced by `kern doctor`) exactly like a
+		// store-write failure — a governance write failing loudly beats an
+		// unlocked chain.
+		if entry.ID == "" {
+			entry.ID = fmt.Sprintf("audit-%d", l.nextSeq())
+		}
+		entry.Hash = computeAuditHash(entry, l.hashChain)
+		l.hashChain = entry.Hash
+		last := &l.entries[len(l.entries)-1]
+		last.ID = entry.ID
+		last.Hash = entry.Hash
+		l.noteDropped(entry, lockErr)
+		return
+	}
+	if entry.Annotation == "" && !auditChainKeyed() {
+		// The HMAC secret is unavailable in this process (sandbox HOME,
+		// read-only config dir): the hash fell back to plain SHA-256.
+		// Record it so the downgraded entry is distinguishable from a
+		// forged one at verification time.
+		entry.Annotation = "written without the audit-chain HMAC secret (hash degraded to plain SHA-256)"
+	}
+	if unlock != nil {
 		defer unlock()
 	}
 
@@ -459,16 +561,94 @@ func (l *AuditLog) persist(entry AuditEntry) {
 
 	data, err := json.Marshal(entry)
 	if err != nil {
-		// Should not happen for AuditEntry; fail softly to keep the log usable.
+		// Should not happen for AuditEntry; fail softly to keep the log
+		// usable — but count the loss and mark the sidecar so it is not
+		// silent (surfaced in `kern doctor`).
+		l.noteDropped(entry, err)
 		return
 	}
 	key := "audit-" + entry.ID
 	if err := l.store.Put(context.Background(), key, data); err != nil {
 		// Log-and-skip: persistence failure must not crash the audit log,
 		// but the loss must not be silent either — the entry survives only
-		// in memory until the next Replay.
-		log.Printf("kern governance: audit entry %s kept in memory only (store write failed: %v)", entry.ID, err)
+		// in memory until the next Replay, and the drop is counted and
+		// surfaced in `kern doctor` via the global sidecar.
+		l.noteDropped(entry, err)
+		return
 	}
+	// Out-of-repo mirror (best-effort, after the primary persist succeeded):
+	// a repo wipe must not destroy the only copy of the governance trail.
+	// The mirror line carries the entry verbatim — chain hashes stay
+	// project-scoped; the mirror is a forensic copy, not a second chain.
+	if l.mirrorPath != "" {
+		if err := appendMirrorLine(l.mirrorPath, data); err != nil {
+			log.Printf("kern governance: audit mirror append failed for %s (primary persist succeeded): %v", l.mirrorPath, err)
+		}
+	}
+}
+
+// appendMirrorLine appends one JSON line to the mirror file, creating the
+// directory on demand. The write is advisory-only: its failure is reported
+// to the caller and never propagates to the audit path.
+func appendMirrorLine(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(data, '\n'))
+	return err
+}
+
+// Dropped returns the number of audit entries this log lost to persistence
+// failure (marshal or store-write errors in persist). Lifetime counter for
+// this process's log; the cross-process surface is the global sidecar
+// written by AppendDroppedAuditMarker, which `kern doctor` reads.
+func (l *AuditLog) Dropped() int64 {
+	return l.dropped.Load()
+}
+
+// noteDropped counts one lost entry (best-effort: every failure inside is
+// swallowed — counting a drop must never become the new crash vector) and
+// appends the global sidecar marker so the loss survives the process.
+func (l *AuditLog) noteDropped(entry AuditEntry, cause error) {
+	l.dropped.Add(1)
+	log.Printf("kern governance: audit entry %s kept in memory only (lost to persistence: %v)", entry.ID, cause)
+	AppendDroppedAuditMarker(entry.ID, entry.Action, entry.Resource, cause.Error())
+}
+
+// AppendDroppedAuditMarker records one audit entry lost before it reached
+// the tamper-evident chain, appending a JSON line to the global sidecar
+// (~/.kern/audit/dropped.jsonl) that `kern doctor` surfaces. The sidecar
+// lives OUTSIDE the failing store on purpose: a store that cannot be
+// written to cannot record its own loss. Best-effort by design — this runs
+// on the failure path of a failure path, so every error here is swallowed.
+func AppendDroppedAuditMarker(id, action, resource, cause string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".kern", "audit")
+	line, err := json.Marshal(map[string]string{
+		"ts":       time.Now().UTC().Format(time.RFC3339),
+		"id":       id,
+		"action":   action,
+		"resource": resource,
+		"cause":    cause,
+	})
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o700)
+	f, err := os.OpenFile(filepath.Join(dir, "dropped.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
 }
 
 // AppendExternal appends an entry from an external source (e.g., Blueprint's
@@ -521,6 +701,15 @@ func (l *AuditLog) AppendExternal(entry AuditEntry) error {
 		key := "audit-" + entry.ID
 		if err := l.store.Put(context.Background(), key, data); err != nil {
 			return fmt.Errorf("persist audit entry: %w", err)
+		}
+		// Out-of-repo mirror (best-effort, after the primary persist
+		// succeeded) — same contract as persist(): a repo wipe must not
+		// destroy the only copy of the governance trail. Approve/reject
+		// decisions flow through this method, so they mirror too.
+		if l.mirrorPath != "" {
+			if err := appendMirrorLine(l.mirrorPath, data); err != nil {
+				log.Printf("kern governance: audit mirror append failed for %s (primary persist succeeded): %v", l.mirrorPath, err)
+			}
 		}
 	}
 	return nil
@@ -753,6 +942,9 @@ func writeAuditChainFields(h io.Writer, e AuditEntry, prevHash string) {
 	if e.Principal != "" {
 		_, _ = fmt.Fprintf(h, "|%s", e.Principal)
 	}
+	if e.DurationMs > 0 {
+		_, _ = fmt.Fprintf(h, "|%d", e.DurationMs)
+	}
 }
 
 // computeAuditHashPlain recomputes the pre-HMAC chain formula: plain SHA-256
@@ -826,14 +1018,63 @@ func (l *AuditLog) Filter(agentID string) []AuditEntry {
 //   - 0 < verified < total   → a genuine break at firstBroken (tampering, or
 //     a mix of versions): entries after the modified one typically still
 //     verify because the chain links via stored hashes.
+//
+// Format strength is monotonic: legacy < plain < HMAC, and a chain only ever
+// gets stronger as kern is upgraded. Once a keyed (HMAC) entry has been seen,
+// a later entry that verifies only under a weaker formula is a downgrade and
+// counts as broken — otherwise anyone able to write the store could append or
+// splice unkeyed entries behind keyed ones, because the plain formulas need
+// no secret. (Entries written while the key was unavailable are also flagged;
+// `kern audit repair` re-chains them once the key is restored.)
 func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	firstBroken, verified, _ = l.verifyChainLocked()
+	return firstBroken, verified
+}
+
+// ChainTiers counts how each audit entry verified. Keyed entries are bound to
+// the out-of-workspace HMAC secret; Plain and Legacy entries use unkeyed
+// SHA-256 formulas that anyone with write access to the store can recompute,
+// so they prove ordering, not authenticity. Downgraded entries verified only
+// under a weaker formula than an earlier entry and are counted as Broken too.
+type ChainTiers struct {
+	Total      int `json:"total"`
+	Keyed      int `json:"keyed"`
+	Plain      int `json:"plain"`
+	Legacy     int `json:"legacy"`
+	Broken     int `json:"broken"`
+	Downgraded int `json:"downgraded"`
+}
+
+// Unkeyed is the number of verified entries that carry no secret-bound proof.
+func (t ChainTiers) Unkeyed() int { return t.Plain + t.Legacy }
+
+// ChainTierReport verifies the chain exactly like VerifyChainReport and
+// returns the per-format breakdown. An in-memory-only log reports every entry
+// as keyed-equivalent (nothing is persisted to forge).
+func (l *AuditLog) ChainTierReport() ChainTiers {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, _, t := l.verifyChainLocked()
+	return t
+}
+
+const (
+	auditTierLegacy = iota + 1
+	auditTierPlain
+	auditTierKeyed
+)
+
+func (l *AuditLog) verifyChainLocked() (firstBroken, verified int, tiers ChainTiers) {
+	tiers.Total = len(l.entries)
 	if l.store == nil {
-		return -1, len(l.entries)
+		tiers.Keyed = len(l.entries)
+		return -1, len(l.entries), tiers
 	}
 	firstBroken = -1
 	var prevHash string
+	strongest := 0
 	for _, e := range l.entries {
 		// Accept any of the three chain formulas: HMAC-SHA256 (current), the
 		// pre-HMAC plain formula (chains persisted by the immediately
@@ -842,20 +1083,56 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 		// binary BEFORE ValidationOutcome was folded into the hash, and all
 		// older chains). Each fallback covers a strict subset of the fields
 		// the current formula covers, so accepting it verifies exactly what
-		// was verifiable when the entry was written — nothing that was ever
-		// protected is weakened.
-		if e.Hash != computeAuditHash(e, prevHash) &&
-			e.Hash != computeAuditHashPlain(e, prevHash) &&
-			e.Hash != computeAuditHashLegacy(e, prevHash) {
+		// was verifiable when the entry was written. Strongest match wins so
+		// an entry that happens to verify under several formulas is credited
+		// to the keyed one.
+		tier := 0
+		switch e.Hash {
+		case computeAuditHash(e, prevHash):
+			tier = auditTierKeyed
+			if !auditChainKeyed() {
+				// computeAuditHash degraded to the plain formula: the match
+				// proves nothing a keyless writer could not have produced.
+				tier = auditTierPlain
+			}
+		case computeAuditHashPlain(e, prevHash):
+			tier = auditTierPlain
+		case computeAuditHashLegacy(e, prevHash):
+			tier = auditTierLegacy
+		}
+		if tier != 0 && tier < strongest {
+			tiers.Downgraded++
+			tier = 0
+		}
+		if tier == 0 {
+			tiers.Broken++
 			if firstBroken < 0 {
 				firstBroken = verified
 			}
 		} else {
 			verified++
+			if tier > strongest {
+				strongest = tier
+			}
+			switch tier {
+			case auditTierKeyed:
+				tiers.Keyed++
+			case auditTierPlain:
+				tiers.Plain++
+			default:
+				tiers.Legacy++
+			}
 		}
 		prevHash = e.Hash
 	}
-	return firstBroken, verified
+	return firstBroken, verified, tiers
+}
+
+// auditChainKeyed reports whether the HMAC secret is available, i.e. whether
+// computeAuditHash currently produces a keyed hash.
+func auditChainKeyed() bool {
+	_, err := auditChainSecret()
+	return err == nil
 }
 
 // computeAuditHashLegacy recomputes an entry hash WITHOUT the

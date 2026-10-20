@@ -271,11 +271,10 @@ func (r *CapabilityRegistry) CapabilityPrecheck(name, agentID, scope, env string
 }
 
 // toolFallbacks maps a tool to an equivalent fallback for P6.10 (tool fallback).
+// The 2026-10-18 surface slim removed kern_what_if/kern_validate/kern_loop;
+// the surviving chain is kern_heal → kern_verify.
 var toolFallbacks = map[string]string{
-	"kern_what_if":  "kern_impact",
-	"kern_validate": "kern_verify",
-	"kern_loop":     "kern_plan",
-	"kern_heal":     "kern_validate",
+	"kern_heal": "kern_verify",
 }
 
 // FallbackFor returns an alternative tool for a tool that is unavailable, or ""

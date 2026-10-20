@@ -540,3 +540,175 @@ func LoadIndex() {}
 		t.Fatal("single-word query must keep fuzzy matching")
 	}
 }
+
+// TestRankedSearchPathFragmentOutranksNameMatches (P1): a path-ish query
+// ("src/tests") must rank symbols whose FILE contains the path fragment above
+// unrelated symbols whose NAME merely contains a split word — the verified
+// gap where the old 20-point file tier let a decoy "Tests" name-match beat
+// the real symbols under src/tests/.
+func TestRankedSearchPathFragmentOutranksNameMatches(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"src/tests/helper.go": `package tests
+// Helper lives under src/tests.
+func Helper() {}
+`,
+		"src/main.go": `package main
+// Tests is a decoy: its NAME contains the query word but it is not in the path.
+func Tests() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := RankedSearchScored(ix, "src/tests", 10)
+	if len(hits) == 0 {
+		t.Fatal("path query must return hits")
+	}
+	if hits[0].Symbol.File != "src/tests/helper.go" {
+		t.Errorf("path query should rank the file under src/tests first, got %s (score %d)", hits[0].Symbol.File, hits[0].Score)
+	}
+	if hits[0].Symbol.Name != "Helper" {
+		t.Errorf("path query should rank the symbol in the matched file, got %s", hits[0].Symbol.Name)
+	}
+	// The decoy must still be reachable, just ranked below the path hit.
+	if len(hits) < 2 || hits[1].Symbol.Name != "Tests" {
+		t.Errorf("name-match decoy should still surface below the path hit, got %+v", hits)
+	}
+}
+
+// TestRankedSearchFilePrefixQuery (P1): the explicit file: prefix form points
+// at ONE file — the symbols defined in it must rank first, and symbols in
+// sibling files that merely share a word must rank below.
+func TestRankedSearchFilePrefixQuery(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"src/main.go": `package main
+// MainEntry is defined in src/main.go.
+func MainEntry() {}
+`,
+		"src/main_helper.go": `package main
+// MainHelper is a sibling that shares the "main" word.
+func MainHelper() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := RankedSearchScored(ix, "file:src/main.go", 10)
+	if len(hits) == 0 {
+		t.Fatal("file: query must return hits")
+	}
+	if hits[0].Symbol.File != "src/main.go" {
+		t.Errorf("file: query should rank the named file's symbol first, got %s (score %d)", hits[0].Symbol.File, hits[0].Score)
+	}
+}
+
+// TestRankedSearchPathQueryPartialMatches (P1): a path query that does not
+// name any real path must NOT fall into the garbage-identifier gate — it
+// returns the closest partial path matches instead of zero hits, so the
+// agent sees what the index has near the fragment.
+func TestRankedSearchPathQueryPartialMatches(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"src/util.go": `package main
+// Util is under src/.
+func Util() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := RankedSearchScored(ix, "src/tests", 10)
+	if len(hits) == 0 {
+		t.Fatal("path query with no full fragment match should still return partial path hits (not the garbage-identifier gate)")
+	}
+	if hits[0].Symbol.File != "src/util.go" {
+		t.Errorf("expected the src/ file to surface, got %+v", hits[0])
+	}
+}
+
+// TestRankedSearchCachesLowerMirrors locks the per-index lowercase-mirror
+// memoization: rankedSearchScored must return identical results whether the
+// mirrors are built fresh (first call) or served from the cache (subsequent
+// calls, any query), and cachedLowerMirrors must return the SAME instance so
+// the per-symbol strings.ToLower (+ FullName concat) work happens once per
+// index, not once per search.
+func TestRankedSearchCachesLowerMirrors(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"app.go": `package main
+
+// OrderStateMachine tracks order lifecycle states.
+type OrderStateMachine struct{}
+
+// Stateful is a single-word decoy.
+func Stateful() {}
+
+// Machine decoy without the state segment.
+func Machine() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Same query twice: the first call builds the mirrors fresh, the second
+	// serves them from the cache — the hit lists must be identical.
+	q1a := RankedSearchScored(ix, "state machine", 10)
+	if len(q1a) == 0 {
+		t.Fatal("expected hits for the prose query")
+	}
+	q1b := RankedSearchScored(ix, "state machine", 10)
+	if !equalHitNameFiles(q1a, q1b) {
+		t.Errorf("cached run differs from the fresh run:\n fresh=%+v\n cached=%+v", q1a, q1b)
+	}
+
+	// A different query flows through the same cached mirrors.
+	q2a := RankedSearchScored(ix, "machine", 10)
+	q2b := RankedSearchScored(ix, "machine", 10)
+	if !equalHitNameFiles(q2a, q2b) {
+		t.Errorf("second query: cached run differs from the fresh run:\n fresh=%+v\n cached=%+v", q2a, q2b)
+	}
+
+	// Memoized per index instance: same pointer on repeated calls, slices in
+	// lockstep with ix.Symbols, and values match a direct recomputation.
+	lm1 := cachedLowerMirrors(ix)
+	lm2 := cachedLowerMirrors(ix)
+	if lm1 != lm2 {
+		t.Error("cachedLowerMirrors must return the same instance on repeated calls")
+	}
+	if len(lm1.names) != len(ix.Symbols) || len(lm1.fulls) != len(ix.Symbols) || len(lm1.files) != len(ix.Symbols) {
+		t.Fatalf("mirror slices out of sync with ix.Symbols: names=%d fulls=%d files=%d symbols=%d",
+			len(lm1.names), len(lm1.fulls), len(lm1.files), len(ix.Symbols))
+	}
+	for i, s := range ix.Symbols {
+		if lm1.names[i] != strings.ToLower(s.Name) {
+			t.Errorf("mirror names[%d] = %q, want %q", i, lm1.names[i], strings.ToLower(s.Name))
+		}
+		if lm1.fulls[i] != strings.ToLower(s.FullName()) {
+			t.Errorf("mirror fulls[%d] = %q, want %q", i, lm1.fulls[i], strings.ToLower(s.FullName()))
+		}
+		if lm1.files[i] != strings.ToLower(s.File) {
+			t.Errorf("mirror files[%d] = %q, want %q", i, lm1.files[i], strings.ToLower(s.File))
+		}
+	}
+}
+
+// equalHitNameFiles reports whether two hit lists agree on each hit's symbol
+// name and file (the parts the mirror memoization could affect).
+func equalHitNameFiles(a, b []RepoHit) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Symbol.Name != b[i].Symbol.Name || a[i].Symbol.File != b[i].Symbol.File {
+			return false
+		}
+	}
+	return true
+}

@@ -19,10 +19,12 @@ func TestResolveSymbolPrefersProductionOverTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSymbol: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(sym), "dispatch") {
+	identity, ok := p.Graph().ResolveNodeID(sym)
+	node, found := p.Graph().NodeByID(identity)
+	if !ok || !found || node.Symbol == nil || !strings.Contains(strings.ToLower(node.Symbol.Name), "dispatch") {
 		t.Fatalf("resolveSymbol = %q (fuzzy=%v); want a production dispatch symbol", sym, fuzzy)
 	}
-	if strings.HasPrefix(sym, "Test") {
+	if intel.IsTestFile(node.Symbol.File) || intel.IsFixtureFile(node.Symbol.File) {
 		t.Fatalf("resolveSymbol = %q; a test func must never win over production symbols", sym)
 	}
 }

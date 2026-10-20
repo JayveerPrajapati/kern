@@ -464,3 +464,194 @@ func TestLogStoreRewriteAll(t *testing.T) {
 		}
 	}
 }
+
+// TestLogStoreShadowRemovalSkipMemoized: once the store has been confirmed to
+// hold no legacy per-key shadow files (a fresh/migrated store), Put must not
+// attempt the redundant per-write shadow os.Remove — the syscall would only
+// return ENOENT. The removal counter stays at zero across many writes,
+// proving the memoized skip (tier-(a) hot-path fix: the audit append path
+// writes a new key per Record, so without the memo every Record would pay
+// this syscall).
+func TestLogStoreShadowRemovalSkipMemoized(t *testing.T) {
+	ctx := context.Background()
+	s := NewLog(t.TempDir())
+	const n = 8
+	for i := 1; i <= n; i++ {
+		key := fmt.Sprintf("audit-audit-%d", i)
+		if err := s.Put(ctx, key, json.RawMessage(`{"n":`+strconv.Itoa(i)+`}`)); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	if got := s.shadowRemovals; got != 0 {
+		t.Fatalf("migrated store attempted %d shadow removals, want 0 (memoized skip)", got)
+	}
+	s.shadowMu.Lock()
+	checked, gone := s.shadowChecked, s.shadowGone
+	s.shadowMu.Unlock()
+	if !checked || !gone {
+		t.Fatalf("memo state = (checked=%v, gone=%v), want (true, true)", checked, gone)
+	}
+	// The skip must not lose data: the chain still holds every entry.
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != n {
+		t.Fatalf("List = %d entries, want %d", len(list), n)
+	}
+}
+
+// TestLogStoreShadowRemovalLegacyPreserved: when the store still holds legacy
+// per-key files, the per-write shadow removal runs exactly as before — the
+// memo must not blind it (preserve exact behavior when the shadow DOES
+// exist). A re-put key's stale shadow is removed, and a shadow that
+// reappears between writes is removed again by the next write of that key.
+func TestLogStoreShadowRemovalLegacyPreserved(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	legacy := NewLocal(dir)
+	for _, k := range []string{"audit-audit-1", "audit-audit-2"} {
+		if err := legacy.Put(ctx, k, json.RawMessage(`{"ID":"`+strings.TrimPrefix(k, "audit-audit-")+`"}`)); err != nil {
+			t.Fatalf("legacy Put(%q): %v", k, err)
+		}
+	}
+	s := NewLog(dir)
+	// First write: the one-time scan finds the legacy files, so the memo is
+	// not "gone" and the removal is attempted (ENOENT for this key).
+	if err := s.Put(ctx, "audit-audit-3", json.RawMessage(`{"ID":"audit-3"}`)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if got := s.shadowRemovals; got != 1 {
+		t.Fatalf("shadow removals after first write = %d, want 1", got)
+	}
+	// Re-put of a legacy key: its stale shadow is removed (exact behavior).
+	if err := s.Put(ctx, "audit-audit-1", json.RawMessage(`{"ID":"audit-1-new"}`)); err != nil {
+		t.Fatalf("re-Put: %v", err)
+	}
+	if got := s.shadowRemovals; got != 2 {
+		t.Fatalf("shadow removals after re-Put = %d, want 2", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "audit-audit-1.json")); !os.IsNotExist(err) {
+		t.Error("stale legacy file still present after re-Put")
+	}
+	// A shadow that reappears (someone recreates it) is removed by the next
+	// write of that key — the memo never permanently blinds the removal path.
+	if err := os.WriteFile(filepath.Join(dir, "audit-audit-1.json"), []byte(`{"ID":"audit-1-recreated"}`), 0o600); err != nil {
+		t.Fatalf("recreate shadow: %v", err)
+	}
+	if err := s.Put(ctx, "audit-audit-1", json.RawMessage(`{"ID":"audit-1-new2"}`)); err != nil {
+		t.Fatalf("re-Put after reappearance: %v", err)
+	}
+	if got := s.shadowRemovals; got != 3 {
+		t.Fatalf("shadow removals after reappearance = %d, want 3", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "audit-audit-1.json")); !os.IsNotExist(err) {
+		t.Error("recreated legacy shadow survived the next write")
+	}
+	got, err := s.Get(ctx, "audit-audit-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != `{"ID":"audit-1-new2"}` {
+		t.Errorf("Get = %s, want the fresh chain value (shadow must not win)", got)
+	}
+}
+
+// TestLogStoreShadowRemovalRetryAfterFailure: when the chain append cannot
+// be opened, the legacy shadow (holding the prior value) must survive the
+// failed attempt (the crash contract, as in TestLogStorePutFailureKeepsShadow)
+// and the retry must remove it — the memo must not blind the removal path.
+func TestLogStoreShadowRemovalRetryAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLog(dir)
+	ctx := context.Background()
+	key := "audit-audit-1"
+	// Legacy per-key shadow holding the prior value.
+	if err := os.WriteFile(filepath.Join(dir, key+".json"), []byte(`{"n":1}`), 0o600); err != nil {
+		t.Fatalf("write shadow: %v", err)
+	}
+	// Break the chain append: a directory at the chain path makes the
+	// O_APPEND open fail.
+	if err := os.MkdirAll(filepath.Join(dir, chainFile), 0o755); err != nil {
+		t.Fatalf("mkdir chain: %v", err)
+	}
+	if err := s.Put(ctx, key, json.RawMessage(`{"n":2}`)); err == nil {
+		t.Fatal("Put() = nil with an unopenable chain, want error")
+	}
+	// The prior value must still be readable through the shadow.
+	got, err := s.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != `{"n":1}` {
+		t.Errorf("Get = %s, want the prior value %s preserved", got, `{"n":1}`)
+	}
+	// Restore the chain path and retry: the stale shadow is removed and the
+	// fresh chain value wins.
+	if err := os.Remove(filepath.Join(dir, chainFile)); err != nil {
+		t.Fatalf("remove chain dir: %v", err)
+	}
+	if err := s.Put(ctx, key, json.RawMessage(`{"n":2}`)); err != nil {
+		t.Fatalf("retry Put: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, key+".json")); !os.IsNotExist(err) {
+		t.Error("stale shadow survived the retry; it must be removed after a successful append")
+	}
+	got, err = s.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after retry: %v", err)
+	}
+	if string(got) != `{"n":2}` {
+		t.Errorf("Get after retry = %s, want the fresh chain value", got)
+	}
+}
+
+// TestLogStoreShadowMemoClearedOnObservedShadow: when a shadow is actually
+// observed in a store the memo had confirmed shadow-free (someone recreates
+// it), the memo must be cleared so the per-write removal re-arms — the next
+// Put removes again and re-learns.
+func TestLogStoreShadowMemoClearedOnObservedShadow(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLog(dir)
+	ctx := context.Background()
+
+	// Migrated store: the memo is set by the one-time scan; no removal
+	// attempts happen across writes.
+	for _, k := range []string{"k1", "k2"} {
+		if err := s.Put(ctx, k, json.RawMessage(`{"v":1}`)); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+	}
+	if got := s.shadowRemovals; got != 0 {
+		t.Fatalf("migrated store attempted %d shadow removals, want 0", got)
+	}
+	s.shadowMu.Lock()
+	gone := s.shadowGone
+	s.shadowMu.Unlock()
+	if !gone {
+		t.Fatal("memo not set after writes to a shadow-free store")
+	}
+
+	// A shadow reappears for an already-written key.
+	if err := os.WriteFile(filepath.Join(dir, "k1.json"), []byte(`"stale"`), 0o600); err != nil {
+		t.Fatalf("recreate shadow: %v", err)
+	}
+	// Delete observes the shadow and must clear the memo.
+	if err := s.Delete(ctx, "k1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	s.shadowMu.Lock()
+	gone = s.shadowGone
+	s.shadowMu.Unlock()
+	if gone {
+		t.Fatal("memo still says 'shadow gone' after a shadow was observed; it must be cleared")
+	}
+
+	// The next Put removes again (per-write removal re-armed).
+	if err := s.Put(ctx, "k3", json.RawMessage(`{"v":3}`)); err != nil {
+		t.Fatalf("Put(k3): %v", err)
+	}
+	if got := s.shadowRemovals; got != 1 {
+		t.Fatalf("shadow removals after observed shadow = %d, want 1 (memo cleared)", got)
+	}
+}

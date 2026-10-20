@@ -1,10 +1,20 @@
 # Changelog
 
+> **Historical record.** Tool names, counts, and defaults in this document reflect the version at the time it was written. See [Tool Selection Guide](docs/tool-selection.md) for the current catalog and default surface.
+
+
 All notable changes to kern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
+
+## [0.9.11] — 2026-10-21
+- **Platform Refinement & Architecture Consolidation**: Completed core context-engine focus, retiring auxiliary server planes and consolidating internal packages into modular, focused subsystems (`internal/topology`, `internal/twinindex`, `internal/verifycmd`).
+- **Core Governance & Verification**: Streamlined unified verification engine (`kern verify`) for security and architecture invariants; enhanced AST boundary guards, sandbox isolation, and deterministic verification workflows.
+- **MCP Tool Surface & Anti-Stall Economy**: Stabilized the 31-tool catalog surface (29 advertised default tools + full-only specialized tools), per-session dedup ledger, advisory loop detection, and token-budget enforcement.
+- **Telemetry, Health & Benchmarking**: Added regression benchmark gate (`kern bench --check`), validated offline doctor diagnostics, and verified optional-by-default local LLM (Ollama) integrations.
+- **CI/CD & Release Pipeline Modernization**: Cleaned release and test matrices across Linux, macOS, and Windows runners, adding automated release artifact verification smoke suites.
 
 - **[0.9.10.3]** — 2026-10-07: Streamlined default advertised MCP tool surface 22→6 (`kern_meta`, `kern_explore`, `kern_impact`, `kern_search`, `kern_verify`, `kern_buddy`) with full dynamic routing via `kern_meta` or `KERN_MCP_FULL=1`; fast/full tiers in `kern_verify`; test fixture demotion in fuzzy symbol search; nested sandbox execution and sandbox isolation hardening; single-sourced agent rules generation from `assets/AGENTS.md`; `kern debt` report; strict per-command flag validation; ETag conditional fetch protocol support.
 
@@ -17,6 +27,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.11] - 2026-10-21
+
+### Breaking
+- **Platform pivot (cluster cuts 1–6)**: the non-core planes are cut to refocus kern as a code-context engine: `internal/cockpit` + `kern ops`/`kernops` commands (cut 1), the web console + `kern-server` binary (cut 2), the enterprise org plane (cut 3), fragility/council/agenteval (cut 4a), dead CLI-backend packages `lsp`/`reviewpack`/`remove` (cut 6), and the remaining `kern-server` leftovers. All cut code is preserved in the private `kern_server` repo. Net: ~61k LOC out.
+- **P4: the blueprint family is deleted** (19.7k LOC, 300+ files: `internal/blueprint`, `bpcli`, `bppolicy`, `bpreceipt`, `gates`, `resilience`, `scanners`, `mcp/blueprint`, `mcp/repair`). The change-governance suite lives on in the standalone blueprint repo; the drift gates survive as `internal/diffgate` + `internal/gitrun`; the global pre-commit hook now runs `kern verify --staged security,architecture`. The `kern check`/`kern fix`/`kern ci` commands died with the family — migrate to `kern verify --types security,architecture`. Thin blueprint bridge commands (`kern guard`/`sec`/`fingerprint`/`audit`) are restored as native kern implementations (P7).
+- **P5 surface slim**: MCP catalog 114→31 tools (default advertised surface 29 + full-only `kern_arch`/`kern_graph` via `KERN_MCP_FULL=1`), CLI command table 194→60 (core surface only). `KERN_TOOLS` allowlists naming removed tools must migrate.
+
+### Changed
+- **Extraction campaign (2026-10-11)**: agent wiring moved out of `internal/setup` into a dedicated `internal/agentwire` leaf package; the graph/index/search CLI family moved out of `cmd/kern` into `internal/graphcli` (flags/etag/helper surface included); language parsing and AST types moved out of `internal/index` into `internal/langparse` + `internal/asttypes` (154 files, ~8.6k insertions) while preserving declaration identity and `nosqlite` builds; the new `internal/configstrip` package becomes the single shared JSON/TOML strip home for `setup --remove` and `agentwire` config. ARCHITECTURE.md ledger parity updated for the whole campaign.
+- **Default MCP advertised surface 6→7**: `kern_exec` joins the default surface (D5); thin AGENTS.md rule text, plugin/shadow assets, and the shipped plugin hash registry updated to the 7-tool claim.
+- **More de-monolithization**: `internal/mcp/catalog` → top-level `mcpcatalog`, `internal/mcp/meta` → `mcpmeta`, the approval/governance CLI family → `internal/approvalcli`, and duplicated CLI flag helpers → `internal/cliflags`; `cmd/kern` and `internal/mcp` size ratchets lowered (19600 / 19000).
+- **Project `AGENTS.md` thin by default**: when the host global slot is kern-managed, project rule files install thin and single-source the full rules from the global slot (this repo dogfoods it).
+- **Perf**: verification engine checks now run concurrently; repeated staleness checks on dirty trees are stat-gated.
+- **Perf (post-pivot fix wave)**: index build streams bounded-channel jobs, tree-sitter parser pooling, search-regex compilation outside the cache lock, single-lstat walk, background Platform warm, shared `internal/filecache`, arch-cache reuse + single-flighted staleness probes, memoized LogStore legacy-shadow.
+- **Anti-stall machinery**: per-session already-served dedup for read tools (`internal/servedledger`), advisory loop-suspect detection (`internal/mcp/loopdetect.go`), `kern_plan` context-sufficiency proof + deterministic first slice, per-phase tool-call budgets with explore-phase enforcement, in-band next-step hints (`internal/mcphints`).
+- **Stats**: per-project tool-usage diagnostics (`kern stats --by-root`, `kern stats --by-tool --root`), buddy savings scoped by project, persisted cross-process semcache counters.
+- **Perfection campaign 2026-10-20**: `kern bench --check` regression gate + `make bench-gate` (versioned thresholds); runtime telemetry sources validated (URL gate, env-only bearer tokens `KERN_PROMETHEUS_TOKEN`/`KERN_OTEL_TOKEN`, fetch-error surfacing, offline doctor); Ollama is optional-by-default with a provider-state doctor report; doctor classifies parent-index state (fresh/stale/empty/unreadable) in the index-shadow warning; ADR-0013 fixes the audit chain as append-only with a documented archival policy; MCP surface trio (31/29/full-only) pinned by test; `scripts/release-smoke.sh` post-packaging artifact verification wired into the release workflow + `make release-smoke`; `make help` target; pre-existing embedded-plugin-hash registry drift fixed.
+- **CI repair**: every GitHub workflow referencing packages deleted in the pivots is fixed — `internal/blueprint`, `internal/bpcli/cli`, `internal/web`, and the `kern-server` binary are removed from ci.yml, test.yml, nightly-full.yml, release.yml, and the Homebrew formula; the release workflow gains the artifact smoke step.
+- **Generated MCP documentation and surface parity:** `kern gen-docs --doc selection` now renders the tool-selection guide from the live catalog/default surface, Cursor skill rules gained deterministic parity coverage, historical records carry explicit notices, and current runtime/doc references to removed tools were cleaned.
+- **Signed agent identities for org mode (`internal/govtoken`)**: org-mode
+  agents can be enrolled with signed bearer tokens, so `agent_id` becomes a
+  verifiable principal instead of a client-asserted label (minimal surface;
+  RBAC default-deny pairing unchanged).
+- **Governance: `kern approval clear` + bounded rejection stickiness**:
+  operators can clear stale approval records, and a rejected record's
+  byte-identical retry block is now bounded rather than permanent.
+- **Setup: backup-then-refresh for customized plugin copies**: a global
+  plugin copy that differs from the embedded asset is backed up before it is
+  refreshed, so hand-edits are never silently clobbered.
+- **Index fixes**: anonymous-arrow functions no longer produce phantom
+  symbols; CSS re-selection (multi-selector rule) duplicates are deduped;
+  the call-resolution metric now splits external (stdlib/vendor) from
+  in-repo unresolved callees.
+- **Guard**: the regex-escape advice is self-consistent across every deny
+  message.
+- **Dogfood-close batch (F1–F16)**: plugin CLI mirrors fixed (memory list,
+  fit-context flags), extractor scoping for nested defs, audit-chain
+  degradation discrimination (ChainTiers surfaced by `kern audit`), evidence
+  output cap.
+- **Perf**: cut fixed per-call MCP serve-path overhead; shared path-keyed
+  `internal/filecache` for repeated file reads (doc index decode, arch
+  cache); staleness probes single-flighted; background Platform warm after
+  index build; LogStore legacy-shadow absence memoized.
+- **Security**: `kern sec` applies the suppression triage end-to-end;
+  refactor symlink-escape closed; exec retention bounded; cache-search
+  mirrors deduped.
+- **MCP protocol**: oversize HTTP bodies rejected with 413 (was a misleading
+  parse error); string-args violations pinned as tool-error results, not
+  `-32602`; `kern semcache stats` now surfaces persisted cross-process
+  hit/miss/saved/eviction counters (a fresh process no longer reports zeros).
+- **Benchmarks**: measured multi-repo latency report published
+  (`docs/benchmarks/multi-repo-latency.md`).
+
+### Added
+- **Native CGO release matrix**: releases ship tree-sitter `-full` assets across the native target matrix, with installers preferring `-full` and falling back to pure-Go; UPX compression and `version` smoke now cover kern-mcp in addition to kern; the `release` job is gated to tag pushes (`workflow_dispatch` dry-runs the matrix without publishing); the Homebrew formula retargets `${{ github.repository }}` with accurate tap-publish wording.
+- **Machine-wide install, visual setup, `kern setup --remove`**: installers gain machine-wide install; `kern setup` gains a visual TUI and `--remove`; `kern doctor` reports machine-wide install health; CI install-smoke covers linux/macos/windows. (`kern try` — added in this window, then cut by the platform pivot — does NOT ship in this release.)
+- **Agent-level evals**: `internal/agenteval` phase 1 (deterministic with/without-kern suite) and phase 2 (real-LLM A/B harness with model pinning for published runs), plus new rename-scoped/add-param agentic tasks with reference solutions.
+- **Search upgrades**: path-fragment ranking and file-prefix boost, 16KiB per-tool search budget, FTS on default builds, a read-only verify allowlist, and `kern stats --net`.
+- **Callee-filtering extraction (`internal/calleefilter`)**: builtin and builder-chain callees filtered, endpoint routes populated, test symbols excluded from symbol surfaces.
+- **Guard & hooks**: fail-open guard mode, global pre-push protection and chained repo hooks, harmless-git inspection passthrough, uniform fail-closed content-intent bash deny on opencode, operator allow-once for guarded subjects, and a network-fetch danger class gating plain `curl`/`wget`/`fetch`.
+- **Index hardening**: refusal of broad auto-index roots with bounded first-index waits, stat-gated staleness checks, and index pre-warming when the opencode plugin loads.
+- **Plugin UX**: specific guard deny messages naming the command and passthrough set, plugin captures routed via `kern remember --auto` (with dedup), `chat.message` noise filter, `--no-memory` on `kern_buddy`, and `kern memory prune --auto`; `@opencode-ai/plugin` bumped to 1.18.35.
+- **Audit transparency**: dropped audit entries are surfaced (counter + sidecar + `kern doctor` check).
+- **`kern_exec` output contract**: kern_verify's output contract for `kern_exec` plus post-hoc dump steering.
+- **Docs/dev-experience**: architecture tour + scoped test target + good-first-issues (contributing), a per-language index accuracy page, doc tool counts derived from the catalog, and TypeScript SDK npm publish metadata (`files`/license/repository/keywords/`access: public`).
+
+### Fixed
+- **Semcache LLM-pinning flake**: semcache tests pin the LLM off — the root cause of the recurring TempDir cleanup flakes.
+- **`go` telemetry writer race**: the sandbox confinement test's TempDir cleanup no longer races the telemetry writer.
+- **Audit-chain integrity**: the audit-chain format downgrade path is closed.
+- **Index identity fixes**: nested same-named defs in different methods no longer collapse into one identity and block the whole index; Java overload/anonymous/nested-class identities distinguished in the duplicate guard; index format v14 bump + merge-boundary noise filter purges stale derived data.
+- **Memory store fixes**: cross-process file locks serialize store mutations; explicit writes are signal-driven genuine (never prefix-classified); deduped `kern remember` writes ack truthfully across CLI/MCP surfaces.
+- **Callee-filter correctness**: language-aware chain rule + file-only test classification + Go 1.21 builtins; `testing.T`-method callees excluded as view noise.
+- **`kern verify --command`**: the resolved executable is classified explicitly (closing the `-d`/`make`/`pip` channels); refusals list allowed commands rather than detected toolchains; governance refusals exit 3 (denial contract).
+- **`kern brief`**: dominant-language endpoints ranked first, cap disclosed.
+- **Plugin output fidelity**: kern read-only view outputs are never lossy-compressed.
+- **`kern stats`**: per-session rules ledger + loud JSONL scanner errors.
+- **twin endpoint extraction**: test files and comment lines excluded; Go 1.22 method-path routes parsed into proper api entities.
+- **MCP server shutdown**: `Close` drains a running background preload build instead of abandoning it mid-index.
+- **CLI/usage fixes**: `kern ast --all` searches per-project `.kern/` indexes read-only; `verify --skill` fails loudly on skill-less dirs; `tools/call` with an empty name errors cleanly; `provenance.symbols` capped at 128 entries; verify command-mode/request-approval flags documented in usage; the managed global-rules block is content-verified (not just markers); the audit repair subcommand is documented.
+- **Doc-drift catch-up**: stale README dependency/tree-sitter/benchmark claims corrected; the 6→7 tool-surface drift closed across README/tool-selection/protocol; `KERN_MCP_FULL=1` documented as a single unfiltered `tools/list` response (retain/cursor paginates tool *output*, not the list itself); the four post-D5/D4 pin drifts closed.
+
+### Security
+- **HTTP MCP bearer auth documented**: `KERN_MCP_AUTH_TOKEN` coverage added to SECURITY.md (and the stale release-build tree-sitter claim corrected).
+- **Guard posture**: uniform fail-closed content-intent bash deny on opencode (operator directive) and the network-fetch danger class ship as part of the default guard posture.
 
 ## [0.9.10.3] - 2026-10-07
 

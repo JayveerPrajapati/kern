@@ -3,6 +3,7 @@ package verifycmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -85,8 +86,10 @@ func set(items ...string) map[string]bool {
 var toolRules = map[string]map[string]subcommandRule{
 	"go": {
 		// -exec, -toolexec and -vettool make go run a caller-chosen program.
-		"go":            {allow: set("build", "test", "vet", "fmt", "mod", "list", "version"), denyFlags: []string{"exec", "toolexec", "vettool"}},
-		"gofmt":         {allow: set("-l", "-d")},
+		"go": {allow: set("build", "test", "vet", "fmt", "mod", "list", "version"), denyFlags: []string{"exec", "toolexec", "vettool"}},
+		// -d prints full source diffs — the exact capability git diff
+		// patches are refused for (L5-2); -l only lists file names.
+		"gofmt":         {allow: set("-l")},
 		"golangci-lint": {},
 		"staticcheck":   {},
 		"govulncheck":   {},
@@ -119,15 +122,28 @@ var toolRules = map[string]map[string]subcommandRule{
 		},
 	},
 	"make": {
-		"make": {},
+		// Variable overrides reach recipe lines verbatim — CFLAGS="x;
+		// curl evil" is recipe-time injection — and -f/--file loads an
+		// arbitrary Makefile with arbitrary recipes (L5-2).
+		"make": {deny: []string{"="}, denyFlags: []string{"f", "file"}},
 	},
 	"kern": {
-		"kern": {allow: set("version", "doctor")},
+		// Read-only kern subcommands only: diagnostics (version/doctor/
+		// health) and index queries (buddy/search/explore/impact/graph/ast).
+		// A command that writes, installs, mutates or executes — index,
+		// setup, update, onboard, remember, memory, mutate, execute, run,
+		// approve, hooks, pack, stats (reset), semcache (clear), evidence
+		// (restore) — stays refused; an agent that needs those uses the
+		// governed exec tools. The refusal message lists the allowed set.
+		"kern": {allow: set("version", "doctor", "health", "buddy", "search", "explore", "impact", "graph", "ast")},
 	},
 }
 
-// pythonModules are the only modules `python -m` may start.
-var pythonModules = set("pytest", "unittest", "mypy", "ruff", "pip")
+// pythonModules are the only modules `python -m` may start. pip is
+// deliberately absent: `python -m pip install <pkg>` installs arbitrary
+// code and the -m nesting hides the installer from the governance
+// name-based classifier (L5-2) — installs belong to the governed exec tools.
+var pythonModules = set("pytest", "unittest", "mypy", "ruff")
 
 // gitReadOnly lists git subcommands that never print file contents.
 var gitReadOnly = set("status", "log", "branch", "rev-parse", "ls-files", "describe", "diff")
@@ -208,11 +224,63 @@ func splitCommand(command string) ([]string, bool) {
 	return append(segs, cur.String()), true
 }
 
+// checkResolvedExecutable closes the basename-trust hole (L5-2, live-proven:
+// /tmp/evil/go inherited go's rule and EXECUTED): an ABSOLUTE pathed command
+// is trusted only when it IS the binary the bare name resolves to via
+// exec.LookPath (symlinks evaluated on both sides); a ~-prefixed external
+// path cannot be resolved the same way and is refused. A kern-named binary
+// additionally accepts the currently-running binary, so the self-referential
+// proof (`/path/to/kern-e verify --command "'/path/to/kern-e version'"`)
+// keeps working while any OTHER kern-* copy at an arbitrary path is refused.
+// Repo-RELATIVE paths (./mvnw, subdir/go) are project content — the same
+// trust class as a Makefile's recipes — and pass through.
+func checkResolvedExecutable(arg0 string) error {
+	if !strings.ContainsRune(arg0, '/') {
+		return nil
+	}
+	if !strings.HasPrefix(arg0, "/") && !strings.HasPrefix(arg0, "~") {
+		return nil
+	}
+	base := strings.TrimPrefix(filepath.Base(arg0), "./")
+	abs, aerr := filepath.Abs(arg0)
+	resolved, rerr := filepath.EvalSymlinks(abs)
+	if aerr != nil || rerr != nil {
+		return fmt.Errorf("pathed executable %q cannot be resolved — invoke the bare command instead", arg0)
+	}
+	if lp, err := exec.LookPath(base); err == nil {
+		if lpResolved, err := filepath.EvalSymlinks(lp); err == nil && lpResolved == resolved {
+			return nil
+		}
+	}
+	if base == "kern" || strings.HasPrefix(base, "kern-") || strings.HasPrefix(base, "kern.") || strings.HasPrefix(base, "kern_") {
+		if self, err := os.Executable(); err == nil {
+			if selfAbs, err := filepath.Abs(self); err == nil {
+				if selfResolved, err := filepath.EvalSymlinks(selfAbs); err == nil && selfResolved == resolved {
+					return nil
+				}
+			}
+		}
+	}
+	return fmt.Errorf("pathed executable %q is not the detected %q binary — invoke the bare command (or the exact detected path)", arg0, base)
+}
+
 func classifySegment(tokens []string, toolchains map[string]bool) error {
 	if len(tokens) == 0 {
 		return fmt.Errorf("empty command between &&")
 	}
+	// A pathed executable must BE the detected binary (L5-2): basename
+	// trust let /tmp/evil/go inherit go's rule and EXECUTE (live-proven).
+	if err := checkResolvedExecutable(tokens[0]); err != nil {
+		return err
+	}
 	name := strings.TrimPrefix(filepath.Base(tokens[0]), "./")
+	// A locally built kern binary may be named kern-e / kern-dev / kern.old:
+	// normalize to "kern" so the SAME read-only allowlist governs it. The
+	// path check above already restricted pathed kern binaries to the
+	// running/installed binary, so this only simplifies rule lookup.
+	if name == "kern" || strings.HasPrefix(name, "kern-") || strings.HasPrefix(name, "kern.") || strings.HasPrefix(name, "kern_") {
+		name = "kern"
+	}
 	args := tokens[1:]
 
 	if name == "git" {
@@ -225,15 +293,27 @@ func classifySegment(tokens []string, toolchains map[string]bool) error {
 		}
 		return checkRule(name, rule, args)
 	}
-	return fmt.Errorf("%q is not an allowed build/test command for this repo (detected: %s); allowed git is read-only status/log/diff --stat. Use kern_explore to read code",
-		name, detectedList(toolchains))
+	return fmt.Errorf("%q is not an allowed build/test command for this repo (allowed: %s; git is read-only status/log/diff --stat). Use kern_explore to read code",
+		name, allowedCommandsList(toolchains))
 }
 
-func detectedList(toolchains map[string]bool) string {
-	if len(toolchains) == 0 {
-		return "no known toolchain"
+// allowedCommandsList names the commands the gate can actually run for the
+// detected toolchains — the decision basis, so the refusal never implies a
+// detected-but-not-allowed tool. Deep-verify L2 F2-13: the old wording said
+// "detected: go, kern, make, node" and then refused `node` (toolRules["node"]
+// permits only npm/yarn/pnpm), which read as a contradiction.
+func allowedCommandsList(toolchains map[string]bool) string {
+	var cmds []string
+	for tc := range toolchains {
+		for name := range toolRules[tc] {
+			cmds = append(cmds, name)
+		}
 	}
-	return strings.Join(sortedKeys(toolchains), ", ")
+	if len(cmds) == 0 {
+		return "no commands (no known toolchain detected)"
+	}
+	sort.Strings(cmds)
+	return strings.Join(cmds, ", ")
 }
 
 func checkRule(name string, rule subcommandRule, args []string) error {
@@ -265,9 +345,11 @@ func checkRule(name string, rule subcommandRule, args []string) error {
 		return nil
 	}
 	if name == "gofmt" {
+		// Only -l and path arguments; any other flag is refused (-d prints
+		// source diffs, -w rewrites files). Paths of any shape are inert.
 		for _, a := range args {
-			if a != "-l" && a != "-d" && !strings.HasPrefix(a, "./") && !strings.HasPrefix(a, ".") && !strings.HasSuffix(a, ".go") {
-				return fmt.Errorf("gofmt is only allowed with -l or -d")
+			if strings.HasPrefix(a, "-") && a != "-l" {
+				return fmt.Errorf("gofmt is only allowed with -l and path arguments (-d prints source diffs — use kern_explore to read code; -w rewrites)")
 			}
 		}
 		return nil

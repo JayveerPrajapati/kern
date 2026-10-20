@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -18,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/cliout"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -31,9 +31,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
-// maxStdinBytes caps piped input so an uncooperative pipe cannot exhaust
+// cliflags.MaxStdinBytes caps piped input so an uncooperative pipe cannot exhaust
 // memory. 64 MiB is far beyond any legitimate use (prompts, logs, source).
-const maxStdinBytes = 64 << 20
 
 // toolTimeout returns the effective timeout for subprocess-running commands
 // (build, validate, heal, sandbox). An unset --timeout gets a 120s default so
@@ -56,24 +55,6 @@ func mcpHTTPAddr(args []string, f flags) string {
 		return args[0]
 	}
 	return f.http
-}
-
-// readStdin returns the full piped stdin, rejecting input larger than
-// maxStdinBytes instead of buffering it all. If stdin is a character device
-// (interactive terminal) rather than a pipe/redirect, it returns nil immediately
-// to prevent indefinite blocking.
-func readStdin() ([]byte, error) {
-	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
-		return nil, nil
-	}
-	b, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(b) > maxStdinBytes {
-		return nil, fmt.Errorf("stdin exceeds %d bytes", maxStdinBytes)
-	}
-	return b, nil
 }
 
 // contextEngine, cliRuntimeSource, cliBoundaryProvider, analyzeChangeCLI,
@@ -433,47 +414,8 @@ func runStatsPerformance(reset, jsonOut bool) (string, error) {
 	return r.Render(), nil
 }
 
-// verifyTypeKeywords are the check-type keywords the verification engine's
-// type dispatcher accepts (engine.Verify's substring match over the request
-// types). A `--types` value must contain at least one of these to run a real
-// check; anything else would silently run nothing and yield a false-green
-// PASS verdict (audit H4).
-var verifyTypeKeywords = []string{
-	"build", "test", "unit", "integration",
-	"security", "sec", "architecture", "archi", "arch",
-	"dependency", "dep", "reuse",
-	"cve", "license", "licen", "secrets", "secret",
-	"e2e", "end-to-end", "static", "analysis", "vet", "lint",
-	"performance", "perf", "bench", "ci",
-}
-
-// validVerifyType reports whether t maps to at least one real verification
-// check in the engine's type dispatcher. The substring match mirrors the
-// engine, so any value the engine would honor stays valid and any value that
-// would silently run nothing is rejected.
-func validVerifyType(t string) bool {
-	tl := strings.ToLower(strings.TrimSpace(t))
-	if tl == "" {
-		return false
-	}
-	for _, kw := range verifyTypeKeywords {
-		if strings.Contains(tl, kw) {
-			return true
-		}
-	}
-	return false
-}
-
-// verifyTypeList renders the human-readable supported-type list for the
-// `--types` validation error message. Derived from verifyTypeKeywords so the
-// error can never list less than the engine actually accepts (the match is
-// substring-based, mirroring the engine's type dispatcher).
-func verifyTypeList() string {
-	return strings.Join(verifyTypeKeywords, ", ")
-}
-
 // isVerifyTypes reports whether s is a comma-separated list of known
-// verification check types. Used to disambiguate the high-level ADR-0006
+// verification check types. Used to disambiguate the high-level
 // `kern verify <types>` form from the classic claims-verification form.
 func isVerifyTypes(s string) bool {
 	trimmed := strings.TrimSpace(s)
@@ -500,233 +442,15 @@ func loadOrBuild(root string) (*index.Index, error) {
 	return index.LoadOrBuild(root)
 }
 
-// suggestSymbols returns up to 5 symbol names from ix that are similar to
-// query (case-insensitive substring or prefix match). Used to provide "did
-// you mean" hints when a symbol lookup fails.
-func suggestSymbols(ix *index.Index, query string) []string {
-	if ix == nil || query == "" {
-		return nil
-	}
-	// Ranked-search hits first: a case-variant camelCase query
-	// ("sanitizeDocName" -> "SanitizeDocName") that the anchored Search
-	// below misses scores strongly here (>= 150 = matches every query
-	// token). The bottom dedupe keeps the list at 5 unique full names.
-	var suggestions []index.Symbol
-	for _, h := range intel.RankedSearchScored(ix, query, 5) {
-		if h.Score >= 150 {
-			suggestions = append(suggestions, h.Symbol)
-		}
-	}
-	// V10: share the MCP server's candidate logic (handlers_graph.go) so the
-	// CLI's "did you mean" set matches kern_explore/kern_graph: anchored
-	// Search first, wildcard-substring fallback, deduped by full name.
-	if len(suggestions) == 0 {
-		suggestions = ix.Search(query, 10)
-	}
-	if len(suggestions) == 0 {
-		suggestions = ix.Search("*"+query+"*", 10)
-	}
-	if len(suggestions) == 0 {
-		// Last resort: the legacy 3-char-prefix heuristic (typo tolerance)
-		// when even the substring search finds nothing.
-		q := strings.ToLower(query)
-		seen := map[string]bool{}
-		for _, s := range ix.Symbols {
-			full := s.FullName()
-			if full == "" || seen[full] {
-				continue
-			}
-			if len(q) >= 3 && strings.HasPrefix(strings.ToLower(full), q[:3]) {
-				seen[full] = true
-				suggestions = append(suggestions, s)
-				if len(suggestions) >= 5 {
-					break
-				}
-			}
-		}
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range suggestions {
-		full := s.FullName()
-		if full == "" || seen[full] {
-			continue
-		}
-		seen[full] = true
-		out = append(out, full)
-		if len(out) >= 5 {
-			break
-		}
-	}
-	return out
-}
-
-// fatalNoSymbol prints a "no symbol found" error with optional suggestions.
-func fatalNoSymbol(symbol string, ix *index.Index) {
-	msg := fmt.Sprintf("no symbol found: %s", symbol)
-	if suggestions := suggestSymbols(ix, symbol); len(suggestions) > 0 {
-		msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")
-	}
-	fatal("%s", msg)
-}
-
-// fatalNoSearchMatch prints a "no symbols matched" error with optional
-// suggestions (the same did-you-mean UX as fatalNoSymbol) and exits 1 — the
-// `kern search` no-match contract (F1): search used to exit 0 on an empty
-// result, breaking the explore/graph convention that "not found" is an error
-// for scripts and CI. The --json path is untouched: an empty result array is
-// data, not an error, and stays exit 0.
-//
-// The suggestion list mirrors kern impact's "close candidates" (ranked
-// search, no strict score gate): a nonsense query like "NoSuchSymbol12345"
-// that matches no symbol still shows what the index actually contains near
-// the query, so the follow-up search is guided instead of blind.
-func fatalNoSearchMatch(query string, ix *index.Index) {
-	msg := fmt.Sprintf("no symbols matched: %s", query)
-	if ix != nil {
-		if cands := intel.CloseCandidates(ix, query, 5); len(cands) > 0 {
-			msg += "\n\nclose candidates:"
-			for _, h := range cands {
-				c := h.Symbol
-				msg += fmt.Sprintf("\n  %-10s %-7s %-24s %s:%d", c.Kind, c.Lang, c.FullName(), c.File, c.Line)
-			}
-		} else if suggestions := suggestSymbols(ix, query); len(suggestions) > 0 {
-			msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")
-		}
-	}
-	fatal("%s", msg)
-}
-
-// splitRange parses a git range "a..b" into (from, to). A single ref is kept
-// as "from" with "to" empty, which git treats as "compare to working tree".
-func splitRange(r string) (string, string) {
-	if r == "" {
-		return "", ""
-	}
-	if p := strings.SplitN(r, "..", 2); len(p) == 2 {
-		return p[0], p[1]
-	}
-	return r, ""
-}
-
+// printJSON renders v as indented JSON on stdout, clipping oversized string
+// fields first (the 512 KiB safety guard). The clip machinery lives in
+// internal/cliout — the shared home for every --json surface's output path
+// (consolidation tranche 7); a marshal failure stays a fatal error with the
+// historical "printJSON: %v" phrasing.
 func printJSON(v any) {
-	b, err := json.MarshalIndent(clipJSONStrings(v), "", "  ")
-	if err != nil {
+	if err := cliout.Print(os.Stdout, v); err != nil {
 		fatal("printJSON: %v", err)
 	}
-	fmt.Println(string(b))
-}
-
-// maxJSONFieldLen bounds any single string field emitted by printJSON. It is
-// a safety net for --json payloads whose embedded command output can grow
-// unboundedly (a `go test -v` log in a verification result measured 606 KB;
-// dogfooding F4): oversized fields are truncated with a marker so the payload
-// stays valid JSON. The engine-side capture clipping already bounds the common
-// paths; this guard exists so no --json surface can dump multi-MB strings to
-// the terminal.
-const maxJSONFieldLen = 512 * 1024
-
-// jsonTruncMarker is appended to a string field truncated by the printJSON
-// safety guard, so truncated output is visibly marked rather than silently
-// cut.
-const jsonTruncMarker = "\n… [kern: field truncated at 512 KiB safety cap — full value kept in .kern/audit logs]"
-
-// clipJSONStrings returns a deep copy of v in which every string longer than
-// maxJSONFieldLen is truncated with jsonTruncMarker. Structure, field order,
-// and non-string values (including exact int64/float values) are preserved, so
-// the JSON shape is identical to an untruncated marshal except for oversized
-// strings. Deterministic, no LLM.
-func clipJSONStrings(v any) any {
-	rv := reflect.ValueOf(v)
-	if !rv.IsValid() {
-		return nil
-	}
-	return clipJSONValue(rv).Interface()
-}
-
-func clipJSONValue(rv reflect.Value) reflect.Value {
-	if !rv.IsValid() {
-		return rv
-	}
-	// Values with a custom JSON marshaler (time.Time, uuid, ...) are safe:
-	// they never exceed maxJSONFieldLen, and recursing into their internal
-	// struct fields would copy only CanInterface() fields — zeroing types
-	// like time.Time whose fields are all unexported.
-	if rv.CanInterface() {
-		if _, ok := rv.Interface().(json.Marshaler); ok {
-			return rv
-		}
-	}
-	switch rv.Kind() {
-	case reflect.String:
-		if rv.Len() > maxJSONFieldLen {
-			return reflect.ValueOf(rv.String()[:maxJSONFieldLen] + jsonTruncMarker)
-		}
-		return rv
-	case reflect.Pointer:
-		if rv.IsNil() {
-			return rv
-		}
-		ev := clipJSONValue(rv.Elem())
-		nv := reflect.New(ev.Type())
-		nv.Elem().Set(ev)
-		return nv
-	case reflect.Interface:
-		if rv.IsNil() {
-			return rv
-		}
-		return clipJSONValue(rv.Elem())
-	case reflect.Struct:
-		nv := reflect.New(rv.Type()).Elem()
-		for i := 0; i < rv.NumField(); i++ {
-			if rv.Field(i).CanInterface() {
-				nv.Field(i).Set(clipJSONValue(rv.Field(i)))
-			}
-		}
-		return nv
-	case reflect.Slice:
-		if rv.IsNil() {
-			return rv
-		}
-		nv := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			nv.Index(i).Set(clipJSONValue(rv.Index(i)))
-		}
-		return nv
-	case reflect.Map:
-		if rv.IsNil() {
-			return rv
-		}
-		nv := reflect.MakeMapWithSize(rv.Type(), rv.Len())
-		iter := rv.MapRange()
-		for iter.Next() {
-			nv.SetMapIndex(iter.Key(), clipJSONValue(iter.Value()))
-		}
-		return nv
-	default:
-		return rv
-	}
-}
-
-// printSavingsFooter writes the canonical savings banner as the last
-// human-readable line of an optimization command: the percentage saved (vs
-// the labeled denominator — "file read raw", "input verbatim", …), the
-// number of tokens removed, and the estimated USD saved at the given
-// cost-per-token rate (callers pass context.CostPerToken(), which honors the
-// KERN_COST_PER_TOKEN override and defaults to 1e-5 $/token). The denominator
-// label is mandatory: the percentage must never appear without saying what
-// it is relative to (L2/honest reporting). It prints nothing when no tokens
-// were actually saved.
-func printSavingsFooter(w io.Writer, beforeTokens, afterTokens int, costPerToken float64, baseline string) {
-	saved := beforeTokens - afterTokens
-	if saved <= 0 {
-		return
-	}
-	if baseline == "" {
-		baseline = "input"
-	}
-	_, _ = fmt.Fprintf(w, "[%.0f%% vs %s ──> %d tokens ──> $%.4f]\n",
-		strutil.Pct(beforeTokens, afterTokens), baseline, saved, float64(saved)*costPerToken)
 }
 
 // printTokenSavings writes the "kern: X -> Y tokens (saved N, P%…)" stderr

@@ -112,6 +112,10 @@ func runPlanMode(p *app.Platform, change string, budgetN int, asJSON bool) {
 		fatal("ExplainContext: %v", err)
 	}
 	plan := kernctx.PlanPacket(&pkt, change, budgetN)
+	// Surface the same low-confidence resolution label Analyze prefixes to
+	// its text (fuzzy match / common-word name collision) on the plan
+	// (B2, QA 2026-10-15).
+	plan.Note = p.ResolutionNote(change)
 	if asJSON {
 		out, err := json.MarshalIndent(plan, "", "  ")
 		if err != nil {
