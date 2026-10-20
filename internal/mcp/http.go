@@ -163,6 +163,10 @@ func newHTTPServerCore(ctx context.Context) (*Server, *http.ServeMux) {
 	return srv, mux
 }
 
+// maxHTTPBodyBytes caps a single MCP-over-HTTP request body at 16 MiB. A
+// larger body is rejected with 413 before parsing.
+const maxHTTPBodyBytes = 1 << 24
+
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !transport.IsLocalhostOrigin(r) {
 		http.Error(w, "origin not allowed", http.StatusForbidden)
@@ -180,9 +184,33 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expected Content-Type: application/json", http.StatusUnsupportedMediaType)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<24))
+	// Read with a one-byte-over cap so truncation is detectable: a body
+	// larger than the cap is rejected with 413 (Content Too Large) instead
+	// of parsing a silently-truncated body and answering a misleading
+	// -32700 parse error (F5, production-readiness audit 2026-10-17).
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxHTTPBodyBytes+1))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxHTTPBodyBytes {
+		http.Error(w, fmt.Sprintf("request body exceeds %d MiB limit", maxHTTPBodyBytes>>20), http.StatusRequestEntityTooLarge)
+		return
+	}
+	// Parse-level failures are reported BEFORE the protocol-version gate
+	// (F10): a body that cannot parse has no version to negotiate, so it
+	// must answer -32700 parse/batch error, not a misleading 412 (live
+	// probe: a header-less malformed body answered "unsupported MCP
+	// protocol version"). The batch check reads the raw body prefix;
+	// everything after it can rely on the body being a JSON object.
+	// Batch requests were removed from the spec (2025-06-18); reject arrays.
+	if strings.HasPrefix(strings.TrimLeft(string(body), " \t\r\n"), "[") {
+		writeHTTPError(w, errorResponse(nil, -32700, "batch requests are not supported"))
+		return
+	}
+	var req rpcRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeHTTPError(w, errorResponse(nil, -32700, "parse error"))
 		return
 	}
 	// MCP-Protocol-Version is required on every request AFTER initialization;
@@ -200,16 +228,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("MCP-Protocol-Version", ver)
-	// Batch requests were removed from the spec (2025-06-18); reject arrays.
-	if strings.HasPrefix(strings.TrimLeft(string(body), " \t\r\n"), "[") {
-		writeHTTPError(w, errorResponse(nil, -32700, "batch requests are not supported"))
-		return
-	}
-	var req rpcRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeHTTPError(w, errorResponse(nil, -32700, "parse error"))
-		return
-	}
 	if r := s.dispatch(req); r != nil {
 		data, err := json.Marshal(r)
 		if err != nil {

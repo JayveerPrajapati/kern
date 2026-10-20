@@ -18,77 +18,12 @@ func toolsCallJSON(t *testing.T, id int, name string, args map[string]any) strin
 	return writeReq("tools/call", id, `{"name":"`+name+`","arguments":`+string(a)+`}`)
 }
 
-func TestSchemaValidateOK(t *testing.T) {
-	t.Parallel()
-	args := map[string]any{"data": `{"name":"x","n":3}`, "schema": `{"type":"object","required":["name","n"],"properties":{"name":{"type":"string"},"n":{"type":"number"}}}`}
-	resp := serveOne(t, toolsCallJSON(t, 31, "kern_schema_validate", args))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if !strings.Contains(out, "schema OK") {
-		t.Fatalf("expected conform message, got %q", out)
-	}
-}
-
-func TestSchemaValidateViolations(t *testing.T) {
-	t.Parallel()
-	args := map[string]any{"data": `{"name":123}`, "schema": `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`}
-	resp := serveOne(t, toolsCallJSON(t, 32, "kern_schema_validate", args))
-	out, _ := toolResultText(t, resp)
-	if !strings.Contains(out, "schema violations") {
-		t.Fatalf("expected violations, got %q", out)
-	}
-}
-
-func TestSchemaValidateMissingArgs(t *testing.T) {
-	t.Parallel()
-	resp := serveOne(t, toolsCallJSON(t, 33, "kern_schema_validate", map[string]any{}))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "required") {
-		t.Fatalf("expected missing-args isError, got: %+v", resp)
-	}
-}
-
-func TestDiffFilesIdenticalAndMissing(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	a := filepath.Join(root, "a.txt")
-	b := filepath.Join(root, "b.txt")
-	if err := os.WriteFile(a, []byte("same\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(b, []byte("same\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	resp := serveOne(t, toolsCallJSON(t, 34, "kern_diff_files", map[string]any{"root": root, "a": a, "b": b}))
-	out, _ := toolResultText(t, resp)
-	if out != "files identical" {
-		t.Fatalf("expected identical, got %q", out)
-	}
-
-	resp = serveOne(t, toolsCallJSON(t, 35, "kern_diff_files", map[string]any{"root": root, "a": "", "b": ""}))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "are required") {
-		t.Fatalf("expected required-args isError, got: %+v", resp)
-	}
-}
-
 func TestCompactFileMissingPath(t *testing.T) {
 	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 36, "kern_compact_file", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "path is required") {
 		t.Fatalf("expected missing-path isError, got: %+v", resp)
-	}
-}
-
-func TestVerifyOutputMissingText(t *testing.T) {
-	t.Parallel()
-	resp := serveOne(t, toolsCallJSON(t, 37, "kern_verify_output", map[string]any{}))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "text is required") {
-		t.Fatalf("expected missing-text isError, got: %+v", resp)
 	}
 }
 

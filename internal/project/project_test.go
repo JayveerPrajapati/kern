@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 func writeFile(t *testing.T, root, name, content string) {
@@ -94,6 +95,51 @@ func TestSessionIndexBuildAndStaleRebuild(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected rebuilt index to include Extra")
+	}
+}
+
+// TestSessionArchitectureInvalidatedOnRebuild pins the cache contract
+// graph.Arch relies on: the derived architecture cache is cleared both by
+// Invalidate() and by Index() when a rebuild publishes a fresh index
+// instance, so a session never serves a stale architecture for the new
+// index. The cached value is recomputed on demand and reflects the new tree.
+func TestSessionArchitectureInvalidatedOnRebuild(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "main.go", "package main\n\nfunc main() { local() }\nfunc local() {}\n")
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+
+	ix1, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index 1: %v", err)
+	}
+	first := topology.RenderArch(s.Architecture(ix1))
+	if s.arch == nil {
+		t.Fatal("Architecture must populate the cache")
+	}
+	// Cache hit: the second call returns the identical cached value.
+	if got := topology.RenderArch(s.Architecture(ix1)); got != first {
+		t.Fatal("cached Architecture changed between calls")
+	}
+
+	// A rebuild with a different community structure must drop the cache.
+	writeFile(t, root, "extra.go", "package main\n\nfunc Alpha() { beta() }\nfunc beta() {}\n")
+	s.Invalidate()
+	ix2, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index 2: %v", err)
+	}
+	if ix2 == ix1 {
+		t.Fatal("precondition failed: rebuild must produce a new index instance")
+	}
+	if s.arch != nil {
+		t.Fatal("rebuild must invalidate the cached architecture")
+	}
+	second := topology.RenderArch(s.Architecture(ix2))
+	if second == first {
+		t.Fatal("recomputed architecture after rebuild should reflect the new community structure")
 	}
 }
 
@@ -664,4 +710,278 @@ func TestSessionExternalStoreHotReload(t *testing.T) {
 	if !hasSymbol(ix2, "ExternalAdded") {
 		t.Fatal("expected ExternalAdded symbol in hot-reloaded index")
 	}
+}
+
+// stopWatcher stops and detaches the session's file-event watcher so a
+// timing-sensitive test is hermetic: a native watcher (fswatch/inotifywait)
+// could fire Invalidate() mid-test and race the probe bookkeeping.
+func stopWatcher(s *Session) {
+	if s.watcher != nil {
+		s.watcher.Stop()
+		s.watcher = nil
+	}
+}
+
+// TestSessionProbeBurstSingleFlight (D1): a burst of ProbeFresh calls that
+// all arrive after the freshness cooldown expired must run the staleness
+// probe ONCE, not once per call. The first caller in the window becomes the
+// probe runner; the rest wait on the session cond and reuse the memoized
+// verdict (staleUntil on fresh). The probeStale seam counts + blocks so the
+// burst is deterministic: the runner is mid-probe when the burst lands.
+func TestSessionProbeBurstSingleFlight(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close()
+	stopWatcher(s)
+
+	if _, err := s.Index(); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	// Expire the cooldown so the burst lands AFTER it: a fresh staleUntil
+	// would short-circuit every caller with zero probes (nothing to prove).
+	s.mu.Lock()
+	s.staleUntil = time.Time{}
+	s.mu.Unlock()
+
+	var (
+		mu      sync.Mutex
+		probes  int
+		entered = make(chan struct{})
+		release = make(chan struct{})
+		once    sync.Once
+	)
+	orig := probeStale
+	probeStale = func(ix *index.Index) bool {
+		mu.Lock()
+		probes++
+		mu.Unlock()
+		once.Do(func() { close(entered) }) // the runner is now mid-probe
+		<-release                          // hold the probe open until the burst has arrived
+		return false                       // fresh: the memo must re-serve this verdict
+	}
+	t.Cleanup(func() { probeStale = orig })
+
+	// Runner: probes once, blocks inside the probe.
+	runnerDone := make(chan bool, 1)
+	go func() { runnerDone <- s.ProbeFresh() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner never entered the probe")
+	}
+
+	// Burst: every call lands while the runner is mid-probe; all must block
+	// on the single-flight cond instead of running the probe themselves.
+	const burst = 8
+	results := make(chan bool, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- s.ProbeFresh()
+		}()
+	}
+	// Give the burst time to reach the cond wait before releasing the probe.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	if probes != 1 {
+		t.Fatalf("probe count during the burst = %d, want 1 (single-flight memo)", probes)
+	}
+	mu.Unlock()
+
+	close(release)
+	if got := <-runnerDone; !got {
+		t.Fatal("runner verdict: want fresh=true")
+	}
+	wg.Wait()
+	close(results)
+	for r := range results {
+		if !r {
+			t.Fatal("burst caller got stale=false; the memo must re-serve the fresh verdict")
+		}
+	}
+	// Still exactly one probe for the whole window.
+	mu.Lock()
+	defer mu.Unlock()
+	if probes != 1 {
+		t.Fatalf("total probe count = %d, want 1", probes)
+	}
+	// The memo is the same staleUntil the pre-change code set: it expires
+	// when the cooldown does, never later.
+	s.mu.Lock()
+	until := s.staleUntil
+	s.mu.Unlock()
+	if d := time.Until(until); d <= 0 || d > s.freshnessCooldown() {
+		t.Fatalf("memo staleUntil = %v (%v out), want a fresh cooldown window", until, d)
+	}
+}
+
+// TestSessionProbeMemoExpiresWithCooldown (b): the memoized fresh verdict IS
+// the pre-existing cooldown (staleUntil) — calls within the window re-serve
+// it with no probe, and once it passes the probe re-runs. The memo can never
+// extend staleness beyond the pre-existing cooldown.
+func TestSessionProbeMemoExpiresWithCooldown(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close()
+	stopWatcher(s)
+
+	if _, err := s.Index(); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	// Expire the cooldown so the first ProbeFresh actually probes.
+	s.mu.Lock()
+	s.staleUntil = time.Time{}
+	s.mu.Unlock()
+
+	var (
+		mu     sync.Mutex
+		probes int
+	)
+	orig := probeStale
+	probeStale = func(ix *index.Index) bool {
+		mu.Lock()
+		probes++
+		mu.Unlock()
+		return false // fresh
+	}
+	t.Cleanup(func() { probeStale = orig })
+
+	// Window start: the probe runs once and memoizes fresh.
+	if !s.ProbeFresh() {
+		t.Fatal("first probe: want fresh")
+	}
+	mu.Lock()
+	if probes != 1 {
+		t.Fatalf("probes after first call = %d, want 1", probes)
+	}
+	mu.Unlock()
+
+	// Within the window: memoized, no re-probe.
+	if !s.ProbeFresh() {
+		t.Fatal("memoized call: want fresh")
+	}
+	mu.Lock()
+	if probes != 1 {
+		t.Fatalf("memo must not re-probe within the cooldown (probes = %d)", probes)
+	}
+	mu.Unlock()
+
+	// Expire the cooldown exactly the way time would: the memo expires with
+	// it and the next call re-probes.
+	s.mu.Lock()
+	s.staleUntil = time.Time{}
+	s.mu.Unlock()
+	if !s.ProbeFresh() {
+		t.Fatal("post-expiry probe: want fresh")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if probes != 2 {
+		t.Fatalf("expired memo must re-probe (probes = %d, want 2)", probes)
+	}
+}
+
+// TestSessionProbeStaleVerdictInvalidates: a stale probe verdict is
+// memoized as invalidation (mirroring Invalidate) — the session reports no
+// cached index afterwards, so the D1 identity is "noindex" and lookups
+// miss; the next Index() rebuilds and serves a fresh index.
+func TestSessionProbeStaleVerdictInvalidates(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close()
+	stopWatcher(s)
+
+	if _, err := s.Index(); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	s.mu.Lock()
+	s.staleUntil = time.Time{}
+	s.mu.Unlock()
+
+	var probes int
+	orig := probeStale
+	probeStale = func(ix *index.Index) bool {
+		probes++
+		return true // stale
+	}
+	t.Cleanup(func() { probeStale = orig })
+
+	if s.ProbeFresh() {
+		t.Fatal("stale verdict must report not fresh")
+	}
+	if probes != 1 {
+		t.Fatalf("probes = %d, want 1", probes)
+	}
+	if _, ok := s.CachedIndex(); ok {
+		t.Fatal("CachedIndex must report no index after a stale probe")
+	}
+	// The stale memo stays authoritative without re-probing: a follow-up
+	// call in the same window returns the documented vacuous true (no cached
+	// identity is left to distrust) WITHOUT running the probe again — and
+	// CachedIndex keeps reporting nothing, so the D1 identity stays "noindex".
+	if !s.ProbeFresh() {
+		t.Fatal("post-invalidation ProbeFresh: documented vacuous true")
+	}
+	if probes != 1 {
+		t.Fatalf("stale memo must not re-probe (probes = %d)", probes)
+	}
+	if _, ok := s.CachedIndex(); ok {
+		t.Fatal("CachedIndex must stay empty after the stale memo")
+	}
+	// The next Index() rebuilds and serves a fresh index.
+	ix, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index after stale probe: %v", err)
+	}
+	if ix == nil || len(ix.Symbols) == 0 {
+		t.Fatal("Index() must rebuild after a stale probe")
+	}
+}
+
+// TestSessionProbeFreshDetectsEditAfterCooldown (d): the memo never blinds
+// the probe — once the cooldown expires, a REAL staleness probe detects an
+// edit and invalidates, so no cache entry keyed to the old identity can be
+// served beyond the pre-existing cooldown window.
+func TestSessionProbeFreshDetectsEditAfterCooldown(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "a.go", "package main\n\nfunc A() string { return \"v1\" }\n")
+	s := New(root, "")
+	defer s.Close()
+	stopWatcher(s)
+
+	if _, err := s.Index(); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	// Unchanged tree: fresh (served from the cooldown the build recorded).
+	if !s.ProbeFresh() {
+		t.Fatal("unchanged tree must be fresh")
+	}
+
+	// Edit + expire the cooldown: the next probe must detect the change.
+	writeFile(t, root, "a.go", "package main\n\nfunc A() string { return \"v2 edited\" }\n")
+	s.mu.Lock()
+	s.staleUntil = time.Time{}
+	s.mu.Unlock()
+
+	if s.ProbeFresh() {
+		t.Fatal("edited tree must probe stale — the memo must not blind the probe")
+	}
+	if _, ok := s.CachedIndex(); ok {
+		t.Fatal("stale probe must invalidate the cached index")
+	}
+	// Rebuild reconciles with the edited tree (freshness contract).
+	ix, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index after edit: %v", err)
+	}
+	hashesMatchTree(t, ix, root)
 }

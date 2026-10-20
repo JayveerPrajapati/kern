@@ -5,12 +5,13 @@ package mcp
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
@@ -124,19 +125,15 @@ func categoryToolAllowed(t Tool, category string) bool {
 // is the (already filtered or full) registered catalog; a nil/empty allowlist
 // allows everything, otherwise name must appear in both the allowlist and
 // the catalog. The allowlist slice is passed in (already cached on the
-// Server) rather than re-read from the environment on every call.
+// Server) rather than re-read from the environment on every call. Catalog
+// membership is resolved through the init-built toolByName map (O(1)) — built
+// from the same `tools` slice every caller passes — instead of a linear scan
+// of the ~140-tool catalog per call.
 func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
-	inCatalog := false
-	for i := range toolsList {
-		if toolsList[i].Name == name {
-			inCatalog = true
-			break
-		}
-	}
-	if !inCatalog {
+	if _, inCatalog := toolByName[name]; !inCatalog {
 		return false
 	}
 	for i := range allowed {
@@ -147,47 +144,25 @@ func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 	return false
 }
 
-// highLevelTools is the set of tools kept when KERN_MCP_HIGH_LEVEL_ONLY=1.
-// It includes the 5 high-level orchestration tools (kern_analyze, kern_plan,
-// kern_execute, kern_verify, kern_incident) plus a minimal set of essential
-// primitives that high-level agents still need.
+// HighLevelToolsCount reports the size of the legacy
+// KERN_MCP_HIGH_LEVEL_ONLY surface. Exported so doc-parity tests derive
+// the number docs state instead of hand-writing it (rec 1d: counts come
+// from the catalog, never from a keyboard).
+func HighLevelToolsCount() int { return len(highLevelTools) }
+
+// highLevelTools is the set of tools kept when KERN_MCP_HIGH_LEVEL_ONLY=1
+// (the legacy high-level surface). After the 2026-10-18 surface slim it is
+// the orchestration + verification core: the 6 tools a high-level
+// (task-planning) agent drives end to end. The read/analysis primitives
+// (search/graph/arch/probe/context/...) are deliberately excluded — they
+// stay reachable via kern_meta.
 var highLevelTools = map[string]bool{
-	"kern_analyze":              true,
-	"kern_plan":                 true,
-	"kern_execute":              true,
-	"kern_verify":               true,
-	"kern_incident":             true,
-	"kern_what_if":              true,
-	"kern_impact":               true,
-	"kern_search":               true,
-	"kern_context":              true,
-	"kern_explore":              true,
-	"kern_graph":                true,
-	"kern_memory":               true,
-	"kern_review":               true,
-	"kern_security":             true,
-	"kern_validate":             true,
-	"kern_repair":               true,
-	"kern_refactor_transaction": true,
-	"kern_exec":                 true,
-	"kern_sandbox":              true,
-	"kern_commitmsg":            true,
-	"kern_pack":                 true,
-	"kern_project_map":          true,
-	"kern_compact_file":         true,
-	"kern_fit_context":          true,
-	"kern_buddy":                true,
-	"kern_usage_guide":          true,
-	"kern_mask_pii":             true,
-	"kern_optimize":             true,
-	"kern_doc":                  true,
-	"kern_context_budget":       true,
-	"kern_swap":                 true,
-	"kern_verify_output":        true,
-	"kern_check_draft":          true,
-	"kern_taint":                true,
-	"kern_schema_validate":      true,
-	"kern_stats":                true,
+	"kern_run":    true,
+	"kern_plan":   true,
+	"kern_heal":   true,
+	"kern_verify": true,
+	"kern_impact": true,
+	"kern_review": true,
 }
 
 // defaultTools is the surface advertised by default. The full catalog is
@@ -198,14 +173,11 @@ var highLevelTools = map[string]bool{
 // surface shrinks. This implements the MCP spec's "high-level tools, not
 // dozens of tiny low-value tools" guidance.
 //
-// The 6-tool set (expanded 2026-10-01 from the original 11) is
-// evidence-based: usage telemetry (kern stats --by-tool) showed the biggest
-// token savers and most-used primitives were unadvertised, the original set
-// had zero edit-phase tools (KERN_MCP_PHASE=edit advertised only meta+cross),
-// and the AGENTS.md kern-rules mandate compact_file/project_map/probe/memory
-// first — rules that were dead letters on default connections. Every phase
-// (explore/plan/edit/verify/meta/cross) is now covered; ~14k advertised
-// tokens, still well under the 24.1k full-catalog gate.
+// The default surface is usage-curated: it exposes the lifecycle tools agents
+// use most while keeping schema cost below the full catalog. kern_exec is the
+// deliberate execution exception: advertising it keeps the governed execution
+// path discoverable, while every call still fails closed behind
+// KERN_ALLOW_EXEC/KERN_TOOLS. Advertisement is not an execution firewall.
 //
 // The name list lives in the leaf package internal/mcp/toolsurface so the
 // highlevel control plane (kern_run recommendations) can annotate tools
@@ -278,9 +250,9 @@ func (s *Server) filteredTools() []Tool {
 		s.filtered = out
 		return s.filtered
 	}
-	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 36-tool middle set (deprecated;
-	// prefer the default minimal set or KERN_MCP_FULL). Otherwise the NEW
-	// DEFAULT: the minimal 6-tool defaultTools surface.
+	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 6-tool middle set (deprecated;
+	// prefer the default 29-tool set or KERN_MCP_FULL). Otherwise the
+	// DEFAULT: the 29-tool defaultTools surface.
 	var keep map[string]bool
 	if highLevelOnly() {
 		keep = highLevelTools
@@ -314,6 +286,29 @@ func (s *Server) filteredTools() []Tool {
 	}
 	s.filtered = out
 	return s.filtered
+}
+
+// toolPhase returns the catalog phase of a tool name ("" for unknown tools —
+// toolByName indexes the registered catalog once at init, so this is O(1)).
+func toolPhase(name string) string {
+	return toolByName[name].Phase
+}
+
+// exploreBudgetCap returns the per-session explore-phase budget cap from
+// KERN_EXPLORE_BUDGET: N >= 1 enables it, unset disables it (completely off —
+// zero behavior change). A malformed value (non-numeric or < 1) warns on
+// stderr and disables (fails-loud, mirroring cacheTTL in tool_cache.go).
+func exploreBudgetCap() int {
+	v := strings.TrimSpace(os.Getenv("KERN_EXPLORE_BUDGET"))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		fmt.Fprintf(os.Stderr, "kern-mcp: KERN_EXPLORE_BUDGET=%q not a positive integer, disabled\n", v)
+		return 0
+	}
+	return n
 }
 
 // precheckTool validates a tool name against the KERN_TOOLS allowlist and the
@@ -350,6 +345,35 @@ func (s *Server) precheckTool(name string, args map[string]any) (string, error) 
 	if root := argString(args, "root"); root != "" {
 		if err := validateRoot(root); err != nil {
 			return "", fmt.Errorf("%w: %v", domain.ErrToolDenied, err)
+		}
+	}
+	// Explore-phase budget (B2, anti-stall campaign Phase 2): a per-SERVER,
+	// per-session-key cap on explore-phase tool calls (KERN_EXPLORE_BUDGET=N,
+	// opt-in; unset = completely off). Placed after allowlist/root validation
+	// so blocked calls never consume budget (same ordering rationale as the
+	// safety-budget block below) and BEFORE it so a phase denial never counts
+	// against the safety budget. The counter is the server's own per-session
+	// map (phaseBudget) — the explore cap is per-session-key, while s.budget
+	// is per-Server and task-scoped elsewhere — so the cap works standalone
+	// with zero safety-budget env opt-in. The count is mirrored into the
+	// generic domain mechanism (TrackToolCallPhase) when the safety budget
+	// exists, keeping that mechanism live on this path; its limit is
+	// deliberately NOT set on s.budget, because the gateway would otherwise
+	// deny with the generic message instead of this teaching text, and the
+	// per-session semantics would be lost.
+	if cap := s.phaseBudgetCap; cap > 0 && toolPhase(name) == PhaseExplore {
+		key := sessionKeyFor(args)
+		s.budgetMu.Lock()
+		deny := s.phaseBudget[key] >= cap
+		if !deny {
+			s.phaseBudget[key]++
+			if s.budget != nil {
+				s.budget.TrackToolCallPhase(PhaseExplore)
+			}
+		}
+		s.budgetMu.Unlock()
+		if deny {
+			return "", fmt.Errorf("%w: explore budget exceeded (%d calls) — emit a plan (kern_plan) or raise KERN_EXPLORE_BUDGET", domain.ErrToolDenied, cap)
 		}
 	}
 	// track every tool call against the safety budget through the

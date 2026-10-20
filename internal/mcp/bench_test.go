@@ -31,7 +31,17 @@ func benchProject(b *testing.B) string {
 // steady-state dispatch (session-cached index), not the initial index build.
 func BenchmarkDispatch(b *testing.B) {
 	root := benchProject(b)
+	// The benchmark's t.TempDir project falls outside the default
+	// confinement roots (process cwd / KERN_MCP_ROOTS), so the run used to
+	// depend on an external KERN_MCP_NO_CONFINE=1 that the exec guard
+	// blocks. Opt out of confinement INSIDE the harness — before server
+	// construction, matching the env the server checks in confinementGate /
+	// NewServerForRoot — and pin the workspace roots to the temp project
+	// (mirroring the latency probe), so the benchmark runs under default
+	// environments without weakening production confinement.
+	b.Setenv("KERN_MCP_NO_CONFINE", "1")
 	s := NewServer(strings.NewReader(""), io.Discard)
+	s.roots = []string{root}
 	ctx := context.Background()
 	calls := []struct {
 		name string

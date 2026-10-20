@@ -42,7 +42,14 @@ func AnchorLine(ix *index.Index, symbol string) string {
 	if !found {
 		return ""
 	}
+	return AnchorDefinition(ix, index.Symbol{File: file, Name: full, Line: line})
+}
+
+func AnchorDefinition(ix *index.Index, symbol index.Symbol) string {
+	if ix == nil || symbol.File == "" {
+		return ""
+	}
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s|%s|%d|%v|%s", file, full, line, true, ix.Root)
-	return fmt.Sprintf("evidence: %s:%d %s", file, line, "evidence-sha256:"+hex.EncodeToString(h.Sum(nil))[:16])
+	_, _ = fmt.Fprintf(h, "%s|%s|%d|%v|%s", symbol.File, symbol.FullName(), symbol.Line, true, ix.Root)
+	return fmt.Sprintf("evidence: %s:%d %s", symbol.File, symbol.Line, "evidence-sha256:"+hex.EncodeToString(h.Sum(nil))[:16])
 }

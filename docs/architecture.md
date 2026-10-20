@@ -13,13 +13,12 @@ graph TD
     subgraph Clients["1. Agent & IDE Interface Layer"]
         CLI["CLI (`cmd/kern`)"]
         MCPServer["MCP Server (`cmd/kern-mcp`)"]
-        WebConsole["Web Console (`cmd/kern-server`)"]
         Agents["Agent Integrations (`Claude`, `Cursor`, `Antigravity`, `OpenCode`, `Codex`, `Copilot`, `Qwen`, `Qoder`)"]
     end
 
     subgraph Governance["2. Dispatch & Governance Layer"]
         MCPMux["MCP Dispatcher (`internal/mcp`)"]
-        Catalog["Catalog Registry (`internal/mcp/catalog`) — 140 Tools"]
+        Catalog["Catalog Registry (`internal/mcpcatalog`) — 31 Tools"]
         Gov["Context Governor (`internal/mcp/gov`)"]
         Audit["Merkle Audit Log (`internal/governance`)"]
         Firewall["Change Firewall & Gates G0–G39 (`internal/gates`, `internal/bpcli`)"]
@@ -96,9 +95,13 @@ flowchart LR
 
 ---
 
-## 3. Modular MCP Subsystem Architecture (44 Leaf Subpackages)
+## 3. Modular MCP Subsystem Architecture (52 Leaf Subpackages)
 
-The `internal/mcp/` subsystem is completely decomposed into 44 independent leaf packages, ensuring zero monolithic coupling:
+The `internal/mcp/` subsystem pairs a capped dispatcher root with 52 focused
+leaf packages. The root is a capped monolith (see the ARCHITECTURE.md ledger —
+ratcheted below its pre-extraction baseline; crossing the cap forces the next
+family out to a top-level sibling such as `internal/mcpcatalog`,
+`internal/mcpmeta`, `internal/mcpcli`, or `internal/mcpserve`), not a hidden one:
 
 ```mermaid
 graph TD
@@ -139,7 +142,7 @@ graph TD
         flight["`internal/mcp/flight`"]
         stream["`internal/mcp/stream`"]
         transport["`internal/mcp/transport`"]
-        catalog["`internal/mcp/catalog`"]
+        catalog["`internal/mcpcatalog`"]
     end
 
     Monolith --> CoreNav

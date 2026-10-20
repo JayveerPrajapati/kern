@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
 const sampleGo = `package main
@@ -222,5 +223,55 @@ func TestProjectMapInvalidMaxFiles(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid integer") {
 		t.Fatalf("expected invalid-integer error, got: %v", err)
+	}
+}
+
+// TestBuddyNoMemory pins the kern_buddy no_memory param at the tool-body
+// level: with no_memory the digest omits both memory sections; without it
+// the seeded lesson renders in "Project memory".
+func TestBuddyNoMemory(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	// Join Buddy's background index warms BEFORE the TempDir cleanup runs
+	// (t.Cleanup is LIFO: this runs before root's RemoveAll, registered
+	// earlier) — without the join the warm races root removal and the
+	// JSON-cache fallback recreates .kern mid-cleanup ("directory not empty").
+	t.Cleanup(func() { buddyWarmWG.Wait() })
+	if _, err := memory.AddExplicit(root, "always run tests before committing"); err != nil {
+		t.Fatal(err)
+	}
+
+	withMem, err := Buddy(context.Background(), map[string]any{"root": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(withMem, "## Project memory") || !strings.Contains(withMem, "always run tests before committing") {
+		t.Fatalf("default buddy must render Project memory:\n%s", withMem)
+	}
+
+	noMem, err := Buddy(context.Background(), map[string]any{"root": root, "no_memory": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(noMem, "## Project memory") || strings.Contains(noMem, "## Recent session activity") {
+		t.Fatalf("no_memory buddy must omit both memory sections:\n%s", noMem)
+	}
+}
+
+// TestCompactRefusesCredentialFile pins F5: kern_compact_file must never
+// serve credential-shaped files (secret blocklist), even inside the
+// workspace root.
+func TestCompactRefusesCredentialFile(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, ".env")
+	if err := os.WriteFile(secret, []byte("TOKEN=hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compact(context.Background(), Hooks{}, map[string]any{"root": dir, "path": ".env"})
+	if err == nil {
+		t.Fatal("expected Compact to refuse a credential-shaped file")
+	}
+	if !strings.Contains(err.Error(), "credential") {
+		t.Fatalf("expected a credential refusal, got: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -47,6 +48,13 @@ func runVerifyCommand(rest []string) bool {
 	}
 	out, exit, err := verifycmd.VerifyCommand(context.Background(), args)
 	if err != nil {
+		var denied *verifycmd.DeniedError
+		if errors.As(err, &denied) {
+			// Governance refusal (allowlist classification / CheckExec
+			// firewall): exit 3 per the denial contract (kern exitcode),
+			// matching exec and build denials. Findings stay exit 1.
+			fatalPolicy("verify: %v", err)
+		}
 		fmt.Fprintln(os.Stderr, "verify:", err)
 		os.Exit(1)
 	}

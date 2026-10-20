@@ -5,6 +5,8 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -100,6 +102,23 @@ func (s *MemoryStore) save(ms []domain.Memory) error {
 	return fsutil.WriteFileAtomic(s.path, b, 0o600)
 }
 
+// lockStore takes the cross-process file lock serializing typed-store
+// mutations (L5-3): the plugin's `kern remember` subprocess and the MCP
+// server raced load-modify-save and last-writer-wins dropped entries.
+// Acquired BEFORE s.mu so a waiter never holds the in-process mutex; the
+// only nested cross-store ordering is v1-lock→typed-lock (typed never
+// calls v1), which keeps the pair deadlock-free. Lock failure degrades
+// loudly to process-local (writes stay atomic; only cross-process
+// serialization is lost) — FileLock.Unlock is nil-safe.
+func (s *MemoryStore) lockStore() *cache.FileLock {
+	fl, err := cache.LockFile(s.path)
+	if err != nil {
+		log.Printf("memory: typed-store cross-process lock unavailable (%v); continuing process-local", err)
+		return nil
+	}
+	return fl
+}
+
 // Add stores a new typed memory entry. Returns the entry with ID and
 // timestamps set.
 //
@@ -116,6 +135,8 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 	if err := s.authorize(agent, PermissionWrite); err != nil {
 		return domain.Memory{}, err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -169,6 +190,8 @@ func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) 
 	if err := s.authorize(agent, PermissionWrite); err != nil {
 		return domain.Memory{}, err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -212,7 +235,17 @@ func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) 
 // CurrentMemories returns only the memories that are current (not superseded
 // and not historical) for the given type. An empty type returns
 // all current memories.
+//
+// The read is serialized with writers (QA 5.4): the MCP server dispatches
+// tools/call requests concurrently, and the store instance is rebuilt per
+// call (NewMemoryStore), so the per-instance mu cannot order a read against
+// an in-flight Add from another instance. Taking the same cross-process file
+// lock the writers hold makes an add→recall sequence within one session
+// deterministically see the write (the read cannot land between the add's
+// load and its atomic rename).
 func (s *MemoryStore) CurrentMemories(memType domain.MemoryType) ([]domain.Memory, error) {
+	fl := s.lockStore() // QA 5.4: serialize the read with concurrent writers
+	defer fl.Unlock()
 	ms := s.load()
 	out := make([]domain.Memory, 0, len(ms))
 	for _, m := range ms {
@@ -236,6 +269,8 @@ func (s *MemoryStore) MarkHistorical(id string) error {
 	if err := s.authorize("human", PermissionWrite); err != nil {
 		return err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -264,8 +299,11 @@ func (s *MemoryStore) MarkHistorical(id string) error {
 }
 
 // List returns all memories, optionally filtered by type. If memType is empty,
-// returns all types. Results are sorted by CreatedAt descending.
+// returns all types. Results are sorted by CreatedAt descending. The read is
+// serialized with writers (QA 5.4) like CurrentMemories.
 func (s *MemoryStore) List(memType domain.MemoryType) ([]domain.Memory, error) {
+	fl := s.lockStore() // QA 5.4: serialize the read with concurrent writers
+	defer fl.Unlock()
 	ms := s.load()
 	out := make([]domain.Memory, 0, len(ms))
 	for _, m := range ms {
@@ -278,8 +316,11 @@ func (s *MemoryStore) List(memType domain.MemoryType) ([]domain.Memory, error) {
 	return out, nil
 }
 
-// Get retrieves a memory by ID.
+// Get retrieves a memory by ID. The read is serialized with writers
+// (QA 5.4) like CurrentMemories.
 func (s *MemoryStore) Get(id string) (domain.Memory, error) {
+	fl := s.lockStore() // QA 5.4: serialize the read with concurrent writers
+	defer fl.Unlock()
 	for _, m := range s.load() {
 		if m.ID == id {
 			return m, nil
@@ -294,6 +335,8 @@ func (s *MemoryStore) Delete(id string) error {
 	if err := s.authorize("human", PermissionDelete); err != nil {
 		return err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -318,12 +361,78 @@ func (s *MemoryStore) Delete(id string) error {
 	return nil
 }
 
+// Clear removes the typed store file entirely; an absent store is a no-op.
+// It mirrors v1 Clear so `kern memory clear` / kern_memory clear empty BOTH
+// surfaces (v1 + typed) instead of leaving buddy's "Project memory"
+// populated with the lessons the user asked to clear.
+func (s *MemoryStore) Clear() error {
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := os.Remove(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// RemoveContent deletes every typed memory whose Content equals content and
+// reports how many were removed. No match is not an error — it is the mirror
+// path for `kern memory remove`, where the lesson was already removed from
+// the v1 store and the typed store may simply not hold it.
+func (s *MemoryStore) RemoveContent(content string) (int, error) {
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms := s.load()
+	kept := ms[:0]
+	removed := 0
+	for _, m := range ms {
+		if m.Content == content {
+			removed++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	return removed, s.save(kept)
+}
+
+// RemovePrefix deletes every typed memory whose Content starts with prefix
+// and reports how many were removed. No match is not an error.
+func (s *MemoryStore) RemovePrefix(prefix string) (int, error) {
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms := s.load()
+	kept := ms[:0]
+	removed := 0
+	for _, m := range ms {
+		if strings.HasPrefix(m.Content, prefix) {
+			removed++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	return removed, s.save(kept)
+}
+
 // Update modifies an existing memory's content/tags. With governance
 // attached, the actor is "human" and must hold write permission.
 func (s *MemoryStore) Update(id string, content string, tags []string) (domain.Memory, error) {
 	if err := s.authorize("human", PermissionWrite); err != nil {
 		return domain.Memory{}, err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -373,6 +482,8 @@ func (s *MemoryStore) Replace(id string, m domain.Memory) (domain.Memory, error)
 	if err := s.authorize(agent, PermissionWrite); err != nil {
 		return domain.Memory{}, err
 	}
+	fl := s.lockStore() // cross-process L5-3
+	defer fl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -431,6 +542,8 @@ func (s *MemoryStore) AuthorizedRecall(q Query, agentID string, clearance int) (
 	if err := s.authorize(agentID, PermissionRead); err != nil {
 		return nil, err
 	}
+	fl := s.lockStore() // QA 5.4: serialize the read with concurrent writers
+	defer fl.Unlock()
 	mems, err := s.recall(q, agentID, true)
 	if err != nil {
 		return nil, err

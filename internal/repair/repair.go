@@ -184,7 +184,18 @@ func RepairRoot(root, compilerOutput string, apply bool) ([]Result, error) {
 		}
 
 		if apply && res.Repaired {
-			_ = os.WriteFile(fullPath, []byte(res.Content), 0o644)
+			// A failed apply write must never report Repaired: true — the
+			// file on disk would still be broken while the result claims a
+			// fix. Surface it as a per-file error like the read/repair paths.
+			if werr := os.WriteFile(fullPath, []byte(res.Content), 0o644); werr != nil {
+				results = append(results, Result{
+					File:     relPath,
+					Repaired: false,
+					Action:   res.Action,
+					Error:    "apply write: " + werr.Error(),
+				})
+				continue
+			}
 		}
 		results = append(results, *res)
 	}

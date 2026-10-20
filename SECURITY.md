@@ -45,10 +45,10 @@ known limitations, and how to report vulnerabilities.
 - **Evidence bundles** — decisions and executions are recorded as
   tamper-evident bundles sealed by SHA-256 content hashes, with an optional
   ed25519 project key (`internal/evidence/`).
-- **Authorized context** — `kern_authorize_context` computes the exact set of
-  symbols and call edges an agent may read for a task, with an auditable
-  authorization proof (`internal/governance/authorize.go`).
-- **Security scanning** — the `kern_security` tool scans for secrets, SQL
+- **Authorized context** — governed context scoping is enforced through the
+  security boundary and task-scope validation paths
+  (`internal/governance/authorize.go`).
+- **Security scanning** — `kern verify security` (or `kern sec`) scans for secrets, SQL
   injection, weak crypto, and unsafe deserialization (`internal/sec` + `internal/secscan`).
 - **MCP tool confinement** — path-typed tool arguments are confined to
   configured roots via `withinRoot()` and `rootedPath()` in
@@ -65,10 +65,14 @@ known limitations, and how to report vulnerabilities.
 - **TLS for HTTP MCP transport** — the HTTP MCP mode supports TLS via `KERN_MCP_TLS_CERT`
   and `KERN_MCP_TLS_KEY`. When enabled, it is encrypted. If TLS
   is not configured, it is unencrypted and loopback-only; use stdio mode for anything beyond localhost.
-- **No auth beyond Origin header** — the loopback HTTP server authenticates
-  requests only by validating that the `Origin` header is a local origin
-  (`isLocalhostOrigin`, `internal/mcp/http.go`). It is not a security
-  boundary against local processes.
+- **HTTP MCP auth: Origin check by default, opt-in bearer token** — the
+  loopback HTTP server authenticates requests by validating that the `Origin`
+  header is a local origin (`isLocalhostOrigin`, `internal/mcp/http.go`);
+  this is not a security boundary against local processes. For explicit TCP
+  binds or shared hosts, set `KERN_MCP_AUTH_TOKEN` to additionally require
+  `Authorization: Bearer <token>` on `POST /mcp` (constant-time compare,
+  `internal/mcp/http_auth.go`; `/health` stays open). This is deliberately
+  separate from `KERN_AUTH_TOKEN` (the web-console / enterprise serve mode).
 - **Releases are GPG-signed when configured** — distributions ship with
   `SHA256SUMS` checksums; when the maintainer has configured GPG keys the
   checksums and every binary are additionally signed (`SHA256SUMS.sig`,
@@ -90,16 +94,57 @@ known limitations, and how to report vulnerabilities.
   view-bound etag, so unrelated index changes rotate the key. See
   `docs/adr/0012-conditional-fetch-etags.md` for the full trust model.
 
+## Machine-wide install
+
+By default the installer runs `kern setup --global-only --global-rules`
+(opt out with `KERN_AUTO_WIRE=0`). What that means for your machine:
+
+- **It edits user-level files, not repos.** It registers the kern MCP server,
+  hook scripts and rules in each supported agent's home config, adds a global
+  git ignore entry, and sets `git config --global core.hooksPath` to
+  `~/.kern/git-hooks`. No file is written inside any repository. Previews:
+  `kern setup --global-only --dry-run`. A global instructions file it
+  rewrites (e.g. `~/AGENTS.md`) is first backed up to `*.bak.<timestamp>`;
+  `kern setup --check` lists every wired location. Undo: `kern setup --remove` (machine-wide only; it
+  removes only kern-owned entries and refuses to unset a `core.hooksPath` that
+  is not kern's).
+- **Global git hooks run in every repo.** `pre-commit` runs
+  `kern verify --staged security,architecture`; `pre-push` refuses force-push and deletion of
+  `main`/`master` (`KERN_PROTECTED_BRANCHES` to change). The repo's own hooks
+  are still run. A repo with its own `core.hooksPath` (e.g. husky) shadows
+  them. If the kern binary is missing the commit gate fails open instead of
+  blocking every commit on the machine.
+- **The agent hook guard is steering, not a security boundary.** It redirects
+  built-in read/grep/bash to kern tools. It fails open when kern is missing,
+  and can be switched off with `KERN_DISABLED=1`, a `.kern/off` file in the
+  repo, or (for a first index build) a fresh `.kern/indexing` marker. None of
+  those switches are audited, and any process that can set the environment or
+  write files in the repo can use them — including an agent. The enforcement
+  that matters is the exec firewall and approval gates (`CheckExec`), which do
+  not depend on the hook guard.
+- **Git hook override is audited.** The only way past the pre-commit and
+  pre-push gates is `KERN_BYPASS=1` / `KERN_ENFORCE=0`, which appends a
+  record to `~/.kern/audit/bypass.jsonl` (`KERN_BYPASS_REASON` is recorded).
+  `KERN_DISABLED` and marker files deliberately do **not** disable the git
+  hooks. The bypass log is local, append-only by convention, and not
+  tamper-evident, unlike the governance audit chain.
+- **No auto-indexing of broad directories.** With kern wired globally an agent
+  can start anywhere. The first automatic index refuses `$HOME`, a filesystem
+  root and common documents folders (`KERN_ALLOW_BROAD_INDEX=1` overrides;
+  `kern index <dir>` is always allowed and is a deliberate act).
+
 ## Build Tags
 
 - `-tags nosqlite` — disables the persistent SQLite symbol index with WAL and
   FTS5 full-text search (`internal/index/sqlite_store.go`). The default build
   uses the SQLite index.
 - `-tags notreesitter` — opts OUT of the default tree-sitter AST parsing
-  (~13 grammars), falling back to regex heuristics
-  (`internal/index/treesitter.go`). Tree-sitter is compiled in by default and
-  is hard-CGO, so the default build requires a C toolchain; the release
-  binaries ship the pure-Go `-tags notreesitter` build.
+(~13 grammars), falling back to regex heuristics
+(`internal/index/treesitter.go`). Tree-sitter is compiled in by default and
+is hard-CGO, so the default build requires a C toolchain. Releases ship both:
+native-platform tree-sitter `-full` assets (Linux amd64/arm64, macOS
+amd64/arm64, Windows amd64 — installers probe these first) and cross-compiled
+pure-Go `-tags notreesitter` builds for the remaining targets.
 
 ## Dependencies
 
@@ -107,7 +152,8 @@ The default build links the Go standard library plus pure-Go dependencies
 (`gopkg.in/yaml.v3` for YAML policy/config parsing, and the cgo-free SQLite
 driver) and compiles in the tree-sitter grammars — hard-CGO C sources, so the
 default build needs a C toolchain. `-tags notreesitter` drops tree-sitter for
-a fully cgo-free build (the shipped release binaries); `-tags nosqlite`
+a fully cgo-free build (the cross-compiled release builds for non-native
+targets; native platforms get the tree-sitter `-full` asset); `-tags nosqlite`
 disables SQLite.
 
 ## Security-relevant environment variables
@@ -121,8 +167,12 @@ All fail closed unless noted:
 | `KERN_ALLOW_DEPLOY` | Gates external deploy operations; production mutation is disabled unless set to `1`. |
 | `KERN_MCP_ROOTS` | Comma-separated workspace roots for MCP path confinement. Defaults to the process cwd and fails closed. |
 | `KERN_AUTH_TOKEN` | Bearer token required for enterprise / HTTP serve mode. Unset = server refuses to serve (503). |
+| `KERN_MCP_AUTH_TOKEN` | Opt-in bearer auth for the HTTP MCP transport: when set, `POST /mcp` requires `Authorization: Bearer <token>` (constant-time compare; `/health` stays open). Unset = no bearer auth — the default `auto` transport is a 0600 unix socket, and explicit TCP binds are loopback-only with Origin checks. |
 | `KERN_SANDBOX_MAX_SNAPSHOT_BYTES` | Per-file sandbox snapshot cap (default 100 MiB). |
 | `KERN_MCP_TLS_CERT` | Path to the TLS certificate file for the HTTP MCP server. |
 | `KERN_MCP_TLS_KEY` | Path to the TLS private key file for the HTTP MCP server. |
 | `KERN_ALLOW_UNISOLATED` | If set to `1`, allows execution outside the sandbox. |
 | `KERN_ALLOW_NET` | If set to `1`, allows unrestricted network access during sandbox execution. |
+| `KERN_ALLOW_BROAD_INDEX` | If set to `1`, allows automatic first indexing of `$HOME`, a filesystem root or a documents folder (refused by default). |
+| `KERN_BYPASS` / `KERN_ENFORCE=0` | Break-glass: lets hooks and git hooks through. **Opens** rather than closes; audited to `~/.kern/audit/bypass.jsonl`. |
+| `KERN_DISABLED` | **Opens**: switches the agent hook guard off for the process. Not audited; has no effect on the git hooks. |

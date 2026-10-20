@@ -2,8 +2,8 @@ package index
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/calleefilter"
 	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
@@ -96,13 +97,11 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	// symbol -> defining files, to map prev's merged edge maps back to
 	// per-file contributions (edges sourced from a file = edges whose owner
 	// is a symbol defined there). A name defined in MORE than one file — a
-	// Go function colliding with a prose heading (CHANGELOG.md's
-	// "Changelog" vs internal/commitmsg's Changelog), or same-named
-	// functions across packages — must never be attributed to a single
-	// file: when that file changed, replacing its bucket would silently
-	// delete the other files' edges (observed as kern dead flagging live
-	// callees of Changelog as certainly dead). Multi-defined owners join
-	// the unattributable keep-verbatim path instead.
+	// Go function colliding with a prose heading, or same-named functions
+	// across packages — must never be attributed to a single file: when that
+	// file changed, replacing its bucket would silently delete the other
+	// files' edges. Multi-defined owners join the unattributable
+	// keep-verbatim path instead.
 	symFiles := make(map[string]map[string]bool, len(prev.Symbols))
 	for _, s := range prev.Symbols {
 		if symFiles[s.FullName()] == nil {
@@ -136,27 +135,30 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	var unattributable []string                        // owners not attributable to exactly one file (kept verbatim)
 	var unattributableInherits []string                // subtypes defined in multiple files (kept verbatim)
 	for owner, callees := range prev.Calls {
-		file := soleDefiningFile(owner)
-		if file == "" {
-			unattributable = append(unattributable, owner)
-			continue
-		}
-		if callsByFile[file] == nil {
-			callsByFile[file] = map[string][]CallEdge{}
-		}
-		if len(dispatch) > 0 {
-			kept := make([]CallEdge, 0, len(callees))
-			for _, ce := range callees {
-				if dispatch[owner+"->"+ce.Target] {
-					continue
-				}
-				kept = append(kept, ce)
+		// Copied edges bypass the record-time noise filter (L5-1): stale
+		// builtin and test-harness edges survived every update — filter
+		// here. Chains stay: call-vs-field shape needs the AST.
+		unowned := false
+		for _, ce := range callees {
+			file := ce.SourceFile
+			if file == "" {
+				file = soleDefiningFile(owner)
 			}
-			callsByFile[file][owner] = kept
-		} else {
-			// No dispatch edges in prev: copy verbatim, preserving prev's
-			// per-file merge order exactly.
-			callsByFile[file][owner] = callees
+			if file == "" {
+				unowned = true
+				continue
+			}
+			if ce.Synth == "dispatch" || (ce.SourceFile == "" && ce.Synth == "" && dispatch[owner+"->"+ce.Target]) ||
+				calleefilter.IsNoiseCalleeFor(ce.Target, false, file) {
+				continue
+			}
+			if callsByFile[file] == nil {
+				callsByFile[file] = map[string][]CallEdge{}
+			}
+			callsByFile[file][owner] = append(callsByFile[file][owner], ce)
+		}
+		if unowned {
+			unattributable = append(unattributable, owner)
 		}
 	}
 	for subtype, bases := range prev.Inherits {
@@ -250,7 +252,7 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 						// waiting on a slow head-of-line file. Back off; the
 						// merge loop keeps draining results and will advance
 						// the window once the head arrives.
-						runtime.Gosched()
+						time.Sleep(reorderBackoff)
 						continue
 					}
 					idx := next.Add(1) - 1
@@ -299,26 +301,18 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 		}
 	}
 	// Owners with no defining symbol are pathological (a Build-consistent
-	// index keys every call edge by a symbol's full name), and owners whose
-	// name is defined in several files cannot be attributed to one bucket
-	// without risking silent edge loss — both keep their edges verbatim
-	// rather than being dropped.
+	// index keys every call edge by a symbol's full name). Legacy edges without
+	// source provenance whose owner is defined in several files cannot be
+	// attributed to one bucket safely, so keep only those unowned edges.
 	for _, owner := range unattributable {
-		callees := prev.Calls[owner]
-		if len(dispatch) > 0 {
-			kept := make([]CallEdge, 0, len(callees))
-			for _, ce := range callees {
-				if dispatch[owner+"->"+ce.Target] {
-					continue
-				}
-				kept = append(kept, ce)
+		for _, ce := range prev.Calls[owner] {
+			if ce.SourceFile != "" || dispatch[owner+"->"+ce.Target] ||
+				calleefilter.IsNoiseCalleeFor(ce.Target, false, "") {
+				continue
 			}
-			callees = kept
-		}
-		for _, ce := range callees {
 			copied[owner+"->"+ce.Target] = true
+			ix.Calls[owner] = append(ix.Calls[owner], ce)
 		}
-		ix.Calls[owner] = append(ix.Calls[owner], callees...)
 	}
 
 	// Subtypes defined in multiple files (the same name-collision rule as
@@ -336,6 +330,16 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	// computeCallers: it prunes the Calls map, and the reconciliation pass
 	// and Callers/AliasCallers are derived from it afterwards.
 	dropDanglingCalls(ix, prev, copied)
+	if prev.GoTypes {
+		if err := ix.bindGoTypes(); err != nil {
+			return nil, err
+		}
+	}
+	if prev.JavaCompiler {
+		if err := ix.bindJavaCompiler(prev.JavaClasspath); err != nil {
+			return nil, err
+		}
+	}
 	ix.promoteLowEdges()
 	ix.addFrameworkDIEdges()
 	ix.computeCallers()
@@ -353,6 +357,16 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	// below).
 	ix.Identity = gitID.joinIdentity(ix.FileHashes, ix.UpdatedAt)
 	ix.reusedResults = int(reusedCount.Load())
+	workers := 1
+	if len(jobs) >= t.parallelMin {
+		workers = t.workers
+	}
+	ix.BuildStats = BuildStats{
+		Kind:    "update",
+		Ms:      time.Since(start).Milliseconds(),
+		Workers: workers,
+		Reused:  int(reusedCount.Load()),
+	}
 	metrics.Default().RecordIndexBuild(time.Since(start))
 	return ix, nil
 }
@@ -420,7 +434,7 @@ func updateComputeFile(prev *Index, j fileJob, snap *FreshnessSnapshot, callsByF
 		// buildParallel's merge loop.
 		return updateResult{r: fileResult{seq: j.seq, rel: j.rel, readErr: true}}
 	}
-	if !isIndexable(j.rel, src) {
+	if !langparse.IsIndexable(j.rel, src) {
 		return updateResult{r: fileResult{seq: j.seq, rel: j.rel, skip: true}}
 	}
 	if ph, ok := prev.FileHashes[j.rel]; ok && ph == cache.Hash(src) {
@@ -476,6 +490,7 @@ func reconstructFileResult(prev *Index, rel, hash string, mtime int64, callsByFi
 			Path:    filepath.Dir(rel),
 			Files:   []string{rel},
 			Imports: append([]ImportEdge(nil), imports...),
+			Exports: append([]ExportEdge(nil), prev.ExportsByFile[rel]...),
 		}
 		if pkg != nil {
 			r.pkg.Name = pkg.Name

@@ -156,6 +156,31 @@ func TestGraphDefaultUnchanged(t *testing.T) {
 	}
 }
 
+// TestGraphOneLineDiffersFromDefault locks the C2/F2 fix: the default render
+// is the adaptive context-min slice (mirroring the MCP kern_graph default)
+// while --one-line keeps the compact single-line neighbourhood. Before the
+// fix the default rendered the same ix.Graph text as --one-line, making the
+// flag a no-op and collapsing both conditional-fetch views to one etag.
+func TestGraphOneLineDiffersFromDefault(t *testing.T) {
+	dir := graphEntitiesFixture(t)
+	def := captureStdout(t, func() {
+		if code := dispatchCommand("graph", []string{"GetUsers", dir}); code != 0 {
+			t.Fatalf("graph exit = %d, want 0", code)
+		}
+	})
+	one := captureStdout(t, func() {
+		if code := dispatchCommand("graph", []string{"--one-line", "GetUsers", dir}); code != 0 {
+			t.Fatalf("graph --one-line exit = %d, want 0", code)
+		}
+	})
+	if def == one {
+		t.Fatalf("default and --one-line renders must differ (C2/F2):\ndefault: %q\none-line: %q", def, one)
+	}
+	if !strings.Contains(def, "GetUsers") || !strings.Contains(one, "GetUsers") {
+		t.Errorf("both renders must mention the symbol:\ndefault: %s\none-line: %s", def, one)
+	}
+}
+
 // TestGraphDeadAlias locks `kern graph dead <dir>`: the first positional
 // "dead" is the dead-code report subcommand (top-level `kern dead`), not a
 // symbol to resolve — so it must render dead-code output and exit 0 instead
@@ -181,11 +206,8 @@ func TestGraphDeadAlias(t *testing.T) {
 // symbol still renders the code graph (not the dead-code report).
 func TestGraphDeadAliasSymbolLookupUnchanged(t *testing.T) {
 	dir := graphEntitiesFixture(t)
-	recovered := catchExit(t, func() {
-		dispatchCommand("graph", []string{"Dead", dir})
-	})
-	if ee, ok := recovered.(exitError); !ok || ee.code == 0 {
-		t.Fatalf("graph Dead (capital) must stay a symbol lookup — no fixture symbol 'Dead' exists, so exit must be non-zero, got %v", recovered)
+	if code := dispatchCommand("graph", []string{"Dead", dir}); code == 0 {
+		t.Fatalf("graph Dead (capital) must stay a symbol lookup — no fixture symbol 'Dead' exists, so exit must be non-zero, got %d", code)
 	}
 	out := captureStdout(t, func() {
 		if code := dispatchCommand("graph", []string{"GetUsers", dir}); code != 0 {

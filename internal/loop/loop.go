@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	blueprintdomain "github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 	"github.com/JayveerPrajapati/kern/internal/coder"
 	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -121,11 +120,6 @@ type LoopConfig struct {
 	// The built-in budget/risk/approval pauses are independent and unaffected.
 	PauseTrigger func(res *Result, stage string) (string /*pause reason or ""*/, bool)
 
-	// Firewall optionally wires the Blueprint change-firewall adapter (KernOps Phase 1).
-	// When non-nil, Verify and Protect stages invoke the in-process Blueprint
-	// validation pipeline, and stageCode enters an auto-repair loop on BLOCK.
-	Firewall *FirewallAdapter
-
 	// MaxRepairAttempts is the maximum number of auto-repair cycles when
 	// verification/firewall returns BLOCK (default: 3).
 	MaxRepairAttempts int
@@ -159,11 +153,9 @@ type Result struct {
 	// store; this field is the immediate surfacing so callers can report it
 	// and the next run's remember stage recalls the constraints from memory.
 	LearnedConstraints []string
-	BudgetPaused       bool             // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
-	Paused             bool             // true when the loop PAUSED for any reason
-	PauseReason        string           // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
-	RepairAttempts     int              // number of auto-repair cycles executed
-	RepairContracts    []RepairContract // active or resolved repair contracts
+	BudgetPaused       bool   // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
+	Paused             bool   // true when the loop PAUSED for any reason
+	PauseReason        string // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
 	// VerifyAdvisory carries the raw verification summary when a read-only
 	// loop (L0/L1) saw a FAIL that only reflects pre-existing repo hygiene
 	// (hardcoded secrets, stale boundaries, a broken build) rather than the
@@ -438,9 +430,7 @@ func (l *Loop) preflight(intent string, res *Result) (paused bool, reason string
 // intent/plan/code are delegated to the caller-provided step. It returns the
 // stage's textual output and an error when the stage failed.
 func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, wt *execution.Worktree, res *Result) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	_ = ctx
 	var out string
 	var err error
 	switch st {
@@ -463,14 +453,7 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 		}
 	case stageProtect:
 		// Invoke governance approval before deploy; fail-closed if denied.
-		if l.cfg.Firewall != nil {
-			out, err = l.cfg.Firewall.Protect(ctx, intent, wt)
-			if err != nil {
-				l.pause(res, "approval")
-			} else {
-				res.Protected = true
-			}
-		} else if l.cfg.Appr != nil {
+		if l.cfg.Appr != nil {
 			ap, apprErr := l.requestApproval(intent)
 			if apprErr != nil {
 				err = apprErr
@@ -493,14 +476,9 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 			if d, derr := wt.Diff(); derr == nil {
 				res.Diff = d
 			}
-			if l.cfg.Firewall != nil {
-				out, err = l.runAutoRepairLoop(ctx, intent, step, wt, res, out)
-			}
 		}
 	case stageVerify:
-		if l.cfg.Firewall != nil {
-			out, err = l.cfg.Firewall.Verify(ctx, intent, wt)
-		} else {
+		{
 			// Scope the test leg to the packages the loop's own change
 			// touched (res.Diff from stageCode): a one-file task pays
 			// seconds, not the whole-module suite. Read-only loops have
@@ -581,94 +559,6 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 	return out, err
 }
 
-// runAutoRepairLoop evaluates the worktree against the Blueprint firewall and
-// automatically prompts the coder/step to repair violations up to MaxRepairAttempts (KernOps Phase 1).
-func (l *Loop) runAutoRepairLoop(ctx context.Context, intent string, step StepFunc, wt *execution.Worktree, res *Result, initialOutput string) (string, error) {
-	maxAttempts := l.cfg.MaxRepairAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 3
-	}
-
-	taskID := res.Intent
-	out := initialOutput
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		valResult, contracts, err := l.cfg.Firewall.ValidateWorktree(ctx, wt, taskID, intent, attempt)
-		if err != nil {
-			return out, fmt.Errorf("firewall evaluation error: %w", err)
-		}
-
-		if valResult.Status != blueprintdomain.StatusBlock {
-			l.publish(eventbus.Event{
-				Kind:    eventbus.Kind("loop.firewall_passed"),
-				Subject: intent,
-				Payload: map[string]string{
-					"status":  string(valResult.Status),
-					"attempt": fmt.Sprintf("%d", attempt),
-				},
-			})
-			return out, nil
-		}
-
-		// Filter for actionable code repair contracts. Approval is gated separately at stageProtect.
-		var codeContracts []RepairContract
-		for _, c := range contracts {
-			if c.GateID != "G24_APPROVAL" {
-				codeContracts = append(codeContracts, c)
-			}
-		}
-
-		if len(codeContracts) == 0 {
-			// No code-level defects to repair; approval or non-code gate checks proceed to their respective stages.
-			return out, nil
-		}
-
-		res.RepairAttempts = attempt
-		res.RepairContracts = codeContracts
-
-		gateID := "G0_FIREWALL"
-		rawMsg := "firewall policy violation"
-		if len(codeContracts) > 0 {
-			gateID = codeContracts[0].GateID
-			rawMsg = codeContracts[0].RawMessage
-		}
-
-		l.publish(eventbus.Event{
-			Kind:    eventbus.Kind("loop.repair_attempt"),
-			Subject: intent,
-			Payload: map[string]string{
-				"attempt":   fmt.Sprintf("%d", attempt),
-				"max":       fmt.Sprintf("%d", maxAttempts),
-				"gate_id":   gateID,
-				"contracts": fmt.Sprintf("%d", len(codeContracts)),
-			},
-		})
-
-		if attempt >= maxAttempts {
-			return out, fmt.Errorf("firewall: blocked by gate %s after %d repair attempts: %s",
-				gateID, attempt, rawMsg)
-		}
-
-		repairPrompt := FormatRepairPrompt(codeContracts)
-
-		repairOut, stepErr := step("repair", repairPrompt, wt, res)
-		if stepErr != nil {
-			return out, fmt.Errorf("repair step error on attempt %d: %w", attempt, stepErr)
-		}
-		if repairOut != "" {
-			out = repairOut
-		}
-		if d, derr := wt.Diff(); derr == nil {
-			res.Diff = d
-		}
-	}
-	return out, nil
-}
-
-// coderStep returns a StepFunc that delegates the code stage to the wired
-// coder.Agent. For non-code stages it returns empty (the loop's internal
-// stages handle those). This is used when cfg.Coder is set and the caller
-// did not supply a StepFunc.
 func (l *Loop) coderStep() StepFunc {
 	return func(stage, intent string, wt *execution.Worktree, res *Result) (string, error) {
 		if stage != stageCode && stage != "repair" {

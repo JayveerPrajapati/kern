@@ -1,11 +1,14 @@
 package mcp
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	"time"
 )
 
 // toolAudit returns the server's shared audit log for MCP tool executions,
@@ -28,7 +31,8 @@ func (s *Server) toolAudit() *governance.AuditLog {
 		}
 		s.audit = governance.NewAuditLog().
 			WithStore(storage.NewLog(dir)).
-			WithLockPath(filepath.Join(dir, ".lock"))
+			WithLockPath(filepath.Join(dir, ".lock")).
+			WithMirror(governance.MirrorFor(dir))
 	}
 	return s.audit
 }
@@ -37,12 +41,23 @@ func (s *Server) toolAudit() *governance.AuditLog {
 // executed tools (read-only included) and pre-dispatch rejections alike
 // (the chain previously recorded only firewall decisions, approvals,
 // and gated exec). Best-effort by design: an audit failure is swallowed and
-// never fails the tool call it describes. cached marks a D1 cache hit: the
-// entry is tagged Policy:"tool-cache" / Reason:"served from cache" so the
-// evidence chain reflects what was actually served (F5). Result stays
-// "allowed" — no new Result value is invented.
-func (s *Server) auditToolCall(name string, args map[string]any, runErr error, executed bool, cached bool) {
-	defer func() { _ = recover() }() // the audit trail must never take a tool call down
+// never fails the tool call it describes — but the loss is not silent: a
+// panic is recovered here and marked in the global dropped-audit sidecar,
+// and store-write losses are counted inside AuditLog.persist (both surface
+// in `kern doctor` as the audit-dropped check). cached marks a D1 cache
+// hit: the entry is tagged Policy:"tool-cache" / Reason:"served from
+// cache" so the evidence chain reflects what was actually served (F5).
+// Result stays "allowed" — no new Result value is invented.
+func (s *Server) auditToolCall(name string, args map[string]any, runErr error, executed bool, cached bool, took time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			// The audit trail must never take a tool call down — but the
+			// loss must not be silent either: mark the global sidecar so
+			// `kern doctor` surfaces the dropped entry.
+			governance.AppendDroppedAuditMarker("", "tool_call", name, fmt.Sprintf("panic: %v", r))
+			log.Printf("kern mcp: auditToolCall panic for tool %q recovered (drop marked): %v", name, r)
+		}
+	}()
 	agent := argString(args, "agent_id")
 	if agent == "" {
 		agent = governance.DefaultAgentID
@@ -61,6 +76,9 @@ func (s *Server) auditToolCall(name string, args map[string]any, runErr error, e
 		Approved: executed,
 		Result:   result,
 		TaskID:   argString(args, "task"),
+	}
+	if took > 0 {
+		entry.DurationMs = took.Milliseconds()
 	}
 	if cached {
 		entry.Policy = "tool-cache"

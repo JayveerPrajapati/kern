@@ -437,6 +437,33 @@ func TestMaskSchemeLessDSN(t *testing.T) {
 	}
 }
 
+// TestMaskCompoundAndProsePasswords pins the two free-text password forms
+// that escaped the mask in live QA 2026-10-15: compound keywords
+// (db_password=… — `\b` fails after an underscore) and prose
+// ("password is …"). The keyword embedded in a longer word (notpassword=…)
+// must stay unmasked.
+func TestMaskCompoundAndProsePasswords(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantMask bool
+	}{
+		{"compound underscore", "db_password=hunter2safe", true},
+		{"compound uppercase", "SMTP_PASSWORD=hunter2safe", true},
+		{"compound multi-underscore", "db_user_password: hunter2safe", true},
+		{"compound dash", "my-password: hunter2safe", true},
+		{"prose is", "the password is hunter2safe", true},
+		{"keyword inside longer word stays unmasked", "notpassword=hunter2safe", false},
+	}
+	for _, tc := range cases {
+		res := Mask(tc.in)
+		masked := strings.Contains(res.Text, "[MASKED_PASSWORD_")
+		if masked != tc.wantMask {
+			t.Errorf("%s: masked=%v, want %v (output: %s)", tc.name, masked, tc.wantMask, res.Text)
+		}
+	}
+}
+
 func TestMaskInlinePasswordAndVaultTokens(t *testing.T) {
 	in := "Input with password Sup3rSecret!, hvs.CAESB1234567890abcdef_ghi and user test@corp.example.com"
 	res := Mask(in)
@@ -521,6 +548,51 @@ func TestMaskEncodedVsLabelPlaceholderCollision(t *testing.T) {
 	res := Mask(in)
 	if back := res.Unmask(res.Text); back != in {
 		t.Errorf("round-trip failed: got %q want %q (masked %q, mapping %v)", back, in, res.Text, res.Mapping)
+	}
+}
+
+// TestMaskPrefixShapedTokensAlwaysMatch (QA 2026-10-19): structurally-valid
+// but low-entropy tokens escaped the entropy/length heuristics and reached
+// logs verbatim — AKIA1234567890EXAMPLE (AKIA + 17, outside the old exact-16
+// rule) and ghp_abc123def456ghi (15 chars after ghp_, below the old 30-char
+// floor). Prefix-shaped tokens must always match regardless of length.
+func TestMaskPrefixShapedTokensAlwaysMatch(t *testing.T) {
+	in := "ERROR auth failed key=AKIA1234567890EXAMPLE token=ghp_abc123def456ghi user=qa.tester@example-corp.com retrying"
+	res := Mask(in)
+	for _, leak := range []string{"AKIA1234567890EXAMPLE", "ghp_abc123def456ghi", "qa.tester@example-corp.com"} {
+		if strings.Contains(res.Text, leak) {
+			t.Errorf("prefix-shaped secret leaked: %q -> %q", leak, res.Text)
+		}
+	}
+	if res.ByLabel["AWS"] != 1 || res.ByLabel["EMAIL"] != 1 {
+		t.Errorf("expected AWS+EMAIL findings, got %+v", res.ByLabel)
+	}
+	// The ghp_ token is masked (leak loop above) but its label can be either
+	// GITHUB (bare-token shape) or TOKEN (when a "token=" keyword precedes it,
+	// the keyword rule's earlier start wins the greedy span) — masking is what
+	// matters, not the cosmetic label.
+	if res.ByLabel["GITHUB"]+res.ByLabel["TOKEN"] == 0 {
+		t.Errorf("expected the ghp_ token masked as GITHUB or TOKEN, got %+v", res.ByLabel)
+	}
+}
+
+// TestMaskPythonSliceNotIPV6 (QA 2026-10-19): a Python slice like
+// sample[1::2] is 2 single-char hex groups and must not read as an IPv6
+// address, while a real compressed public IPv6 keeps matching.
+func TestMaskPythonSliceNotIPV6(t *testing.T) {
+	in := "if sample[1::2] == _null2:  # 2nd and 4th are null"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_IPV6_") {
+		t.Errorf("python slice masked as ipv6: %q", res.Text)
+	}
+	if res.ByLabel["IPV6"] != 0 {
+		t.Errorf("expected no IPV6 findings, got %+v", res.ByLabel)
+	}
+	// Positive control: a real public IPv6 (≥2-char groups on both sides of
+	// ::) must still be masked.
+	real := Mask("router at 2606:4700:4700::1111")
+	if real.ByLabel["IPV6"] != 1 {
+		t.Errorf("public IPv6 not masked: %q (got %+v)", real.Text, real.ByLabel)
 	}
 }
 

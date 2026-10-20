@@ -43,7 +43,7 @@ kern-mcp --http :8080 --tls-cert cert.pem --tls-key key.pem   # TLS
   (no unix sockets) or when the legacy behavior is forced with
   `KERN_MCP_TRANSPORT=tcp`. The socket is unlinked on clean shutdown.
 - Explicit TCP binds are **loopback only**; non-loopback binds are rejected for
-  security (`kern-server` is the network-facing binary).
+  security.
 - An HTTP **Origin check** applies on every request.
 - **TLS is optional and opt-in**: `--tls-cert` / `--tls-key` flags, or the
   `KERN_MCP_TLS_CERT` / `KERN_MCP_TLS_KEY` environment variables. TLS protects the
@@ -195,9 +195,9 @@ sub-tool regardless.
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 117-tool catalog (default is the 6-tool `defaultTools` surface) |
+| `KERN_MCP_FULL=1` | Advertise the full 31-tool catalog (default is the 29-tool `defaultTools` surface) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
-| `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 36-tool `highLevelTools` set (deprecated; prefer the default 6 or `KERN_MCP_FULL=1`) |
+| `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 6-tool `highLevelTools` set (deprecated; prefer the default 29 or `KERN_MCP_FULL=1`) |
 | `KERN_MCP_CATEGORY=<family>` | Advertise only one functional family — one of `analyze`, `agent`, `arch`, `ast`, `context`, `doc`, `edit`, `evidence`, `exec`, `framework`, `graph`, `governance`, `incident`, `lock`, `memory`, `meta`, `mcpbridge`, `optimize`, `org`, `project`, `review`, `task`, `verify` (e.g. `kern_search` is `graph`); `kern_meta` always stays |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |
@@ -218,7 +218,7 @@ deployment is confined to the workspace rather than trusted unconditionally.
 
 ### 6.2 Command execution
 
-`kern_exec`, `kern_sandbox` and related tools are gated by the command-execution
+`kern_exec` is gated by the command-execution
 governance firewall (`KERN_ALLOW_EXEC` / `KERN_TOOLS`). Denied calls return an
 error explaining the missing allowance.
 
@@ -233,7 +233,7 @@ Every tool carries a `riskLevel` so governed clients can gate access:
 | `high` | Security-sensitive or destructive | 18 |
 | `critical` | Arbitrary command execution or deployment | 4 |
 
-Counts sum to the 117-tool catalog (see `docs/tool-catalog.md`).
+Counts sum to the 31-tool catalog (see `docs/tool-catalog.md`).
 
 ## 7. Phase model
 
@@ -251,3 +251,18 @@ kern setup --verify                       # spawn kern-mcp and check the initial
 
 `kern setup --verify` is the recommended smoke test: it spawns the configured
 `kern-mcp` and asserts it answers the MCP `initialize` handshake correctly.
+
+## 9. Accepted deviations and boundaries
+
+Recorded from the 2026-10-17 production-readiness audit. Each row is a
+deliberate scope decision, declared through `capabilities` or answered with
+the spec's correct error code — never a silent degradation.
+
+| Area | Behavior | Why it is accepted |
+|---|---|---|
+| Resources API | Not implemented: `capabilities` does not advertise `resources`, and `resources/list` answers `-32601` method not found. | kern's data-equivalent for resources is the tool surface (context/evidence/memory bundles). An API that is not implemented is refused with the spec's error code rather than half-implemented. |
+| SSE streaming | Not supported: initialize advertises `streamableHttpCapabilities: {sse: false}`, and a request with an `Accept: text/event-stream` header answers `501 Not Implemented`. | Every kern tool response is a single JSON-RPC result; SSE would add streaming complexity with no current consumer. |
+| `2024-11-05` over HTTP | The legacy protocol version is accepted on the HTTP transport (pinned by `TestHandleHTTPSLegacyProtocolVersionAccepted`). | The 2024-11-05 wire format (JSON-RPC POST over the same method set) is shared with the newer versions; rejecting working legacy clients would break them for no security gain. |
+| Notification responses | HTTP notifications answer `202 Accepted` with an empty body. | Spec-mandated (Streamable HTTP): a notification never receives a response body. |
+| Request-body cap | Bodies over 16 MiB are rejected with `413 Content Too Large` before parsing (pinned by `TestHandleHTTPOversizeBodyRejected`). | A silently-truncated body must not be parsed into a misleading `-32700` parse error; the cap also bounds per-request memory. On stdio, an overlong line is drained and skipped without killing the session. |
+| Protocol-version set | Supported set is `{2024-11-05, 2025-03-26, 2025-06-18}`; an unsupported version answers `412 Precondition Failed`. | Honest negotiation: the server echoes only versions it actually implements. |

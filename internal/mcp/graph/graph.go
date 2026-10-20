@@ -18,6 +18,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/explorebudget"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -29,6 +30,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 	"github.com/JayveerPrajapati/kern/internal/twin"
 )
 
@@ -47,7 +49,11 @@ func AstSearch(ctx context.Context, ix *index.Index, args map[string]any) (strin
 	}
 	matches := ix.Search(pattern, limit)
 	if len(matches) == 0 {
-		return "no symbols matched: " + pattern + staleNote(ix), nil
+		// QA F7: the echoed pattern must be clipped (120 chars) — a huge
+		// pattern was previously returned in full inside the no-match line.
+		// 6.4: a pattern without a kind prefix gets the kind-glob hint
+		// (`func handle*` misses methods, whose kind is "method").
+		return "no symbols matched: " + clipQuery(pattern) + index.KindGlobHint(pattern) + staleNote(ix), nil
 	}
 	var b strings.Builder
 	for _, m := range matches {
@@ -227,8 +233,14 @@ func Larges(ctx context.Context, ix *index.Index, args map[string]any) (string, 
 
 }
 
-func Arch(ctx context.Context, ix *index.Index, args map[string]any) (string, error) {
-	return intel.RenderArch(intel.AnalyzeArchitecture(ix)), nil
+func Arch(ctx context.Context, ix *index.Index, sess *project.Session, args map[string]any) (string, error) {
+	var arch topology.Architecture
+	if sess != nil {
+		arch = sess.Architecture(ix)
+	} else {
+		arch = topology.AnalyzeArchitecture(ix)
+	}
+	return topology.RenderArch(arch), nil
 
 }
 
@@ -241,7 +253,7 @@ func Surprising(ctx context.Context, ix *index.Index, args map[string]any) (stri
 		}
 		limit = n
 	}
-	return intel.RenderSurprising(intel.SurprisingConnections(ix, limit)), nil
+	return topology.RenderSurprising(topology.SurprisingConnections(ix, limit)), nil
 }
 
 func Near(ctx context.Context, ix *index.Index, args map[string]any) (string, error) {
@@ -282,7 +294,7 @@ func Bridges(ctx context.Context, ix *index.Index, args map[string]any) (string,
 		}
 		limit = n
 	}
-	return intel.RenderBridges(intel.Bridges(ix, limit)), nil
+	return topology.RenderBridges(topology.Bridges(ix, limit)), nil
 
 }
 
@@ -437,9 +449,6 @@ func FtsSearch(ctx context.Context, root string, args map[string]any) (string, e
 	query := mcpargs.ArgString(args, "query")
 	if query == "" {
 		return "", fmt.Errorf("query is required")
-	}
-	if !index.SQLiteEnabled() {
-		return "", fmt.Errorf("fts5 requires a build with -tags sqlite (rebuild kern with 'go build -tags sqlite'); use kern_search for ranked free-text search on this default build")
 	}
 	limit := 20
 	if v := mcpargs.ArgString(args, "limit"); v != "" {
@@ -910,11 +919,20 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		// affected files from the filtered radius.
 		callers := gov.FilterQualified(ix, ix.CallersFor(rep.Definition), false)
 		callees := gov.FilterQualified(ix, ix.CallsFor(rep.Definition), true)
-		radius := gov.FilterQualified(ix, rep.BlastRadius, false)
+		var radius []string
+		for position, name := range rep.BlastRadius {
+			definition := rep.BlastSymbols[position]
+			if definition.File != "" {
+				if gov.Allowed[name] || gov.Allowed[definition.FullName()] {
+					radius = append(radius, name)
+				}
+			} else {
+				radius = append(radius, gov.FilterQualified(ix, []string{name}, false)...)
+			}
+		}
 		rep.Callers = mcpgov.SimpleNames(callers)
 		qualifyCallees(ix, rep, callees)
-		rep.BlastRadius = radius
-		rep.BlastFiles = intel.AffectedFiles(ix, radius)
+		rep.RetainBlastRadius(radius)
 		rep.Source = gov.FilterContextFooter(ix, rep.Source)
 		names := append([]string{rep.Resolved}, callers...)
 		names = append(names, callees...)
@@ -929,7 +947,20 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		names = append(names, rep.BlastRadius...)
 		gvc.StampRaw(provenance.SymbolProvenances(ix, names))
 	}
+	// max_tokens caps the ASSEMBLED response, not just the source: the
+	// budgeted render drops optional sections first and trims the
+	// caller/callee/blast lists with an explicit "+N more (raise
+	// max_tokens)" marker (QA 2026-10-19 item 2). 32 tokens are reserved
+	// for the one-line provenance stamp the envelope appends, so the full
+	// text stays within the caller's budget.
+	effectiveMax := maxTokens
+	if maxTokens > 64 {
+		effectiveMax = maxTokens - 32
+	}
 	rendered := intel.RenderExplore(rep)
+	if maxTokens > 0 {
+		rendered = explorebudget.Render(rep, effectiveMax)
+	}
 	if mcpargs.ArgString(args, "explain") == "true" {
 		if info, ok := intel.Why(ix, symbol); ok {
 			if gov != nil {
@@ -952,8 +983,17 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 				info.Callers = kept
 				info.InEdges = len(kept)
 			}
-			rendered = intel.RenderExploreExplain(rep, info)
+			if maxTokens > 0 {
+				rendered = explorebudget.RenderExplain(rep, info, effectiveMax)
+			} else {
+				rendered = intel.RenderExploreExplain(rep, info)
+			}
 		}
+	}
+	// A budgeted response drops the opt-in freshness footer first (the
+	// structured provenance envelope still carries the proof).
+	if maxTokens > 0 {
+		return rendered, nil
 	}
 	return rendered + FreshnessFooter(args, ix), nil
 }
@@ -1085,7 +1125,7 @@ func Communities(ctx context.Context, ix *index.Index, sess *project.Session, ar
 	if limit > 0 && len(comms) > limit {
 		comms = comms[:limit]
 	}
-	return intel.RenderCommunities(comms), nil
+	return topology.RenderCommunities(comms), nil
 
 }
 

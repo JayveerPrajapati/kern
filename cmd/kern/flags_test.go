@@ -247,19 +247,6 @@ func TestParseFlagsMigratedDefaults(t *testing.T) {
 
 // TestRunHealthRootEqualsForm pins the unified parser at the handler level:
 // a migrated FlagSet command (health) accepts the --flag=value form.
-func TestRunHealthRootEqualsForm(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := t.TempDir()
-	out := captureStdout(t, func() { runHealth([]string{"--root=" + root}) })
-	m := assertValidJSON(t, out)
-	idx, ok := m["index"].(map[string]any)
-	if !ok {
-		t.Fatalf("health output missing index block: %v", m)
-	}
-	if idx["built"] != false {
-		t.Fatalf("index block = %v, want built=false (empty dir)", idx)
-	}
-}
 
 // TestParseFlagsFast pins the --fast verify flag contract: the shared parser
 // accepts it (bool form, --flag and --flag=false), and it composes with

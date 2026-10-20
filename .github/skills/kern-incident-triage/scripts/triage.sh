@@ -2,6 +2,13 @@
 set -euo pipefail
 
 LOG_PATH="${1:-}"
+if [ "$LOG_PATH" = "--help" ] || [ "$LOG_PATH" = "-h" ]; then
+  echo "Usage: $0 <path_to_log_or_stacktrace>"
+  echo ""
+  echo "Compresses the log, then runs auto-SRE triage with AST symbol mapping"
+  echo "on the given log/stacktrace file."
+  exit 0
+fi
 if [ -z "$LOG_PATH" ]; then
   echo "Usage: $0 <path_to_log_or_stacktrace>"
   exit 1

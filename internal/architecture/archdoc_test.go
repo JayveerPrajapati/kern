@@ -71,8 +71,12 @@ func TestArchitectureDocParity(t *testing.T) {
 
 // TestArchitectureDocMentionsKnownDrift pins that the doc records the
 // largest subsystem honestly (the plan's drift example: mcp monolith)
-// instead of hiding it, and keeps the settled blueprint cap (9800, Stage D
-// follow-up) from regressing.
+// instead of hiding it, requires the doc to name the extracted families that
+// made the ratchet possible, and keeps the settled blueprint cap (9800,
+// Stage D follow-up) from regressing. The cmd/kern ratchet is pinned the
+// same way as the mcp ratchet: the CLI's approval/governance family was
+// extracted to internal/approvalcli and the cap must stay BELOW the
+// pre-extraction baseline.
 func TestArchitectureDocMentionsKnownDrift(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, archDocRel))
@@ -88,11 +92,31 @@ func TestArchitectureDocMentionsKnownDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
-		if row.Dir == "internal/mcp" && row.Cap < 20000 {
-			t.Errorf("internal/mcp cap %d too tight for the documented monolith", row.Cap)
+		// The mcp monolith is documented, extracted (catalog → mcpcatalog,
+		// meta → mcpmeta) and its cap ratcheted at or below 19,000 — BELOW
+		// the pre-extraction baseline (20,018) — so the subtree can only
+		// shrink: crossing the cap forces the next extraction, never a
+		// cap raise.
+		if row.Dir == "internal/mcp" && row.Cap > 19000 {
+			t.Errorf("internal/mcp cap %d must stay ratcheted at or below 19,000 (pre-extraction baseline was 20,018)", row.Cap)
+		}
+		if row.Dir == "internal/mcp" && (!strings.Contains(doc, "internal/mcpcatalog") || !strings.Contains(doc, "internal/mcpmeta")) {
+			t.Error("ARCHITECTURE.md must name the extracted families (internal/mcpcatalog, internal/mcpmeta) — the ratcheted mcp cap is only honest with the extraction documented")
 		}
 		if row.Dir == "internal/blueprint" && row.Cap < 9800 {
 			t.Errorf("internal/blueprint cap %d below the settled Stage D cap (9800)", row.Cap)
+		}
+		// The CLI follows the same ratchet: the approval/governance command
+		// family (approve/reject/approval/audit/policy) was extracted to
+		// internal/approvalcli and cmd/kern's cap is ratcheted BELOW the
+		// pre-extraction baseline (19,979) — the command surface can only
+		// shrink: crossing the cap forces the next family out, never a
+		// cap raise.
+		if row.Dir == "cmd/kern" && row.Cap >= 19979 {
+			t.Errorf("cmd/kern cap %d must stay ratcheted below 19,979 (pre-extraction baseline was 19,979)", row.Cap)
+		}
+		if row.Dir == "cmd/kern" && !strings.Contains(doc, "internal/approvalcli") {
+			t.Error("ARCHITECTURE.md must name the extracted approval/governance family (internal/approvalcli) — the ratcheted cmd/kern cap is only honest with the extraction documented")
 		}
 	}
 }

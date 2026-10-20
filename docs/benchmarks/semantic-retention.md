@@ -1,7 +1,14 @@
 # Semantic Retention Benchmarks
 
-**Status:** Baseline established (2026-09-09) · **Suite:** P1-001
+**Status:** [measured] — Baseline established (2026-09-09) · **Suite:** P1-001
 **Owner:** kern maintainers · **Tokenizer:** `internal/tokenize.Count` (deterministic, offline, stdlib-only)
+
+> **Dated note (2026-10-19):** the token counts in this page's baseline were
+> produced by the `internal/tokenize.Count` implementation as of 2026-09-09;
+> tokenizer behavior may have drifted since (token-count deltas affect the
+> loss-adjusted-savings figures, not the retention ratios, which are
+> tokenizer-independent). This note is informational — no re-measurement has
+> been performed for this page.
 
 This document is the detailed specification for kern's **semantic retention**
 benchmark suite. It defines what we measure, how we measure it, and what

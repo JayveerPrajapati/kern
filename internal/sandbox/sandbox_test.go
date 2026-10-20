@@ -639,3 +639,40 @@ func TestSanitizedEnvScrubsGoproxy(t *testing.T) {
 		t.Fatal("GOSUMDB missing from sanitizedEnv")
 	}
 }
+
+// TestSanitizedEnvPropagatesGovernanceVars pins the P3 env contract: the
+// governance policy vars governance.CheckExecCommand reads (KERN_ALLOW_EXEC,
+// KERN_TOOLS, KERN_BYPASS, KERN_ENFORCE, KERN_EXEC_RISK) must propagate from
+// the operator's env into the sandboxed build/test child so a machine's
+// policy behaves identically under `kern verify` and in an interactive shell
+// — a test fixture (or git's global pre-commit hook) that shells out to
+// `kern` from inside the child inherits the same policy. The minimal-env
+// rationale stays: a secret-carrying var is still dropped.
+func TestSanitizedEnvPropagatesGovernanceVars(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_TOOLS", "kern_verify,kern_search")
+	t.Setenv("KERN_BYPASS", "1")
+	t.Setenv("KERN_ENFORCE", "0")
+	t.Setenv("KERN_EXEC_RISK", "HIGH")
+	t.Setenv("KERN_DEPLOY_SECRET_TOKEN", "s3cr3t") // must still be stripped
+	got := map[string]string{}
+	for _, kv := range sanitizedEnv() {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			got[kv[:i]] = kv[i+1:]
+		}
+	}
+	for name, want := range map[string]string{
+		"KERN_ALLOW_EXEC": "1",
+		"KERN_TOOLS":      "kern_verify,kern_search",
+		"KERN_BYPASS":     "1",
+		"KERN_ENFORCE":    "0",
+		"KERN_EXEC_RISK":  "HIGH",
+	} {
+		if got[name] != want {
+			t.Fatalf("sanitizedEnv() must propagate %s=%q, got %q", name, want, got[name])
+		}
+	}
+	if _, ok := got["KERN_DEPLOY_SECRET_TOKEN"]; ok {
+		t.Fatal("sanitizedEnv() must still strip secret vars")
+	}
+}

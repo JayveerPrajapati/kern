@@ -6,8 +6,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // ToolInfo is the discovery projection of one catalog tool: its name,
@@ -74,6 +75,14 @@ func (c *Catalog) Call(tool string, args map[string]any) (string, error) {
 // CallContext is Call with an explicit context (cancellation, deadlines).
 func (c *Catalog) CallContext(ctx context.Context, tool string, args map[string]any) (string, error) {
 	return c.srv.CallToolGoverned(ctx, tool, args)
+}
+
+// CallResult is CallContext speaking the conditional-fetch protocol
+// structurally (C2/F3, ADR-0012): an eligible response carries its etag
+// (pass it back in args to conditionally collapse a re-read), and a
+// matching etag yields an unchanged verdict instead of the full text.
+func (c *Catalog) CallResult(ctx context.Context, tool string, args map[string]any) (domain.ToolCallResult, error) {
+	return c.srv.CallToolGovernedResult(ctx, tool, args)
 }
 
 // Tools returns every registered catalog tool's name and description (plus

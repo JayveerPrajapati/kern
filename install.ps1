@@ -10,9 +10,15 @@
 #   * The go-install fallback builds the default tree-sitter build (hard CGO);
 #     set $env:KERN_PUREGO="1" to build the pure-Go opt-out instead
 #     (`go install -tags notreesitter ...`, no C toolchain required).
+#   * Prebuilt downloads PREFER the tree-sitter-enabled -full zip (shipped
+#     for windows amd64); set $env:KERN_FORCE_PUREGO="1" to use the pure-Go
+#     zip instead (also the automatic fallback when no -full asset exists).
 #   * Adds the install dir to the user PATH (persisted via User environment).
 #   * Verifies `kern.exe version` and performs an MCP JSON-RPC initialize handshake.
-#   * Auto-wires kern into detected agents (`kern setup --detect --global`).
+#   * Wires kern ONCE, machine-wide (`kern setup --global-only --global-rules`):
+#     user-level MCP + hooks + rules for every agent, NO file written in any
+#     repo. A repo initializes itself when an agent first works in it.
+#     Set $env:KERN_AUTO_WIRE="0" to install the binaries only.
 #   * Supports actions: install (default), upgrade, status, uninstall.
 #   * upgrade re-runs the install path; a running kern.exe/kern-mcp.exe
 #     is moved aside (unique .old name) before the copy — Windows cannot
@@ -35,6 +41,60 @@ $Version = $env:KERN_VERSION
 if (-not $Version) { $Version = "latest" }
 $Prefix = $env:KERN_INSTALL_DIR
 if (-not $Prefix) { $Prefix = Join-Path $HOME ".local\bin" }
+
+# --- Output style -----------------------------------------------------------
+# Colour via Write-Host -ForegroundColor (NO_COLOR and KERN_PLAIN respected).
+# Glyphs and box characters are unicode only where the console renders them
+# (Windows Terminal, PowerShell 7+); legacy consoles get ASCII. They are built
+# from code points so this file stays pure ASCII (no BOM/encoding problems).
+$UseColor = (-not $env:NO_COLOR) -and (-not $env:KERN_PLAIN)
+$UseUnicode = (-not $env:KERN_ASCII) -and ($env:WT_SESSION -or ($PSVersionTable.PSVersion.Major -ge 7))
+if ($UseUnicode) {
+    $GOk = [string][char]0x2714; $GWarn = [string][char]0x26A0
+    $BTL = [string][char]0x256D; $BTR = [string][char]0x256E
+    $BBL = [string][char]0x2570; $BBR = [string][char]0x256F
+    $BH = [string][char]0x2500; $BV = [string][char]0x2502
+} else {
+    $GOk = "ok"; $GWarn = "!"
+    $BTL = "+"; $BTR = "+"; $BBL = "+"; $BBR = "+"; $BH = "-"; $BV = "|"
+}
+# Was the install dir already on the user PATH before this run changes it?
+$PathWasSet = ([Environment]::GetEnvironmentVariable("Path", "User") -like "*$Prefix*")
+
+function Write-Colored {
+    param([string]$Text, [string]$Color = "", [switch]$NoNewline)
+    if ($UseColor -and $Color) { Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline }
+    else { Write-Host $Text -NoNewline:$NoNewline }
+}
+function Write-Step {
+    param([string]$Msg)
+    Write-Host "  " -NoNewline
+    Write-Colored $GOk "Green" -NoNewline
+    Write-Host " $Msg"
+}
+function Write-Warn {
+    param([string]$Msg)
+    Write-Host "  " -NoNewline
+    Write-Colored $GWarn "Yellow" -NoNewline
+    Write-Host " $Msg"
+}
+function Write-Header {
+    param([string]$Msg)
+    Write-Host ""
+    Write-Colored "  $Msg" "Cyan"
+}
+# Boxes are 62 columns wide; content must be ASCII and at most 58 columns.
+function Write-Box {
+    param([string]$Title, [string[]]$Lines)
+    $n = 57 - $Title.Length
+    Write-Colored ("  " + $BTL + $BH + " " + $Title + " " + ($BH * $n) + $BTR) "DarkGray"
+    foreach ($l in $Lines) {
+        Write-Colored ("  " + $BV + " ") "DarkGray" -NoNewline
+        Write-Host $l.PadRight(58) -NoNewline
+        Write-Colored (" " + $BV) "DarkGray"
+    }
+    Write-Colored ("  " + $BBL + ($BH * 60) + $BBR) "DarkGray"
+}
 
 function Get-Version {
   if ($Version -ne "latest") { return $Version }
@@ -142,31 +202,72 @@ function Confirm-Sha256 {
     return $true
 }
 
+# Show-NextSteps: what to do after an install that wired nothing.
+function Show-NextSteps {
+    Write-Host ""
+    Write-Box "kern is installed" (@(
+        "Nothing was wired into your agents or git yet.",
+        "",
+        "1. kern doctor          check install and index health",
+        "2. kern setup --dry-run preview what wiring would write",
+        "3. kern setup           wire detected agents (asks first)",
+        "",
+        "Wire all agents machine-wide: kern setup --global-only"
+    ) + $(if (-not $PathWasSet) { @("", "Open a NEW terminal so the updated PATH applies.") } else { @() }))
+}
+
+# Show-WiredSummary: what a successful global wiring means.
+function Show-WiredSummary {
+    Write-Host ""
+    Write-Box "kern is wired globally" (@(
+        "Every agent now has kern (MCP + hooks), machine-wide.",
+        "No repo was touched. A repo initializes itself the first",
+        "time an agent works in it (kern_buddy builds the index).",
+        "",
+        "Restart your agent to load kern.",
+        "",
+        "kern setup --dry-run preview what wiring would write",
+        "kern doctor       check wiring and index health",
+        "kern setup        add shared config to a team repo",
+        "",
+        "Opt out of auto-wiring: KERN_AUTO_WIRE=0 when installing"
+    ) + $(if (-not $PathWasSet) { @("", "Open a NEW terminal so the updated PATH applies.") } else { @() }))
+}
+
+# Wire-Kern registers kern ONCE, machine-wide: user-level MCP for every agent,
+# global hooks, global rules and global git ignore (`kern setup --global-only
+# --global-rules`). It writes NO file in any repo and does not index anything:
+# a repo initializes itself when an agent first works in it. KERN_AUTO_WIRE=0
+# installs the binaries only. An upgrade refreshes the same user-level assets.
 function Wire-Kern {
     $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($oldPath -notlike "*$Prefix*") {
         [Environment]::SetEnvironmentVariable("Path", "$oldPath;$Prefix", "User")
-        Write-Host "note: added $Prefix to your user PATH (open a new terminal)." -ForegroundColor Yellow
+        Write-Warn "added $Prefix to your user PATH (open a new terminal)."
     }
     $kern = Join-Path $Prefix "kern.exe"
     if (-not (Test-Path $kern)) {
         Write-Host "kern: binary not found at $kern; skipping auto-wire." -ForegroundColor Red
-        Write-Host "  run 'kern setup --detect --global' manually in your project root."
+        Write-Host "  run 'kern setup --global-only' manually."
         return
     }
+    if ($env:KERN_AUTO_WIRE -eq "0") {
+        Show-NextSteps
+        return
+    }
+    Write-Header "Wiring kern for every agent (user-level, no repo files)"
+    $wired = $false
     try {
-        $projRoot = git rev-parse --show-toplevel 2>$null
-        if (-not $projRoot) { $projRoot = (Get-Location).Path }
-        Write-Host "auto-wiring kern into detected agents in: $projRoot (and globally)"
-        Push-Location $projRoot
-        try {
-            & $kern setup --detect --root $projRoot --global
-            Write-Host "indexing project (first run may take a minute)..."
-            & $kern index $projRoot 2>$null
-        } finally {
-            Pop-Location
-        }
-    } catch { <# non-fatal: setup/index is best-effort #> }
+        & $kern setup --global-only --global-rules --yes
+        $wired = ($LASTEXITCODE -eq 0)
+    } catch { $wired = $false }
+    if ($wired) {
+        Write-Step "global wiring complete - 'kern setup --check' shows current wiring"
+        Show-WiredSummary
+    } else {
+        Write-Warn "global wiring failed - run 'kern setup --global-only' to see why"
+        Show-NextSteps
+    }
 }
 
 function Show-Status {
@@ -332,6 +433,7 @@ if ($Action -eq "uninstall" -or ($args.Count -gt 0 -and $args[0] -eq "uninstall"
     exit 0
 }
 
+Write-Header "kern installer ($Action)"
 $tag = Get-Version
 if (-not $tag) {
     # F7b: an unresolvable release means the tag cannot be honored — abort
@@ -364,23 +466,53 @@ $tmp = Join-Path $env:TEMP "kern-install-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 try {
-    Write-Host "kern: downloading $tag ($file)"
-    $zip = Join-Path $tmp $file
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-    } catch {
-        Write-Host "kern: no prebuilt asset for Windows at $tag; falling back to go install." -ForegroundColor Yellow
-        if (Get-Command go -ErrorAction SilentlyContinue) {
-            $goInstalled = Install-Go -Tag $tag
-            if ($goInstalled) {
-                Verify-Kern -PrefixDir $Prefix
-                & Wire-Kern
-                exit 0
+    # Prefer the tree-sitter-enabled native build: probe for the -full zip
+    # FIRST (windows amd64 ships one). A clean 404 falls back to the pure-Go
+    # zip; any other probe failure also falls back with a warning. The
+    # selected zip is checksum-verified below, so either asset is checked the
+    # same way. KERN_FORCE_PUREGO=1 skips the probe entirely.
+    $zip = $null
+    $forcePureGo = $env:KERN_FORCE_PUREGO
+    if ($forcePureGo -eq "1") {
+        Write-Host "kern: KERN_FORCE_PUREGO=1 — using the pure-Go build ($file)" -ForegroundColor Yellow
+    } else {
+        $fullFile = "kern-windows-${goarch}-full.zip"
+        $fullZip = Join-Path $tmp $fullFile
+        try {
+            Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$tag/$fullFile" -OutFile $fullZip -UseBasicParsing
+            $file = $fullFile
+            $url = "https://github.com/$Repo/releases/download/$tag/$file"
+            $zip = $fullZip
+            Write-Host "kern: using tree-sitter build ($file)" -ForegroundColor Green
+        } catch {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            if ($status -eq 404) {
+                Write-Host "kern: no -full (tree-sitter) asset for Windows at $tag; using the pure-Go build ($file)" -ForegroundColor Yellow
+            } else {
+                Write-Host "kern: could not probe $fullFile (HTTP $status) — using the pure-Go build ($file)" -ForegroundColor Yellow
             }
+        }
+    }
+    if (-not $zip) { $zip = Join-Path $tmp $file }
+    if (-not (Test-Path $zip)) {
+        Write-Host "kern: downloading $tag ($file)"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+        } catch {
+            Write-Host "kern: no prebuilt asset for Windows at $tag; falling back to go install." -ForegroundColor Yellow
+            if (Get-Command go -ErrorAction SilentlyContinue) {
+                $goInstalled = Install-Go -Tag $tag
+                if ($goInstalled) {
+                    Verify-Kern -PrefixDir $Prefix
+                    & Wire-Kern
+                    exit 0
+                }
+                exit 1
+            }
+            Write-Host "kern: download failed and go is not installed." -ForegroundColor Red
             exit 1
         }
-        Write-Host "kern: download failed and go is not installed." -ForegroundColor Red
-        exit 1
     }
 
     # Fail-closed checksum verification against the release SHA256SUMS
@@ -431,8 +563,6 @@ try {
     Write-Host "installed: $(Join-Path $Prefix 'kern.exe') ($tag)"
     Verify-Kern -PrefixDir $Prefix
     & Wire-Kern
-
-    Write-Host "kern is ready. Run 'kern buddy' for a project onboarding digest."
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

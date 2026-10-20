@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/metaroute"
 )
 

@@ -4,14 +4,23 @@
 package intel
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"log"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
+
+// Violation is the boundary-crossing record consumed by intel's SARIF
+// renderer (sarif.go). The type itself lives in internal/topology (with the
+// rest of the graph-structure family, where CheckPurity produces it); this
+// alias keeps downstream intel imports compiling.
+type Violation = topology.Violation
 
 // ChangedFiles returns the files changed in the working tree (staged +
 // unstaged) relative to HEAD. Falls back to `git status --porcelain -z` when
@@ -88,41 +97,16 @@ func (e *GitError) Error() string {
 
 // IsTestFile reports whether a relative path is a test file. It covers the
 // common conventions: *_test.go, *.test.js/ts, *_spec.rb, test_*.py and files
-// under test/tests/spec/__tests__ directories.
-func IsTestFile(rel string) bool {
-	lower := strings.ToLower(rel)
-	base := filepath.Base(lower)
-	if strings.HasSuffix(lower, "_test.go") {
-		return true
-	}
-	for _, suffix := range []string{
-		".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".test.mjs", ".test.cjs",
-		".test.py", ".test.rb", ".test.go",
-		".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".spec.rb", ".spec.py",
-		"_test.py", "_test.rb", "_test.js", "_test.ts", "_spec.rb", "_spec.py",
-	} {
-		if strings.HasSuffix(lower, suffix) {
-			return true
-		}
-	}
-	if strings.HasPrefix(base, "test_") || strings.HasPrefix(base, "test-") {
-		return true
-	}
-	for _, dir := range []string{"/test/", "/tests/", "/spec/", "/__tests__/"} {
-		if strings.Contains("/"+lower+"/", dir) {
-			return true
-		}
-	}
-	return false
-}
+// under test/tests/spec/__tests__ directories. The predicate body lives in
+// internal/code (code.IsTestFile), shared with the topology package.
+func IsTestFile(rel string) bool { return code.IsTestFile(rel) }
 
 // IsFixtureFile reports whether a relative path lives under a testdata/
 // directory segment — Go's canonical location for test fixtures and demo
 // code. Fixtures are not production source, so architecture enforcement must
-// not flag (or silently skip-check) their crossings.
-func IsFixtureFile(rel string) bool {
-	return strings.Contains("/"+filepath.ToSlash(rel)+"/", "/testdata/")
-}
+// not flag (or silently skip-check) their crossings. The predicate body lives
+// in internal/code (code.IsFixtureFile), shared with the topology package.
+func IsFixtureFile(rel string) bool { return code.IsFixtureFile(rel) }
 
 // ImportMatches reports whether an import path refers to a local directory.
 // Go import paths are slash-separated; Java (and other JVM languages) use
@@ -312,33 +296,49 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 }
 
 // blastRadiusWalk is the package-aware blast-radius BFS. The visited set is
-// keyed by symbol NAME (first-seen depth, sorted for determinism), exactly
-// like the pre-package-aware walk, but the neighbors come from the same
+// keyed by declaration identity (first-seen depth, sorted for determinism),
+// while neighbors come from the same
 // package-aware attribution explore's direct-caller list uses:
 // ix.CallersFor(sym) resolves each recorded caller of a symbol to the
 // symbols that really call it (package-qualified keys plus same-package bare
 // buckets — never a bare-name merge of every same-named definition), and
 // findCallerDef resolves each caller endpoint to the concrete symbol with
 // the parent as context (same-package, then import-based). Because the
-// visited set is keyed by name, a same-named symbol that is itself a caller
-// (the MCP wrapper "AuthorizeContext" calling the governance core) collapses
-// into the already-visited root instead of re-expanding every same-named
-// definition's edges — the same-name merge can no longer amplify the radius
-// (TestAuthorizeContextDefaultScoped/Denial call the wrapper, not the core).
+// visited set is keyed by declaration, a same-named wrapper remains distinct
+// from its core and its real transitive callers are included. Source-owned
+// edges select concrete callers; unresolved identities remain opaque leaves.
 // Roots that do not resolve to an indexed symbol keep the legacy raw
 // ix.Callers expansion. The second return value carries the resolved symbol
 // behind each radius name (same order) so file attribution can use the exact
 // symbol instead of a first-match name map ("Generate" is shared by three
 // packages; only evidence's calls the governance core).
-func blastRadiusWalk(ix *index.Index, roots []string, strict bool) ([]string, []index.Symbol, map[string]int, int) {
+func blastRadiusWalk(ix *index.Index, roots []string, strict bool, selected ...index.Symbol) ([]string, []index.Symbol, map[string]int, int) {
 	visited := map[string]int{}
 	type entry struct {
 		name string
 		sym  index.Symbol
+		key  string
 	}
 	queue := make([]entry, 0, len(roots))
 	skipped := 0
-	symByName := map[string]index.Symbol{}
+	entries := map[string]entry{}
+	add := func(name string, sym index.Symbol, depth int) {
+		key := "raw:" + name
+		if sym.File != "" {
+			key = sym.DeclarationID()
+		}
+		if _, seen := visited[key]; seen {
+			return
+		}
+		visited[key] = depth
+		item := entry{name: name, sym: sym, key: key}
+		entries[key] = item
+		queue = append(queue, item)
+	}
+	// The sourced-caller index is precomputed ONCE per index (lazy,
+	// sync.Once-guarded in index.Index) — rebuilding it from ALL of ix.Calls
+	// on every invocation was the measured blast-radius latency regression
+	// (docs/benchmarks/graph-latency.md ~900x vs the documented numbers).
 	var langByFull map[string]string
 	if strict {
 		langByFull = map[string]string{}
@@ -348,19 +348,21 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool) ([]string, []
 			}
 		}
 	}
-	for _, r := range roots {
+	for rootIndex, r := range roots {
 		if r == "" {
 			continue
 		}
-		if _, ok := visited[r]; ok {
-			continue
-		}
-		visited[r] = 0
 		sym, ok := findDef(ix, r)
-		if ok {
-			symByName[r] = sym
+		if !ok {
+			sym, ok = ix.ResolveName(r)
 		}
-		queue = append(queue, entry{name: r, sym: sym})
+		if rootIndex < len(selected) && selected[rootIndex].File != "" {
+			sym, ok = selected[rootIndex], true
+		}
+		if !ok {
+			sym = index.Symbol{}
+		}
+		add(r, sym, 0)
 	}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -378,47 +380,73 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool) ([]string, []
 						continue
 					}
 				}
-				if _, ok := visited[caller]; !ok {
-					visited[caller] = visited[cur.name] + 1
-					queue = append(queue, entry{name: caller})
-				}
+				add(caller, index.Symbol{}, visited[cur.key]+1)
 			}
 			continue
 		}
-		for _, c := range ix.CallersFor(cur.sym) {
-			callerSym, ok := findCallerDef(ix, c, cur.sym)
-			if !ok {
+		candidates := map[string]bool{}
+		for _, caller := range ix.CallersFor(cur.sym) {
+			candidates[caller] = true
+		}
+		for _, caller := range ix.SourcedCallersBySimple(cur.sym.Name) {
+			candidates[caller] = true
+		}
+		for c := range candidates {
+			callerSyms, unresolved := callerDefinitions(ix, c, cur.sym)
+			if unresolved {
 				// An unresolvable caller endpoint is still a real caller:
 				// report it under its raw name as a leaf (never expanded).
+				if strict && ix.PrecisionByLang[langByFull[c]] != "resolved" {
+					skipped++
+				} else {
+					key := "raw:" + c
+					if _, seen := visited[key]; !seen {
+						visited[key] = visited[cur.key] + 1
+						entries[key] = entry{name: c, key: key}
+					}
+				}
+			}
+			for _, callerSym := range callerSyms {
 				if strict {
-					if p := ix.PrecisionByLang[langByFull[c]]; p != "resolved" {
+					if p := ix.PrecisionByLang[callerSym.Lang]; p != "resolved" {
 						skipped++
 						continue
 					}
 				}
-				if _, ok := visited[c]; !ok {
-					visited[c] = visited[cur.name] + 1
-					queue = append(queue, entry{name: c})
-				}
-				continue
-			}
-			if strict {
-				if p := ix.PrecisionByLang[callerSym.Lang]; p != "resolved" {
-					skipped++
-					continue
-				}
-			}
-			name := callerSym.FullName()
-			if _, ok := visited[name]; !ok {
-				visited[name] = visited[cur.name] + 1
-				symByName[name] = callerSym
-				queue = append(queue, entry{name: name, sym: callerSym})
+				add(callerSym.FullName(), callerSym, visited[cur.key]+1)
 			}
 		}
 	}
-	out := make([]string, 0, len(visited))
-	for s := range visited {
-		out = append(out, s)
+	counts := map[string]int{}
+	for _, item := range entries {
+		name := item.name
+		if item.sym.File != "" {
+			name = item.sym.FullName()
+		}
+		counts[name]++
+	}
+	pkgByFile := packagePathByFile(ix)
+	names := map[string]string{}
+	nameCounts := map[string]int{}
+	for key, item := range entries {
+		name := item.name
+		if item.sym.File != "" && counts[item.sym.FullName()] > 1 {
+			name = qualifiedName(pkgByFile, map[string]bool{item.sym.FullName(): true}, item.sym)
+		}
+		names[key] = name
+		nameCounts[name]++
+	}
+	out := make([]string, 0, len(entries))
+	symByName := map[string]index.Symbol{}
+	dist := map[string]int{}
+	for key, item := range entries {
+		name := names[key]
+		if nameCounts[name] > 1 {
+			name += "@" + key
+		}
+		out = append(out, name)
+		symByName[name] = item.sym
+		dist[name] = visited[key]
 	}
 	sort.Strings(out)
 	// outSyms must stay POSITIONALLY PARALLEL to out — the "same order"
@@ -437,7 +465,7 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool) ([]string, []
 			outSyms[i] = sym
 		}
 	}
-	return out, outSyms, visited, skipped
+	return out, outSyms, dist, skipped
 }
 
 // affectedFilesOf returns the distinct non-documentation source files of the
@@ -448,7 +476,7 @@ func affectedFilesOf(syms []index.Symbol) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range syms {
-		if s.File == "" || index.IsDocFile(s.File) || seen[s.File] {
+		if s.File == "" || langparse.IsDocFile(s.File) || seen[s.File] {
 			continue
 		}
 		seen[s.File] = true
@@ -459,7 +487,7 @@ func affectedFilesOf(syms []index.Symbol) []string {
 }
 
 // AffectedFiles returns the distinct files touched by a set of symbols.
-// Documentation files (markdown/HTML — see index.IsDocFile) are excluded:
+// Documentation files (markdown/HTML — see langparse.IsDocFile) are excluded:
 // the index keeps them in the graph, but a code blast-radius set is about
 // what a change can break in code, and a fuzzy over-match dragged doc pages
 // (export_graph.html, docs/adr/*.md) into every impacted-file list.
@@ -468,7 +496,7 @@ func AffectedFiles(ix *index.Index, symbols []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range symbols {
-		if f := fileMap[s]; f != "" && !index.IsDocFile(f) && !seen[f] {
+		if f := fileMap[s]; f != "" && !langparse.IsDocFile(f) && !seen[f] {
 			seen[f] = true
 			out = append(out, f)
 		}

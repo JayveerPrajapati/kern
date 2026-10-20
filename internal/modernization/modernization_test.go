@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // writeTree writes a fixture module and returns its root directory.
@@ -350,7 +350,7 @@ func TestModernizationTotalExtent(t *testing.T) {
 }
 
 func TestModernizationDisambiguateNames(t *testing.T) {
-	comms := []intel.Community{
+	comms := []topology.Community{
 		{
 			ID:       "comm-1",
 			Packages: []string{"services/auth/wrapper"},
@@ -446,23 +446,42 @@ func %s() int { return 1 }
 
 import "shared"
 
-func A20() int { return B20() + shared.Util(1) }
+func A20() int { return B20() + C20() + D20() + shared.Util(1) }
 
-func B20() int { return 1 }
+func B20() int { return C20() }
+
+func C20() int { return D20() }
+
+func D20() int { return B20() }
 `
 	files["pkg21/pkg21.go"] = `package pkg21
 
 import "shared"
 
-func A21() int { return B21() + shared.Util(2) }
+func A21() int { return B21() + C21() + D21() + shared.Util(2) }
 
-func B21() int { return 1 }
+func B21() int { return C21() }
+
+func C21() int { return D21() }
+
+func D21() int { return B21() }
 `
+	// shared is internally dense (every helper calls Util and Util calls every
+	// helper) so label propagation keeps it a cluster of its own instead of
+	// absorbing it into the single-edge callers pkg20 and pkg21.
 	files["shared/shared.go"] = `package shared
 
-func Util(v int) int { return helper(v) }
+func Util(v int) int { return h1(v) + h2(v) + h3(v) + h4(v) }
 
-func helper(v int) int { return v }
+func h1(v int) int { return Util2(v) }
+
+func h2(v int) int { return Util2(v) }
+
+func h3(v int) int { return Util2(v) }
+
+func h4(v int) int { return Util2(v) }
+
+func Util2(v int) int { return h1(v) + h2(v) + h3(v) + h4(v) + v }
 `
 
 	plan, err := NewAnalyzer(build(t, files)).Analyze()

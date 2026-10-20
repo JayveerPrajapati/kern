@@ -386,7 +386,13 @@ func (e *WorkflowEngine) RunContext(ctx stdctx.Context, rootTask *Task, stepHand
 					return rootTask, fmt.Errorf("agent: task %s approval gate could not be persisted: %w", rootTask.ID, err)
 				}
 				if e.store != nil {
-					_ = e.store.AddPending(req)
+					// The task itself is persisted below with ResumeStep, so a
+					// failed pending-write degrades to re-requesting the gate on
+					// engine restart — but out-of-band approval tooling would
+					// not see the request meanwhile, so surface the loss.
+					if err := e.store.AddPending(req); err != nil {
+						log.Printf("kern agent: approval %s could not be persisted (out-of-band approval will not see it): %v", req.ID, err)
+					}
 				}
 				e.mu.Lock()
 				e.approvalRef[req.ID] = approval{key: key}

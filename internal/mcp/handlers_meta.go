@@ -3,7 +3,7 @@
 // The natural-language classifier (metaroute.ClassifyMetaRequest and its
 // sub-routers) and the semantic fallback live in internal/metaroute as
 // plain functions; the dispatch surface (meta.Handle) lives in
-// internal/mcp/meta. This file wires them into *Server: handleMeta builds
+// internal/mcpmeta. This file wires them into *Server: handleMeta builds
 // the leaf Hooks from server state (dispatchTable, validPhase, costHintFor)
 // and delegates to meta.Handle. The unexported shims below (classifyMetaRequest,
 // validateVerifyTypes, verifyTypesExec) keep the few remaining in-package
@@ -17,9 +17,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
-	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpmeta"
 	"github.com/JayveerPrajapati/kern/internal/metaroute"
 )
 

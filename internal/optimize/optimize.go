@@ -107,6 +107,7 @@ func record(op stats.Operation, opts Options, res Result) {
 		Session:      opts.Session,
 		Operation:    op,
 		Tool:         stats.ToolForOperation(op),
+		Root:         opts.Root,
 		Source:       opts.Source,
 		Model:        modelOrDefault(opts.Model),
 		BeforeTokens: res.BeforeTokens,
@@ -415,6 +416,15 @@ func Log(text string, opts Options) (Result, error) {
 	if strings.TrimSpace(text) == "" {
 		return Result{}, errors.New("empty log")
 	}
+	// Mask secrets/PII BEFORE anything leaves this function: the cache key,
+	// the on-disk semantic index and the cached Result payload all derive
+	// from text below, so an unmasked log would persist raw secrets under
+	// ~/.cache/kern. Masking is deterministic, so the masked form — and the
+	// derived key — is stable across runs (QA 2026-10-19: --kind log --mask
+	// emitted every secret verbatim because the log path never masked).
+	if opts.Mask {
+		text = pii.MaskNames(text, opts.MaskNames).Text
+	}
 
 	var truncateRules []compress.TruncateRule
 	if cfg := config.Load(opts.Root); cfg != nil {
@@ -536,38 +546,25 @@ func RunBuild(ctx context.Context, command string, dir string, opts Options) (Re
 	if err != nil {
 		outStr += "\n" + err.Error()
 	}
-	compacted := compactCommandOutput(outStr)
+	// JSON is data, not log noise — the line-level compactor keeps the head
+	// plus every error/warn-shaped line, which splices unrelated entries of
+	// a JSON document together (observed live: a governed `kern audit --json`
+	// came back as valid-looking JSON with dozens of spliced "Result":
+	// "error" lines — unparseable garbage). Detect JSON-shaped child output
+	// by the first non-space byte BEFORE appending the error text and pass
+	// it through verbatim.
+	if compress.IsJSONShaped(string(out)) {
+		compacted := outStr
+		display := "cmd: " + command + "\n" + compacted
+		res := finish("cmd: "+command+"\n"+outStr, display, tokenize.KindLog)
+		record(stats.OpRunBuild, opts, res)
+		return res, err
+	}
+	compacted := compress.CompactCommandOutput(outStr)
 	// The command prefix is part of what the caller receives, so count it on
 	// both sides of the token ledger: raw (before) and compacted (after).
 	display := "cmd: " + command + "\n" + compacted
 	res := finish("cmd: "+command+"\n"+outStr, display, tokenize.KindLog)
 	record(stats.OpRunBuild, opts, res)
 	return res, err
-}
-
-func compactCommandOutput(out string) string {
-	lines := strings.Split(out, "\n")
-	var keep []string
-	for _, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" {
-			continue
-		}
-		low := strings.ToLower(t)
-		if strings.HasPrefix(low, "[info]") || strings.HasPrefix(low, "[debug]") ||
-			strings.HasPrefix(low, "downloading") || strings.HasPrefix(low, "progress") {
-			continue
-		}
-		if len(keep) < 60 || strings.Contains(low, "error") || strings.Contains(low, "fail") || strings.Contains(low, "warn") {
-			keep = append(keep, t)
-		}
-	}
-	// Always cap — and say so, so a truncated build log is never mistaken for
-	// the full output.
-	if len(keep) > 120 {
-		omitted := len(keep) - 120
-		keep = keep[:120]
-		keep = append(keep, fmt.Sprintf("… (%d lines omitted)", omitted))
-	}
-	return strings.Join(keep, "\n")
 }

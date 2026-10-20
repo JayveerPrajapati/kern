@@ -9,6 +9,7 @@ package secscan
 import (
 	"bytes"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"io/fs"
 	"math"
 	"os"
@@ -273,9 +274,9 @@ func ScanFile(rel string, src []byte) []Finding {
 				continue
 			}
 			// Well-known git object constants (empty tree, null SHA) are
-			// structural sentinels, not credentials: kern's own
-			// diff-against-empty-tree gate hardcodes the empty-tree SHA
-			// (internal/bpcli/cli/check.go), and every git toolchain ships
+			// structural sentinels, not credentials: the diff gate used to
+			// hardcode the empty-tree SHA in the blueprint family (deleted
+			// in the P4 pivot), and every git toolchain ships
 			// both values. A scanner that flags them is noise (I1).
 			if r.Label == "HEX" && isWellKnownGitHash(string(src[idx[0]:idx[1]])) {
 				continue
@@ -284,6 +285,16 @@ func ScanFile(rel string, src []byte) []Finding {
 			// optional whitespace). Documentation examples like
 			// "// Matches: password=secret123" are not real credentials.
 			if isCommentLine(src, idx[0]) {
+				continue
+			}
+			// Address literals in documentation spans are not credentials: a
+			// netmask example inside a Python docstring
+			// (requests/utils.py:744 — "Example: if mask is 24 function
+			// returns 255.255.255.0") is documentation, not a hardcoded
+			// secret (QA 2026-10-19). Line comments are handled above; this
+			// covers /* */ block comments and """...""" / '''...''' docstrings
+			// for the address labels only.
+			if (r.Label == "IP" || r.Label == "IPV6") && isInCommentSpan(src, idx[0], idx[1]) {
 				continue
 			}
 			// EMAIL false-positive guards: emails in HTML placeholder
@@ -387,6 +398,43 @@ func isCommentLine(src []byte, pos int) bool {
 	lineStart := bytes.LastIndexByte(src[:pos], '\n') + 1
 	trimmed := bytes.TrimLeft(src[lineStart:pos], " \t")
 	return bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("#"))
+}
+
+// isInCommentSpan reports whether the match at src[start:end] sits inside a
+// documentation span: a line comment (// or # — see isCommentLine), a
+// /* */ block comment, or a Python docstring ("""...""" / ”'...”'). The
+// address labels (IP/IPV6) use it to skip example addresses in docs — a
+// netmask in a docstring is documentation, not a hardcoded secret.
+func isInCommentSpan(src []byte, start, end int) bool {
+	if isCommentLine(src, start) {
+		return true
+	}
+	if isInBlockComment(src, start, end, "/*", "*/") {
+		return true
+	}
+	return isInDocstring(src, start)
+}
+
+// isInDocstring reports whether pos sits inside a Python docstring: an odd
+// number of """ (or ”') delimiters appears before pos. Completed docstrings
+// contribute an even count (open+close); the unclosed opener of the current
+// span leaves the count odd. A byte-wise heuristic like isInQuotedString —
+// good enough for line-scoped scans.
+func isInDocstring(src []byte, pos int) bool {
+	return oddDelimiterCount(src, pos, `"""`) || oddDelimiterCount(src, pos, `'''`)
+}
+
+// oddDelimiterCount reports whether delim appears an odd number of times in
+// src[:pos].
+func oddDelimiterCount(src []byte, pos int, delim string) bool {
+	n := 0
+	for i := 0; i+len(delim) <= pos; i++ {
+		if bytes.HasPrefix(src[i:], []byte(delim)) {
+			n++
+			i += len(delim) - 1
+		}
+	}
+	return n%2 == 1
 }
 
 // lineBounds returns the [start,end) byte offsets of the line containing pos.
@@ -695,11 +743,15 @@ func isPragmaTableInfo(src []byte, pos int) bool {
 	if from < 0 {
 		from = 0
 	}
-	window := src[from : pos+64]
+	to := pos + 64
+	if to > len(src) {
+		to = len(src)
+	}
+	window := src[from:to]
 	if !bytes.Contains(window, []byte("PRAGMA table_info(")) {
 		return false
 	}
-	return rePragmaConcat.Match(src[pos : pos+64])
+	return rePragmaConcat.Match(src[pos:to])
 }
 
 // rePragmaConcat matches " + <bare identifier>" operands in a PRAGMA
@@ -837,7 +889,7 @@ func Scan(root string) ([]Finding, error) {
 		if ign.Ignored(rel) {
 			return nil
 		}
-		if !index.QuickExt(rel) && !isConfigFile(rel) || isTestFile(rel) {
+		if !langparse.QuickExt(rel) && !isConfigFile(rel) || isTestFile(rel) {
 			return nil
 		}
 		// Skip non-regular files (FIFOs, sockets, device nodes) to prevent blocking reads.

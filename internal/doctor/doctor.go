@@ -1,5 +1,5 @@
-// Package doctor runs diagnostics: agent wiring, index health, Ollama
-// reachability and stats writability. It reports ok/warn/fail per check.
+// Package doctor runs diagnostics: agent wiring, index health, LLM wiring
+// and stats writability. It reports ok/warn/fail per check.
 package doctor
 
 import (
@@ -54,16 +54,76 @@ func Run(root string) []Finding {
 	out = append(out, checkSandboxes(root))
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkPluginSync()...)
+	out = append(out, checkGlobalRulesFreshness()...)
+	out = append(out, checkGlobalHealth(root)...)
 	out = append(out, checkGitExclude(root))
 	out = append(out, checkIndex(root))
 	out = append(out, checkIndexFreshness(root))
 	out = append(out, checkIndexShadow(root))
 	out = append(out, checkPrecision(root))
 	out = append(out, checkRuntime(root))
-	out = append(out, checkOllama())
+	out = append(out, checkLLM())
 	out = append(out, checkStats())
+	out = append(out, checkAuditDropped())
+	out = append(out, checkAuditChainSize(root))
 	out = append(out, checkAdoption(root))
 	return out
+}
+
+// checkAuditDropped surfaces audit entries lost before they reached the
+// tamper-evident chain: the governance audit log appends one JSON line per
+// loss (store-write failure or a recovered panic on the MCP audit path) to
+// the global sidecar ~/.kern/audit/dropped.jsonl — outside the failing
+// store on purpose, because a store that cannot be written to cannot
+// record its own loss. Missing/empty file = nothing lost; non-empty = warn
+// with the count and the last drop's timestamp: the tool calls themselves
+// were unaffected (audit is best-effort by design), but a silent gap in
+// the evidence chain would undercut the tamper-evident claim.
+func checkAuditDropped() Finding {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Finding{Check: "audit-dropped", Level: "ok", Detail: "no home dir — dropped-audit sidecar not checked"}
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".kern", "audit", "dropped.jsonl"))
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return Finding{Check: "audit-dropped", Level: "ok", Detail: "no dropped audit entries (sidecar absent or empty)"}
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	noun := "entries"
+	if len(lines) == 1 {
+		noun = "entry"
+	}
+	detail := fmt.Sprintf("%d audit %s dropped — tool calls were unaffected, but the evidence chain has gaps (lost at write time, not tampered); review, then truncate the sidecar to re-arm", len(lines), noun)
+	var last struct {
+		Ts string `json:"ts"`
+	}
+	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) == nil && last.Ts != "" {
+		detail += ", last at " + last.Ts
+	}
+	return Finding{Check: "audit-dropped", Level: "warn", Detail: detail}
+}
+
+// checkAuditChainSize reports the governance audit chain's footprint
+// (<root>/.kern/audit/chain.jsonl). The chain is append-only by design —
+// each record's hash covers its predecessor, so in-place trimming or
+// rotation would break tamper-evidence — and kern deliberately never
+// truncates it. A missing or small file is ok; once it passes the warn
+// threshold the operator is told to ARCHIVE it (move the file aside; the
+// next append starts a fresh chain) and keep the archive, instead of
+// expecting kern to rotate the chain silently.
+func checkAuditChainSize(root string) Finding {
+	path := filepath.Join(root, ".kern", "audit", "chain.jsonl")
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return Finding{Check: "audit-chain-size", Level: "ok", Detail: "no governance audit chain yet"}
+	}
+	const warnBytes = 50 << 20
+	size := fi.Size()
+	detail := fmt.Sprintf("governance audit chain: %.1f MB", float64(size)/(1<<20))
+	if size >= warnBytes {
+		return Finding{Check: "audit-chain-size", Level: "warn", Detail: detail + " — append-only by design (records are hash-chained, kern never truncates); archive it by moving chain.jsonl aside (a fresh chain starts on the next append) and keep the archive for audit history"}
+	}
+	return Finding{Check: "audit-chain-size", Level: "ok", Detail: detail}
 }
 
 func checkBinary() Finding {
@@ -120,17 +180,18 @@ const mcpInitializeRequest = `{"jsonrpc":"2.0","id":1,"method":"initialize","par
 // it surfaces that immediately (killedBySIGKILL decodes both the direct
 // signal-death form and the shell-wrapped 137 form).
 // execProbeTimeout returns the per-binary MCP handshake deadline for
-// checkExec. The 5s default matches doctor's quick-probe UX;
-// KERN_DOCTOR_EXEC_TIMEOUT_MS (milliseconds) overrides it so heavily loaded
-// hosts — e.g. CI running the full suite in parallel — can keep the probe
-// from misreading slow process spawn as a binary defect.
+// checkExec. The 10s default keeps the probe from misreading a slow process
+// spawn on a loaded host as a binary defect (live dogfood 2026-10-12: the 5s
+// predecessor false-failed once under load and passed on re-run — a flaky
+// FAIL is worse than a slower probe); KERN_DOCTOR_EXEC_TIMEOUT_MS
+// (milliseconds) overrides it in either direction for CI tuning.
 func execProbeTimeout() time.Duration {
 	if ms := os.Getenv("KERN_DOCTOR_EXEC_TIMEOUT_MS"); ms != "" {
 		if n, err := strconv.Atoi(ms); err == nil && n > 0 {
 			return time.Duration(n) * time.Millisecond
 		}
 	}
-	return 5 * time.Second
+	return 10 * time.Second
 }
 
 func checkExec(bin string) Finding {
@@ -249,7 +310,7 @@ func checkEnv() Finding {
 		k, v, _ := strings.Cut(kv, "=")
 		switch {
 		case k == "KERN_LLM_PROVIDER":
-			if v != "" && v != "ollama" && v != "openai" && v != "anthropic" && v != "google" {
+			if v != "" && !llm.KnownProvider(v) {
 				warns = append(warns, k+"="+v+" (unknown provider)")
 			}
 		case k == "KERN_MCP_WATCH":
@@ -308,11 +369,43 @@ func checkVersion() Finding {
 	}
 }
 
+// kernModulePath is the go module path of the kern repository — the ONLY
+// checkout the binary/HEAD parity comparison is meaningful against. Running a
+// stamped kern binary inside a foreign repo must never compare the binary's
+// build commit to the FOREIGN repo's HEAD: psf/requests dogfooding reported
+// "installed binary is stale; rebuild and reinstall" there, nudging a
+// pointless reinstall of a perfectly current binary.
+const kernModulePath = "github.com/JayveerPrajapati/kern"
+
+// isKernCheckout reports whether root is a kern source checkout: its go.mod
+// must declare the kern module path. A foreign repo (any other module, or no
+// go.mod) is not a kern checkout, so build-vs-repo parity is undefined there.
+func isKernCheckout(root string) bool {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "module "); ok {
+			return strings.TrimSpace(rest) == kernModulePath
+		}
+	}
+	return false
+}
+
 // checkParity detects a stale installed binary: when the binary is stamped
 // with a build commit, it must match the repo HEAD it is run against
 // (north-star NS-7). An unstamped ("dev") build cannot prove parity and
-// reports the stamping incantation instead of failing.
+// reports the stamping incantation instead of failing. The comparison only
+// runs inside a kern checkout — against a foreign repo the check is skipped
+// (a kern binary's build commit is unrelated to the foreign repo's HEAD, and
+// reporting a mismatch there would be wrong advice).
 func checkParity(root string) Finding {
+	if !isKernCheckout(root) {
+		return Finding{Check: "parity", Level: "ok",
+			Detail: "not a kern checkout — binary/repo parity not compared"}
+	}
 	v := version.Version
 	if v == "dev" || v == "" {
 		return Finding{
@@ -456,15 +549,22 @@ func wiringFindings(sts []setup.Status, detectedAgents []string) []Finding {
 	// carries the distinct notes and paths, instead of printing the same
 	// line twice.
 	type merged struct {
-		level int // 0 ok, 1 warn
-		notes []string
-		paths []string
+		level     int // 0 ok, 1 warn
+		notes     []string
+		notePaths map[string][]string // per-note paths, first-seen order
+		paths     []string
 	}
 	var order []string
 	groups := map[string]*merged{}
 	for _, s := range sts {
 		note, lvl := s.Note, 0
 		if !s.Installed {
+			lvl = 1
+		}
+		// Advisory prefixes from setup (checkWrapperFreshness): a STALE
+		// or WARN note is a warning even though the surface exists —
+		// "[ok] kern STALE: 85d7fa0 != 66a92d1" reads as a contradiction.
+		if strings.HasPrefix(note, "WARN:") || strings.HasPrefix(note, "STALE:") {
 			lvl = 1
 		}
 		if strings.Contains(note, "registered") && !detected[s.Agent] {
@@ -485,7 +585,7 @@ func wiringFindings(sts []setup.Status, detectedAgents []string) []Finding {
 		}
 		m, ok := groups[s.Agent]
 		if !ok {
-			m = &merged{level: lvl}
+			m = &merged{level: lvl, notePaths: map[string][]string{}}
 			groups[s.Agent] = m
 			order = append(order, s.Agent)
 		}
@@ -493,7 +593,13 @@ func wiringFindings(sts []setup.Status, detectedAgents []string) []Finding {
 			m.level = lvl
 		}
 		if note != "" {
-			m.notes = append(m.notes, note)
+			if _, seen := m.notePaths[note]; !seen {
+				m.notePaths[note] = nil
+				m.notes = append(m.notes, note)
+			}
+			if s.Path != "" {
+				m.notePaths[note] = append(m.notePaths[note], s.Path)
+			}
 		}
 		if s.Path != "" {
 			m.paths = append(m.paths, s.Path)
@@ -511,15 +617,37 @@ func wiringFindings(sts []setup.Status, detectedAgents []string) []Finding {
 				uniq = append(uniq, n)
 			}
 		}
-		detail := strings.Join(uniq, "; ")
-		if len(m.paths) > 1 {
-			// Same-named statuses from distinct locations (e.g. the two
-			// global opencode plugin paths): name them so the merged line is
-			// unambiguous.
-			if detail != "" {
-				detail += " — "
+		var detail string
+		if len(uniq) > 1 {
+			// Conflicting notes under one label (e.g. five global-rules
+			// slots present, one missing): pair EVERY note with its own
+			// paths. Dumping all paths after the joined notes attributed
+			// "not present" to the first listed path — a file that is
+			// actually present — reading as a self-contradiction.
+			var parts []string
+			for _, n := range uniq {
+				if ps := m.notePaths[n]; len(ps) > 1 {
+					parts = append(parts, n+" — "+strings.Join(ps, "; "))
+				} else if len(ps) == 1 {
+					parts = append(parts, n+" — "+ps[0])
+				} else {
+					parts = append(parts, n)
+				}
 			}
-			detail += strings.Join(m.paths, "; ")
+			detail = strings.Join(parts, "; ")
+		} else {
+			if len(uniq) == 1 {
+				detail = uniq[0]
+			}
+			if len(m.paths) > 1 {
+				// Same-named statuses from distinct locations (e.g. the two
+				// global opencode plugin paths): name them so the merged line is
+				// unambiguous.
+				if detail != "" {
+					detail += " — "
+				}
+				detail += strings.Join(m.paths, "; ")
+			}
 		}
 		lvl := "ok"
 		if m.level > 0 {
@@ -750,7 +878,10 @@ func hasIndexStore(dir string) bool {
 // checkIndexShadow warns when the root serves its own nested .kern while a
 // parent directory also holds an index (F5c): the subdir index is what gets
 // served (explicit-root resolution), and a partial subdir index shadowing a
-// full parent index is a common source of confusing 0-symbol answers.
+// full parent index is a common source of confusing 0-symbol answers. The
+// parent's index is classified (fresh/stale/empty/unreadable) so the
+// remediation names the side that is actually wrong: only a fresh parent is
+// worth serving — a stale/empty/unreadable parent is itself the problem.
 func checkIndexShadow(root string) Finding {
 	if !hasIndexStore(root) {
 		return Finding{Check: "index-shadow", Level: "ok", Detail: "no nested index at this root"}
@@ -759,8 +890,40 @@ func checkIndexShadow(root string) Finding {
 	if parent == "" {
 		return Finding{Check: "index-shadow", Level: "ok", Detail: "no parent index shadows this root"}
 	}
-	return Finding{Check: "index-shadow", Level: "warn",
-		Detail: fmt.Sprintf("serving nested index %s while a parent index exists at %s — pass the parent root to serve the full index", index.StorePath(root), filepath.Join(parent, ".kern"))}
+	state, parentSyms := classifyParentIndex(parent)
+	childSyms := 0
+	if cix, err := index.Load(root); err == nil && cix != nil {
+		childSyms = len(cix.Symbols)
+	}
+	detail := fmt.Sprintf("serving nested index %s (%d symbols) while the parent index at %s is %s",
+		index.StorePath(root), childSyms, filepath.Join(parent, ".kern"), state)
+	if parentSyms > 0 {
+		detail += fmt.Sprintf(" (%d symbols)", parentSyms)
+	}
+	if state == "fresh" {
+		detail += " — serve the full tree from the parent root (or --root " + parent + "), or keep this root for subproject-scoped work"
+	} else {
+		detail += " — this root is fine; fix the parent: rebuild it (cd " + parent + " && kern index .) or remove it if unintended"
+	}
+	return Finding{Check: "index-shadow", Level: "warn", Detail: detail}
+}
+
+// classifyParentIndex loads the parent's index store and reports its state
+// plus symbol count: "fresh", "stale", "empty" (valid store, no symbols), or
+// "unreadable" (missing/corrupt store). Stale is the index's own hash-based
+// gate (ix.Stale), so classification never needs a rebuild.
+func classifyParentIndex(parent string) (state string, symbols int) {
+	ix, err := index.Load(parent)
+	if err != nil || ix == nil {
+		return "unreadable", 0
+	}
+	if len(ix.Symbols) == 0 {
+		return "empty", 0
+	}
+	if ix.Stale() {
+		return "stale", len(ix.Symbols)
+	}
+	return "fresh", len(ix.Symbols)
 }
 
 // checkPrecision reports the per-language edge-precision tier recorded on the
@@ -804,19 +967,47 @@ func checkPrecision(root string) Finding {
 		Detail: fmt.Sprintf("all %d languages at resolved precision (Go + Java)", resolvedCount)}
 }
 
-// checkRuntime reports the production-intelligence wiring: the wired adapter
-// (env/config live source or .kern/runtime.json snapshot), its poll interval,
-// and its telemetry health (event/error counts). No source is a warn with the
-// enable hint, mirroring `kern runtime status` — the doctor surfaces the
-// runtime dimension where users already look for diagnostics.
+// runtimeNoSourceHint is the enable hint shared by the no-source and
+// raced-away-snapshot states.
+const runtimeNoSourceHint = "no runtime source; set KERN_PROMETHEUS_URL / KERN_OTEL_URL / KERN_K8S_API, or provide .kern/runtime.json (see docs/runtime-integrations.md)"
+
+// checkRuntime reports the production-intelligence wiring WITHOUT constructing
+// live pollers (A3: doctor stays offline). Live sources are described — kind,
+// endpoint, credential presence, poll interval — never started; only the local
+// snapshot is read. Live telemetry comes from the MCP kern_runtime tool.
 func checkRuntime(root string) Finding {
-	src := runtime.LoadSource(root)
-	if src == nil {
+	desc := runtime.DescribeSource(root)
+	switch {
+	case desc.Kind == "":
+		return Finding{Check: "runtime", Level: "warn", Detail: runtimeNoSourceHint}
+	case desc.Invalid != "":
 		return Finding{
 			Check:  "runtime",
 			Level:  "warn",
-			Detail: "no runtime source; set KERN_PROMETHEUS_URL / KERN_OTEL_URL / KERN_K8S_API, or provide .kern/runtime.json",
+			Detail: fmt.Sprintf("%s source configured (%s) but invalid: %s — fix the URL; live polling is never started for a malformed endpoint", desc.Kind, desc.URL, desc.Invalid),
 		}
+	case desc.Kind == "snapshot":
+		return checkRuntimeSnapshot(root)
+	}
+	auth := "none"
+	if desc.HasAuth {
+		auth = desc.AuthEnv
+	}
+	detail := fmt.Sprintf("%s source wired: %s (origin %s, poll %s, credentials %s) — wiring check only, no network; live data via MCP kern_runtime",
+		desc.Kind, desc.URL, desc.Origin, desc.Poll, auth)
+	if desc.Kind == "kubernetes" && !desc.HasAuth {
+		detail += "; KERN_K8S_TOKEN not set (unauthenticated API servers only)"
+	}
+	return Finding{Check: "runtime", Level: "ok", Detail: detail}
+}
+
+// checkRuntimeSnapshot renders the telemetry counts for the local snapshot
+// source (the only variant doctor actually loads — a plain file read).
+func checkRuntimeSnapshot(root string) Finding {
+	src := runtime.LoadSource(root)
+	if src == nil {
+		// Raced with the snapshot being removed between describe and load.
+		return Finding{Check: "runtime", Level: "warn", Detail: runtimeNoSourceHint}
 	}
 	profiles := runtime.ServiceProfiles(src)
 	events, errors := 0, 0
@@ -836,18 +1027,13 @@ func checkRuntime(root string) Finding {
 	return Finding{Check: "runtime", Level: lvl, Detail: detail}
 }
 
-func checkOllama() Finding {
-	c := llm.New("")
-	if c.Available() {
-		return Finding{Check: "ollama", Level: "ok", Detail: c.Base + " reachable, model " + c.Model}
-	}
-	// Ollama down: report which locally-wired agent CLIs can serve as the
-	// LLM provider instead (the auto chain in llm.NewProvider).
-	agents := llm.AvailableLocalAgents()
-	if len(agents) > 0 {
-		return Finding{Check: "ollama", Level: "warn", Detail: c.Base + " not reachable; LLM calls fall back to local agent CLI(s): " + strings.Join(agents, ", ")}
-	}
-	return Finding{Check: "ollama", Level: "warn", Detail: c.Base + " not reachable and no agent CLI installed (claude/codex/gemini/qwen); deterministic compression still works"}
+// checkLLM renders the LLM wiring report (llm.Status owns the
+// classification): Ollama is optional by default — the auto chain serves
+// LLM calls from the local agent CLIs first — so a stopped Ollama next to
+// installed CLIs is the normal healthy state, not a broken install.
+func checkLLM() Finding {
+	st := llm.Status()
+	return Finding{Check: "llm", Level: st.Level, Detail: st.Detail}
 }
 
 func checkStats() Finding {
@@ -889,7 +1075,7 @@ func Render(root string, findings []Finding) string {
 	verdict := "all good"
 	switch worst {
 	case 1:
-		verdict = "warnings — mostly optional; run `kern setup` and `kern index .`"
+		verdict = "warnings — mostly optional; each [warn] line above names its own fix (setup-drift items: `kern setup`; stale index: `kern index .`)"
 	case 2:
 		verdict = "failures — fix the [fail] items above"
 	}

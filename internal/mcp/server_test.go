@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -219,6 +218,13 @@ func testRoot(t *testing.T) string {
 
 func TestOptimizePromptAndCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// Pin the LLM off: the "auto" chain shells out to locally-installed agent
+	// CLIs (claude/opencode/codex) BEFORE Ollama, so on a developer machine
+	// these tests exec real agents (45-120s each) whose kern-wired children
+	// inherit XDG_CACHE_HOME and write kern/metrics.json at exit — racing
+	// t.TempDir's RemoveAll ("directory not empty" cleanup flake). The
+	// deterministic compression path is what these tests assert.
+	t.Setenv("KERN_LLM_PROVIDER", "none")
 	args, _ := json.Marshal(map[string]any{"action": "prompt", "prompt": "this is a long prompt with redundant redundancy and verbose words", "cache": "true"})
 	resp := serveOne(t, writeReq("tools/call", 7, `{ "name":"kern_optimize","arguments":`+string(args)+`}`))
 	text, isErr := toolResultText(t, resp)
@@ -241,6 +247,8 @@ func TestOptimizePromptAndCache(t *testing.T) {
 
 func TestSemanticCacheViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// See TestOptimizePromptAndCache: keep the test hermetic and deterministic.
+	t.Setenv("KERN_LLM_PROVIDER", "none")
 	// First call primes the semantic cache (cache is on by default now).
 	first := mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "how do I compress a very large server log file"})
 	if strings.Contains(first, "served from") {
@@ -263,6 +271,8 @@ func TestSemanticCacheViaMCP(t *testing.T) {
 
 func TestSemcacheManagementViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// See TestOptimizePromptAndCache: keep the test hermetic and deterministic.
+	t.Setenv("KERN_LLM_PROVIDER", "none")
 	mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "the database connection failed during migration"})
 	mcpAssertOK(t, "kern_optimize", map[string]any{"action": "log", "log": "ERROR disk full\nERROR connection refused\nINFO start"})
 
@@ -319,20 +329,6 @@ func TestOptimizeLogViaMCP(t *testing.T) {
 	}
 	if !strings.Contains(out, "ERROR disk full") {
 		t.Fatalf("critical log line lost: %q", out)
-	}
-}
-
-func TestContextBudgetViaMCP(t *testing.T) {
-	t.Parallel()
-	long := strings.Repeat("word ", 2500)
-	args, _ := json.Marshal(map[string]any{"text": long, "max_tokens": "50"})
-	resp := serveOne(t, writeReq("tools/call", 11, `{"name":"kern_context_budget","arguments":`+string(args)+`}`))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if !strings.Contains(out, "tokens") || !strings.Contains(out, "saved") {
-		t.Fatalf("bad budget output: %q", out)
 	}
 }
 
@@ -419,139 +415,8 @@ func TestAstSearchViaMCP(t *testing.T) {
 	}
 }
 
-func TestVerifyOutputViaMCP(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := testRoot(t)
-	f := filepath.Join(root, "app.go")
-	_ = os.WriteFile(f, []byte("package main\n\nfunc main() {}\n"), 0o644)
-	text := "see app.go:1 for main entry"
-	args, _ := json.Marshal(map[string]any{"root": root, "text": text})
-	resp := serveOne(t, writeReq("tools/call", 15, `{"name":"kern_verify_output","arguments":`+string(args)+`}`))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if out == "" {
-		t.Fatal("expected some verify output")
-	}
-}
-
-func TestCheckDraftViaMCP(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := testRoot(t)
-	f := filepath.Join(root, "app.go")
-	_ = os.WriteFile(f, []byte("package main\n\nfunc helper() {}\nfunc main() { helper() }\n"), 0o644)
-
-	// A clean draft (builtins + local func) validates with an OK verdict.
-	clean := "package main\n\nfunc main() { println(len(\"x\")) }\n"
-	args, _ := json.Marshal(map[string]any{"root": root, "code": clean})
-	resp := serveOne(t, writeReq("tools/call", 40, `{"name":"kern_check_draft","arguments":`+string(args)+`}`))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if !strings.Contains(out, "OK") {
-		t.Fatalf("expected clean verdict, got %q", out)
-	}
-
-	// A draft calling an unknown symbol reports one finding line.
-	bad := "package main\n\nfunc main() { totallyMissingFunc() }\n"
-	args2, _ := json.Marshal(map[string]any{"root": root, "code": bad})
-	resp2 := serveOne(t, writeReq("tools/call", 41, `{"name":"kern_check_draft","arguments":`+string(args2)+`}`))
-	out2, isErr2 := toolResultText(t, resp2)
-	if isErr2 {
-		t.Fatalf("unexpected error: %s", out2)
-	}
-	if !strings.Contains(out2, "unknown_symbol") || !strings.Contains(out2, "issue(s) found") {
-		t.Fatalf("expected finding line, got %q", out2)
-	}
-}
-
-func TestCheckDraftMissingCode(t *testing.T) {
-	t.Parallel()
-	resp := serveOne(t, toolsCallJSON(t, 42, "kern_check_draft", map[string]any{}))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "code is required") {
-		t.Fatalf("expected missing-code isError, got: %+v", resp)
-	}
-}
-
-func TestDiffFilesViaMCP(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	a := filepath.Join(root, "a.txt")
-	b := filepath.Join(root, "b.txt")
-	_ = os.WriteFile(a, []byte("line one\nline two\n"), 0o644)
-	_ = os.WriteFile(b, []byte("line one\nline three\n"), 0o644)
-	args, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b})
-	resp := serveOne(t, writeReq("tools/call", 16, `{"name":"kern_diff_files","arguments":`+string(args)+`}`))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if !strings.Contains(out, "line two") || !strings.Contains(out, "line three") {
-		t.Fatalf("expected diff hunk, got %q", out)
-	}
-}
-
 // TestDiffFilesCompactViaMCP verifies the compact=true mode collapses long
 // context runs into annotation lines while preserving changed lines.
-func TestDiffFilesCompactViaMCP(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	a := filepath.Join(root, "a.txt")
-	b := filepath.Join(root, "b.txt")
-	var sb strings.Builder
-	for i := 1; i <= 30; i++ {
-		fmt.Fprintf(&sb, "line %d\n", i)
-	}
-	content := sb.String()
-	_ = os.WriteFile(a, []byte(content), 0o644)
-	_ = os.WriteFile(b, []byte(strings.Replace(content, "line 15\n", "line 15 changed\n", 1)), 0o644)
-	args, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b, "compact": true})
-	resp := serveOne(t, writeReq("tools/call", 40, `{"name":"kern_diff_files","arguments":`+string(args)+`}`))
-	out, isErr := toolResultText(t, resp)
-	if isErr {
-		t.Fatalf("unexpected error: %s", out)
-	}
-	if !strings.Contains(out, "lines unchanged") {
-		t.Fatalf("expected compact annotation, got %q", out)
-	}
-	if !strings.Contains(out, "-line 15") || !strings.Contains(out, "+line 15 changed") {
-		t.Fatalf("expected changed lines verbatim, got %q", out)
-	}
-	// Non-compact mode must still emit a normal patch with hunk headers.
-	args2, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b})
-	resp2 := serveOne(t, writeReq("tools/call", 41, `{"name":"kern_diff_files","arguments":`+string(args2)+`}`))
-	out2, isErr2 := toolResultText(t, resp2)
-	if isErr2 {
-		t.Fatalf("unexpected error: %s", out2)
-	}
-	if !strings.Contains(out2, "@@") {
-		t.Fatalf("expected hunk header in non-compact diff, got %q", out2)
-	}
-}
-
-func TestLockUnlockViaMCP(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	acq := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build", "action": "acquire"}) + `}`
-	rel := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"action": "release", "scope": "build"}) + `}`
-	// Lock and unlock are dependent calls: submit one, wait for its response,
-	// then submit the next (as a real client would).
-	resps := serveSequential(t,
-		writeReq("tools/call", 17, acq),
-		writeReq("tools/call", 18, rel),
-	)
-	aout, _ := toolResultText(t, resps[0])
-	if !strings.Contains(aout, "lock acquired") {
-		t.Fatalf("lock acquire failed: %q", aout)
-	}
-	rout, _ := toolResultText(t, resps[1])
-	if !strings.Contains(rout, "lock released") {
-		t.Fatalf("lock release failed: %q", rout)
-	}
-}
 
 // serveSequential feeds each request into the same running server and waits
 // for its response before submitting the next. Tools run concurrently inside
@@ -646,10 +511,68 @@ func (b *lockedBuffer) Reset() {
 
 func TestUnknownToolReturnsError(t *testing.T) {
 	t.Parallel()
+	// F1 (MCP spec parity): an unknown tool name is an "invalid params"
+	// JSON-RPC error (-32602), not an isError tool result — matching the
+	// spec's tools/call example and prompts/get handling.
 	resp := serveOne(t, writeReq("tools/call", 19, `{"name":"kern_does_not_exist","arguments":{}}`))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "unknown tool") {
-		t.Fatalf("expected isError for unknown tool: %+v", resp)
+	err, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error object for unknown tool, got: %+v", resp)
+	}
+	if int(err["code"].(float64)) != -32602 {
+		t.Fatalf("expected invalid-params (-32602) for unknown tool, got %v", err["code"])
+	}
+	if msg, _ := err["message"].(string); !strings.Contains(msg, "unknown tool") {
+		t.Fatalf("expected 'unknown tool' message, got: %v", err["message"])
+	}
+}
+
+// TestEmptyToolNameCleanError pins F1-6 (deep-verify L1): a tools/call with an
+// empty name used to surface as the dangling "unknown tool: " cosmetic error;
+// it must instead name the actual problem — the missing name parameter.
+func TestEmptyToolNameCleanError(t *testing.T) {
+	t.Parallel()
+	// F1 (MCP spec parity): an empty tool name is invalid params (-32602),
+	// not an isError tool result.
+	resp := serveOne(t, writeReq("tools/call", 21, `{"name":"","arguments":{}}`))
+	err, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error object for empty tool name, got: %+v", resp)
+	}
+	if int(err["code"].(float64)) != -32602 {
+		t.Fatalf("expected invalid-params (-32602), got %v", err["code"])
+	}
+	if msg, _ := err["message"].(string); !strings.Contains(msg, "missing tool name") {
+		t.Fatalf("expected clean missing-name error, got: %v", err["message"])
+	}
+}
+
+// TestStringArgViolationIsToolErrorNotJSONRPC pins the D6 framing contract
+// end to end on the RAW wire shape: a wrong-typed string argument must
+// surface as an isError TOOL RESULT (naming the argument, the tool and the
+// expected type) — never as the JSON-RPC -32602 protocol error, which stays
+// reserved for F1 unknown/empty tool names (TestUnknownToolReturnsError /
+// TestEmptyToolNameCleanError). The pre-dispatch validateStringArgs call
+// site was removed in the P1 serve-path consolidation; this pins that the
+// runTool choke point is the single, intentional D6 surface.
+func TestStringArgViolationIsToolErrorNotJSONRPC(t *testing.T) {
+	t.Parallel()
+	root := mcpProject(t)
+	resp := mcpCall(t, "kern_search", map[string]any{"root": root, "query": map[string]any{}})
+	// Must NOT be a JSON-RPC error (-32602).
+	if e, ok := resp["error"].(map[string]any); ok {
+		t.Fatalf("D6 violation must surface as an isError tool result, got JSON-RPC error %+v", e)
+	}
+	res, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a result object, got %+v", resp)
+	}
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true tool result, got %+v", res)
+	}
+	text, _ := toolResultText(t, resp)
+	if !strings.Contains(text, `argument "query" for tool kern_search: expected a string, got an object`) {
+		t.Fatalf("expected D6 argument error in result text, got %q", text)
 	}
 }
 
@@ -672,33 +595,6 @@ func jsonMust(m map[string]any) string {
 
 // TestLockErrorIsNotFakeHeld verifies kern_lock reports the real Acquire
 // failure instead of a fabricated "held (pid 0)" .
-func TestLockErrorIsNotFakeHeld(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join(t.TempDir(), "notadir")
-	if err := os.WriteFile(root, []byte("file, not dir"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	req := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build", "action": "acquire"}) + `}`
-	resp := serveOne(t, writeReq("tools/call", 21, req))
-	out, isErr := toolResultText(t, resp)
-	if !isErr {
-		t.Fatalf("expected error for unwritable lock root, got %q", out)
-	}
-	if strings.Contains(out, "held (pid 0)") {
-		t.Fatalf("must not fabricate a holder pid: %q", out)
-	}
-	if !strings.Contains(out, "lock scope is required") && !strings.Contains(out, "not a directory") {
-		t.Fatalf("expected the real acquire error, got %q", out)
-	}
-}
 
 // TestLockDispatchUnknownAction pins the kern_lock action dispatcher: an
 // unknown action is rejected up front through the full tools/call path.
-func TestLockDispatchUnknownAction(t *testing.T) {
-	t.Parallel()
-	resp := serveOne(t, writeReq("tools/call", 22, `{"name":"kern_lock","arguments":{"action":"bogus"}}`))
-	out, isErr := toolResultText(t, resp)
-	if !isErr || !strings.Contains(out, "unknown action") {
-		t.Fatalf("expected unknown-action isError for kern_lock: %+v", resp)
-	}
-}

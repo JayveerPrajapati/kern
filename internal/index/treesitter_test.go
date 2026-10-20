@@ -511,3 +511,377 @@ greet();
 		t.Errorf("file:greeter.ts -> greet confidence = %q, want MEDIUM (matches only Greeter.greet's short name)", greetEdge.Confidence)
 	}
 }
+
+// TestTreeSitterPythonNestedDefsDistinctIdentity pins the WD-3 fix: two
+// same-named helpers nested in DIFFERENT test methods must carry distinct
+// receivers — keyed on the class receiver they shared one identity and the
+// fail-loud duplicate check refused to index the whole file.
+func TestTreeSitterPythonNestedDefsDistinctIdentity(t *testing.T) {
+	src := `class TestStreams:
+    def test_one(self):
+        def _helper():
+            return 1
+        return _helper()
+
+    def test_two(self):
+        def _helper():
+            return 2
+        return _helper()
+`
+	syms, _, _, _, err := tsExtract("test_streams.py", []byte(src), "python")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := map[string]bool{}
+	for _, s := range syms {
+		if s.Name == "_helper" {
+			recv[s.Receiver] = true
+		}
+	}
+	if !recv["test_one"] || !recv["test_two"] {
+		t.Errorf("nested same-named helpers must carry their enclosing method receivers (test_one, test_two), got %v", recv)
+	}
+}
+
+// TestTreeSitterPythonDoubleNestedDefsDistinctIdentity pins the nested-def
+// extractor fix: two same-named helpers nested TWO levels deep (inside
+// identically-named closure factories inside DIFFERENT test methods) must
+// still carry distinct receivers. Stopping at the nearest function ancestor
+// collapses both to the factory name; the outermost enclosing method must
+// win. This mirrors the log_checker tests/test_shell.py `async def gen()`
+// collision (lines 529 and 1209) that made the whole repo un-indexable.
+func TestTreeSitterPythonDoubleNestedDefsDistinctIdentity(t *testing.T) {
+	src := `class TestShell:
+    async def test_shell_current_multi_pod_groups(self):
+        async def _factory(pod):
+            async def gen():
+                yield "a"
+            return gen()
+        return await _factory(None)
+
+    async def test_stream_pod_lines_captures_multi(self):
+        async def _factory(pod):
+            async def gen():
+                yield "b"
+            return gen()
+        return await _factory(None)
+`
+	syms, _, _, _, err := tsExtract("test_shell.py", []byte(src), "python")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := map[string]bool{}
+	for _, s := range syms {
+		if s.Name == "gen" {
+			recv[s.Receiver] = true
+		}
+	}
+	if !recv["test_shell_current_multi_pod_groups"] || !recv["test_stream_pod_lines_captures_multi"] {
+		t.Errorf("double-nested same-named helpers must carry their OUTERMOST enclosing method receivers, got %v", recv)
+	}
+}
+
+// TestTreeSitterPythonOverloadStubsSkipped pins the @overload fix: multiple
+// typing.@overload __init__ stubs followed by one real implementation must
+// extract as a SINGLE __init__ symbol carrying the IMPL's line number — the
+// stubs are signatures only and must not claim the identity. Before the fix,
+// stub and impl shared one identity and the fail-loud duplicate gate refused
+// to index the whole file (live repro: psf/requests src/requests/auth.py
+// lines 92/94). Stacked decorators (staticmethod combined with @overload, in
+// both orders) must still be detected.
+func TestTreeSitterPythonOverloadStubsSkipped(t *testing.T) {
+	src := `from typing import overload
+
+class A:
+    @overload
+    def __init__(self, x: int) -> None: ...
+    @overload
+    def __init__(self, x: str) -> None: ...
+    def __init__(self, x):
+        self.x = x
+
+class B:
+    @staticmethod
+    @overload
+    def parse(x: int) -> None: ...
+    @overload
+    @staticmethod
+    def parse(x: str) -> None: ...
+    @staticmethod
+    def parse(x):
+        return x
+`
+	syms, _, _, _, err := tsExtract("repro.py", []byte(src), "python")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fail-loud duplicate gate must pass: stubs skipped, impls survive.
+	if err := checkFileSymbolConflicts("repro.py", syms); err != nil {
+		t.Fatalf("overload stubs must not conflict with their impls: %v", err)
+	}
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Name+"\x00"+s.Receiver] = s
+	}
+	init, ok := byName["__init__\x00A"]
+	if !ok {
+		t.Fatalf("expected A.__init__ impl symbol, got %+v", syms)
+	}
+	if init.Kind != "method" {
+		t.Errorf("A.__init__ kind = %q; want method", init.Kind)
+	}
+	if init.Line != 8 {
+		t.Errorf("A.__init__ line = %d; want the IMPL line 8 (stubs at 4/6 must be skipped), syms: %+v", init.Line, syms)
+	}
+	parse, ok := byName["parse\x00B"]
+	if !ok {
+		t.Fatalf("expected B.parse impl symbol, got %+v", syms)
+	}
+	if parse.Line != 19 {
+		t.Errorf("B.parse line = %d; want the IMPL line 19 (stacked-decorator stubs at 13/16 skipped), syms: %+v", parse.Line, syms)
+	}
+}
+
+// TestTreeSitterPythonGenuineDuplicateStillFailsLoud: skipping @overload
+// stubs must NOT mask real duplicates — two defs with the same identity and
+// NO @overload decorator must still trip the fail-loud duplicate gate.
+func TestTreeSitterPythonGenuineDuplicateStillFailsLoud(t *testing.T) {
+	src := `class A:
+    def __init__(self, x):
+        self.x = x
+    def __init__(self, y):
+        self.y = y
+`
+	syms, _, _, _, err := tsExtract("dup.py", []byte(src), "python")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFileSymbolConflicts("dup.py", syms); err == nil {
+		t.Fatal("genuine duplicate (same identity, no @overload) must still fail loudly")
+	}
+}
+
+// TestTreeSitterJavaAnonymousClassMethodsDistinct pins the WD-6b fix: two
+// same-signature methods in sibling ANONYMOUS classes inside one method get
+// per-occurrence receivers — keyed on the outer class they shared one
+// identity and the fail-loud duplicate check refused the whole file.
+func TestTreeSitterJavaAnonymousClassMethodsDistinct(t *testing.T) {
+	src := `class StrategyTest {
+    void testIt() {
+        Runnable high = new Runnable() {
+            public int getPriority() { return 10; }
+        };
+        Runnable low = new Runnable() {
+            public int getPriority() { return 200; }
+        };
+    }
+}
+`
+	syms, _, _, _, err := tsExtract("StrategyTest.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := map[string]bool{}
+	for _, s := range syms {
+		if s.Name == "getPriority" {
+			recv[s.Receiver] = true
+		}
+	}
+	if len(recv) != 2 {
+		t.Errorf("same-signature methods in sibling anonymous classes must carry distinct per-occurrence receivers, got %v", recv)
+	}
+}
+
+// TestTreeSitterJavaSameNamedNestedClassesDistinct pins the WD-6c fix: two
+// same-named nested classes under DIFFERENT parents stay distinct via Outer
+// — flat (name, kind) they shared one identity and the duplicate check
+// refused the whole file.
+func TestTreeSitterJavaSameNamedNestedClassesDistinct(t *testing.T) {
+	src := `class OuterTest {
+    class DefaultTests {
+        class MappingTests {
+            void mapIt() {}
+        }
+    }
+    class StrictTests {
+        class MappingTests {
+            void mapIt() {}
+        }
+    }
+}
+`
+	syms, _, _, _, err := tsExtract("OuterTest.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := map[string]bool{}
+	for _, s := range syms {
+		if s.Name == "MappingTests" && s.Kind == "class" {
+			outer[s.Outer] = true
+		}
+	}
+	if !outer["DefaultTests"] || !outer["StrictTests"] {
+		t.Errorf("same-named nested classes under different parents must carry distinct Outers, got %v", outer)
+	}
+}
+
+// TestTreeSitterJavaFieldTypedInterfaceReceiverDistinct pins the P2-3 fix:
+// a call on an interface-TYPED FIELD (Spring @Autowired
+// `apiListenerService.executeNotification(...)`) must resolve to the
+// interface-qualified callee (APIListenerService.executeNotification) so the
+// graph's dispatch-hint machinery can list concrete implementations. Field
+// types are not locals; before the fix the receiver stayed unresolved and no
+// dispatch hints could be produced.
+func TestTreeSitterJavaFieldTypedInterfaceReceiverDistinct(t *testing.T) {
+	src := `class Service {
+    private APIListenerService apiListenerService;
+
+    public void run() {
+        apiListenerService.executeNotification("x");
+    }
+}
+`
+	syms, calls, _, _, err := tsExtract("Service.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = syms
+	found := false
+	for _, ce := range calls["Service.run"] {
+		if ce.Target == "APIListenerService.executeNotification" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("calls[Service.run] = %v; want it to contain APIListenerService.executeNotification (field-typed receiver resolved)", CallEdgeTargets(calls["Service.run"]))
+	}
+	for _, ce := range calls["Service.run"] {
+		if ce.Target == "apiListenerService.executeNotification" {
+			t.Errorf("calls[Service.run] must not keep the unresolved field-receiver callee, got %v", CallEdgeTargets(calls["Service.run"]))
+		}
+	}
+}
+
+// TestTreeSitterJavaSameNamedMethodsInSameNamedClassesDistinct pins the
+// WD-6d fix: two same-named methods inside two same-named nested classes
+// get the receiver class's own parent in Outer — Receiver alone ("MappingTests")
+// collided and the duplicate check refused the whole file.
+func TestTreeSitterJavaSameNamedMethodsInSameNamedClassesDistinct(t *testing.T) {
+	src := `class OuterTest {
+    class DefaultTests {
+        class MappingTests {
+            void mapIt() {}
+        }
+    }
+    class StrictTests {
+        class MappingTests {
+            void mapIt() {}
+        }
+    }
+}
+`
+	syms, _, _, _, err := tsExtract("OuterTest.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := map[string]bool{}
+	for _, s := range syms {
+		if s.Name == "mapIt" {
+			pairs[s.Receiver+"|"+s.Outer] = true
+		}
+	}
+	if !pairs["MappingTests|DefaultTests"] || !pairs["MappingTests|StrictTests"] {
+		t.Errorf("same-named methods in same-named nested classes must carry distinct (receiver, outer) identities, got %v", pairs)
+	}
+}
+
+// TestTreeSitterAnonymousArrowParamsNotSymbols locks the anonymous-arrow fix:
+// an arrow function has no name of its own, and ExtractName's child scan used
+// to return its FIRST PARAMETER ("n" in `xs.map(n => n * 2)`) as the symbol
+// name — a phantom method per callback that collided on the fail-loud
+// duplicate gate when the same parameter name repeated inside one enclosing
+// function (live repro: wf_project conduit AIAssistantPanel.tsx, index
+// refused). Arrow functions are not symbol nodes; named bindings keep their
+// symbol via the const-declaration promotion.
+func TestTreeSitterAnonymousArrowParamsNotSymbols(t *testing.T) {
+	src := `const a = 1;
+const handler = (n: number) => n + 1;
+export function main() {
+  const xs = [1, 2].map(n => n * 2);
+  const ys = [3, 4].map(n => n * 3);
+  return xs.length + ys.length + a + handler(2);
+}
+`
+	syms, _, _, _, err := tsExtract("app.tsx", []byte(src), "typescript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range syms {
+		if s.Name == "n" {
+			t.Errorf("anonymous arrow parameter leaked as a symbol: %+v", s)
+		}
+	}
+	// The conflict gate must accept the file (this is the exact shape the
+	// live repro refused to index).
+	if err := checkFileSymbolConflicts("app.tsx", syms); err != nil {
+		t.Fatalf("arrow callback file must pass the duplicate gate: %v", err)
+	}
+	// Named arrow bindings still promote const→func.
+	found := false
+	for _, s := range syms {
+		if s.Name == "handler" && s.Kind == "func" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("named arrow binding must keep its promoted func symbol, got %v", syms)
+	}
+}
+
+// TestTreeSitterCSSReselectionDeduped locks the CSS redeclarative fix:
+// pseudo variants (.btn:disabled), compound selectors (.data-table th) and
+// media-query re-selections of the same class used to extract as duplicate
+// class symbols and the fail-loud duplicate gate refused the whole file
+// (live repro: TradingApp App.css, .btn and .btn:disabled at lines 146/159).
+// CSS keeps the first occurrence per (kind, name) — the definition site.
+func TestTreeSitterCSSReselectionDeduped(t *testing.T) {
+	src := `.btn {
+  color: red;
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+.btn:hover {
+  background: blue;
+}
+.data-table {
+  width: 100%;
+}
+.data-table th {
+  padding: 10px;
+}
+@media (max-width: 600px) {
+  .btn {
+    background: gray;
+  }
+}
+--brand: #ff0000;
+`
+	syms, _, _, _, err := tsExtract("theme.css", []byte(src), "css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFileSymbolConflicts("theme.css", syms); err != nil {
+		t.Fatalf("re-selected CSS classes must pass the duplicate gate: %v", err)
+	}
+	counts := map[string]int{}
+	for _, s := range syms {
+		counts[s.Name]++
+	}
+	if counts["btn"] != 1 || counts["data-table"] != 1 {
+		t.Errorf("re-selected classes must appear exactly once, got %v (all: %v)", counts, syms)
+	}
+	if counts["--brand"] != 1 {
+		t.Errorf("custom property must survive, got %v", syms)
+	}
+}

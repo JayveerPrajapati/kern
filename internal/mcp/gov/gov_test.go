@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govtoken"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 )
@@ -308,6 +310,56 @@ func TestNewDefaultScoped(t *testing.T) {
 		if !g.Allowed[want] {
 			t.Errorf("default scope must allow project symbol %s (allowed=%v)", want, g.Allowed)
 		}
+	}
+}
+
+// TestNewSignedAgentRequiresToken: an agent enrolled with a token secret is
+// a SIGNED identity — agent_id alone is client-asserted and must fail closed
+// at the boundary without a valid agent_token; a token minted by
+// governance.IssueAgentToken passes.
+func TestNewSignedAgentRequiresToken(t *testing.T) {
+	agentID := "gov-signed-" + t.Name()
+	agent := governance.NewAgent(agentID, "Gov Signed Test", "tester", []governance.Permission{
+		{Resource: "context", Action: "read"},
+	})
+	agent.TokenSecret = govtoken.Generate()
+	if err := governance.RegisterAgent(agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	ix, root := buildTestIndex(t)
+
+	// No token: fail closed with a message that names the mint command.
+	_, err := New(context.Background(), map[string]any{
+		"root": root, "agent_id": agentID, "task": "T-signed",
+	}, ix)
+	if err == nil {
+		t.Fatal("signed agent without agent_token must fail closed")
+	}
+	if !strings.Contains(err.Error(), "agent_token") || !strings.Contains(err.Error(), "kern org agents token") {
+		t.Fatalf("denial must name agent_token and the mint command, got: %v", err)
+	}
+
+	// Wrong token: still closed.
+	_, err = New(context.Background(), map[string]any{
+		"root": root, "agent_id": agentID, "task": "T-signed", "agent_token": "1.bogus",
+	}, ix)
+	if err == nil {
+		t.Fatal("signed agent with a bogus agent_token must fail closed")
+	}
+
+	// Valid minted token: the governed call proceeds.
+	tok, terr := govtoken.Issue(agent, time.Now())
+	if terr != nil {
+		t.Fatal(terr)
+	}
+	g, err := New(context.Background(), map[string]any{
+		"root": root, "agent_id": agentID, "task": "T-signed", "agent_token": tok,
+	}, ix)
+	if err != nil {
+		t.Fatalf("signed agent with a valid token must proceed: %v", err)
+	}
+	if g == nil {
+		t.Fatal("signed governed call must return a non-nil governor")
 	}
 }
 

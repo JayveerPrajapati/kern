@@ -4,6 +4,9 @@ import (
 	"encoding/csv"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/budget"
+	"github.com/JayveerPrajapati/kern/internal/clietag"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
+	"github.com/JayveerPrajapati/kern/internal/cliout"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -12,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/tokstats"
 	"maps"
 	"os"
 	"path/filepath"
@@ -37,7 +41,7 @@ func runOptimize(cmd string, rest []string) {
 	}
 	prompt := strings.Join(args, " ")
 	if prompt == "" || prompt == "-" {
-		b, err := readStdin()
+		b, err := cliflags.ReadStdin()
 		if err != nil {
 			fatal("cannot read stdin: %v", err)
 		}
@@ -57,7 +61,7 @@ func runOptimize(cmd string, rest []string) {
 		}
 		attach = string(b)
 	} else if f.attach == "-" {
-		b, err := readStdin()
+		b, err := cliflags.ReadStdin()
 		if err != nil {
 			fatal("cannot read stdin: %v", err)
 		}
@@ -68,7 +72,11 @@ func runOptimize(cmd string, rest []string) {
 		optimize.Recorder = nil
 		defer func() { optimize.Recorder = old }()
 	}
-	res, err := optimize.Prompt(prompt, attach, optimize.Options{Session: f.session, Model: f.model, Source: "cli", LLM: f.llm, Mask: f.mask, MaskNames: splitNames(f.names), Cache: f.cache, FewShot: f.fewshot})
+	recordRoot := f.root
+	if recordRoot == "" {
+		recordRoot, _ = os.Getwd()
+	}
+	res, err := optimize.Prompt(prompt, attach, optimize.Options{Session: f.session, Model: f.model, Source: "cli", LLM: f.llm, Mask: f.mask, MaskNames: splitNames(f.names), Cache: f.cache, FewShot: f.fewshot, Root: recordRoot})
 	if err != nil {
 		fatal("optimize: %v", err)
 	}
@@ -172,13 +180,13 @@ func runCompact(rest []string) {
 	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
 	// <E>)` and exit 0; otherwise the full render plus an `etag: <hash>`
 	// footer on stderr.
-	if cliEtagResponse("kern_compact_file", f.etag, rendered) {
+	if clietag.EtagResponse("kern_compact_file", f.etag, rendered) {
 		return
 	}
 	fmt.Println(rendered)
 	before := tokenize.Count(string(content))
 	after := tokenize.Count(rendered)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", filepath.Base(file)))
+	cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", filepath.Base(file)))
 	// Record to the savings ledger like every other compression surface
 	// (QA Pick #1, finding F-B): without this, `kern compact` under-reports
 	// lifetime savings in `kern stats` / `kern diff`.
@@ -186,9 +194,14 @@ func runCompact(rest []string) {
 		_ = optimize.EnsureRecorder()
 	}
 	if optimize.Recorder != nil {
+		recordRoot := f.root
+		if recordRoot == "" {
+			recordRoot, _ = os.Getwd()
+		}
 		_ = optimize.Recorder.Record(stats.Entry{
 			Operation:    stats.OpCompactFile,
 			Tool:         stats.ToolForOperation(stats.OpCompactFile),
+			Root:         recordRoot,
 			Source:       file,
 			Model:        stats.DefaultModel,
 			BeforeTokens: before,
@@ -224,7 +237,7 @@ func runLog(rest []string) {
 	var b []byte
 	var rerr error
 	if len(args) < 1 || args[0] == "-" {
-		b, rerr = readStdin()
+		b, rerr = cliflags.ReadStdin()
 		if rerr != nil {
 			fatal("log: %v", rerr)
 		}
@@ -239,17 +252,35 @@ func runLog(rest []string) {
 		// with a confusing ENOENT.
 		b = []byte(strings.Join(args, " "))
 	}
+	recordRoot := f.root
+	if recordRoot == "" {
+		recordRoot, _ = os.Getwd()
+	}
 	wireRecorder()
 	res, err := optimize.Log(string(b), optimize.Options{
 		ContextBefore: f.contextBefore,
 		ContextAfter:  f.contextAfter,
 		Profile:       f.profile,
-		Root:          f.root,
+		Root:          recordRoot,
+		Cache:         f.cache,
+		// QA 2026-10-19: --mask was not wired on the log path — every secret
+		// reached the output (and, with --cache, the ~/.cache/kern previews)
+		// verbatim. optimize.Log now masks the input BEFORE keying/compressing
+		// when Mask is set, so the cache never sees raw secrets either.
+		Mask:      f.mask,
+		MaskNames: splitNames(f.names),
 	})
 	if err != nil {
 		fatal("log: %v", err)
 	}
-	fmt.Println(res.Output)
+	out := res.Output
+	// Same deterministic re-mask the prompt path applies (runOptimize): the
+	// log compressor keeps lines verbatim, so --mask must never echo a known
+	// secret pattern even if a placeholder round-trip slipped.
+	if f.mask {
+		out = pii.Mask(out).Text
+	}
+	fmt.Println(out)
 	window := ""
 	if f.contextBefore > 0 || f.contextAfter > 0 {
 		window = fmt.Sprintf(" [window -%d/+%d]", f.contextBefore, f.contextAfter)
@@ -258,7 +289,7 @@ func runLog(rest []string) {
 	if res.LLMSkipped != "" {
 		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
 	}
-	printSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken(), "input verbatim")
+	cliout.PrintSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runTokens(rest []string) {
@@ -301,7 +332,7 @@ func runBudget(rest []string) {
 	}
 	text := strings.Join(args, " ")
 	if text == "" {
-		b, err := readStdin()
+		b, err := cliflags.ReadStdin()
 		if err != nil {
 			fatal("budget: %v", err)
 		}
@@ -327,7 +358,7 @@ func runBudget(rest []string) {
 		fmt.Fprintf(os.Stderr, "kern: %d tokens (budget %d applied, no reduction)\n", after, maxTokens)
 	}
 	fmt.Println(out)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
+	cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runTerse(rest []string) {
@@ -344,7 +375,7 @@ func runTerseCore(rest []string) {
 	text := ""
 	if len(args) > 0 {
 		if args[0] == "-" {
-			b, err := readStdin()
+			b, err := cliflags.ReadStdin()
 			if err != nil {
 				fatal("terse: %v", err)
 			}
@@ -360,7 +391,7 @@ func runTerseCore(rest []string) {
 		}
 	}
 	if text == "" {
-		b, err := readStdin()
+		b, err := cliflags.ReadStdin()
 		if err != nil {
 			fatal("terse: %v", err)
 		}
@@ -390,7 +421,7 @@ func runTerseCore(rest []string) {
 	}
 	printTokenSavings(os.Stderr, before, after, extra, "")
 	fmt.Println(out)
-	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
+	cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), "input verbatim")
 }
 
 func runSemcache(rest []string) {
@@ -552,14 +583,47 @@ func runStats(cmd string, rest []string) {
 		w.Flush()
 		return
 	}
-	// `kern stats --by-tool` renders the per-tool token ledger: for each tool
-	// that recorded entries (MCP dispatch entries plus optimization entries
-	// whose operation maps to a tool), its call count, tokens returned to the
-	// agent, tokens saved and estimated cost saved, sorted by savings desc.
-	// Tools that don't know their before/after contribute tokens returned only —
-	// no savings are ever fabricated.
+	// `kern stats --by-root` renders local per-project diagnostics; legacy
+	// rootless entries are excluded so projects cannot claim one another.
+	if f.byRoot {
+		roots, err := rec.Roots(f.days, f.session)
+		if err != nil {
+			fatal("stats: %v", err)
+		}
+		type rootRow struct {
+			Root        string  `json:"root"`
+			Operations  int     `json:"operations"`
+			ToolCalls   int     `json:"tool_calls"`
+			SavedTokens int     `json:"saved_tokens"`
+			SavedPct    float64 `json:"saved_percent"`
+			CostSaved   float64 `json:"cost_saved_usd"`
+		}
+		rows := make([]rootRow, 0, len(roots))
+		for _, projectRoot := range roots {
+			sum, err := rec.SummarizeByRoot(f.days, f.session, projectRoot)
+			if err != nil {
+				fatal("stats: %v", err)
+			}
+			rows = append(rows, rootRow{projectRoot, sum.Operations, sum.ToolCalls, sum.SavedTotal, sum.SavedPct, sum.CostSaved})
+		}
+		if f.json {
+			printJSON(rows)
+			return
+		}
+		fmt.Printf("kern stats --by-root (last %d days)%s\n", f.days, statsRateSuffix())
+		if len(rows) == 0 {
+			fmt.Println("  no rooted project data yet (legacy rootless entries are excluded)")
+			return
+		}
+		fmt.Printf("  %-48s %8s %10s %13s %11s\n", "root", "ops", "tool calls", "tokens saved", "cost saved")
+		for _, row := range rows {
+			fmt.Printf("  %-48s %8d %10d %13d $%10.4f\n", row.Root, row.Operations, row.ToolCalls, row.SavedTokens, row.CostSaved)
+		}
+		return
+	}
+	// The per-tool ledger is machine-wide unless --root scopes it to a project.
 	if f.byTool {
-		tools, err := rec.SummarizeByTool(f.days, f.session)
+		tools, err := rec.SummarizeByTool(f.days, f.session, f.root)
 		if err != nil {
 			fatal("stats: %v", err)
 		}
@@ -567,7 +631,11 @@ func runStats(cmd string, rest []string) {
 			printJSON(tools)
 			return
 		}
-		fmt.Printf("kern stats --by-tool (last %d days)%s\n", f.days, statsRateSuffix())
+		scope := ""
+		if f.root != "" {
+			scope = " — root: " + f.root
+		}
+		fmt.Printf("kern stats --by-tool (last %d days)%s%s\n", f.days, statsRateSuffix(), scope)
 		if len(tools) == 0 {
 			fmt.Println("  no per-tool data yet (MCP tool calls and kern compact record entries)")
 			return
@@ -606,6 +674,14 @@ func runStats(cmd string, rest []string) {
 	if err != nil {
 		fatal("stats: %v", err)
 	}
+	// `kern stats --net` reports the honest NET savings: gross saved tokens
+	// minus the session's rules-injection cost (the loaded AGENTS.md/CLAUDE.md
+	// rule files, read at runtime) minus slice re-read call costs (anchor
+	// re-slices that re-delivered truncated output). The net percentage keeps
+	// the gross denominator so the two are directly comparable.
+	if f.net {
+		sum.ApplyNet(tokstats.RuleInjectionTokens(projectRoot(f)))
+	}
 	if f.json {
 		perMillion, model, kind := kernctx.CostRateInfo()
 		out := struct {
@@ -618,8 +694,32 @@ func runStats(cmd string, rest []string) {
 			CostRatePerMillion float64 `json:"cost_rate_per_million"`
 			CostRateModel      string  `json:"cost_rate_model,omitempty"`
 			CostRateKind       string  `json:"cost_rate_kind,omitempty"`
-		}{sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved, perMillion, model, kind}
+			Net                *struct {
+				RulesInjectionTokens int     `json:"rules_injection_tokens"`
+				RulesSessions        int     `json:"rules_injection_sessions"`
+				SliceReadTokens      int     `json:"slice_read_tokens"`
+				NetSavedTotal        int     `json:"net_saved_tokens"`
+				NetSavedPct          float64 `json:"net_saved_percent"`
+			} `json:"net,omitempty"`
+		}{sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved, perMillion, model, kind, nil}
+		if f.net {
+			out.Net = &struct {
+				RulesInjectionTokens int     `json:"rules_injection_tokens"`
+				RulesSessions        int     `json:"rules_injection_sessions"`
+				SliceReadTokens      int     `json:"slice_read_tokens"`
+				NetSavedTotal        int     `json:"net_saved_tokens"`
+				NetSavedPct          float64 `json:"net_saved_percent"`
+			}{sum.RulesInjectionTokens, sum.Sessions, sum.SliceReadTokens, sum.NetSavedTotal, sum.NetSavedPct}
+		}
 		printJSON(out)
+		return
+	}
+	if f.net {
+		fmt.Printf("kern stats --net (last %d days)\n", f.days)
+		fmt.Printf("  gross saved tokens : %d (%.1f%%)\n", sum.SavedTotal, sum.SavedPct)
+		fmt.Printf("  - rules injection  : %d tokens × %d session(s)\n", sum.RulesInjectionTokens, sum.Sessions)
+		fmt.Printf("  - slice re-reads   : %d tokens\n", sum.SliceReadTokens)
+		fmt.Printf("  net saved tokens   : %d (%.1f%%)\n", sum.NetSavedTotal, sum.NetSavedPct)
 		return
 	}
 	fmt.Printf("kern stats (last %d days)\n", f.days)
@@ -629,7 +729,7 @@ func runStats(cmd string, rest []string) {
 	fmt.Printf("  saved tokens : %d (%.1f%%)\n", sum.SavedTotal, sum.SavedPct)
 	fmt.Printf("  cost saved   : $%.4f\n", sum.CostSaved)
 	fmt.Printf("  cost model   : %s\n", costModelLabel())
-	fmt.Println("  per-tool ledger: kern stats --by-tool · per-agent: kern stats --by-agent")
+	fmt.Println("  per-tool ledger: kern stats --by-tool · per-agent: kern stats --by-agent · per-project: kern stats --by-root")
 
 }
 

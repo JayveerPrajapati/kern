@@ -3,6 +3,8 @@ package index
 import (
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 )
 
 func TestIsGeneratedPath(t *testing.T) {
@@ -95,54 +97,6 @@ func TestIsGeneratedContent(t *testing.T) {
 	}
 }
 
-func TestIsMinified(t *testing.T) {
-	cases := []struct {
-		name string
-		src  string
-		want bool
-	}{
-		{
-			name: "normal js short lines",
-			src:  "function foo() {\n  const x = 1;\n  return x;\n}\n",
-			want: false,
-		},
-		{
-			name: "minified single 10000-char line",
-			src:  strings.Repeat("a", 10000) + "\n",
-			want: true,
-		},
-		{
-			name: "minified many 600-char lines",
-			src:  strings.Repeat("x", 600) + "\n" + strings.Repeat("y", 600) + "\n" + strings.Repeat("z", 600) + "\n" + strings.Repeat("w", 600) + "\n" + strings.Repeat("v", 600) + "\n" + strings.Repeat("u", 600) + "\n" + strings.Repeat("t", 600) + "\n" + strings.Repeat("s", 600) + "\n" + strings.Repeat("r", 600) + "\n" + strings.Repeat("q", 600) + "\n" + strings.Repeat("p", 600) + "\n",
-			want: true,
-		},
-		{
-			name: "empty file",
-			src:  "",
-			want: false,
-		},
-		{
-			name: "python normal lines",
-			src:  "def hello():\n    print('hi')\n",
-			want: false,
-		},
-		{
-			name: "few 600-char lines not enough",
-			src:  strings.Repeat("x", 600) + "\n" + strings.Repeat("y", 600) + "\n" + strings.Repeat("z", 600) + "\n",
-			want: false,
-		},
-	}
-	for _, c := range cases {
-		if got := isMinified([]byte(c.src)); got != c.want {
-			t.Errorf("%s: isMinified = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// TestIsIndexableLongLineGoAndMarkdown guards the isMinified language gate:
-// a Go dispatch table or generated Markdown catalog with many 500+ char lines
-// is legitimate source and must stay indexable, while a genuinely minified
-// JS/CSS bundle is still rejected.
 func TestIsIndexableLongLineGoAndMarkdown(t *testing.T) {
 	var goTable strings.Builder
 	goTable.WriteString("package main\n")
@@ -153,7 +107,7 @@ func TestIsIndexableLongLineGoAndMarkdown(t *testing.T) {
 		goTable.WriteString(strings.Repeat("h", 500))
 		goTable.WriteString("},\n")
 	}
-	if !isIndexable("cmd/kern/dispatch_table.go", []byte(goTable.String())) {
+	if !langparse.IsIndexable("cmd/kern/dispatch_table.go", []byte(goTable.String())) {
 		t.Error("long-line Go dispatch table must stay indexable (was misclassified as minified)")
 	}
 
@@ -164,16 +118,16 @@ func TestIsIndexableLongLineGoAndMarkdown(t *testing.T) {
 		md.WriteString(strings.Repeat("c", 600))
 		md.WriteString(" |\n")
 	}
-	if !isIndexable("docs/tool-catalog.md", []byte(md.String())) {
+	if !langparse.IsIndexable("docs/tool-catalog.md", []byte(md.String())) {
 		t.Error("long-line Markdown catalog must stay indexable (was misclassified as minified)")
 	}
 
 	// The gate must not weaken real minified-bundle rejection for JS/CSS.
 	jsBundle := strings.Repeat("x", 600) + "\n" + strings.Repeat("y", 600) + "\n" + strings.Repeat("z", 600) + "\n" + strings.Repeat("w", 600) + "\n" + strings.Repeat("v", 600) + "\n" + strings.Repeat("u", 600) + "\n" + strings.Repeat("t", 600) + "\n" + strings.Repeat("s", 600) + "\n" + strings.Repeat("r", 600) + "\n" + strings.Repeat("q", 600) + "\n" + strings.Repeat("p", 600) + "\n"
-	if isIndexable("vendor/bundle.min.js", []byte(jsBundle)) {
+	if langparse.IsIndexable("vendor/bundle.min.js", []byte(jsBundle)) {
 		t.Error("minified JS bundle must stay rejected")
 	}
-	if isIndexable("vendor/bundle.min.css", []byte(jsBundle)) {
+	if langparse.IsIndexable("vendor/bundle.min.css", []byte(jsBundle)) {
 		t.Error("minified CSS bundle must stay rejected")
 	}
 }

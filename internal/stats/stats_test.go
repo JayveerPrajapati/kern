@@ -507,3 +507,122 @@ func TestSummarizeByAgentDayWindow(t *testing.T) {
 		t.Fatalf("stale entries must be excluded from the 7-day window, got %+v", agents)
 	}
 }
+
+// TestSummarizeCountsSliceReadTokens pins the honest-net ledger: slice
+// re-read tool calls (Slice=true) do NOT count as optimization ops, and their
+// AfterTokens accumulate into SliceReadTokens so ApplyNet can subtract them
+// from the gross savings figure.
+func TestSummarizeCountsSliceReadTokens(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "stats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Recorder{dir: dir}
+	if err := r.Record(Entry{Time: time.Now(), Operation: OpToolCall, Tool: "kern_search", AfterTokens: 300}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Record(Entry{Time: time.Now(), Operation: OpToolCall, Tool: "kern_search", Slice: true, AfterTokens: 120}); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := r.Summarize(7, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Operations != 0 {
+		t.Fatalf("slice re-reads must not count as optimization ops, got %d", sum.Operations)
+	}
+	if sum.SliceReadTokens != 120 {
+		t.Fatalf("SliceReadTokens = %d, want 120 (only Slice=true entries)", sum.SliceReadTokens)
+	}
+}
+
+// TestApplyNet pins the net-savings arithmetic and the honest-denominator
+// convention: NetSavedTotal is gross minus rules-injection (paid once PER
+// SESSION — Sessions multiplies the measurement, L5-6) minus slice
+// re-reads, the net percentage keeps SavedPct's denominator (BeforeTotal),
+// and a negative net is reported as-is, not clamped.
+func TestApplyNet(t *testing.T) {
+	sum := &Summary{BeforeTotal: 1000, SavedTotal: 400, SavedPct: 40, SliceReadTokens: 50, Sessions: 1}
+	sum.ApplyNet(120)
+	if sum.RulesInjectionTokens != 120 {
+		t.Fatalf("RulesInjectionTokens = %d, want 120", sum.RulesInjectionTokens)
+	}
+	if sum.NetSavedTotal != 230 { // 400 - 120×1 - 50
+		t.Fatalf("NetSavedTotal = %d, want 230", sum.NetSavedTotal)
+	}
+	if sum.NetSavedPct != 23 { // 230 / 1000
+		t.Fatalf("NetSavedPct = %v, want 23 (same denominator as SavedPct)", sum.NetSavedPct)
+	}
+	// Multi-session windows deduct per-session (L5-6): 3 sessions × 120.
+	multi := &Summary{BeforeTotal: 1000, SavedTotal: 900, Sessions: 3}
+	multi.ApplyNet(120)
+	if multi.NetSavedTotal != 540 { // 900 - 360
+		t.Fatalf("multi-session NetSavedTotal = %d, want 540 (rules × sessions)", multi.NetSavedTotal)
+	}
+	// Negative net stays honest.
+	neg := &Summary{BeforeTotal: 1000, SavedTotal: 10, SliceReadTokens: 5, Sessions: 1}
+	neg.ApplyNet(20)
+	if neg.NetSavedTotal != -15 {
+		t.Fatalf("negative net must be reported as-is, got %d", neg.NetSavedTotal)
+	}
+	// Nil receiver must not panic (mirrors the zero-value recorder contract).
+	var nilSum *Summary
+	nilSum.ApplyNet(1)
+}
+
+// TestSummarizeCountsSessions pins the L5-6 per-session rules ledger:
+// every distinct session with recorded entries — including tool-call-only
+// sessions, which also paid the injection — counts once, and a session
+// filter collapses the count to 1.
+func TestSummarizeCountsSessions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "stats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Recorder{dir: dir}
+	for _, s := range []string{"s1", "s1", "s2", "tool-only"} {
+		op := OpOptimizePrompt
+		if s == "tool-only" {
+			op = OpToolCall
+		}
+		if err := r.Record(Entry{Time: time.Now().Add(-1 * time.Hour), Session: s, Operation: op, BeforeTokens: 100, AfterTokens: 50}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum, err := r.Summarize(7, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Sessions != 3 {
+		t.Fatalf("Sessions = %d, want 3 (s1, s2, tool-only — tool-call sessions count too)", sum.Sessions)
+	}
+	filtered, err := r.Summarize(7, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Sessions != 1 {
+		t.Fatalf("session-filtered Sessions = %d, want 1", filtered.Sessions)
+	}
+}
+
+// TestSummarizeOversizedLineFailsLoud pins the L5-6 scanner guard: a JSONL
+// line beyond the 4 MiB cap must surface as an ERROR from Summarize, not
+// silently truncate the day's remaining entries.
+func TestSummarizeOversizedLineFailsLoud(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "stats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Recorder{dir: dir}
+	if err := r.Record(Entry{Time: time.Now().Add(-1 * time.Hour), Session: "s1", Operation: OpOptimizePrompt, BeforeTokens: 100, AfterTokens: 50}); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().UTC().Format("2006-01-02") + ".jsonl"
+	huge := strings.Repeat("x", 5<<20)
+	if err := os.WriteFile(filepath.Join(dir, day), []byte(huge+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Summarize(1, ""); err == nil {
+		t.Fatal("Summarize must fail loud on an oversized JSONL line, got nil error")
+	}
+}

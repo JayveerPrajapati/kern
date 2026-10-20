@@ -118,7 +118,7 @@ func initTemplate() {
 	_ = exec.Command("git", "-C", dir, "config", "user.name", "testfixture").Run()
 	_ = exec.Command("git", "-C", dir, "config", "user.email", "testfixture@example.com").Run()
 	_ = exec.Command("git", "-C", dir, "add", "-A").Run()
-	if out, err := exec.Command("git", "-C", dir, "-c", "maintenance.auto=0", "-c", "gc.auto=0", "commit", "-qm", "fixture init").CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", dir, "-c", "core.hooksPath=", "-c", "maintenance.auto=0", "-c", "gc.auto=0", "commit", "-qm", "fixture init").CombinedOutput(); err != nil {
 		templateErr = fmt.Errorf("git commit: %v (%s)", err, out)
 		return
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // fullRulesFixture is a minimal stand-in for the full AGENTS.md variant: it
@@ -12,7 +14,7 @@ import (
 // carry a marker-managed block like the real generated file.
 func fullRulesFixture() string {
 	return instructionMarkerOpen + "\n" +
-		fullRulesHeader + "\n" +
+		agentwire.FullRulesHeader + "\n" +
 		"full usage rules body — kern_meta routing, kern-first policy, tool list\n" +
 		instructionMarkerClose + "\n"
 }
@@ -34,7 +36,7 @@ func TestThinRulesRefuseFullDowngradeByDefault(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, "AGENTS.md", fullRulesFixture())
 
-	status := wireThinRulesFile(root, "AGENTS.md", "all", false)
+	status := agentwire.WireThinRulesFile(root, "AGENTS.md", "all", false)
 
 	if !strings.Contains(status.Note, "kept existing full rules") {
 		t.Fatalf("expected downgrade refusal, got status %+v", status)
@@ -56,7 +58,7 @@ func TestThinRulesDowngradeWhenExplicit(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, "AGENTS.md", fullRulesFixture())
 
-	status := wireThinRulesFile(root, "AGENTS.md", "all", true)
+	status := agentwire.WireThinRulesFile(root, "AGENTS.md", "all", true)
 
 	if !strings.Contains(status.Note, "thin rules written") {
 		t.Fatalf("expected thin write, got status %+v", status)
@@ -65,10 +67,10 @@ func TestThinRulesDowngradeWhenExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(after), fullRulesHeader) {
+	if strings.Contains(string(after), agentwire.FullRulesHeader) {
 		t.Fatalf("full header must be gone after an explicit downgrade, got:\n%s", after)
 	}
-	if !strings.Contains(string(after), thinAGENTSmd("all")) {
+	if !strings.Contains(string(after), agentwire.ThinAGENTSmd("all")) {
 		t.Fatalf("thin variant must be present after an explicit downgrade, got:\n%s", after)
 	}
 }
@@ -79,7 +81,7 @@ func TestThinRulesDowngradeWhenExplicit(t *testing.T) {
 func TestThinRulesWrittenWhenNoFullFile(t *testing.T) {
 	root := t.TempDir()
 
-	status := wireThinRulesFile(root, "AGENTS.md", "all", false)
+	status := agentwire.WireThinRulesFile(root, "AGENTS.md", "all", false)
 
 	if !strings.Contains(status.Note, "thin rules written") {
 		t.Fatalf("expected thin write on fresh repo, got status %+v", status)
@@ -118,15 +120,16 @@ func TestAgentsMDPersistedKeyDetection(t *testing.T) {
 // critical kern-first routing facts — the decision-table essentials
 // (read→kern_explore, grep→kern_search, build/test→kern_verify,
 // unsure→kern_meta), the session-start kern_buddy call, and the default
-// 6-tool surface note — while staying thin by design.
+// 7-tool surface note — while staying thin by design.
 func TestThinAGENTSmdCarriesEssentialRouting(t *testing.T) {
-	thin := thinAGENTSmd("all")
+	thin := agentwire.ThinAGENTSmd("all")
 	for _, want := range []string{
 		"kern_meta",    // unsure → kern_meta
 		"kern_explore", // read → kern_explore
 		"kern_search",  // grep → kern_search
 		"kern_verify",  // build/test → kern_verify
 		"kern_buddy",   // session-start onboarding call
+		"kern_exec",    // governed execution — the tool missing when rule text said 6 tools
 		"KERN_MCP_FULL=1",
 		"read",
 		"grep",

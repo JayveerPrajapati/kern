@@ -108,8 +108,17 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 		if edge.Kind != "calls" {
 			continue
 		}
-		outgoing[edge.From] = append(outgoing[edge.From], edge.To)
-		incoming[edge.To] = append(incoming[edge.To], edge.From)
+		fromID, toID := edge.From, edge.To
+		if edge.Resolution == "" {
+			if identity, ok := e.graph.ResolveEdgeEndpoint(edge.From, edge.From); ok {
+				fromID = identity
+			}
+			if identity, ok := e.graph.ResolveEdgeEndpoint(edge.To, edge.From); ok {
+				toID = identity
+			}
+		}
+		outgoing[fromID] = append(outgoing[fromID], toID)
+		incoming[toID] = append(incoming[toID], fromID)
 	}
 
 	// Reachable = the roots plus every endpoint transitively reachable via
@@ -117,14 +126,26 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 	reachable := map[string]bool{}
 	queue := []string{}
 	for _, r := range roots {
-		if r.Qualified == "" || reachable[r.Qualified] {
+		if r.ID != "" {
+			if !reachable[r.ID] {
+				reachable[r.ID] = true
+				queue = append(queue, r.ID)
+			}
 			continue
 		}
-		reachable[r.Qualified] = true
-		queue = append(queue, r.Qualified)
+		for _, node := range e.graph.Nodes {
+			if node.Symbol == nil || node.Symbol.File != r.File || node.Symbol.Line != r.Line || node.Symbol.Qualified != r.Qualified || reachable[node.ID] {
+				continue
+			}
+			reachable[node.ID] = true
+			queue = append(queue, node.ID)
+		}
 	}
 	for head := 0; head < len(queue); head++ {
 		cur := queue[head]
+		if strings.HasPrefix(cur, "ref:") || strings.HasPrefix(cur, "?") {
+			continue
+		}
 		add := func(nb string) {
 			if reachable[nb] {
 				return
@@ -158,15 +179,15 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 		if edge.Kind != "calls" {
 			continue
 		}
-		if !reachable[edge.From] || !reachable[edge.To] {
-			continue
-		}
 		fromID, ok := resolveEdgeID(edge.From, byID, byName)
 		if !ok {
 			continue
 		}
 		toID, ok := resolveEdgeID(edge.To, byID, byName)
 		if !ok {
+			continue
+		}
+		if !reachable[fromID] || !reachable[toID] {
 			continue
 		}
 		fromNode, _ := byID[fromID]

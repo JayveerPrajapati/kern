@@ -50,7 +50,16 @@ func Runtime(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 
 	switch action {
 	case "status":
-		return jsonOf(runtime.StatusSnapshot(src))
+		snap := runtime.StatusSnapshot(src)
+		if src == nil {
+			// A configured-but-invalid endpoint (bad URL) is a different
+			// state than "nothing wired": say so instead of implying the
+			// source was never set up.
+			if d := runtime.DescribeSource(ix.Root); d.Kind != "" && d.Invalid != "" {
+				snap["configured_but_invalid"] = d.Invalid
+			}
+		}
+		return jsonOf(snap)
 	case "drift":
 		var codeRoutes []string
 		for _, sym := range ix.Symbols {

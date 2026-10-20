@@ -371,7 +371,9 @@ func ProcessLogin() bool {
 	if err != nil {
 		t.Fatalf("resolveSymbol failed to auto-resolve approximate phrase: %v", err)
 	}
-	if !strings.Contains(sym, "UserAuthenticationRateLimiter") {
+	identity, resolved := p.Graph().ResolveNodeID(sym)
+	resolvedNode, found := p.Graph().NodeByID(identity)
+	if !resolved || !found || resolvedNode.Symbol == nil || resolvedNode.Symbol.Name != "UserAuthenticationRateLimiter" {
 		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym)
 	}
 	if !fuzzy {
@@ -383,7 +385,7 @@ func ProcessLogin() bool {
 	if err != nil {
 		t.Fatalf("resolveSymbol single approximate token failed: %v", err)
 	}
-	if !strings.Contains(sym2, "UserAuthenticationRateLimiter") {
+	if node, ok := p.Graph().NodeByID(sym2); !ok || node.Symbol == nil || node.Symbol.Name != "UserAuthenticationRateLimiter" {
 		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym2)
 	}
 	if !fuzzy2 {
@@ -432,7 +434,7 @@ func ProcessLogin() bool {
 	if err != nil {
 		t.Fatalf("resolveSymbol(sanitizeDocName): %v", err)
 	}
-	if sym != "SanitizeDocName" {
+	if node, ok := p.Graph().NodeByID(sym); !ok || node.Symbol == nil || node.Symbol.Name != "SanitizeDocName" {
 		t.Errorf("resolveSymbol(sanitizeDocName) = %q, want SanitizeDocName", sym)
 	}
 	if !fuzzy {

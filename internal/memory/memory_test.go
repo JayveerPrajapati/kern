@@ -138,7 +138,7 @@ func TestAutoCaptureLabeledAndExcludedFromRecall(t *testing.T) {
 	if err := Add(root, "always store the session id in the auth cookie"); err != nil {
 		t.Fatalf("Add lesson: %v", err)
 	}
-	if err := AddAuto(root, "User: auto-tagged prompt about the billing slice"); err != nil {
+	if _, err := AddAuto(root, "User: auto-tagged prompt about the billing slice"); err != nil {
 		t.Fatalf("AddAuto: %v", err)
 	}
 
@@ -276,11 +276,11 @@ func TestAddAutoDedupesDuplicateCaptures(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
 	for i := 0; i < 3; i++ {
-		if err := AddAuto(root, "Command failed: go build ./..."); err != nil {
+		if _, err := AddAuto(root, "Command failed: go build ./..."); err != nil {
 			t.Fatalf("AddAuto #%d: %v", i, err)
 		}
 	}
-	if err := AddAuto(root, "Edited internal/api/handlers.go"); err != nil {
+	if _, err := AddAuto(root, "Edited internal/api/handlers.go"); err != nil {
 		t.Fatalf("AddAuto different capture: %v", err)
 	}
 	counts := map[string]int{}
@@ -305,7 +305,7 @@ func TestAddExplicitWritesTypedAndV1(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
 	const lesson = "Always run tests before committing code changes"
-	if err := AddExplicit(root, lesson); err != nil {
+	if _, err := AddExplicit(root, lesson); err != nil {
 		t.Fatalf("AddExplicit: %v", err)
 	}
 
@@ -357,7 +357,7 @@ func TestAutoFloodDoesNotEvictExplicitLessons(t *testing.T) {
 	}
 	// Flood with unique auto captures far beyond maxEntries.
 	for i := 0; i < maxEntries*4; i++ {
-		if err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
+		if _, err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
 			t.Fatalf("AddAuto #%d: %v", i, err)
 		}
 	}
@@ -437,7 +437,7 @@ func TestMixedAutoAndExplicitInterleaved(t *testing.T) {
 				t.Fatalf("Add explicit #%d: %v", i, err)
 			}
 		} else {
-			if err := AddAuto(root, fmt.Sprintf("User: interleaved auto capture %d", i)); err != nil {
+			if _, err := AddAuto(root, fmt.Sprintf("User: interleaved auto capture %d", i)); err != nil {
 				t.Fatalf("AddAuto #%d: %v", i, err)
 			}
 		}
@@ -474,7 +474,7 @@ func TestRecallFindsExplicitAfterAutoFlood(t *testing.T) {
 		t.Fatalf("Add lesson: %v", err)
 	}
 	for i := 0; i < maxEntries*3; i++ {
-		if err := AddAuto(root, fmt.Sprintf("User: flood prompt %d about deployment", i)); err != nil {
+		if _, err := AddAuto(root, fmt.Sprintf("User: flood prompt %d about deployment", i)); err != nil {
 			t.Fatalf("AddAuto #%d: %v", i, err)
 		}
 	}
@@ -570,7 +570,7 @@ func TestExplicitLessonsSurviveRestartAndAutoFlood(t *testing.T) {
 		}
 	}
 	for i := 0; i < maxEntries*4; i++ {
-		if err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
+		if _, err := AddAuto(root, fmt.Sprintf("User: auto flood prompt %d", i)); err != nil {
 			t.Fatalf("AddAuto #%d: %v", i, err)
 		}
 	}
@@ -602,5 +602,334 @@ func TestExplicitLessonsSurviveRestartAndAutoFlood(t *testing.T) {
 	}
 	if auto != maxEntries-len(explicit) {
 		t.Fatalf("restart: got %d auto entries, want %d", auto, maxEntries-len(explicit))
+	}
+}
+
+// TestAddExplicitAutoShapedStaysGenuine pins L5-4 (supersedes the F2
+// prefix-routing pin): the explicit write path is signal-driven — a caller
+// that chose `kern remember` / kern_memory action=add gets a GENUINE lesson
+// (Source "user" in both stores) no matter what the text starts with, so a
+// real lesson like "Edited files must always ship with tests" stays
+// recallable and prune --auto-safe. Auto routing is the caller's --auto flag
+// (plugin/hooks → AddAuto), never text-shape guessing on this path.
+func TestAddExplicitAutoShapedStaysGenuine(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	for _, lesson := range []string{
+		"Edited internal/api/handlers.go",
+		"Command failed: ls: nope: no such file or directory",
+		"Explored internal/mcp/dispatch.go",
+		"User: refactor the auth middleware",
+	} {
+		if _, err := AddExplicit(root, lesson); err != nil {
+			t.Fatalf("AddExplicit %q: %v", lesson, err)
+		}
+	}
+
+	// Typed store: every explicit write must be Source "user".
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 4 {
+		t.Fatalf("typed store: got %d entries, want 4: %+v", len(mems), mems)
+	}
+	for _, m := range mems {
+		if m.Source != "user" {
+			t.Fatalf("typed capture %q Source = %q, want user", m.Content, m.Source)
+		}
+	}
+
+	// v1 store: labeled user — never relabeled auto by Load's migration.
+	for _, e := range List(root) {
+		if e.Source != "user" {
+			t.Fatalf("v1 capture %q Source = %q, want user", e.Text, e.Source)
+		}
+	}
+	// Explicit auto-shaped lessons are recallable (the F3 finding's headline
+	// gap: they were previously excluded from recall).
+	if got := Recall(root, "refactor the auth middleware", 10); len(got) == 0 {
+		t.Fatalf("auto-shaped explicit write must stay recallable, got %+v", got)
+	}
+	// And prune --auto keeps them.
+	if _, err := PruneAuto(root); err != nil {
+		t.Fatal(err)
+	}
+	if got := Recall(root, "refactor the auth middleware", 10); len(got) == 0 {
+		t.Fatalf("auto-shaped explicit write lost to prune --auto: %+v", got)
+	}
+}
+
+// TestAddExplicitAutoDedupesAcrossEntryFunctions pins F2: the 60s exact-text
+// dedup window must fire for auto-routed content regardless of which entry
+// function wrote it — AddExplicit, AddAuto and Add (auto-classified) must
+// collapse to ONE entry per store, not three (the pre-fix triplication).
+func TestAddExplicitAutoDedupesAcrossEntryFunctions(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	const lesson = "Edited /tmp/lane/a.go"
+	if _, err := AddExplicit(root, lesson); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddAuto(root, lesson); err != nil {
+		t.Fatal(err)
+	}
+	if err := Add(root, lesson); err != nil {
+		t.Fatal(err)
+	}
+	if v1 := List(root); len(v1) != 1 {
+		t.Fatalf("v1 store: expected 1 entry after 3 auto writes, got %d: %+v", len(v1), v1)
+	}
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("typed store: expected 1 entry after 3 auto writes, got %d: %+v", len(mems), mems)
+	}
+}
+
+// TestAddExplicitGenuineLessonNeverDeduped pins F2: a genuinely user-typed
+// lesson (non-auto-shaped text) written twice through the explicit path must
+// stay Source "user"/"" in both stores and must NOT be deduped — the dedup
+// window is auto-captures-only.
+func TestAddExplicitGenuineLessonNeverDeduped(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	const lesson = "always run tests before committing code changes"
+	if _, err := AddExplicit(root, lesson); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddExplicit(root, lesson); err != nil {
+		t.Fatal(err)
+	}
+	if v1 := List(root); len(v1) != 2 {
+		t.Fatalf("genuine explicit lessons must not dedupe, got %d entries: %+v", len(v1), v1)
+	}
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 2 {
+		t.Fatalf("typed store: genuine lessons must not dedupe, got %d: %+v", len(mems), mems)
+	}
+	for _, m := range mems {
+		if m.Source == "auto" {
+			t.Fatalf("genuine lesson mislabeled auto: %+v", m)
+		}
+	}
+	// Still recallable (auto excludes only captures).
+	if got := Recall(root, "run tests before committing", DefaultRecallLimit); len(got) != 2 {
+		t.Fatalf("genuine lessons lost from recall, got %d: %+v", len(got), got)
+	}
+}
+
+// TestPruneAuto pins the F2 prune: automatic captures (Source "auto" or
+// auto-shaped content, including legacy mislabeled "user" junk) are removed
+// from both stores, exact duplicates collapse to their most recent copy, and
+// genuine user/learning lessons survive.
+func TestPruneAuto(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+
+	// Typed store: legacy junk (triplicated "Edited ..." mislabeled "user",
+	// a Source "auto" failed command), a duplicated genuine lesson, and a
+	// unique learning entry.
+	st := NewMemoryStore(root)
+	for _, m := range []domain.Memory{
+		{Type: domain.MemoryLesson, Content: "Edited /tmp/lane/a.go", Source: "user", Scope: "project"},
+		{Type: domain.MemoryLesson, Content: "Edited /tmp/lane/a.go", Source: "user", Scope: "project"},
+		{Type: domain.MemoryLesson, Content: "Edited /tmp/lane/a.go", Source: "user", Scope: "project"},
+		{Type: domain.MemoryLesson, Content: "Command failed: ls: nope", Source: "auto", Scope: "project"},
+		{Type: domain.MemoryLesson, Content: "the payment service retries idempotency keys", Source: "user", Scope: "project"},
+		{Type: domain.MemoryLesson, Content: "the payment service retries idempotency keys", Source: "user", Scope: "project"},
+		{Type: domain.MemoryConstraint, Content: "redis keys must contain tenant id", Source: "learning", Scope: "project"},
+	} {
+		if _, err := st.Add(m); err != nil {
+			t.Fatalf("typed Add %q: %v", m.Content, err)
+		}
+	}
+
+	// v1 store: auto captures + one explicit lesson.
+	for _, l := range []string{"User: flood prompt", "Command failed: go build ./...", "explicit lesson about the api"} {
+		if err := Add(root, l); err != nil {
+			t.Fatalf("v1 Add %q: %v", l, err)
+		}
+	}
+
+	stats, err := PruneAuto(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Typed: only the Source "auto" failed command is removed (L5-4:
+	// Source "user" entries survive even with auto-shaped prefixes — they
+	// are indistinguishable from genuine "Edited ..." lessons, which must
+	// be prune --auto-safe); the triplicated Edited entries and the
+	// duplicated payment lesson collapse to their most recent copies.
+	if stats.TypedRemoved != 1 {
+		t.Fatalf("TypedRemoved = %d, want 1", stats.TypedRemoved)
+	}
+	if stats.TypedCollapsed != 3 {
+		t.Fatalf("TypedCollapsed = %d, want 3", stats.TypedCollapsed)
+	}
+	// v1: 2 autos removed, no explicit duplicates to collapse.
+	if stats.V1Removed != 2 {
+		t.Fatalf("V1Removed = %d, want 2", stats.V1Removed)
+	}
+	if stats.V1Collapsed != 0 {
+		t.Fatalf("V1Collapsed = %d, want 0", stats.V1Collapsed)
+	}
+
+	// Survivors: payment lesson (deduped to one) + redis learning entry.
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 3 {
+		t.Fatalf("typed store after prune = %d entries, want 3: %+v", len(mems), mems)
+	}
+	contents := map[string]bool{}
+	for _, m := range mems {
+		contents[m.Content] = true
+	}
+	if !contents["the payment service retries idempotency keys"] {
+		t.Fatalf("genuine lesson lost by prune: %+v", mems)
+	}
+	if !contents["redis keys must contain tenant id"] {
+		t.Fatalf("learning entry lost by prune: %+v", mems)
+	}
+	// The "user"-mislabeled Edited triplicate survives as ONE collapsed
+	// copy (L5-4: indistinguishable from a genuine "Edited ..." lesson;
+	// legacy junk is removable via `kern memory remove --prefix`).
+	if !contents["Edited /tmp/lane/a.go"] {
+		t.Fatalf("collapsed Edited copy missing after prune: %+v", mems)
+	}
+	for _, m := range mems {
+		if m.Content == "Command failed: ls: nope" {
+			t.Fatalf("auto junk survived prune: %+v", m)
+		}
+	}
+
+	// v1 survivors: the explicit lesson only, still recallable.
+	if ls := List(root); len(ls) != 1 || ls[0].Text != "explicit lesson about the api" {
+		t.Fatalf("v1 store after prune = %+v, want the explicit lesson only", ls)
+	}
+	if got := Recall(root, "explicit lesson about the api", 5); len(got) != 1 {
+		t.Fatalf("explicit lesson lost from recall after prune: %+v", got)
+	}
+}
+
+// TestPruneAutoIdempotent: a second prune over a clean store removes nothing.
+func TestPruneAutoIdempotent(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if _, err := AddExplicit(root, "a genuine lesson"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PruneAuto(root); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := PruneAuto(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TypedRemoved+stats.TypedCollapsed+stats.V1Removed+stats.V1Collapsed != 0 {
+		t.Fatalf("second prune over clean store must be a no-op, got %+v", stats)
+	}
+}
+
+// TestClearClearsBothStores pins F2: `kern memory clear` (memory.Clear) must
+// empty the TYPED store too — it previously emptied only v1, leaving buddy's
+// "Project memory" populated with the cleared lessons.
+func TestClearClearsBothStores(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if _, err := AddExplicit(root, "a lesson to clear"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Clear(root); err != nil {
+		t.Fatal(err)
+	}
+	if ls := List(root); len(ls) != 0 {
+		t.Fatalf("v1 store not cleared: %+v", ls)
+	}
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 0 {
+		t.Fatalf("typed store not cleared: %+v", mems)
+	}
+}
+
+// TestRemoveMirrorsTypedStore pins F2: RemoveIndex/RemovePrefix must delete
+// the lesson from the typed store as well, so `kern memory remove` actually
+// removes it from buddy's "Project memory".
+func TestRemoveMirrorsTypedStore(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if _, err := AddExplicit(root, "delete me: stale playbook"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveIndex(root, 1); err != nil {
+		t.Fatal(err)
+	}
+	mems, err := NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mems {
+		if m.Content == "delete me: stale playbook" {
+			t.Fatalf("removed lesson still in typed store: %+v", m)
+		}
+	}
+
+	// Prefix form removes every typed entry sharing the prefix.
+	if _, err := AddExplicit(root, "Edited /tmp/lane/b.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddExplicit(root, "Edited /tmp/lane/c.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemovePrefix(root, "Edited /tmp/lane/"); err != nil {
+		t.Fatal(err)
+	}
+	mems, err = NewMemoryStore(root).CurrentMemories("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mems {
+		if strings.HasPrefix(m.Content, "Edited /tmp/lane/") {
+			t.Fatalf("prefix-removed capture still in typed store: %+v", m)
+		}
+	}
+}
+
+// TestAddExplicitDedupReportsWritten pins the Q22/F1-5 ack contract: a
+// deduped write (auto-shaped text re-fired within the 60s window) must
+// report written=false so CLI/MCP acks can say "already remembered"
+// instead of a false "remembered."; a genuine lesson always reports true.
+func TestAddExplicitDedupReportsWritten(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if written, err := AddExplicit(root, "Edited /tmp/lane/ack.go"); err != nil || !written {
+		t.Fatalf("first auto-shaped add: written=%v err=%v", written, err)
+	}
+	// L5-4: an auto-shaped text via the EXPLICIT path is genuine — a
+	// deliberate re-remember is legitimate user intent, never deduped.
+	if written, err := AddExplicit(root, "Edited /tmp/lane/ack.go"); err != nil || !written {
+		t.Fatalf("genuine auto-shaped re-add stays written=true, got written=%v err=%v", written, err)
+	}
+	if written, err := AddExplicit(root, "a genuine lesson for the ack contract"); err != nil || !written {
+		t.Fatalf("genuine add must report written=true, got written=%v err=%v", written, err)
+	}
+	if written, err := AddExplicit(root, "a genuine lesson for the ack contract"); err != nil || !written {
+		t.Fatalf("genuine re-add stays written=true (never deduped), got written=%v err=%v", written, err)
+	}
+	if written, err := AddAuto(root, "User: auto prompt ack contract"); err != nil || !written {
+		t.Fatalf("first AddAuto: written=%v err=%v", written, err)
+	}
+	if written, err := AddAuto(root, "User: auto prompt ack contract"); err != nil || written {
+		t.Fatalf("deduped AddAuto re-fire must report written=false, got written=%v err=%v", written, err)
 	}
 }

@@ -1,25 +1,26 @@
-name: nightly-full
-# Nightly full (non-short) test suite. The per-push test.yml job runs
-# `go test -short`, which skips ~153 tests including every real-worktree
-# loop test (L5 proof gate, pause+budget, governed-loop repair) and the
-# binary-backed blueprint G2/G7 gates (setup-tools installs kern on PATH,
-# so those run here for real). This job runs the whole suite without
-# -short, plus vet, the architecture parity gate, and the governance
-# gate — on a nightly schedule with manual dispatch.
+name: nightly
+# Everything too slow, too network-dependent or too OS-specific for every PR.
+# Replaces the former nightly-full.yml + blueprint-nightly.yml and takes over
+# the live-release Windows installer smoke that used to run on every PR and
+# every tag.
+#
+# The per-push ci.yml runs `go test -short`; this runs the whole suite without
+# -short, which includes every real-worktree loop test (L5 proof gate,
+# pause+budget, governed-loop repair).
 on:
   schedule:
-    - cron: '0 6 * * *' # daily, 06:00 UTC
+    - cron: '0 3 * * *' # daily, 03:00 UTC
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: nightly-full-${{ github.workflow }}
+  group: nightly-${{ github.workflow }}
   cancel-in-progress: true
 jobs:
   full-suite:
     name: Full suite (no -short)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -29,11 +30,162 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: ./.github/actions/setup-tools
+      # ./... covers every remaining package and the architecture parity
+      # gate; vet and the governance gate already run on every PR (ci.yml).
       - name: go test ./... (no -short)
-        run: go test -timeout 30m ./...
-      - name: go vet ./...
-        run: go vet ./...
-      - name: Architecture parity gate
-        run: go test ./internal/architecture/ -count=1
-      - name: Governance gate
-        run: go run ./cmd/kern check --ci
+        run: go test -count=1 -timeout 60m ./...
+
+  # Repo-wide governance debt report: the FULL two-pass duplication check
+  # (jscpd over the whole tree) and all-repo architecture findings — the checks
+  # the pre-commit hook deliberately skips via --fast. Informational:
+  # pre-existing debt does not fail the nightly.
+  debt-report:
+    name: Repo-wide debt report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
+      - name: kern verify (full governance scan)
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+          KERN_BINARY="$RUNNER_TEMP/kern" "$RUNNER_TEMP/kern" verify --types security,architecture,dependency || \
+            echo "::warning::kern verify reported findings (see report above)"
+
+  # The packages the install work touches, WITHOUT -short, on macOS and
+  # Windows. Non-blocking: it exists to surface portability gaps.
+  cross-os-full:
+    name: full tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test install-related packages (no -short)
+        shell: bash
+        run: go test -timeout 40m ./internal/setup/ ./internal/index/ ./internal/project/ ./internal/doctor/ ./internal/gitblocks/ ./cmd/kern/
+
+  # Windows installer + native `kern update` leg smoke against the LIVE release.
+  # install.ps1 and the PowerShell fetch -> temp-file -> pwsh -File chain in
+  # runUpdateWindows (cmd_update.go) are Windows-only code the ubuntu jobs never
+  # execute. This job runs on a real windows-latest runner: it builds the CLI
+  # from the checkout, runs the live installer (release zip download +
+  # Copy-Binary rename-aside), asserts the installed binary runs, then
+  # exercises the Go Windows update leg end-to-end. It needs the network and the
+  # published release, which is why it runs nightly and not on PRs or tags.
+  #
+  # Guard-tolerance choice: the final `kern update --dry-run` may exit 1 when
+  # the network-free updateGuardDenial refuses before the installer branch is
+  # reached (e.g. an unverifiable installed version) — that refusal is a
+  # legitimate outcome and the guard itself is unit-tested. What must never
+  # happen are the old failure modes of a broken fetch/pwsh chain
+  # ('PowerShell is required' / 'could not fetch' / 'installer failed'), so
+  # the step asserts on the captured output, not on the exit code.
+  windows-update-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build kern for Windows
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "0"
+          go build -buildvcs=false -tags sqlite,notreesitter -o "$env:RUNNER_TEMP\kern-smoke.exe" ./cmd/kern
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Downloads the live windows release zip and installs to
+      # $HOME\.local\bin (install.ps1's default prefix, $env:KERN_INSTALL_DIR
+      # unset), exercising the real installer path incl. Copy-Binary
+      # rename-aside and Verify-Kern. KERN_AUTO_WIRE=0: this job tests the
+      # installer and update chain, not machine-wide wiring (ci.yml covers that).
+      - name: Install live release via install.ps1
+        shell: pwsh
+        env:
+          KERN_AUTO_WIRE: "0"
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Action install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Assert installed kern.exe runs
+        shell: pwsh
+        run: |
+          & "$HOME\.local\bin\kern.exe" version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "installed kern.exe version check failed (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+      # Tolerates exit codes 0 (happy path: installer status op ran) and 1
+      # (updateGuardDenial refused before the installer branch — acceptable,
+      # see the job comment) but fails on the old broken-chain failure
+      # strings. 'checking for updates' proves the dry-run reached the
+      # status branch (fetch -> temp-file -> pwsh -File). The two preference
+      # overrides keep pwsh 7.3+'s stderr-as-error behavior from throwing on
+      # captured stderr (GitHub's pwsh preamble sets $ErrorActionPreference
+      # to 'stop'); failures are decided by the string checks below.
+      - name: Exercise Go Windows update leg (dry-run)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = & "$HOME\.local\bin\kern.exe" update --dry-run 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host "exit code: $code"
+          Write-Host $out
+          if ($code -ne 0 -and $code -ne 1) {
+            Write-Error "unexpected exit code $code (expected 0 or 1)"
+            exit $code
+          }
+          if ($out -match "PowerShell is required") {
+            Write-Error "smoke failed: 'PowerShell is required' — pwsh/powershell not found"
+            exit 1
+          }
+          if ($out -match "could not fetch") {
+            Write-Error "smoke failed: 'could not fetch' — installer script download failed"
+            exit 1
+          }
+          if ($out -match "installer failed") {
+            Write-Error "smoke failed: 'installer failed' — install.ps1 status op failed"
+            exit 1
+          }
+          if ($out -match "checking for updates") {
+            Write-Host "OK: dry-run reached the installer status branch (fetch -> temp-file -> pwsh -File chain ran)"
+          } else {
+            Write-Host "NOTE: 'checking for updates' not printed — updateGuardDenial denied before the ps1 leg (accepted smoke outcome)"
+          }
+
+  # A red nightly nobody sees is not a nightly: open an issue when a blocking
+  # job fails on the schedule. (debt-report is informational and cross-os-full
+  # is non-blocking, so neither is listed.)
+  notify:
+    name: open issue on failure
+    needs: [full-suite, windows-update-smoke]
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Nightly failed $(date -u +%F)" \
+            --body "The scheduled nightly run failed: $RUN_URL"

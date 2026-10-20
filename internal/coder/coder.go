@@ -10,7 +10,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
-	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/pii"
@@ -104,6 +103,17 @@ type Result struct {
 	PromptFixedTokens int
 }
 
+// worktree is the minimal worktree surface Agent.Code needs (Dir for project
+// grounding and verification, Apply for patch application, Diff for round
+// feedback). It is the consumer-side seam that keeps internal/coder decoupled
+// from internal/execution: *execution.Worktree satisfies it implicitly, and
+// the coder never names the concrete type.
+type worktree interface {
+	Dir() string
+	Apply(patch string) error
+	Diff() (string, error)
+}
+
 // Code drives the LLM to generate a patch for the given intent and plan,
 // applies it to the worktree, and verifies it, iterating on failure. Returns
 // ErrNoProvider when the provider is nil, and the last round's diff with
@@ -115,7 +125,7 @@ type Result struct {
 // keeps the previous ungrounded behavior. Returns ErrNoProvider when the
 // provider is nil, and the last round's diff with Passed=false plus
 // ErrBudgetExhausted when all rounds fail.
-func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Result, error) {
+func (a *Agent) Code(intent, plan, context string, wt worktree) (*Result, error) {
 	if a.provider == nil {
 		return nil, ErrNoProvider
 	}
@@ -425,7 +435,7 @@ func extractEdits(response string) []fileEdit {
 // exactly (first occurrence) and replaced. On failure the error carries the
 // offending search text and the ACTUAL head of the file, so the next round's
 // prompt shows the LLM what it got wrong instead of a bare "not found".
-func applyEdits(wt *execution.Worktree, edits []fileEdit) error {
+func applyEdits(wt worktree, edits []fileEdit) error {
 	for _, fe := range edits {
 		if err := validEditPath(fe.path); err != nil {
 			return err

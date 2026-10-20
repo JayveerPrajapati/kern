@@ -16,7 +16,7 @@ import (
 
 // Hooks provides dependencies from the owning MCP server.
 type Hooks struct {
-	Add    func(ctx context.Context, root, lesson string) error
+	Add    func(ctx context.Context, root, lesson string) (bool, error)
 	List   func(ctx context.Context, root string) ([]memory.Entry, error)
 	Recall func(ctx context.Context, root, prompt string, k int) ([]memory.Entry, error)
 	Remove func(ctx context.Context, root, id string) (memory.Entry, error)
@@ -83,14 +83,22 @@ func Add(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	if h.Add != nil {
-		if err := h.Add(ctx, root, lesson); err != nil {
+		written, err := h.Add(ctx, root, lesson)
+		if err != nil {
 			return "", err
+		}
+		if !written {
+			return "already remembered — identical lesson within 60s, not re-stored.", nil
 		}
 	} else {
 		// Explicit user lesson: dual-write so it surfaces in buddy's
 		// "Project memory" (typed store) and stays recallable (v1 store).
-		if err := memory.AddExplicit(root, lesson); err != nil {
+		written, err := memory.AddExplicit(root, lesson)
+		if err != nil {
 			return "", err
+		}
+		if !written {
+			return "already remembered — identical lesson within 60s, not re-stored.", nil
 		}
 	}
 	return "remembered.", nil

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
 func TestFileStoreAddPendingAndLoad(t *testing.T) {
@@ -516,5 +517,75 @@ func TestFileStoreSavePerms(t *testing.T) {
 	}
 	if perm := di.Mode().Perm(); perm != 0o700 {
 		t.Errorf(".kern dir mode = %o, want 0700", perm)
+	}
+}
+
+// TestFileStoreClear locks the backend of `kern approval clear`: Clear
+// removes a record by ID (whatever its status) and returns it, an unknown ID
+// errors without touching the store, and the audit chain carries the
+// operator action (action "clear", result "cleared").
+func TestFileStoreClear(t *testing.T) {
+	root := t.TempDir()
+	s := NewFileStore(root)
+	decided := time.Now().Add(-time.Minute)
+	if err := s.AddPending(domain.Approval{
+		ID:          "appr-clearme",
+		TaskID:      "task-clear",
+		Requester:   "agent-a",
+		Status:      "rejected",
+		Reason:      "not this campaign",
+		RequestedAt: decided.Add(-time.Hour),
+		DecidedAt:   &decided,
+	}); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+	if err := s.AddPending(domain.Approval{ID: "appr-stays", TaskID: "task-keep", Status: "pending", RequestedAt: time.Now()}); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+
+	removed, err := s.Clear("appr-clearme", "operator", "re-open after review")
+	if err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if removed.ID != "appr-clearme" || removed.Status != "rejected" {
+		t.Fatalf("Clear returned %+v, want the rejected appr-clearme record", removed)
+	}
+	if _, err := s.Get("appr-clearme"); err == nil {
+		t.Fatal("cleared record must be gone from the store")
+	}
+	if _, err := s.Get("appr-stays"); err != nil {
+		t.Fatalf("unrelated record must survive the clear: %v", err)
+	}
+
+	// Unknown ID: a loud error, store untouched.
+	if _, err := s.Clear("appr-nope", "operator", ""); err == nil {
+		t.Fatal("Clear of an unknown id must fail loudly")
+	}
+	if _, err := s.Get("appr-stays"); err != nil {
+		t.Fatalf("failed clear must not touch the store: %v", err)
+	}
+
+	// The clear is audited in the tamper-evident chain.
+	l := NewAuditLog().
+		WithStore(storage.NewLog(filepath.Join(root, ".kern", "audit"))).
+		WithLockPath(filepath.Join(root, ".kern", "audit", ".lock"))
+	if _, err := l.Replay(); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	var found *AuditEntry
+	for i := range l.All() {
+		e := &l.All()[i]
+		if e.Resource == "approval:appr-clearme" {
+			found = e
+		}
+	}
+	if found == nil {
+		t.Fatalf("audit chain has no clear entry for appr-clearme; entries: %+v", l.All())
+	}
+	if found.Action != "clear" || found.Result != "cleared" || found.Approved {
+		t.Errorf("clear entry = action=%s result=%s approved=%t, want clear/cleared/false", found.Action, found.Result, found.Approved)
+	}
+	if found.AgentID != "operator" || found.Reason != "re-open after review" {
+		t.Errorf("clear entry agent=%s reason=%q, want operator/re-open after review", found.AgentID, found.Reason)
 	}
 }

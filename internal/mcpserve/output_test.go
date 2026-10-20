@@ -28,8 +28,8 @@ func TestCallOutputBudgetPerToolTable(t *testing.T) {
 	// Unset the env so the assertions resolve against the built-in default.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "")
 	// Listed tools get their per-tool defaults.
-	if b, err := CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 8<<10 {
-		t.Fatalf("kern_search = %d, err=%v; want %d", b, err, 8<<10)
+	if b, err := CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 16<<10 {
+		t.Fatalf("kern_search = %d, err=%v; want %d", b, err, 16<<10)
 	}
 	if b, err := CallOutputBudget("kern_compact_file", map[string]any{}); err != nil || b != 48<<10 {
 		t.Fatalf("kern_compact_file = %d, err=%v; want %d", b, err, 48<<10)
@@ -58,7 +58,7 @@ func TestCallOutputBudgetPerToolTable(t *testing.T) {
 	}
 	// A non-binding env (above the table) leaves the table value in charge.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "1048576")
-	if b, err := CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 8<<10 {
+	if b, err := CallOutputBudget("kern_search", map[string]any{}); err != nil || b != 16<<10 {
 		t.Fatalf("a non-binding env must leave the table value, got %d, err=%v", b, err)
 	}
 	// Per-call max_output at/below an explicit env cap still wins — the

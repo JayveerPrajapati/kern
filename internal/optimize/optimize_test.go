@@ -1,6 +1,8 @@
 package optimize
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,5 +276,68 @@ func TestPromptLLMSkippedWhenNoBackendConfigured(t *testing.T) {
 	}
 	if res2.LLMSkipped == "" {
 		t.Fatal("expected LLMSkipped when the default chain is unreachable even with a configured model")
+	}
+}
+
+// TestLogMaskMasksBeforeCache (QA 2026-10-19): the log path never applied
+// --mask — every secret reached the output AND the on-disk cache/semantic
+// index verbatim. optimize.Log must mask the input BEFORE keying/compressing,
+// so the cache payload never holds raw secrets, and the output stays masked
+// across cache hits.
+func TestLogMaskMasksBeforeCache(t *testing.T) {
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	in := "ERROR auth failed key=AKIA1234567890EXAMPLE token=ghp_abc123def456ghi user=qa.tester@example-corp.com retrying"
+
+	res, err := Log(in, Options{Mask: true, Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"AKIA1234567890EXAMPLE", "ghp_abc123def456ghi", "qa.tester@example-corp.com"} {
+		if strings.Contains(res.Output, leak) {
+			t.Errorf("secret leaked in masked log output: %q -> %q", leak, res.Output)
+		}
+	}
+	if !strings.Contains(res.Output, "[MASKED_") {
+		t.Errorf("expected masked placeholders in output, got %q", res.Output)
+	}
+
+	// A second identical call must hit the exact cache and stay masked.
+	res2, err := Log(in, Options{Mask: true, Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res2.FromCache {
+		t.Fatalf("expected the second masked call to be served from cache, got %+v", res2)
+	}
+	for _, leak := range []string{"AKIA1234567890EXAMPLE", "ghp_abc123def456ghi"} {
+		if strings.Contains(res2.Output, leak) {
+			t.Errorf("cache-served output leaked %q: %q", leak, res2.Output)
+		}
+	}
+
+	// Nothing written under the cache home may contain the raw secrets: the
+	// key, the cached Result payload and the semantic index all derive from
+	// the masked text.
+	err = filepath.WalkDir(cacheHome, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		for _, leak := range []string{"AKIA1234567890EXAMPLE", "ghp_abc123def456ghi"} {
+			if bytes.Contains(b, []byte(leak)) {
+				t.Errorf("cache file %s contains raw secret %q", p, leak)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -48,13 +48,13 @@ func TestWhatEventsAffected(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("WhatEventsAffected(OrderService) = %d nodes, want 1: %v", len(got), ids(got))
 	}
-	if got[0].ID != "order.OrderCreatedEvent" {
+	if got[0].Label != "order.OrderCreatedEvent" || got[0].ID != eventIndex().Symbols[2].DeclarationID() {
 		t.Errorf("affected event = %q, want order.OrderCreatedEvent", got[0].ID)
 	}
 
 	// Changing the event itself returns it directly (self event-like).
 	got = g.WhatEventsAffected("OrderCreatedEvent")
-	if len(got) != 1 || got[0].ID != "order.OrderCreatedEvent" {
+	if len(got) != 1 || got[0].Label != "order.OrderCreatedEvent" {
 		t.Errorf("WhatEventsAffected(OrderCreatedEvent) = %v, want [order.OrderCreatedEvent]", ids(got))
 	}
 

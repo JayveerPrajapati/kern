@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/duplication"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/scanners/duplication"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
@@ -193,8 +193,9 @@ func unquoteGitPath(p string) string {
 
 // toDuplicationFingerprint maps an intel fingerprint (the in-process oracle)
 // onto the duplication scanner's Fingerprint so the same structural
-// Similarity pipeline scores the pair. It mirrors fingerprintFromRecord
-// (internal/scanners/duplication/check.go): every field maps 1:1, and
+// Similarity pipeline scores the pair. It mirrors internal/duplication's
+// Fingerprint projection (the old scanners/duplication mirror was deleted
+// with the blueprint family): every field maps 1:1, and
 // ControlFlow maps intel's CFFingerprint onto duplication's CFFingerprint.
 func toDuplicationFingerprint(fp intel.Fingerprint) duplication.Fingerprint {
 	return duplication.Fingerprint{

@@ -54,14 +54,12 @@ func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 // where degree = len(callers) + len(callees) of the RESOLVED symbol, read
 // from the raw index maps (ix.Callers / ix.Calls, exact key — both deduped at
 // finalize, so len() equals the row count the adjacency renderer shows).
-// Unresolvable roots — including interface-method call targets, which have no
-// symbol of their own — fall back to the base GraphCtxDefaultTokens.
+// Unresolvable roots fall back to the base GraphCtxDefaultTokens.
 // Deterministic: the same index and symbol always yield the same budget.
 func AdaptiveGraphCtxTokens(ix *index.Index, symbol string) int {
 	resolved, ok := Resolve(ix, symbol)
 	if !ok {
-		// Unresolvable root (including "Receiver.Method" interface call
-		// targets): no adjacency to scale by, so the base budget applies.
+		// Unresolvable root: no adjacency to scale by, so the base budget applies.
 		return GraphCtxDefaultTokens
 	}
 	degree := len(ix.Callers[resolved]) + len(ix.CallSites(resolved))
@@ -80,24 +78,32 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 	if symbol == "" {
 		return "", fmt.Errorf("symbol is required")
 	}
-	resolved, ok := Resolve(ix, symbol)
+	resolved, entry, ok := ResolveEntry(ix, symbol)
 	if !ok {
-		// An interface method ("Store.Fetch") has no symbol of its own — the
-		// index records the receiver-qualified call target, not a definition.
+		// Older indexes may record an interface method target without its
+		// declaration symbol.
 		// Answer with the dispatch it can take instead of failing.
 		if recv, meth, isIface := graphInterfaceMethod(ix, symbol); isIface {
 			return graphInterfaceMethodCtxMin(ix, symbol, recv, meth, maxTokens, minConf)
 		}
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
-	g, ok := ix.Neighborhood(resolved)
+	g, ok := ix.Neighborhood(entry.DeclarationID())
 	if !ok {
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
 	passes := MinConfidenceFilter(minConf)
 	var b strings.Builder
-	if def := graphDefNode(g, resolved); def != nil {
-		b.WriteString(fmt.Sprintf("graph %s (%s) — %s:%d\n", def.Name, def.Kind, def.File, def.Line))
+	rootID := entry.DeclarationID()
+	if def := graphDefNode(g, rootID); def != nil {
+		kind := def.Kind
+		for _, declaration := range ix.Symbols {
+			if declaration.Kind == "interface" && declaration.File == def.File && declaration.Name == entry.Receiver {
+				kind = "interface method"
+				break
+			}
+		}
+		b.WriteString(fmt.Sprintf("graph %s (%s) — %s:%d\n", def.Name, kind, def.File, def.Line))
 	} else {
 		b.WriteString("graph " + resolved + "\n")
 	}
@@ -105,7 +111,7 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 		b.WriteString("  dispatch (INFERRED): " + strings.Join(impls, ", ") + "\n")
 	}
 
-	callers := graphNeighbors(ix, g, resolved, "caller")
+	callers := graphNeighbors(ix, g, rootID, "caller")
 	if len(callers) > 0 {
 		b.WriteString(fmt.Sprintf("callers (%d):\n", len(callers)))
 		for _, row := range callers {
@@ -116,7 +122,7 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 		}
 	}
 
-	callees := graphNeighbors(ix, g, resolved, "callee")
+	callees := graphNeighbors(ix, g, rootID, "callee")
 	if len(callees) > 0 {
 		b.WriteString(fmt.Sprintf("callees (%d):\n", len(callees)))
 		for _, row := range callees {
@@ -130,7 +136,7 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 		}
 	}
 
-	if members := graphCommunityMembers(ix, resolved); len(members) > 0 {
+	if members := ix.CommunityMembers(rootID); len(members) > 0 {
 		shown := members
 		if len(shown) > maxCommunityMembers {
 			shown = append(shown[:maxCommunityMembers], "…")
@@ -312,14 +318,19 @@ func graphDefNode(g index.GraphResult, root string) *index.GraphNode {
 // graphEdgeRow is one adjacency row: a neighbor name, its confidence label,
 // and its file:line when a definition exists.
 type graphEdgeRow struct {
-	name string
-	conf string // EXTRACTED / INFERRED / AMBIGUOUS
-	loc  string // " — file:line" or ""
+	name       string
+	conf       string // EXTRACTED / INFERRED / AMBIGUOUS
+	loc        string // " — file:line" or ""
+	resolution string
 }
 
 // String renders the edge row as "name [conf]file:line".
 func (r graphEdgeRow) String() string {
-	return r.name + " [" + r.conf + "]" + r.loc
+	text := r.name + " [" + r.conf + "]" + r.loc
+	if r.resolution != "" && r.resolution != "resolved" {
+		text += " (binding: " + r.resolution + ")"
+	}
+	return text
 }
 
 // graphNeighbors returns the deduped, sorted adjacency of root in one
@@ -329,8 +340,16 @@ func (r graphEdgeRow) String() string {
 // no definition, so a location would be misleading.
 func graphNeighbors(ix *index.Index, g index.GraphResult, root, dir string) []graphEdgeRow {
 	loc := map[string]string{}
+	names := map[string]string{}
+	rootCandidates := map[string]bool{root: true}
 	for _, n := range g.Nodes {
-		if n.File != "" {
+		names[n.ID] = n.Name
+		for _, candidate := range n.Candidates {
+			if candidate == root {
+				rootCandidates[n.ID] = true
+			}
+		}
+		if n.File != "" && n.Line > 0 {
 			loc[n.ID] = fmt.Sprintf(" — %s:%d", n.File, n.Line)
 		}
 	}
@@ -338,9 +357,9 @@ func graphNeighbors(ix *index.Index, g index.GraphResult, root, dir string) []gr
 	seen := map[string]bool{}
 	for _, e := range g.Edges {
 		var nb string
-		if dir == "caller" && e.To == root {
+		if dir == "caller" && rootCandidates[e.To] {
 			nb = e.From
-		} else if dir == "callee" && e.From == root {
+		} else if dir == "callee" && rootCandidates[e.From] {
 			nb = e.To
 		} else {
 			continue
@@ -357,42 +376,44 @@ func graphNeighbors(ix *index.Index, g index.GraphResult, root, dir string) []gr
 			conf = "AMBIGUOUS"
 		}
 		l := loc[nb]
-		if _, _, isIface := graphInterfaceMethod(ix, nb); isIface {
+		name := names[nb]
+		if dir == "callee" && e.Reference != "" {
+			name = e.Reference
+		}
+		if _, _, isIface := graphInterfaceMethod(ix, name); isIface {
 			conf = "INFERRED"
 			l = ""
 		}
-		rows = append(rows, graphEdgeRow{name: nb, conf: conf, loc: l})
+		rows = append(rows, graphEdgeRow{name: name, conf: conf, loc: l, resolution: e.Resolution})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	sort.Slice(rows, func(first, second int) bool {
+		if rows[first].name != rows[second].name {
+			return rows[first].name < rows[second].name
+		}
+		return rows[first].loc < rows[second].loc
+	})
 	return rows
 }
 
 // graphCommunityMembers returns the sorted member names of the community
 // containing root, or nil when root participates in no local call edges. It
-// prefers the persisted labels (ix.Communities) and falls back to computing
-// label propagation on demand; both use the same index-package algorithm.
+// selects declarations by ID or a unique full name, never pooled name labels.
 func graphCommunityMembers(ix *index.Index, root string) []string {
-	label := ix.Communities
-	if len(label) == 0 {
-		label = ix.CommunityLabels()
-	}
-	groups := map[string][]string{}
-	for n, l := range label {
-		groups[l] = append(groups[l], n)
-	}
-	for _, members := range groups {
-		found := false
-		for _, m := range members {
-			if m == root {
-				found = true
-				break
+	var selected *index.Symbol
+	for _, symbol := range ix.Symbols {
+		if symbol.DeclarationID() == root {
+			return ix.CommunityMembers(root)
+		}
+		if symbol.FullName() == root {
+			if selected != nil {
+				return nil
 			}
+			copy := symbol
+			selected = &copy
 		}
-		if !found || len(members) < minCommunitySize {
-			continue
-		}
-		sort.Strings(members)
-		return members
+	}
+	if selected != nil {
+		return ix.CommunityMembers(selected.DeclarationID())
 	}
 	return nil
 }

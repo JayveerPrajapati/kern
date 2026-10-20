@@ -45,15 +45,6 @@ func containsStr(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
-func TestRenderArch(t *testing.T) {
-	root := buildTestProject(t)
-	ix := buildIndex(t, root)
-	out := RenderArch(AnalyzeArchitecture(ix))
-	if !containsStr(out, "communities") || !containsStr(out, "coupling") {
-		t.Fatalf("expected architecture overview, got %q", out)
-	}
-}
-
 func TestRenderChangesAndReview(t *testing.T) {
 	root := buildTestProject(t)
 	ix := buildIndex(t, root)
@@ -128,15 +119,6 @@ func TestReviewRangedWithLens(t *testing.T) {
 	}
 }
 
-func TestRenderCommunities(t *testing.T) {
-	root := buildTestProject(t)
-	ix := buildIndex(t, root)
-	out := RenderCommunities(Communities(ix))
-	if !containsStr(out, "community") && !containsStr(out, "cluster") {
-		t.Fatalf("expected communities output, got %q", out)
-	}
-}
-
 func TestRenderDead(t *testing.T) {
 	root := buildTestProject(t)
 	ix := buildIndex(t, root)
@@ -152,19 +134,6 @@ func TestRenderFlows(t *testing.T) {
 	out := RenderFlows(Flows(ix, 20, 5))
 	if !containsStr(out, "entry") {
 		t.Fatalf("expected flows from entries, got %q", out)
-	}
-}
-
-func TestRenderHubsAndBridges(t *testing.T) {
-	root := buildTestProject(t)
-	ix := buildIndex(t, root)
-	hubs := RenderHubs(Hubs(ix, 10))
-	if !containsStr(hubs, "hub") {
-		t.Fatalf("expected hubs output, got %q", hubs)
-	}
-	bridges := RenderBridges(Bridges(ix, 15))
-	if bridges == "" {
-		t.Fatal("expected bridges output")
 	}
 }
 

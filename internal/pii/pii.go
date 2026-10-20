@@ -30,14 +30,24 @@ type Pattern struct {
 // code, logs and documents.
 var DefaultPatterns = []Pattern{
 	{Label: "PRIVATE_KEY", RE: regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`)},
-	{Label: "AWS", RE: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+	// AWS: structural prefix rule — AKIA + 16+ uppercase-alnum ALWAYS matches,
+	// regardless of entropy/length heuristics. The floor is exactly the
+	// canonical 20-char key length (AKIA + 16); the open upper bound also
+	// catches the low-entropy QA sample AKIA1234567890EXAMPLE (AKIA + 17),
+	// which the exact-16 rule let through verbatim (QA 2026-10-19). Real keys
+	// are the only things shaped "AKIA" + uppercase-alnum.
+	{Label: "AWS", RE: regexp.MustCompile(`\bAKIA[0-9A-Z]{16,}\b`)},
 	{Label: "AWS_SECRET", RE: regexp.MustCompile(`\b(?:aws_)?secret(?:_access_key)?\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?`)},
 	// GOOGLE: AIza… API keys (Google Maps/Cloud/Vertex). Placed ahead of the
 	// generic KEY/TOKEN patterns so provider hits label as GOOGLE.
 	{Label: "GOOGLE", RE: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{20,}\b`)},
 	// GITHUB: ghp_ (personal), gho_ (OAuth), ghu_ (user-to-server),
 	// ghs_ (server-to-server), ghr_ (refresh), ghx_ (expiring user).
-	{Label: "GITHUB", RE: regexp.MustCompile(`\bgh[pousrx]_[A-Za-z0-9]{30,}\b`)},
+	// Structural prefix rule: the 15+ alnum floor (canonical tail is 36) is
+	// deliberately below the QA sample ghp_abc123def456ghi (15 chars) so
+	// short/truncated test tokens still match — "ghp_" + 15 alnum has no
+	// prose shape (QA 2026-10-19).
+	{Label: "GITHUB", RE: regexp.MustCompile(`\bgh[pousrx]_[A-Za-z0-9]{15,}\b`)},
 	{Label: "GITHUB_PAT", RE: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{60,}\b`)},
 	{Label: "SLACK", RE: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{Label: "STRIPE", RE: regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b`)},
@@ -59,7 +69,13 @@ var DefaultPatterns = []Pattern{
 	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_=-]+)?\b`)},
 	{Label: "BEARER", RE: regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b`)},
 	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_\s-]?key|apikey|auth[_\s-]?token|access[_\s-]?token|refresh[_\s-]?token|client[_\s-]?secret|private[_\s-]?key|app[_\s-]?secret|consumer[_\s-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
-	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)["']?(?:\s*[=:]\s*|\s+)["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
+	// PASSWORD: the keyword may carry a compound prefix (db_password,
+	// SMTP_PASSWORD, my-password) — `\b` alone fails there because `_` is a
+	// word character — and the separator covers the prose "password is X"
+	// form alongside = and :. A bare keyword inside a longer word
+	// (notpassword) still cannot match: the optional prefix requires a
+	// `_`/`-` separator and the keyword itself stays `\b`-anchored.
+	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?(?:\s*[=:]\s*|\s+is\s+|\s+)["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
 	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
 	// URL_CRED (scheme-less): DSN/userinfo forms without a scheme, e.g.
@@ -75,7 +91,12 @@ var DefaultPatterns = []Pattern{
 	// is more likely a credential than prose.
 	{Label: "HEX", RE: regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)},
 	{Label: "IP", RE: regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)},
-	{Label: "IPV6", RE: regexp.MustCompile(`(?i)\b(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){1,6}::)\b`)},
+	// IPV6: every hex group must be ≥2 chars (QA 2026-10-19). A Python slice
+	// like sample[1::2] is 2 single-char groups and must not read as an
+	// address; real compressed addresses keep ≥2-char groups on both sides of
+	// "::". (::1 / fe80::1 — single-char tails — are non-secret link-local/
+	// loopback anyway and were already suppressed by IsNonSecretIP.)
+	{Label: "IPV6", RE: regexp.MustCompile(`(?i)\b(?:[0-9a-fA-F]{2,4}(?::[0-9a-fA-F]{2,4}){0,6}::[0-9a-fA-F]{2,4}(?::[0-9a-fA-F]{2,4}){0,6}|::[0-9a-fA-F]{2,4}(?::[0-9a-fA-F]{2,4}){0,6}|[0-9a-fA-F]{2,4}(?::[0-9a-fA-F]{2,4}){1,6}::)\b`)},
 	{Label: "EMAIL", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b`)},
 	// PHONE is split into per-shape patterns because RE2 lacks lookarounds
 	// and alternation backtracks: a single pattern cannot span the 3-3-4

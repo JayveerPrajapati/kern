@@ -16,8 +16,12 @@ import (
 // (the MCP server runner).
 func runMcpClient(rest []string) {
 	if len(rest) == 0 {
+		// A bare invocation is a missing-subcommand usage error (exit 2, the
+		// documented contract — QA 2026-10-15 finding 9); the explicit
+		// help/-h/--help subcommand below stays a successful help request
+		// (exit 0). Print the help text, then signal the usage error.
 		mcpClientHelp()
-		return
+		fatalUsage("mcp-client requires a subcommand: add, list, rm, call")
 	}
 	switch rest[0] {
 	case "add":

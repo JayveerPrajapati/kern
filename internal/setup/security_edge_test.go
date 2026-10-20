@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // --- B. mergeJSON path safety (setup_config.go) ---
@@ -287,7 +289,7 @@ func TestWireDuplicateAgentIdempotent(t *testing.T) {
 // because mergeJSON replaces the whole kern entry.
 func TestWireOpencodeDoesNotEnableExec(t *testing.T) {
 	dir := t.TempDir()
-	if st := wireOpencode(dir); !st.Installed {
+	if st := agentwire.WireOpencode(dir); !st.Installed {
 		t.Fatalf("wireOpencode not installed: %+v", st)
 	}
 	assertNoExecEnv := func(stage string) {
@@ -320,7 +322,7 @@ func TestWireOpencodeDoesNotEnableExec(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if st := wireOpencode(dir); !st.Installed {
+	if st := agentwire.WireOpencode(dir); !st.Installed {
 		t.Fatalf("wireOpencode (repair pass) not installed: %+v", st)
 	}
 	assertNoExecEnv("repair pass")

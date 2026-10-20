@@ -15,15 +15,19 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/loop"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/watcher"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/mcpgate"
+	"github.com/JayveerPrajapati/kern/internal/mcphints"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/project"
+	"github.com/JayveerPrajapati/kern/internal/semcache"
+	"github.com/JayveerPrajapati/kern/internal/servedledger"
 	"github.com/JayveerPrajapati/kern/internal/session"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"io"
 	"log"
 	"os"
@@ -185,6 +189,11 @@ type Server struct {
 	// request (initialize or tools/call) instead of server startup, so
 	// setup is instant and the index cost is paid while the user waits.
 	indexOnce sync.Once
+	// preloadWG tracks the background preload goroutines so Close can drain
+	// them before closing sessions; closing (guarded by mu) stops new ones
+	// from starting once shutdown has begun.
+	preloadWG sync.WaitGroup
+	closing   bool
 	// indexedRoots records which project roots have completed at least one
 	// index build this process, so the "first build in progress" notice is
 	// printed once per root instead of on every stale rebuild.
@@ -262,6 +271,34 @@ type Server struct {
 	samplingHost    bool // this server's own slot has a sampler (MCP sampling or command)
 	samplingCapable bool
 	samplerKey      string
+	// ledger is the per-session served ledger (B1, anti-stall campaign Phase
+	// 0): the already-served dedup store for read tools. One ledger per
+	// Server = one ledger per MCP session, so repeats within a session are
+	// caught without cross-session (cross-client, cross-test) pollution.
+	// Wired in runTool; nil-safe (hand-rolled test servers degrade to a
+	// miss/no-op).
+	ledger *servedledger.Ledger
+	// loopdetect is the per-session degenerate-loop detector (B4, anti-stall
+	// campaign Phase 1): advisory near-duplicate detection for read queries.
+	// One detector per Server = one per MCP session, like the ledger; wired
+	// in runTool. Nil-safe (hand-rolled test servers degrade to a no-op).
+	loopdetect *semcache.LoopDetector
+	// phaseBudgetCap is the per-session explore-phase tool-call cap
+	// (KERN_EXPLORE_BUDGET=N, N >= 1; 0 = disabled). phaseBudget counts
+	// explore-phase calls per session key (sessionKeyFor), so the cap is
+	// per-session-key and INDEPENDENT of s.budget (which is per-Server and,
+	// where tasklife uses it, task-scoped). Guarded by budgetMu in
+	// precheckTool (the same check-then-track critical section as the safety
+	// budget).
+	phaseBudgetCap int
+	phaseBudget    map[string]int
+	// hints is the per-session tool-adoption hint engine (B6, anti-stall
+	// campaign Phase 4): in-band nudges inside tool responses reminding the
+	// agent of high-value tools it never calls. One engine per Server = one
+	// per MCP session, like the ledger; wired at the full-payload return
+	// sites in runTool. Nil-safe (hand-rolled test servers degrade to a
+	// no-op).
+	hints *mcphints.Hints
 }
 
 // WithPreToolHook registers a pre-tool-use hook. NewServer wires the
@@ -390,7 +427,10 @@ func newServerCore(transport string) *Server {
 	// that never constructs a server (e.g. a pure `kern diff-gate` CLI run)
 	// is wired in cmd/kern main.
 	catalog.WithDiffgateTools()
-	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
+	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}, ledger: servedledger.New(), loopdetect: semcache.NewLoopDetector(), phaseBudget: map[string]int{}, hints: mcphints.New()}
+	// The explore-phase budget (B2) is opt-in via KERN_EXPLORE_BUDGET; unset
+	// leaves phaseBudgetCap 0 (completely off, zero behavior change).
+	s.phaseBudgetCap = exploreBudgetCap()
 	// The session LRU is wired with the root-owned platform-cache cleanup as
 	// the eviction callback: when an idle session is evicted, the per-root
 	// Platform (full call graph + twin-merged knowledge state) and its build
@@ -570,7 +610,7 @@ func (s *Server) progress(ctx context.Context, token, tool string, pct int, msg 
 // slowTools are the tools whose dispatch can take seconds to minutes; they
 // emit MCP progress notifications so agents see liveness instead of
 // silence during multi-second tool calls. The "slow" flag lives on the
-// per-tool catalog table (catalog.Tool.Slow in internal/mcp/catalog/tools.go)
+// per-tool catalog table (catalog.Tool.Slow in internal/mcpcatalog/tools.go)
 // — slowness is declared next to each tool definition (index/build/scan,
 // sandbox, heal, validate, refactor, repair), not in a drifting side map —
 // and this set is derived from it. Fast lookups (search, explore, graph,
@@ -588,6 +628,25 @@ var slowTools = func() map[string]bool {
 	}
 	return m
 }()
+
+// durationFooterThreshold gates the per-call "[kern] took Xs" result footer:
+// fast calls stay byte-identical to today (parity tests capture exact
+// outputs), only multi-second calls gain the line. A var so tests can lower
+// it without sleeping real seconds.
+var durationFooterThreshold = 2 * time.Second
+
+// appendDurationFooter appends the model-visible latency line to a tool
+// result (duration-visibility L1): the tool-call duration is otherwise shown
+// only by host UIs from their own part timestamps, which the model never
+// sees — and some hosts (opencode) discard progress-notification content.
+// One line, last position, threshold-gated; empty text and short calls are
+// returned unchanged.
+func appendDurationFooter(text string, took time.Duration) string {
+	if text == "" || took <= durationFooterThreshold {
+		return text
+	}
+	return fmt.Sprintf("%s\n[kern] took %.1fs", text, took.Seconds())
+}
 
 func (s *Server) startProgress(ctx context.Context, id, token, tool string) func() {
 	done := make(chan struct{})
@@ -681,7 +740,17 @@ func (s *Server) preloadIndexes() {
 		if isFilesystemRoot(r) {
 			continue
 		}
+		// Register under mu so Add cannot race Close's Wait, and so no
+		// preload starts after shutdown began.
+		s.mu.Lock()
+		if s.closing {
+			s.mu.Unlock()
+			return
+		}
+		s.preloadWG.Add(1)
+		s.mu.Unlock()
 		go func(root string) {
+			defer s.preloadWG.Done()
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "kern-mcp: preload index %s: panic recovered: %v\n", root, r)
@@ -695,8 +764,68 @@ func (s *Server) preloadIndexes() {
 			// Record the build so a later graph tool call that reuses this
 			// warm index does not print the "first build in progress" notice.
 			s.indexedRoots.Store(root, true)
+			// Warm the root's shared Platform in the background: the index
+			// build just settled, so the first high-level tool call
+			// (kern_impact, kern_plan, kern_analyze, ...) finds the cached
+			// Platform instead of blocking on the ~5 tree walks
+			// app.NewWithIndex runs. Best-effort and preloadWG-tracked like
+			// the index preload itself, so Close drains it and a warm
+			// failure just means the first call builds as before.
+			s.warmPlatform(root)
 		}(r)
 	}
+}
+
+// warmPlatform builds the root's shared application Platform in the
+// background so the first high-level tool call after the index build finds a
+// warm cache instead of blocking on the ~5 tree walks app.NewWithIndex runs.
+// It calls the same platformFor code path the handlers use, so the existing
+// per-root cache keying (index instance) and the per-root build lock apply
+// unchanged: a warm that races a rebuild keys to whatever index instance the
+// next call would resolve (it can never pin a stale platform), concurrent
+// tool calls and the warm serialize on the same per-root lock, and a warm
+// failure is silent — the first call builds the Platform exactly as before
+// the warm existed. The goroutine is tracked by preloadWG (registered under
+// mu with the same closing guard as preloadIndexes) so Close drains it like
+// a preload; once shutdown has begun no warm starts.
+func (s *Server) warmPlatform(root string) {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return
+	}
+	s.preloadWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.preloadWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "kern-mcp: warm platform %s: panic recovered: %v\n", root, r)
+			}
+		}()
+		// The session LRU may have evicted this root between the index build
+		// and this warm (a server touching many roots at capacity): nothing
+		// to warm, and re-walking the tree here would only rebuild the index
+		// the eviction just released. The next tool call builds both as
+		// today.
+		if _, ok := s.sessCache.Peek(root); !ok {
+			return
+		}
+		if _, err := s.platformFor(context.Background(), root); err != nil {
+			fmt.Fprintf(os.Stderr, "kern-mcp: warm platform %s: %v\n", root, err)
+			return
+		}
+		// The session may have been evicted WHILE the Platform was building
+		// (the build holds only the per-root lock, never the session cache).
+		// Drop the warm entry so an evicted root's Platform cannot linger;
+		// the next call rebuilds it, exactly as if the warm had never run.
+		// Peek is called WITHOUT s.mu held: the session cache invokes its
+		// onEvict callback (evictSessionState, which takes s.mu) under its
+		// own lock, so holding s.mu here would invert that lock order.
+		if _, ok := s.sessCache.Peek(root); !ok {
+			s.evictSessionState(root)
+		}
+	}()
 }
 
 // startReactiveWatcher starts the ADR-0011 reactive file watcher when the
@@ -915,6 +1044,25 @@ func (s *Server) safeDispatch(req rpcRequest) (r any) {
 // tolerates sessions already closed by LRU eviction (project.Session.Close
 // is itself documented safe to call multiple times).
 func (s *Server) Close() {
+	// Refuse new preloads and drain running ones BEFORE closing sessions: a
+	// preload still inside Index() would otherwise start a background save
+	// after the session's saveWG was already waited on, or re-create a
+	// session (and its watcher) after cleanup. index.Build takes no context,
+	// so the drain is bounded; a build that outlives it is abandoned and
+	// ends with the process.
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	preloadsDone := make(chan struct{})
+	go func() {
+		s.preloadWG.Wait()
+		close(preloadsDone)
+	}()
+	select {
+	case <-preloadsDone:
+	case <-time.After(watchShutdownTimeout):
+		fmt.Fprintln(os.Stderr, "kern-mcp: shutdown: a background index preload is still running; abandoning it")
+	}
 	// Close every cached session and drain the LRU: the sessions' background
 	// index saves (saveWG) and file watchers are stopped here.
 	s.sessCache.CloseAll()
@@ -957,19 +1105,25 @@ func (s *Server) dispatch(req rpcRequest) any {
 	// tool result with isError=true — so the client sees a clean tool error
 	// rather than a panic or a JSON-RPC error. A nil or disabled gate is a
 	// no-op, keeping the default (loopback-client trust) behavior identical.
-	if s.gate != nil && s.gate.Enabled() && req.Method == "tools/call" {
-		var p struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-		}
-		if json.Unmarshal(req.Params, &p) == nil {
-			if err := s.gate.Check(p.Name, p.Arguments); err != nil {
+	// The tools/call params are decoded ONCE here and shared with the gate
+	// check AND toolCallResponseDecoded below, so a call is JSON-decoded
+	// exactly once (the gate previously re-unmarshalled what
+	// toolCallResponse had already decoded). A malformed params body is not
+	// a gate matter — the old gate decode silently skipped it and
+	// toolCallResponse answered "invalid params"; the tools/call case below
+	// answers identically.
+	var callParams toolCallParams
+	callParamsOK := false
+	if req.Method == "tools/call" {
+		callParamsOK = json.Unmarshal(req.Params, &callParams) == nil
+		if callParamsOK && s.gate != nil && s.gate.Enabled() {
+			if err := s.gate.Check(callParams.Name, callParams.Arguments); err != nil {
 				denied := "pre-tool-use denied: " + err.Error()
 				result := map[string]any{
 					"content": []any{map[string]any{"type": "text", "text": denied}},
 					"isError": true,
 				}
-				mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, denied)
+				mcpserve.AttachTokenMetadata(result, callParams.Name, callParams.Arguments, tokenize.Count(denied))
 				return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
 			}
 		}
@@ -1070,7 +1224,10 @@ func (s *Server) dispatch(req rpcRequest) any {
 	case "tools/list":
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": s.filteredTools(), "schemaVersion": s.schemaVersionFor()}}
 	case "tools/call":
-		return s.toolCallResponse(req.ID, req.Params)
+		if !callParamsOK {
+			return errorResponse(req.ID, -32602, "invalid params")
+		}
+		return s.toolCallResponseDecoded(req.ID, callParams)
 	case "prompts/list":
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"prompts": prompts}}
 	case "prompts/get":
@@ -1097,11 +1254,16 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	metrics.Default().RecordRequest()
 	start := time.Now()
 	fromCache := false
+	// skipFooter marks the etag short-circuit returns below: their tiny
+	// protocol payloads ("unchanged (etag …)") are matched verbatim by
+	// callers and must not gain a duration footer line.
+	skipFooter := false
 	defer func() {
+		took := time.Since(start)
 		// D1: cache-hit durations must not pollute the RecordToolCall latency
 		// percentiles — hits are counted under RecordCacheHit instead (F4).
 		if !fromCache {
-			metrics.Default().RecordToolCall(time.Since(start))
+			metrics.Default().RecordToolCall(took)
 		}
 		if runErr != nil {
 			metrics.Default().RecordError()
@@ -1112,9 +1274,19 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 		// blocked; executed calls as allowed/error. Cache hits append too,
 		// tagged Policy:"tool-cache" / Reason:"served from cache" (F5).
 		if name != "" {
-			s.auditToolCall(name, args, runErr, true, fromCache)
+			s.auditToolCall(name, args, runErr, true, fromCache, took)
 		} else {
-			s.auditToolCall(origName, args, runErr, false, fromCache)
+			s.auditToolCall(origName, args, runErr, false, fromCache, took)
+		}
+		// Duration visibility L1: the host UI shows the call's wall-clock to
+		// the HUMAN from its own part timestamps, but the MODEL only sees the
+		// result text — and some hosts (opencode) discard progress
+		// notification content entirely. A threshold-gated last line makes
+		// the latency model-visible on every host. Fast calls and error
+		// results stay byte-identical to today; cache hits are fast and the
+		// etag short-circuits are exempted via skipFooter.
+		if runErr == nil && !skipFooter {
+			out = appendDurationFooter(out, took)
 		}
 	}()
 	// B1 (ADR-0012): conditional-fetch state is strictly per-call. runTool
@@ -1130,6 +1302,7 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 		scope.etag = ""
 		scope.unchanged = false
 		scope.sliced = false
+		scope.routed.routedSet = false
 	}
 	name, err := s.precheckTool(name, args)
 	if err != nil {
@@ -1163,6 +1336,44 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 		}
 		return out, nil
 	}
+	// kern_meta D1 cache routing: resolve the routed (name, args) ONCE for
+	// this call and memoize it on the per-call scope, so cacheableForCall
+	// (both the lookup and store gates below) and cacheKeyFor (in cacheLookup
+	// and cacheStore, including the F-1 fingerprint path) read the memo
+	// instead of re-running the classifier up to 4× on the same request.
+	// resolveCacheCall is pure and deterministic, so the memo is byte-identical
+	// to what each consumer would have computed. Placed after the R7 slice
+	// re-read (which never touches the cache) and reset at the top of every
+	// runTool entry so composed steps (same scope, different args) recompute.
+	if name == "kern_meta" {
+		if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+			scope.routed.name, scope.routed.args = resolveCacheCall(context.Background(), name, args)
+			scope.routed.routedSet = true
+		}
+	}
+	// Loop-suspect detection (B4, anti-stall campaign Phase 1): observe the
+	// read query EARLY — before the served-ledger pointer and D1 gates — so
+	// the ring records every read call, including ones whose payload gets
+	// deduped (a loop is still a loop when the answer was re-served). The
+	// advisory marker is appended only to full-payload responses below;
+	// pointer lines, etag short-circuits, slice re-reads and error returns
+	// never carry it.
+	loopMarker := s.loopObserve(ctx, name, args)
+	// Served ledger (B1, anti-stall campaign Phase 0): per-session
+	// already-served dedup for read tools. When the same (tool,
+	// view-defining args) was already served in THIS session, answer with a
+	// one-line pointer instead of re-emitting the payload — protecting the
+	// agent's context window and teaching the etag in-band. Placed after the
+	// R7 slice re-read and the kern_meta routed memo (the ledger keys the
+	// ROUTED call, same resolution as the D1 cache), before the D1 gate: a
+	// ledger hit is cheaper than even a cache hit. no_cache=1 bypasses
+	// (fresh serve, same as D1), and so does an explicit etag (the caller is
+	// already speaking the conditional-fetch protocol — the D1 path serves
+	// the tiny "unchanged" reply, which is what the pointer teaches).
+	if ptr, ok := s.ledgerLookup(ctx, name, args); ok {
+		skipFooter = true
+		return ptr, nil
+	}
 	// D1 — tool-response cache: check INSIDE runTool, after precheckTool and
 	// validateStringArgs succeed and before dispatchTool (F4), so a cache hit
 	// never skips the KERN_TOOLS allowlist, root validation, the 	// safety budget, metrics or the audit chain. Only Cacheable (explicit
@@ -1171,7 +1382,7 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	// kern_meta participates only when the sub-tool it routes to is itself
 	// cacheable (R1), and semantic calls never participate (R3). Lookup and
 	// store below use the same gate, so both paths are covered.
-	if cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
+	if cacheableForCall(ctx, name, args) && cacheEnabled() && !noCacheArg(args) {
 		if text, hit := s.cacheLookup(ctx, name, args); hit {
 			fromCache = true
 			metrics.Default().RecordCacheHit()
@@ -1180,11 +1391,30 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 			// "unchanged" is expected, and the short response is never
 			// stored back.
 			if short := s.maybeShortCircuit(ctx, name, args, text); short != "" {
+				skipFooter = true
 				return short, nil
 			}
+			// Served ledger: a full-payload cache-hit replay is a serve —
+			// record it (with the entry's etag, stamped on the scope by
+			// cacheLookup) so an identical repeat in this session gets the
+			// one-line pointer.
+			s.ledgerRecord(ctx, name, args, text)
+			hint := s.hintFor(ctx, name, args, text, loopMarker)
+			text = appendLoopMarker(text, loopMarker)
+			text = appendHintLine(text, hint)
 			return text, nil
 		}
 		metrics.Default().RecordCacheMiss()
+	}
+	// C2/F4 (W6): pre-render short-circuit — a registry-verified etag claim
+	// with unchanged index identity and serve view proves the response would
+	// be byte-identical, so the handler render is skipped. Placed after the
+	// D1 gate (a cache hit already avoids the render) and before the progress
+	// wrap (no handler, no progress). Falls back to the post-render
+	// maybeShortCircuit below on any mismatch.
+	if short := s.maybePreRenderShortCircuit(ctx, name, args); short != "" {
+		skipFooter = true
+		return short, nil
 	}
 	// slow tools emit MCP progress notifications (0% start, 5s
 	// keep-alive, 100% stop) so agents see liveness instead of silence during
@@ -1215,13 +1445,21 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	// cacheStore.
 	if err == nil {
 		if short := s.maybeShortCircuit(ctx, name, args, text); short != "" {
+			skipFooter = true
 			return short, nil
 		}
 		// D1: store only successful (non-error) results; the response text is
 		// the raw pre-sandbox output (max_output is applied at serve time).
-		if cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
+		if cacheableForCall(ctx, name, args) && cacheEnabled() && !noCacheArg(args) {
 			s.cacheStore(ctx, name, args, text)
 		}
+		// Served ledger: record the full-payload serve with the etag minted
+		// for it (scope.etag), so an identical repeat in this session is
+		// answered with the one-line pointer instead of the payload.
+		s.ledgerRecord(ctx, name, args, text)
+		hint := s.hintFor(ctx, name, args, text, loopMarker)
+		text = appendLoopMarker(text, loopMarker)
+		text = appendHintLine(text, hint)
 	}
 	return text, err
 }
@@ -1242,13 +1480,15 @@ func (s *Server) maybeShortCircuit(ctx context.Context, name string, args map[st
 	}
 	// The conditional-fetch protocol is carried on the per-call indexScope:
 	// toolCallResponse attaches result["etag"]/result["unchanged"] and records
-	// the working set from that same scope. The governed/REST passthrough
-	// (CallToolGoverned) runs runTool with the caller's bare ctx — no scope —
-	// so it cannot speak the protocol; a matching etag would otherwise render
-	// the literal "unchanged (etag E)" string as the ENTIRE tool output for a
-	// web-console/SDK consumer. It always serves full text until it can
-	// (HIGH-2), so etags are only ever computed when a scope exists to carry
-	// them.
+	// the working set from that same scope. The RAW governed passthrough
+	// (CallToolGoverned — string-only SDK callers) runs runTool with the
+	// caller's bare ctx — no scope — so it cannot speak the protocol; a
+	// matching etag would otherwise render the literal "unchanged (etag E)"
+	// string as the ENTIRE tool output for a string-only consumer. The
+	// structured variant (CallToolGovernedResult, C2/F3 — REST routes, SDK
+	// CallResult) attaches a per-call scope, carries etag/unchanged as
+	// structured fields, and records the serve exactly like a tools/call.
+	// Etags are only ever computed when a scope exists to carry them.
 	scope, hasScope := ctx.Value(indexScopeKey{}).(*indexScope)
 	if !hasScope {
 		return ""
@@ -1273,10 +1513,84 @@ func (s *Server) maybeShortCircuit(ctx context.Context, name string, args map[st
 	}
 	prev := argString(args, "etag")
 	if prev != "" && prev == e {
+		// Trust-but-verify (C1/P1): only an agent the working-set registry
+		// shows was actually handed this etag for these args may collapse
+		// the re-read. A caller claiming an etag it never received — a
+		// different agent sharing a client-side cache, or a foreign etag —
+		// gets the full text: content over token savings (operator
+		// decision, reject strictness). The stateless CLI conditional fetch
+		// (clietag) never consults this; the check applies only where the
+		// protocol is scope-carried. toolCallResponse re-records the entry
+		// on this serve, so an LRU-evicted agent recovers after one full
+		// re-serve.
+		if served, ok := etag.Default.ServedETag(argString(args, "agent_id"), etag.CanonicalArgsKey(args)); !ok || served != e {
+			return ""
+		}
 		scope.unchanged = true
 		return etag.UnchangedResponseText(e)
 	}
 	return ""
+}
+
+// serveView returns the serve-time view component the response etag is
+// bound to (F-2): the tool's catalog schema version and the call's
+// effective max_output budget. Identical to what maybeShortCircuit folds
+// into HashView, so a view recorded at serve time and recomputed at claim
+// time are directly comparable (C2/F4).
+func serveView(name string, args map[string]any) string {
+	budget, err := mcpserve.CallOutputBudget(name, args)
+	if err != nil {
+		budget = -1
+	}
+	return toolByName[name].SchemaVersion + ":" + strconv.Itoa(budget)
+}
+
+// maybePreRenderShortCircuit implements the pre-render half of the
+// conditional-fetch contract (C2/F4, W6): when the caller's etag claim is
+// registry-verified (trust-but-verify, C1/P1) AND the index identity and
+// the serve view are unchanged since that etag was minted, the response is
+// provably identical, so the handler render is skipped entirely — saving
+// the compute cost of a full re-render, not just the response tokens. It
+// runs after the D1 gate (a cache hit already skips the render) and after
+// precheckTool/validateStringArgs — it never bypasses the allowlist, root
+// validation or the audit chain; it only answers a verified re-read. Any
+// mismatch (foreign etag, evicted entry, content change — the probe-gated
+// identity from C2/F1 rebuilds on staleness — or view drift) falls back to
+// the post-render maybeShortCircuit. Returns "" when the full render must
+// run.
+func (s *Server) maybePreRenderShortCircuit(ctx context.Context, name string, args map[string]any) string {
+	if !etag.Eligible(name) {
+		return ""
+	}
+	prev := argString(args, "etag")
+	if prev == "" {
+		return ""
+	}
+	scope, ok := ctx.Value(indexScopeKey{}).(*indexScope)
+	if !ok {
+		return ""
+	}
+	entry, ok := etag.Default.ServedEntry(argString(args, "agent_id"), etag.CanonicalArgsKey(args))
+	if !ok || entry.ETag != prev || entry.Identity == "" || entry.View == "" {
+		return ""
+	}
+	// The index identity must still be the one the etag was minted under.
+	// cacheIndexIdentity is probe-gated (C2/F1): a content change anywhere
+	// in the tree produces a different identity (or "noindex" when the
+	// session must rebuild) and forces the full render. Within the
+	// freshness-probe cooldown this can serve a stale-identity "unchanged" —
+	// the same bounded window the post-render short-circuit already has
+	// (ADR-0012 race notes).
+	root := resolveRoot(argString(args, "root"))
+	if cur := s.cacheIndexIdentity(root); cur == "" || cur != entry.Identity {
+		return ""
+	}
+	if v := serveView(name, args); v != entry.View {
+		return ""
+	}
+	scope.etag = prev
+	scope.unchanged = true
+	return etag.UnchangedResponseText(prev)
 }
 
 // analyzeChange and simulateChange have been migrated to internal/app.Platform.
@@ -1403,6 +1717,12 @@ func validateRoot(root string) error {
 // conditional-fetch verdict (ADR-0012): runTool stamps the response etag on
 // every eligible tool and marks the call unchanged when it short-circuits, so
 // toolCallResponse can attach result["etag"] / result["unchanged"].
+// routedName/routedArgs memoize resolveCacheCall's kern_meta classification
+// for THIS call (runTool resolves it once at the top and the D1 cache gates,
+// fingerprints and keys reuse the memo instead of re-running the classifier),
+// so the memo is valid only for the (name, args) runTool received and must be
+// reset at the top of every runTool entry (composed steps re-enter under the
+// same scope).
 type indexScope struct {
 	ix        *index.Index
 	prov      *Provenance // structured evidence stamped by retrieval handlers
@@ -1410,6 +1730,16 @@ type indexScope struct {
 	etag      string      // conditional-fetch etag for eligible responses ("" = tool not eligible)
 	unchanged bool        // true when the response is a short-circuit "unchanged (etag E)"
 	sliced    bool        // true when this call is a retained-output slice re-read (R7): the response is served from the cursor store without executing the tool; toolCallResponse still applies the output budget (A3) and, on truncation, mints a chained anchor for the elided remainder
+	routed    routedCall  // kern_meta classification memo (see resolveCacheCall)
+}
+
+// routedCall memoizes resolveCacheCall's output for one kern_meta call so the
+// classifier runs once per call instead of once per cache gate/key/fingerprint
+// (D1). routedSet distinguishes "no memo" (compute) from "memo present".
+type routedCall struct {
+	name      string
+	args      map[string]any
+	routedSet bool
 }
 type indexScopeKey struct{}
 
@@ -1439,7 +1769,7 @@ func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, erro
 	// print a stderr line, then Session.Index loaded it again. Tool calls
 	// wait on the build below silently; preloadIndexes and the background
 	// watch warm roots ahead of time.
-	ix, err := s.sessionFor(root).Index()
+	ix, err := s.sessionFor(root).IndexWithin(indexWaitBudget())
 	if err != nil {
 		return nil, err
 	}
@@ -1457,6 +1787,24 @@ func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, erro
 		return nil, err
 	}
 	return ix, nil
+}
+
+// indexWaitBudget bounds how long one tool call waits on an index build. On a
+// large repo the first build takes tens of seconds; past this budget the call
+// returns a retryable "still building" error (the build keeps running in the
+// background) instead of hanging until the host gives up. Override with
+// KERN_INDEX_WAIT_SECONDS; 0 waits indefinitely.
+func indexWaitBudget() time.Duration {
+	const def = 25 * time.Second
+	v := strings.TrimSpace(os.Getenv("KERN_INDEX_WAIT_SECONDS"))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return time.Duration(n) * time.Second
 }
 
 // rejectEmptyIndex turns a silently-empty index into a real error. The index

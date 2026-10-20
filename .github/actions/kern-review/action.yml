@@ -1,11 +1,11 @@
 name: kern-review
 description: >
   kern PR merge gate: runs the code-intel review (kern review), change-impact
-  analysis with risk scores (kern changes), and the architectural boundary
-  guard (kern guard check), posts an upserted PR comment, and can fail the job
-  when risk exceeds a threshold or boundary violations are reported. All
-  analysis is local and deterministic — the kern binary is downloaded from
-  this repo's release assets.
+  analysis with risk scores (kern review --json), and the architectural
+  boundary guard (kern guard check), posts an upserted PR comment, and can
+  fail the job when risk exceeds a threshold or boundary violations are
+  reported. All analysis is local and deterministic — the kern binary is
+  downloaded from this repo's release assets.
 
 inputs:
   base-ref:

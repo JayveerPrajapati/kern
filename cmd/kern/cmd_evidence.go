@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -23,10 +24,10 @@ func runEvidence(args []string) int {
 	// Flag-form operations (Feature Batch J): `kern evidence --full-state
 	// [--out FILE]` and `kern evidence --restore FILE`. Detected by scanning
 	// (not args[0]) so --root/--out may appear before or after the flag.
-	if hasFlag(args, "--full-state") {
+	if cliflags.HasFlag(args, "--full-state") {
 		return runEvidenceFullState(args)
 	}
-	if hasFlag(args, "--restore") {
+	if cliflags.HasFlag(args, "--restore") {
 		return runEvidenceRestore(args)
 	}
 	switch args[0] {
@@ -331,7 +332,7 @@ func evidenceSource(file, url string) ([]byte, error) {
 		}
 		return data, nil
 	}
-	return readStdin()
+	return cliflags.ReadStdin()
 }
 
 // runEvidenceExplain renders a bundle in plain language: what it proves and

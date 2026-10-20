@@ -179,7 +179,8 @@ func Store(root, from, to string) error {
 	if strings.TrimSpace(d) == "" {
 		return nil
 	}
-	return memory.AddAuto(root, "latest change:\n"+sanitize(d))
+	_, err = memory.AddAuto(root, "latest change:\n"+sanitize(d))
+	return err
 }
 
 // maxStoredContent is the maximum length of persisted commit content.

@@ -22,9 +22,7 @@ func sliceContains(s []string, v string) bool {
 // than trusted — so they can never fabricate a violation.
 func TestImpactStrictSkipsHeuristicEdges(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"svc/svc.go": `package svc
-
-func Target() {}
+		"svc/svc.ts": `export function Target(): void {}
 `,
 		"web/caller.ts": `import { Target } from "../svc/svc";
 

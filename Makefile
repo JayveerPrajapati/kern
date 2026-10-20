@@ -12,9 +12,15 @@ GOFLAGS := -buildvcs=false
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-purego test test-race vet lint bench install install-purego hooks release dist mcpb clean clean-artifacts
+.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks release dist release-smoke mcpb clean clean-artifacts help
 
 all: build
+
+# help lists every target declared in .PHONY — it cannot drift from the
+# target list because it IS the target list (CONTRIBUTING.md points here).
+help:
+	@echo "kern Makefile targets:"
+	@sed -n 's/^.PHONY: //p' $(MAKEFILE_LIST) | tr ' ' '\n' | sed '/^$$/d' | sed 's/^/  make /'
 
 # build is the DEFAULT build: tree-sitter is compiled in (hard CGO — the
 # grammar bindings compile C sources via `import "C"`). CGO_ENABLED=1 is
@@ -24,7 +30,6 @@ build:
 	mkdir -p $(BIN)
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
-	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
 # build-purego is the documented pure-Go opt-out: -tags notreesitter swaps
 # the tree-sitter grammars for regex-heuristic extraction, so no C toolchain
@@ -33,7 +38,6 @@ build-purego:
 	mkdir -p $(BIN)
 	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
-	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
 test:
 	go test ./...
@@ -41,6 +45,20 @@ test:
 # tests: resilience real-execution scenarios, long index builds).
 test-short:
 	go test -short ./...
+# test-touched runs ONLY the packages your current changes touch (working
+# tree vs HEAD, or the last commit when clean), plus the gate packages that
+# pin cross-package files — the plugin/AGENTS.md lesson (687ec36): those
+# files are read by internal/setup AND internal/architecture, so touching
+# them must run both. This is the iteration loop; `make test-short` stays
+# the pre-merge ritual.
+test-touched:
+	@pkgs=$$(./scripts/touched-packages.sh); \
+	if [ -n "$$pkgs" ]; then \
+		echo "go test -count=1 $$pkgs"; \
+		go test -count=1 $$pkgs; \
+	else \
+		echo "no touched packages — nothing to test"; \
+	fi
 # cover runs the short suite with coverage and prints the per-package
 # summary. CI uploads coverage.out to Codecov; this is the local equivalent.
 cover:
@@ -68,27 +86,36 @@ bench:
 # the web console /benchmarks page renders. Zero network by design.
 bench-latency:
 	go run ./cmd/kern bench --root .
+# bench-gate is the benchmark regression gate (perfection plan B1): the
+# same harness with --check, verifying the run against the versioned
+# thresholds in cmd/kern/bench_thresholds.json. Fails (exit 1) on hard
+# violations: the warm-load/query ceilings, the cold-vs-warm speedup floor
+# (a warm Load that falls through to a full Build collapses it), or a
+# zero-result query (wiring regression). Ceilings are deliberately generous
+# so only real regressions fail, never machine noise.
+bench-gate:
+	go run ./cmd/kern bench --root . --check
 
 install: build
 	mkdir -p $${HOME}/.local/bin
-	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
+	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/
 # macOS Gatekeeper SIGKILLs adhoc-signed binaries carrying the
 # com.apple.provenance xattr on first launch (exit 137, empty output).
 # Re-sign after copy and strip both quarantine and provenance xattrs so
 # agents can launch kern-mcp without a Gatekeeper kill.
 ifeq ($(shell uname -s),Darwin)
-	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
-	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
-	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
 endif
 
 install-purego: build-purego
 	mkdir -p $${HOME}/.local/bin
-	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
+	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/
 ifeq ($(shell uname -s),Darwin)
-	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
-	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
-	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
 endif
 
 # opencode hooks: MCP server + config + auto-discovered plugin + agent rules.
@@ -124,19 +151,16 @@ release: clean
 		mkdir -p $(BIN)/kern-$$os-$$arch; \
 		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
 		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
 		tar -C $(BIN)/kern-$$os-$$arch -czf $(BIN)/kern-$$os-$$arch.tar.gz .; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
 	mkdir -p $(BIN)/kern-windows-amd64; \
 	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
 	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN)/kern-windows-amd64 && zip -q -r ../kern-windows-amd64.zip . && cd .. && rm -rf kern-windows-amd64
 	mkdir -p $(BIN)/kern-windows-arm64; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern.exe ./cmd/kern; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
-	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN)/kern-windows-arm64 && zip -q -r ../kern-windows-arm64.zip . && cd .. && rm -rf kern-windows-arm64
 	# Checksum manifest for every release archive (same format the release
 	# workflow ships): shasum -a 256 (macOS) and sha256sum (Linux) both emit
@@ -146,6 +170,16 @@ release: clean
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release
+
+# release-smoke verifies the PACKAGED artifacts (plan B3), not the dev
+# binary: SHA256SUMS verification, current-platform archive extraction,
+# version stamps, a live MCP stdio handshake (default surface 29 tools,
+# KERN_MCP_FULL=1 31, kern_arch/kern_graph full-only), a real index+search
+# run on this repo, and `kern doctor` with zero [fail] findings. Run it
+# after `make release VERSION=<tag>`; point SMOKE_DIR at a downloaded
+# release directory to smoke a published release the same way.
+release-smoke:
+	./scripts/release-smoke.sh --dir $(BIN) --repo . $(if $(VERSION),--version $(VERSION),)
 
 # Build a .mcpb bundle for MCP registry distribution (future releases).
 # Usage: make mcpb VERSION=v0.1.0
@@ -166,7 +200,7 @@ clean:
 # at the repo root by ad-hoc builds (go build without -o, go test -c, pip
 # imports). All targets are gitignored, so this only reclaims disk space.
 clean-artifacts:
-	rm -f kern kern-mcp kern-server
+	rm -f kern kern-mcp
 	rm -f *.test
 	rm -f bench
 	rm -rf __pycache__

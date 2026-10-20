@@ -430,8 +430,11 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	t, rep, text, err := s.finalizeImpact(t, &rep)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
-		// the mapping so the substitution is never silent.
-		head := fmt.Sprintf("resolved %q -> %s (fuzzy match)", change, target)
+		// the mapping so the substitution is never silent. The target may be
+		// a decl:<sha> identity (resolveSymbol maps receiver-qualified bare
+		// names through DeclarationID); the banner must name the symbol, not
+		// the hash (QA 6.6).
+		head := fmt.Sprintf("resolved %q -> %s (fuzzy match)", change, displayName(g, s.platform.Index(), target))
 		// Entry parity (P2): when the final resolution still has same-named
 		// production definitions, list them the way explore's render does, so
 		// the picked target is never presented as the only candidate. The
@@ -442,7 +445,7 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 			if _, d, ok := intel.ResolveEntry(ix, change); ok && d != nil {
 				if alts := intel.AmbiguousAlternatives(ix, change, *d); len(alts) > 0 {
 					head += fmt.Sprintf("\nnote: %q is ambiguous — showing %s; other definitions: %s. Pass a qualified name (Type.Method or dir/pkg.Symbol) to choose.",
-						change, target, strings.Join(alts, ", "))
+						change, displayName(g, ix, target), strings.Join(alts, ", "))
 				}
 			}
 		}
@@ -677,7 +680,12 @@ func lastSegment(ref string) string {
 func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*agent.Task, domain.ImpactReport, string, error) {
 	t.Impact = rep
 	rep.Evidence = intel.AnchorLine(s.platform.Index(), rep.Target)
-	out := renderImpactText(*rep)
+	// The text renderer must name the target symbol, not its decl:<sha>
+	// identity (QA 6.6); the structured ImpactReport keeps the raw ID for
+	// --json / machine consumers. Render a display-mapped copy.
+	renderRep := *rep
+	renderRep.Target = displayName(s.platform.Graph(), s.platform.Index(), rep.Target)
+	out := renderImpactText(renderRep)
 	// Bare-name target over multiple definitions: call buckets are
 	// recorded by simple name, so a bare reference cannot say WHICH
 	// same-named definition it means — the report is the union or (with
@@ -823,6 +831,16 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	// symbol names and file paths above); unrelated package edges are noise.
 	filter := planFilter(pkt)
 	for _, e := range pkt.Dependencies {
+		if s.platform != nil {
+			if graph := s.platform.Graph(); graph != nil {
+				if node, ok := graph.NodeByID(e.From); ok && node.Label != "" {
+					e.From = node.Label
+				}
+				if node, ok := graph.NodeByID(e.To); ok && node.Label != "" {
+					e.To = node.Label
+				}
+			}
+		}
 		// Trim any "pkg."-style qualifier on the right side before matching,
 		// so an edge "pkg.A → pkg.B" touches the affected symbol "B".
 		to := e.To

@@ -44,7 +44,9 @@ var EligibleTools = map[string]bool{
 	"kern_compact_file": true,
 	"kern_context":      true,
 	"kern_explore":      true,
-	"kern_retrieve":     true,
+	"kern_graph":        true,
+	"kern_search":       true,
+	"kern_why":          true,
 }
 
 // Eligible reports whether the named tool participates in conditional fetch.
@@ -83,9 +85,13 @@ func Hash(text, toolSchemaVersion string) string {
 // UnchangedResponseText is the body of the short-circuit response served when
 // the caller's etag matches the freshly computed one. The caller recognizes
 // the short-circuit from the result fields (etag + unchanged=true) rather
-// than from this text, which stays human-readable.
+// than from this text, which stays human-readable — and self-describing
+// (C1/P3): a reader whose context holds no earlier copy (a fresh subagent,
+// a restarted session, an LLM that dropped the payload) is told how to
+// recover inline, so the tiny reply can never strand a caller without
+// content on hosts that lack a client-side cache.
 func UnchangedResponseText(e string) string {
-	return "unchanged (etag " + e + ")"
+	return "unchanged (etag " + e + ") — identical to your earlier read; reuse your earlier copy. If this content is not in your context, call again without the etag argument to receive the full payload."
 }
 
 // StripServeTimeArgs returns a copy of args with the identity-only and
@@ -123,12 +129,20 @@ func CanonicalArgsKey(args map[string]any) string {
 }
 
 // Entry is one working-set registry row: the tool that answered, the args
-// digest for that ask, the etag the caller was handed, and when.
+// digest for that ask, the etag the caller was handed, and when. Identity
+// and View (C2/F4) bind the etag to what it was minted over: the index
+// identity (content-addressed fingerprint of the tree the serve ran
+// under) and the serve view (tool schema version + max_output budget) —
+// the pre-render short-circuit compares both before skipping the handler
+// render. "" means unknown (serve ran without an index in scope, or a
+// pre-C2/F4 entry).
 type Entry struct {
-	Tool  string    // eligible tool name (kern_context, ...)
-	Args  string    // canonical args digest (CanonicalArgsKey)
-	ETag  string    // etag served for that ask
-	Stamp time.Time // when the etag was last served
+	Tool     string    // eligible tool name (kern_context, ...)
+	Args     string    // canonical args digest (CanonicalArgsKey)
+	ETag     string    // etag served for that ask
+	Stamp    time.Time // when the etag was last served
+	Identity string    // index identity the serve ran under ("" = unknown)
+	View     string    // serve view: schema version + ":" + max_output budget
 }
 
 // Registry bounds (ADR-0012): a small, strictly bounded working set per
@@ -203,6 +217,45 @@ func (r *Registry) Record(agentID string, e Entry) {
 		delete(r.byAgent[agentID], tail)
 	}
 	r.entryOrder[agentID] = order
+}
+
+// ServedETag reports the etag recorded in agentID's working set for the
+// given canonical args key (CanonicalArgsKey of the caller's arguments).
+// It is the trust-but-verify anchor for the unchanged short-circuit
+// (C1/P1): a caller may only collapse a re-read when the registry shows
+// THIS agent was actually handed that etag for those args. The bucket
+// derivation matches Record ("" -> agentlessKey) so lookups and records
+// always agree on the bucket. ok is false when the agent or the entry is
+// absent (never served, or evicted at the LRU bound).
+func (r *Registry) ServedETag(agentID, args string) (e string, ok bool) {
+	if agentID == "" {
+		agentID = agentlessKey
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.byAgent[agentID][args]
+	if !ok {
+		return "", false
+	}
+	return entry.ETag, true
+}
+
+// ServedEntry returns the full working-set entry for agentID's last serve of
+// args (C2/F4): the pre-render short-circuit verifies not just the etag but
+// the index identity and serve view it was minted under. Bucket derivation,
+// locking and no-MRU-promotion mirror ServedETag; ok is false when the agent
+// or the entry is absent (never served, or evicted at the LRU bound).
+func (r *Registry) ServedEntry(agentID, args string) (Entry, bool) {
+	if agentID == "" {
+		agentID = agentlessKey
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.byAgent[agentID][args]
+	if !ok {
+		return Entry{}, false
+	}
+	return entry, true
 }
 
 // promoteAgentLocked moves an agent id to the MRU front. Caller holds r.mu.

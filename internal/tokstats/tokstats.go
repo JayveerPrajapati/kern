@@ -111,6 +111,36 @@ func FilesReadRaw(n int) string {
 	return fmt.Sprintf("%d files read raw", n)
 }
 
+// RuleInjectionTokens counts the tokens a session's rules injection costs:
+// the repo AGENTS.md and CLAUDE.md plus the global ~/.claude/CLAUDE.md, each
+// read once at runtime (missing files count 0). kern injects these files into
+// every host session, so they are a fixed context cost every savings claim
+// must be netted against (`kern stats --net`). Read-only stdlib file access —
+// the setup machinery is deliberately NOT imported here, so this stays cheap
+// and dependency-free. Per-file counts come from the same mtime+size-keyed
+// cache as the graph savings, so repeated runs cost nothing extra.
+func RuleInjectionTokens(root string) int {
+	total := 0
+	for _, p := range ruleFiles(root) {
+		total += fileTokenCount(p)
+	}
+	return total
+}
+
+// ruleFiles lists the rule files a session loads: the repo AGENTS.md/CLAUDE.md
+// plus the global ~/.claude/CLAUDE.md slot — the measured triple in the
+// rules-triplication audit (F3).
+func ruleFiles(root string) []string {
+	paths := []string{
+		filepath.Join(root, "AGENTS.md"),
+		filepath.Join(root, "CLAUDE.md"),
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".claude", "CLAUDE.md"))
+	}
+	return paths
+}
+
 // savingsCacheKey identifies one cached file-token count: the absolute file
 // path plus the file's mtime AND size at the moment it was tokenized (V2,
 // deep-dive B2: mtime alone misses a same-mtime edit; size catches the common

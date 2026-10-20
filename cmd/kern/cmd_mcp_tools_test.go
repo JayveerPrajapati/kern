@@ -89,73 +89,22 @@ func TestDiskIndexViewReportsRebuildRequired(t *testing.T) {
 	}
 }
 
-func TestRunHealthIndexBlockIsDiskAuthoritative(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := jsonCliFixture(t)
-	// Build a real on-disk index first (cold).
-	runIndex([]string{root, "--json"})
-
-	out := captureStdout(t, func() { runHealth([]string{"--root", root, "--json"}) })
-	m := assertValidJSON(t, out)
-	idx, ok := m["index"].(map[string]any)
-	if !ok {
-		t.Fatalf("health output missing index block: %v", m)
-	}
-	if idx["built"] != true {
-		t.Fatalf("index.built = %v, want true (disk index authoritative): %v", idx["built"], m)
-	}
-	if s, ok := idx["symbols"].(float64); !ok || s < 1 {
-		t.Fatalf("index.symbols = %v, want >= 1 (disk counts, not the in-memory 0): %v", idx["symbols"], m)
-	}
-	if f, ok := idx["files"].(float64); !ok || f < 1 {
-		t.Fatalf("index.files = %v, want >= 1 (disk counts): %v", idx["files"], m)
-	}
-	if idx["fresh"] != true {
-		t.Fatalf("index.fresh = %v, want true right after build: %v", idx["fresh"], m)
-	}
-	// The in-memory view must be relabeled, with an explicit note.
-	mem, ok := m["mcp_memory_index"].(map[string]any)
-	if !ok {
-		t.Fatalf("health output missing relabeled mcp_memory_index block: %v", m)
-	}
-	if note, ok := mem["note"].(string); !ok || note == "" {
-		t.Fatalf("mcp_memory_index.note missing: %v", mem)
-	}
-}
-
 // TestRunHealthNoIndexReportsNotBuilt pins the first-run shape: with no
 // persisted index, the health "index" block says so explicitly (built=false
 // with a note) instead of echoing the in-memory zero block.
-func TestRunHealthNoIndexReportsNotBuilt(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := t.TempDir()
-
-	out := captureStdout(t, func() { runHealth([]string{"--root", root}) })
-	m := assertValidJSON(t, out)
-	idx, ok := m["index"].(map[string]any)
-	if !ok {
-		t.Fatalf("health output missing index block: %v", m)
-	}
-	if idx["built"] != false || idx["symbols"] != float64(0) {
-		t.Fatalf("index block = %v, want built=false/symbols=0", idx)
-	}
-	if _, ok := idx["note"].(string); !ok {
-		t.Fatalf("index block missing note: %v", idx)
-	}
-}
 
 // TestRunMCPToolSuccess pins the success path: runMCPTool prints the tool's
 // output to stdout. kern_schema_validate is deterministic and local (no
 // network, no index build), so it is a stable, cheap probe.
 func TestRunMCPToolSuccess(t *testing.T) {
 	out := captureStdout(t, func() {
-		runMCPTool("kern_schema_validate", map[string]any{
-			"data":   `{"name":"x"}`,
-			"schema": `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`,
+		runMCPTool("kern_search", map[string]any{
+			"query": "Greet",
+			"root":  ".",
 		})
 	})
-	if !strings.Contains(out, "schema OK") {
-		t.Fatalf("runMCPTool output = %q, want schema OK message", out)
+	if !strings.Contains(out, "Greet") {
+		t.Fatalf("runMCPTool output = %q, want a search hit", out)
 	}
 }
 
@@ -202,42 +151,42 @@ func TestRunSynthesizeTestBadFlagExits2(t *testing.T) {
 	}
 }
 
+// TestPosNamesFile pins the positional disambiguation helper: CWD-relative
+// paths, root-relative paths, and non-files (symbols) are told apart.
+func TestPosNamesFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "greet"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "greet", "greet.go")
+	if err := os.WriteFile(p, []byte("package greet\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !posNamesFile(p, "") {
+		t.Errorf("posNamesFile(abs existing file) = false, want true")
+	}
+	// Root-relative spelling with a different CWD: the engine joins the
+	// file against root, so this counts as the source form too.
+	if !posNamesFile(filepath.Join("greet", "greet.go"), root) {
+		t.Errorf("posNamesFile(root-relative existing file) = false, want true")
+	}
+	if posNamesFile("Greet", "") {
+		t.Errorf("posNamesFile(symbol) = true, want false")
+	}
+	if posNamesFile(filepath.Join("nope", "missing.go"), root) {
+		t.Errorf("posNamesFile(missing file) = true, want false")
+	}
+}
+
+// TestRunSynthesizeTestPositionalFileMapsToFile pins the B1 fix end-to-end:
+// `kern synthesize-test <path.go>` (the natural documented invocation) must
+// synthesize a test from the file — it used to map the positional to
+// --target and fail with "must be provided".
+
 // TestRunHealthDefaultsRootPins the dogfooding B-HIGH fix: `kern health`
 // without --root must resolve the project root (like every other CLI
 // command) so the disk-index freshness probe gets a real root. The old code
 // passed the empty f.root straight through, so DiskIndexView("") reported
 // stale=true / verdict:"unknown" / root:"" even on a fresh index —
 // contradicting kern doctor and kern index --status.
-func TestRunHealthDefaultsRoot(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	root := jsonCliFixture(t)
-	// Build a real on-disk index first (cold).
-	runIndex([]string{root, "--json"})
-	// Run from inside the fixture so the default root "." resolves to it.
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatalf("Chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	out := captureStdout(t, func() { runHealth(nil) })
-	m := assertValidJSON(t, out)
-	idx, ok := m["index"].(map[string]any)
-	if !ok {
-		t.Fatalf("health output missing index block: %v", m)
-	}
-	if idx["root"] != "." {
-		t.Fatalf("index.root = %v, want \".\" (defaulted, not empty)", idx["root"])
-	}
-	if idx["fresh"] != true {
-		t.Fatalf("index.fresh = %v, want true on a fresh index (B-HIGH: was stale/unknown with an empty root)", idx["fresh"])
-	}
-	if idx["stale"] != false {
-		t.Fatalf("index.stale = %v, want false (B-HIGH)", idx["stale"])
-	}
-	if idx["verdict"] != "fresh" {
-		t.Fatalf("index.verdict = %v, want fresh (B-HIGH: was unknown)", idx["verdict"])
-	}
-}

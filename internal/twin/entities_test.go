@@ -305,3 +305,126 @@ func TestEntitiesConstructorResolvesToServiceEndpoints(t *testing.T) {
 		t.Errorf("NewServer must surface the endpoints of its package service, got:\n%+v", ents)
 	}
 }
+
+// TestEntitiesIndexEntryMethodPath locks the Go 1.22 method-path route
+// handling (F3-3): a route string like "POST /orders" must yield an api
+// entity with Method POST and a clean /orders path — not the pre-fix
+// "GET POST /orders" (method GET, path polluted with the verb) and not a
+// missing entity.
+func TestEntitiesIndexEntryMethodPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+// Register wires the endpoints with Go 1.22 method-path patterns.
+func Register() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /orders", handleCreate)
+	mux.HandleFunc("GET /orders/{id}", handleGet)
+	mux.HandleFunc("/plain", handlePlain)
+}
+
+// handleCreate creates an order.
+func handleCreate(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "created") }
+
+// handleGet fetches one order.
+func handleGet(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "got") }
+
+// handlePlain serves the legacy-form route.
+func handlePlain(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "plain") }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := MergeIntoIndex(ix, dir)
+	cases := []struct{ sym, want string }{
+		{"handleCreate", "POST /orders"},
+		{"handleGet", "GET /orders/{id}"},
+		{"handlePlain", "GET /plain"},
+	}
+	for _, tc := range cases {
+		ents, err := Entities(g, tc.sym)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range ents {
+			if e.Kind == "api" && e.Name == tc.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected the %q api entity, got:\n%+v", tc.sym, tc.want, ents)
+		}
+	}
+}
+
+// TestEntitiesIndexEntrySkipsTestFiles pins F3-4 on the inventory side:
+// index entry symbols extracted from _test.go files must not become api
+// entities (same exclusion the buddy digest applies).
+func TestEntitiesIndexEntrySkipsTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+import "net/http"
+
+// Register wires the real endpoint.
+func Register() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/real", handleReal)
+}
+
+// handleReal serves it.
+func handleReal(w http.ResponseWriter, r *http.Request) {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(`package main
+
+import "net/http"
+
+// TestRegister mirrors the registration.
+func TestRegister() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from-test", handleReal)
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := MergeIntoIndex(ix, dir)
+	ents, err := Entities(g, "handleReal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if e.Kind == "api" && strings.Contains(e.Name, "/from-test") {
+			t.Errorf("test-file route leaked into the entity inventory: %q", e.Name)
+		}
+	}
+	found := false
+	for _, e := range ents {
+		if e.Kind == "api" && e.Name == "GET /real" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the /real api entity, got:\n%+v", ents)
+	}
+}

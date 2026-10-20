@@ -1,10 +1,51 @@
 name: test
+# Reusable core test workflow, called by ci.yml (every PR/push) and release.yml
+# (every tag). Keep this to checks that must pass for BOTH. PR-only extras
+# (cross-OS smoke, governance gate) live in ci.yml; live-network checks live in
+# nightly-full.yml, so a release is never blocked by someone else's network.
+#
+# The jobs are independent and run in parallel, so wall-clock time is the
+# slowest job instead of the sum of all of them.
 on:
   workflow_call:
 permissions:
   contents: read
 jobs:
-  test:
+  # Cheap static checks: fail in about a minute instead of after the full suite.
+  # `go vet` is deliberately not repeated here: ci.yml's golangci-lint runs
+  # govet (see .golangci.yml), and `go test` runs its own vet subset.
+  checks:
+    name: format, install.ps1 parse
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
+      - name: Generated docs freshness
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+          "$RUNNER_TEMP/kern" gen-catalog --check
+          "$RUNNER_TEMP/kern" gen-contracts --check
+          "$RUNNER_TEMP/kern" gen-docs --doc schemas --check
+          "$RUNNER_TEMP/kern" gen-docs --doc selection --check
+          "$RUNNER_TEMP/kern" gen-docs --doc site --check
+      # install.ps1 is executed only on the windows runner (ci.yml
+      # global-install-smoke); on the ubuntu jobs it is dead weight that a
+      # silent PowerShell syntax error would otherwise ship. [scriptblock]::Create
+      # parses the whole file without running it, so any future edit that breaks
+      # the script's syntax fails CI here, cheaply. pwsh is preinstalled on
+      # ubuntu images.
+      - name: install.ps1 parse check
+        run: |
+          pwsh -NoProfile -Command "$null = [scriptblock]::Create((Get-Content install.ps1 -Raw)); 'parse ok'"
+
+  unit:
+    name: unit tests (coverage)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -16,19 +57,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: ./.github/actions/setup-tools
-
-      - name: Vet
-        run: go vet ./...
-      - name: Format
-        run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
-      # install.ps1 is executed only on the windows runner (below); on the
-      # ubuntu jobs it is dead weight that a silent PowerShell syntax error
-      # would otherwise ship. [scriptblock]::Create parses the whole file
-      # without running it, so any future edit that breaks the script's
-      # syntax fails CI here, cheaply. pwsh is preinstalled on ubuntu images.
-      - name: install.ps1 parse check
-        run: |
-          pwsh -NoProfile -Command "$null = [scriptblock]::Create((Get-Content install.ps1 -Raw)); 'parse ok'"
       - name: Test (with coverage)
         run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
       - name: Upload coverage to Codecov
@@ -36,6 +64,22 @@ jobs:
         with:
           files: coverage.out
           fail_ci_if_error: false
+
+  # Build-tag variants: the same packages under the pure-Go tag sets, plus a
+  # compile check of all three binaries under every tag combination.
+  tags:
+    name: build tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
       - name: Test (sqlite,notreesitter tags)
         run: CGO_ENABLED=0 go test -tags sqlite,notreesitter ./internal/index/... ./internal/doctor/...
       - name: Test (notreesitter tags)
@@ -44,43 +88,82 @@ jobs:
         run: |
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
-          go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
       - name: Build all binaries (sqlite,notreesitter tags)
         run: |
           CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern
           CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern-mcp
-          CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern-server
       - name: Build all binaries (notreesitter tags)
         run: |
           CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern
           CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern-mcp
-          CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern-server
-      # Race detector over the concurrency-sensitive packages (agent registry /
-      # in-flight tool / lock lifecycle races, event bus, blueprint sandbox,
-      # loop scheduler, symbol index, project store, process groups). Scoped
-      # to keep the full -race ./... suite from slowing CI. The -timeout is
-      # sized for the race run (roughly 4x slower): internal/app alone is
-      # ~3min without -race and exceeds the default 10m cap under
-      # instrumentation, and the index suite adds ~4min under -race, so the
-      # step gets a 20m budget. This only adds the -race flag — test
-      # parallelism is unchanged, so netns tests (which rely on t.Setenv and
-      # must stay serial) are unaffected.
+
+  # Race detector over the concurrency-sensitive packages (agent registry /
+  # in-flight tool / lock lifecycle races, event bus, loop scheduler, symbol
+  # index, project store, process groups). Scoped
+  # to keep the full -race ./... suite from slowing CI. The -timeout is
+  # sized for the race run (roughly 4x slower): internal/app alone is
+  # ~3min without -race and exceeds the default 10m cap under
+  # instrumentation, and the index suite adds ~4min under -race. The package
+  # list is split into two shards that run in parallel (this was one 20m
+  # serial step); the union is exactly the previous list. This only adds the
+  # -race flag — test parallelism is unchanged, so netns tests (which rely on
+  # t.Setenv and must stay serial) are unaffected.
+  race:
+    name: race detector (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: app-governance
+            packages: ./internal/app/... ./internal/governance/...
+          - shard: mcp-index-loop-rest
+            packages: ./internal/mcp/... ./internal/index/... ./internal/project/... ./internal/loop/... ./internal/eventbus/... ./internal/processgroup/...
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
       - name: Test (race detector)
-        run: go test -short -race -timeout 20m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/... ./internal/eventbus/... ./internal/blueprint/sandbox/... ./internal/loop/... ./internal/index/... ./internal/project/... ./internal/processgroup/...
-      - name: MCP catalog parity
-        run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
-      - name: Architecture doc parity
-        run: go test -v ./internal/architecture/ -run TestArchitectureDocParity -count=1
-      - name: Golden question routing suite
-        run: go test ./internal/metaroute/ -run TestClassifyMetaRequest_GoldenQuestions -count=1
-      - name: Per-language parity report
-        run: go test ./internal/index/ -run TestParityReportPerLanguage -count=1
-      - name: CLI command usage and parity contract
-        run: go test ./cmd/kern/ -run 'TestEveryCommandHasUsage|TestMCPToolsReachableFromCLI' -count=1
+        run: go test -short -race -timeout 20m ${{ matrix.packages }}
+
+  # The contract/parity gates (MCP catalog vs plugin, architecture doc parity,
+  # golden routing questions, per-language parity, CLI usage contract) are
+  # ordinary tests that run inside `unit`; none skips under -short, so a
+  # separate job would only run them a second time.
+
+  # Benchmark regression gate (`kern bench --check`, the `make bench-gate`
+  # target). Latency gates are machine-sensitive, so the versioned thresholds
+  # in cmd/kern/bench_thresholds.json are deliberately generous (ceilings ~10x
+  # over the measured baseline) and only fail on real regressions — the
+  # cold-vs-warm speedup floor catches a warm Load falling through to a full
+  # Build, the query ceilings catch a wiring regression, and min_results catches
+  # a zero-result query. Runs on every PR/push and every release tag (test.yml
+  # is reused by release.yml), giving the gate CI enforcement instead of it
+  # being a local-only `make` target.
+  bench:
+    name: bench regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run bench --check
+        run: go run ./cmd/kern bench --root . --check
 
   # Locks the release artifact layout: `make dist` (the same flow the release
   # workflow uses) must produce exactly the archives release.yml uploads, each
-  # containing the three binaries, plus a SHA256SUMS that round-trips through
+  # containing the two binaries, plus a SHA256SUMS that round-trips through
   # sha256sum -c. Guards against silent layout drift (renamed archives or
   # binaries) breaking install.sh and the release pipeline.
   release-layout:
@@ -105,17 +188,17 @@ jobs:
           done
           echo "all release archives present:"
           ls -1 kern-*.tar.gz kern-*.zip
-      - name: Assert each archive contains the three binaries
+      - name: Assert each archive contains the two binaries
         run: |
           cd bin
           for a in kern-*.tar.gz; do
-            for b in kern kern-mcp kern-server; do
+            for b in kern kern-mcp; do
               tar tzf "$a" | grep -qx "./$b" || { echo "$a is missing ./$b:"; tar tzf "$a"; exit 1; }
             done
             echo "$a OK"
           done
           for a in kern-*.zip; do
-            for b in kern.exe kern-mcp.exe kern-server.exe; do
+            for b in kern.exe kern-mcp.exe; do
               unzip -l "$a" | grep -q " $b$" || { echo "$a is missing $b:"; unzip -l "$a"; exit 1; }
             done
             echo "$a OK"
@@ -125,90 +208,3 @@ jobs:
           cd bin
           test -s SHA256SUMS || { echo "SHA256SUMS not generated by make dist"; exit 1; }
           sha256sum -c SHA256SUMS
-
-  # Windows installer + native `kern update` leg smoke. install.ps1 and the
-  # PowerShell fetch -> temp-file -> pwsh -File chain in runUpdateWindows
-  # (cmd_update.go) are Windows-only code the ubuntu jobs above never
-  # execute, so they were previously verified by construction only. This job
-  # runs on a real windows-latest runner: it builds the CLI from the
-  # checkout, runs the live installer (release zip download + Copy-Binary
-  # rename-aside), asserts the installed binary runs, then exercises the Go
-  # Windows update leg end-to-end.
-  #
-  # Guard-tolerance choice: the final `kern update --dry-run` may exit 1 when
-  # the network-free updateGuardDenial refuses before the installer branch is
-  # reached (e.g. an unverifiable installed version) — that refusal is a
-  # legitimate outcome and the guard itself is unit-tested. What must never
-  # happen are the old failure modes of a broken fetch/pwsh chain
-  # ('PowerShell is required' / 'could not fetch' / 'installer failed'), so
-  # the step asserts on the captured output, not on the exit code.
-  windows-update-smoke:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build kern for Windows
-        shell: pwsh
-        run: |
-          $env:CGO_ENABLED = "0"
-          go build -buildvcs=false -tags sqlite,notreesitter -o "$env:RUNNER_TEMP\kern-smoke.exe" ./cmd/kern
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Downloads the live windows release zip and installs to
-      # $HOME\.local\bin (install.ps1's default prefix, $env:KERN_INSTALL_DIR
-      # unset), exercising the real installer path incl. Copy-Binary
-      # rename-aside and Verify-Kern.
-      - name: Install live release via install.ps1
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Action install
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Assert installed kern.exe runs
-        shell: pwsh
-        run: |
-          & "$HOME\.local\bin\kern.exe" version
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "installed kern.exe version check failed (exit $LASTEXITCODE)"
-            exit $LASTEXITCODE
-          }
-      # Tolerates exit codes 0 (happy path: installer status op ran) and 1
-      # (updateGuardDenial refused before the installer branch — acceptable,
-      # see the job comment) but fails on the old broken-chain failure
-      # strings. 'checking for updates' proves the dry-run reached the
-      # status branch (fetch -> temp-file -> pwsh -File). The two preference
-      # overrides keep pwsh 7.3+'s stderr-as-error behavior from throwing on
-      # captured stderr (GitHub's pwsh preamble sets $ErrorActionPreference
-      # to 'stop'); failures are decided by the string checks below.
-      - name: Exercise Go Windows update leg (dry-run)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $PSNativeCommandUseErrorActionPreference = $false
-          $out = & "$HOME\.local\bin\kern.exe" update --dry-run 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host "exit code: $code"
-          Write-Host $out
-          if ($code -ne 0 -and $code -ne 1) {
-            Write-Error "unexpected exit code $code (expected 0 or 1)"
-            exit $code
-          }
-          if ($out -match "PowerShell is required") {
-            Write-Error "smoke failed: 'PowerShell is required' — pwsh/powershell not found"
-            exit 1
-          }
-          if ($out -match "could not fetch") {
-            Write-Error "smoke failed: 'could not fetch' — installer script download failed"
-            exit 1
-          }
-          if ($out -match "installer failed") {
-            Write-Error "smoke failed: 'installer failed' — install.ps1 status op failed"
-            exit 1
-          }
-          if ($out -match "checking for updates") {
-            Write-Host "OK: dry-run reached the installer status branch (fetch -> temp-file -> pwsh -File chain ran)"
-          } else {
-            Write-Host "NOTE: 'checking for updates' not printed — updateGuardDenial denied before the ps1 leg (accepted smoke outcome)"
-          }

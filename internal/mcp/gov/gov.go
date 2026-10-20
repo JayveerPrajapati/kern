@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govtoken"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
@@ -84,6 +86,15 @@ func New(ctx context.Context, args map[string]any, ix *index.Index) (*Governor, 
 	task := mcpargs.ArgString(args, "task")
 	fw := governance.NewFirewall()
 	if agent, aerr := governance.GetAgent(agentID); aerr == nil {
+		// Signed identities (TokenSecret enrolled): agent_id alone is
+		// client-asserted and untrusted — a bearer agent_token must verify
+		// or the call fails closed before any authorization. Raw mode's
+		// explicit opt-out (PermissiveMode above) skips the check.
+		if agent.TokenSecret != "" {
+			if terr := govtoken.Verify(agent, mcpargs.ArgString(args, "agent_token"), time.Now()); terr != nil {
+				return nil, fmt.Errorf("governance: agent %q has a signed identity — agent_id requires a valid agent_token: %w (mint one with `kern org agents token %s`)", agentID, terr, agentID)
+			}
+		}
 		fw = fw.WithAgents(agent)
 	}
 	sc := TaskScopeFromArgs(args, task)

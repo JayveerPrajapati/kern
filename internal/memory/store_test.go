@@ -484,3 +484,76 @@ func TestStoreMarkHistorical(t *testing.T) {
 		t.Errorf("memory status = %q, want historical (15.4)", got.Status)
 	}
 }
+
+// TestStoreClear pins the typed-store Clear used by `kern memory clear` /
+// kern_memory clear: it removes the store file entirely, and an absent store
+// is a no-op.
+func TestStoreClear(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Add(domain.Memory{Type: domain.MemoryLesson, Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if ms, _ := s.List(""); len(ms) != 0 {
+		t.Fatalf("store not cleared: %+v", ms)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatalf("Clear over absent store: %v", err)
+	}
+}
+
+// TestStoreRemoveContent pins the typed mirror used by `kern memory remove
+// <n>`: every entry with the exact content is deleted; no match is not an
+// error.
+func TestStoreRemoveContent(t *testing.T) {
+	s := newTestStore(t)
+	for _, c := range []string{"Edited /tmp/lane/a.go", "Edited /tmp/lane/a.go", "a genuine lesson"} {
+		if _, err := s.Add(domain.Memory{Type: domain.MemoryLesson, Content: c, Source: "user", Scope: "project"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.RemoveContent("Edited /tmp/lane/a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("RemoveContent removed %d, want 2", n)
+	}
+	ms, _ := s.List("")
+	if len(ms) != 1 || ms[0].Content != "a genuine lesson" {
+		t.Fatalf("remaining = %+v, want only the genuine lesson", ms)
+	}
+	n, err = s.RemoveContent("no such content")
+	if err != nil || n != 0 {
+		t.Fatalf("no-match RemoveContent = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestStoreRemovePrefix pins the typed mirror used by `kern memory remove
+// <prefix>`: every entry whose content starts with the prefix is deleted; no
+// match is not an error.
+func TestStoreRemovePrefix(t *testing.T) {
+	s := newTestStore(t)
+	for _, c := range []string{"Edited /tmp/lane/a.go", "Edited /tmp/lane/b.go", "a genuine lesson"} {
+		if _, err := s.Add(domain.Memory{Type: domain.MemoryLesson, Content: c, Source: "user", Scope: "project"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.RemovePrefix("Edited /tmp/lane/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("RemovePrefix removed %d, want 2", n)
+	}
+	ms, _ := s.List("")
+	if len(ms) != 1 || ms[0].Content != "a genuine lesson" {
+		t.Fatalf("remaining = %+v, want only the genuine lesson", ms)
+	}
+	n, err = s.RemovePrefix("zzz")
+	if err != nil || n != 0 {
+		t.Fatalf("no-match RemovePrefix = (%d, %v), want (0, nil)", n, err)
+	}
+}

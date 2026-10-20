@@ -86,6 +86,32 @@ func TestHandleHTTPParseError(t *testing.T) {
 	}
 }
 
+// TestHandleHTTPParseErrorBeforeVersionGate pins the F10 ordering: a
+// malformed body (or batch array) sent WITHOUT the MCP-Protocol-Version
+// header must answer -32700, not a misleading 412 — the body cannot parse,
+// so there is no version to negotiate.
+func TestHandleHTTPParseErrorBeforeVersionGate(t *testing.T) {
+	t.Parallel()
+	s := newHTTPServer()
+	for name, body := range map[string]string{
+		"malformed": "not json",
+		"batch":     `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`,
+	} {
+		rr := doHTTP(t, s, http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 (JSON-RPC error in body), got %d", name, rr.Code)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		e := resp["error"].(map[string]any)
+		if int(e["code"].(float64)) != -32700 {
+			t.Fatalf("%s: expected -32700, got %+v", name, resp)
+		}
+	}
+}
+
 func TestHandleHTTPSingleRequest(t *testing.T) {
 	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
@@ -269,12 +295,21 @@ func TestWriteHTTPErrorIsJSON(t *testing.T) {
 
 func TestHandleHTTPOversizeBodyRejected(t *testing.T) {
 	t.Parallel()
-	// The handler limits reads to 1<<24 bytes. A body smaller than the limit
-	// must still succeed (smoke that the LimitReader path is wired).
+	// The handler limits reads to maxHTTPBodyBytes (16 MiB). A body smaller
+	// than the limit must still succeed (smoke that the LimitReader path is
+	// wired).
 	big := `{"jsonrpc":"2.0","id":4,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", big, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for small body, got %d", rr.Code)
+	}
+	// A body EXCEEDING the cap must be rejected with 413 Content Too Large
+	// (F5, production-readiness audit 2026-10-17) — not silently truncated
+	// into a misleading -32700 parse error.
+	oversize := "{" + strings.Repeat("x", maxHTTPBodyBytes+1) + "}"
+	rr = doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", oversize, nil)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversize body, got %d (body: %.120s)", rr.Code, rr.Body.String())
 	}
 }
 
@@ -360,8 +395,13 @@ func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
 	if _, isErr := toolResultText(t, resp); isErr {
 		t.Fatalf("index tool over HTTP returned an error result: %s", rr.Body.String())
 	}
-	// The provenance stamp must include a commit (this exact path panicked).
-	if !strings.Contains(rr.Body.String(), "commit ") {
+	// The structured provenance must include a commit (this exact path
+	// panicked). The one-line text stamp is omitted for a fully-fresh
+	// in-sync git fixture (QA 2026-10-19), so assert on the envelope field.
+	res := resp["result"].(map[string]any)
+	prov, _ := res["provenance"].(map[string]any)
+	idx, _ := prov["index"].(map[string]any)
+	if commit, _ := idx["git_commit"].(string); commit == "" {
 		t.Fatalf("expected provenance commit stamp, got: %s", rr.Body.String())
 	}
 }
@@ -372,6 +412,12 @@ func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
 // story. Two clients initialize and call kern_search against the same daemon
 // process and receive consistent results from the same session.
 func TestDaemonModeServesMultipleClients(t *testing.T) {
+	// The served ledger (B1) keys on agent_id|task and cannot distinguish
+	// two anonymous clients of one daemon server — client B's identical
+	// search would be answered with the session pointer instead of the
+	// shared-index payload this test pins. The shared-index contract is
+	// exercised with the session-dedup layer off.
+	t.Setenv("KERN_SERVED_LEDGER", "0")
 	root := mcpProject(t)
 	// The daemon's confinement gate fails closed to the process cwd; scope it
 	// to the fixture so the daemon is allowed to serve its own workspace. The

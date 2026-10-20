@@ -1,10 +1,13 @@
 package doctor
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -12,6 +15,36 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"github.com/JayveerPrajapati/kern/internal/version"
 )
+
+// TestCheckAuditChainSize pins the F9 doctor surface: a missing chain is ok,
+// a small chain is ok with its size reported, and a chain past the 50 MB
+// threshold warns with archive guidance (the chain is hash-linked, so kern
+// never rotates it in place — the operator archives instead). The large
+// fixture is a sparse file: truncation, not content, sets the size.
+func TestCheckAuditChainSize(t *testing.T) {
+	root := t.TempDir()
+	if f := checkAuditChainSize(root); f.Level != "ok" {
+		t.Fatalf("missing chain must be ok, got %+v", f)
+	}
+	auditDir := filepath.Join(root, ".kern", "audit")
+	if err := os.MkdirAll(auditDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chain := filepath.Join(auditDir, "chain.jsonl")
+	if err := os.WriteFile(chain, []byte("{\"k\":\"a\",\"v\":{}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkAuditChainSize(root); f.Level != "ok" || !strings.Contains(f.Detail, "MB") {
+		t.Fatalf("small chain must be ok with its size, got %+v", f)
+	}
+	if err := os.Truncate(chain, 51<<20); err != nil {
+		t.Fatal(err)
+	}
+	f := checkAuditChainSize(root)
+	if f.Level != "warn" || !strings.Contains(f.Detail, "archive") {
+		t.Fatalf("large chain must warn with archive guidance, got %+v", f)
+	}
+}
 
 // repoRoot walks up from the package directory to the go.mod owner (a git
 // checkout, which checkParity needs).
@@ -79,6 +112,52 @@ func shortHashAt(root string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestCheckParitySkipsForeignRepo pins the 5.2 fix: the binary/HEAD parity
+// comparison may only run inside a kern checkout (go.mod module ==
+// github.com/JayveerPrajapati/kern). Against a foreign repo — the psf/requests
+// dogfooding report: a stamped kern binary compared against requests' HEAD
+// produced "installed binary is stale; rebuild and reinstall", nudging a
+// pointless reinstall — the check must skip with a "not a kern checkout" note
+// instead of a stale verdict.
+func TestCheckParitySkipsForeignRepo(t *testing.T) {
+	orig := version.Version
+	defer func() { version.Version = orig }()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/psf/requests\n\ngo 1.27\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make it a real git checkout with a HEAD so the pre-fix code path
+	// (stamp vs repo HEAD) would genuinely have produced the stale verdict.
+	if err := exec.Command("git", "-C", dir, "init", "-q").Run(); err != nil {
+		t.Skip("git unavailable: " + err.Error())
+	}
+	commit := exec.Command("git", "-C", dir, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "init")
+	if err := commit.Run(); err != nil {
+		t.Skip("git commit unavailable: " + err.Error())
+	}
+
+	// A build stamp that differs from the foreign repo's HEAD would have
+	// produced the stale verdict before the fix.
+	version.Version = "deadbeef"
+	f := checkParity(dir)
+	if f.Level != "ok" {
+		t.Fatalf("checkParity(foreign repo) = %+v, want ok (skip)", f)
+	}
+	if !strings.Contains(f.Detail, "not a kern checkout") {
+		t.Errorf("detail should say the repo is not a kern checkout, got: %q", f.Detail)
+	}
+	if strings.Contains(f.Detail, "stale") {
+		t.Errorf("foreign repo must not produce a stale-binary verdict, got: %q", f.Detail)
+	}
+	if isKernCheckout(dir) {
+		t.Error("isKernCheckout(foreign repo) = true, want false")
+	}
+	if !isKernCheckout(repoRoot(t)) {
+		t.Error("isKernCheckout(kern repo) = false, want true")
+	}
 }
 
 func TestRunReturnsFindings(t *testing.T) {
@@ -412,7 +491,9 @@ func TestCheckVersion(t *testing.T) {
 
 // TestCheckRuntime pins the production-intelligence diagnostic: no source
 // warns with the enable hint; a wired local snapshot reports its telemetry
-// counts, and one with errors warns.
+// counts, and one with errors warns. Live sources are DESCRIBED, never
+// constructed — doctor must stay offline (A3) — and a malformed configured
+// URL gets its own warning instead of a silent nil.
 func TestCheckRuntime(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root) // isolate from any cwd-level env/config
@@ -458,9 +539,60 @@ func TestCheckRuntime(t *testing.T) {
 	}
 }
 
+// TestCheckRuntimeLiveWiringNoNetwork pins the A3 contract: a configured live
+// source is reported as wiring (kind, endpoint, credential presence) WITHOUT
+// contacting the endpoint — doctor constructs no poller, so the test server
+// must receive zero requests.
+func TestCheckRuntimeLiveWiringNoNetwork(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte(`# unreachable path must never be polled`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("KERN_PROMETHEUS_URL", srv.URL)
+	t.Setenv("KERN_PROMETHEUS_TOKEN", "sekrit")
+
+	f := checkRuntime(root)
+	if f.Check != "runtime" || f.Level != "ok" {
+		t.Fatalf("live-wiring finding = %+v, want runtime/ok", f)
+	}
+	for _, want := range []string{"prometheus", srv.URL, "KERN_PROMETHEUS_TOKEN", "wiring check only"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("live-wiring detail missing %q in:\n%s", want, f.Detail)
+		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("doctor polled the live endpoint %d time(s) — checkRuntime must stay offline", n)
+	}
+}
+
+// TestCheckRuntimeInvalidConfig pins the malformed-endpoint diagnostic: a
+// configured URL that fails validation is a distinct warn naming the URL and
+// the reason, never a silent "no runtime source".
+func TestCheckRuntimeInvalidConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+
+	t.Setenv("KERN_OTEL_URL", "not-a-url")
+	f := checkRuntime(root)
+	if f.Check != "runtime" || f.Level != "warn" {
+		t.Fatalf("invalid-config finding = %+v, want runtime/warn", f)
+	}
+	for _, want := range []string{"otel", "not-a-url", "invalid", "scheme must be http or https"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("invalid-config detail missing %q in:\n%s", want, f.Detail)
+		}
+	}
+}
+
 func TestCheckExecDetectsSIGKILL(t *testing.T) {
 	// Load guard: under full-suite parallelism a process spawn can exceed the
-	// 5s default and misreport as a handshake timeout instead of the SIGKILL
+	// 10s default and misreport as a handshake timeout instead of the SIGKILL
 	// this test asserts on.
 	t.Setenv("KERN_DOCTOR_EXEC_TIMEOUT_MS", "30000")
 	// Regression (e2e 2026-09-13): a binary killed by SIGKILL at exec
@@ -488,7 +620,7 @@ func TestCheckExecDetectsSIGKILL(t *testing.T) {
 // stub that only prints usage fails.
 func TestCheckExecMCPInitializeHandshake(t *testing.T) {
 	// Load guard: see TestCheckExecDetectsSIGKILL — each subtest spawns
-	// several stub processes; under full-suite parallelism the default 5s
+	// several stub processes; under full-suite parallelism the default 10s
 	// probe deadline can expire mid-handshake.
 	t.Setenv("KERN_DOCTOR_EXEC_TIMEOUT_MS", "30000")
 	dir := t.TempDir()
@@ -672,6 +804,42 @@ func TestWiringFindingsDedupesGlobalPlugin(t *testing.T) {
 	}
 }
 
+// TestWiringFindingsPairNotesWithPaths pins the conflicting-notes render:
+// when one label (e.g. "global rules") mixes present and missing slots,
+// each note must name ITS OWN paths. The old render joined the notes and
+// dumped every path at the end, attributing "not present" to the first
+// listed path — a file that is actually present (self-contradiction).
+func TestWiringFindingsPairNotesWithPaths(t *testing.T) {
+	sts := []setup.Status{
+		{Agent: "global rules", Installed: true, Path: "/home/u/.claude/CLAUDE.md", Note: "kern entry present"},
+		{Agent: "global rules", Installed: true, Path: "/home/u/.codex/AGENTS.md", Note: "kern entry present"},
+		{Agent: "global rules", Installed: false, Path: "/home/u/.config/opencode/AGENTS.md", Note: "not present"},
+	}
+	findings := wiringFindings(sts, nil)
+	var f *Finding
+	for i := range findings {
+		if findings[i].Check == "global rules" {
+			f = &findings[i]
+		}
+	}
+	if f == nil {
+		t.Fatal("no merged global rules finding")
+	}
+	if f.Level != "warn" {
+		t.Fatalf("mixed-present group level = %s, want warn", f.Level)
+	}
+	d := f.Detail
+	if !strings.Contains(d, "kern entry present — /home/u/.claude/CLAUDE.md") {
+		t.Errorf("present note must name its own paths, got %q", d)
+	}
+	if !strings.Contains(d, "not present — /home/u/.config/opencode/AGENTS.md") {
+		t.Errorf("missing note must name exactly its own path, got %q", d)
+	}
+	if strings.Contains(d, "not present — /home/u/.claude/CLAUDE.md") {
+		t.Errorf("missing note must not be attributed to a present path: %q", d)
+	}
+}
+
 // TestWiringFindingsRegisteredOnlyWhenDetected pins F13: a "registered"
 // claim must not be reported as [ok] when the agent itself is not detected.
 func TestWiringFindingsRegisteredOnlyWhenDetected(t *testing.T) {
@@ -790,6 +958,84 @@ func TestCheckIndexShadowNested(t *testing.T) {
 	}
 }
 
+// TestCheckIndexShadowParentStates pins the A2 classification: the shadow
+// warning must name the parent's actual state and only advise serving the
+// parent when it is fresh — a stale or unreadable parent is itself the
+// problem, and the remediation must say so instead of telling the operator
+// to serve a bad index.
+func TestCheckIndexShadowParentStates(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	buildAndSave := func(root string) {
+		ix, err := index.Build(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ix.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent := t.TempDir()
+	// A file with a real symbol, so the parent index is fresh AND non-empty
+	// (writeGoFile's bare "package p" yields zero symbols — that is the
+	// empty-parent fixture below).
+	if err := os.WriteFile(filepath.Join(parent, "a.go"), []byte("package p\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The child tree must exist BEFORE the parent build: any file added to
+	// the parent's tree afterwards makes the parent index stale (that is
+	// the stale fixture's mechanism, not a bug).
+	sub := filepath.Join(parent, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGoFile(t, sub, "b.go")
+	buildAndSave(parent)
+	buildAndSave(sub)
+
+	// Fresh parent: advise serving the parent root.
+	f := checkIndexShadow(sub)
+	if f.Level != "warn" || !strings.Contains(f.Detail, "fresh") || !strings.Contains(f.Detail, "parent root") {
+		t.Fatalf("fresh parent: got %+v", f)
+	}
+
+	// Stale parent: a source file added after the parent build makes the
+	// parent index stale — this root is fine, the parent needs the fix.
+	writeGoFile(t, parent, "c.go")
+	f = checkIndexShadow(sub)
+	if !strings.Contains(f.Detail, "stale") || !strings.Contains(f.Detail, "this root is fine") {
+		t.Fatalf("stale parent: got %+v", f)
+	}
+
+	// Unreadable parent: corrupt every store the load chain tries
+	// (bin snapshot → SQLite → JSON; SQLite is primary, so index.json
+	// alone is NOT enough — the sqlite store would still load).
+	for _, name := range []string{"index.json.snap", "index.sqlite", "index.json"} {
+		if err := os.WriteFile(filepath.Join(parent, ".kern", name), []byte("not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f = checkIndexShadow(sub)
+	if !strings.Contains(f.Detail, "unreadable") || !strings.Contains(f.Detail, "this root is fine") {
+		t.Fatalf("unreadable parent: got %+v", f)
+	}
+
+	// Empty parent: a valid parent store with no symbols (bare "package p")
+	// is still a non-servable parent — same remediation as unreadable.
+	emptyParent := t.TempDir()
+	writeGoFile(t, emptyParent, "a.go")
+	buildAndSave(emptyParent)
+	emptySub := filepath.Join(emptyParent, "sub")
+	if err := os.MkdirAll(emptySub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGoFile(t, emptySub, "b.go")
+	buildAndSave(emptySub)
+	f = checkIndexShadow(emptySub)
+	if !strings.Contains(f.Detail, "empty") || !strings.Contains(f.Detail, "this root is fine") {
+		t.Fatalf("empty parent: got %+v", f)
+	}
+}
+
 // TestParentIndexDir walks up to the nearest ancestor holding an index.
 func TestParentIndexDir(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -844,5 +1090,80 @@ func TestWiringFindingsNoCursorWarnAfterFreshSetup(t *testing.T) {
 			f.Check == "cursor rule" {
 			t.Errorf("%s: unexpected warn after fresh setup: %s", f.Check, f.Detail)
 		}
+	}
+}
+
+// TestCheckAuditDropped pins the `kern doctor` surface of the dropped-audit
+// contract (governance.AppendDroppedAuditMarker + AuditLog.persist): absent
+// or empty sidecar = ok; non-empty = warn with the count + last timestamp.
+func TestCheckAuditDropped(t *testing.T) {
+	t.Run("absent sidecar is ok", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if f := checkAuditDropped(); f.Level != "ok" {
+			t.Fatalf("level = %q, want ok (no sidecar): %s", f.Level, f.Detail)
+		}
+	})
+	t.Run("empty sidecar is ok", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".kern", "audit")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "dropped.jsonl"), []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if f := checkAuditDropped(); f.Level != "ok" {
+			t.Fatalf("level = %q, want ok (empty sidecar): %s", f.Level, f.Detail)
+		}
+	})
+	t.Run("non-empty sidecar warns with count and last timestamp", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".kern", "audit")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"ts":"2026-10-08T12:00:00Z","id":"audit-1","action":"tool_call","resource":"kern_search","cause":"disk full"}` + "\n" +
+			`{"ts":"2026-10-08T12:05:00Z","id":"audit-2","action":"tool_call","resource":"kern_explore","cause":"disk full"}` + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "dropped.jsonl"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := checkAuditDropped()
+		if f.Level != "warn" {
+			t.Fatalf("level = %q, want warn (non-empty sidecar): %s", f.Level, f.Detail)
+		}
+		if !strings.Contains(f.Detail, "2 audit entries") {
+			t.Fatalf("detail = %q, want the count of dropped entries", f.Detail)
+		}
+		if !strings.Contains(f.Detail, "12:05:00") {
+			t.Fatalf("detail = %q, want the last drop's timestamp", f.Detail)
+		}
+	})
+}
+
+// TestWiringFindingsAdvisoryPrefixesAreWarnings pins the advisory-prefix
+// mapping: setup's checkWrapperFreshness emits Installed statuses whose
+// notes start with WARN:/STALE: (e.g. an installed kern older than the
+// project-local binary). Doctor must render those as warnings -- "[ok]
+// kern STALE: 85d7fa0 != 66a92d1" reads as a contradiction.
+func TestWiringFindingsAdvisoryPrefixesAreWarnings(t *testing.T) {
+	sts := []setup.Status{
+		{Agent: "kern", Installed: true, Path: "/home/u/.local/bin/kern", Note: "STALE: kern v0.9.9 != kern v0.9.10 - refresh from the same release (else the pre-commit hook may run an old governance gate)"},
+		{Agent: "kern-mcp", Installed: true, Path: "/home/u/.local/bin/kern-mcp", Note: "WARN: cannot read version from /home/u/.local/bin/kern-mcp; refresh it from the same release as kern"},
+		{Agent: "AGENTS.md rules", Installed: true, Path: "/repo/AGENTS.md", Note: "kern entry present"},
+	}
+	levels := map[string]string{}
+	for _, f := range wiringFindings(sts, nil) {
+		levels[f.Check] = f.Level
+	}
+	if levels["kern"] != "warn" {
+		t.Fatalf("STALE note must render warn, got %s", levels["kern"])
+	}
+	if levels["kern-mcp"] != "warn" {
+		t.Fatalf("WARN note must render warn, got %s", levels["kern-mcp"])
+	}
+	if levels["AGENTS.md rules"] != "ok" {
+		t.Fatalf("normal note must stay ok, got %s", levels["AGENTS.md rules"])
 	}
 }

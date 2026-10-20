@@ -61,7 +61,10 @@ func fakeIndex() *index.Index {
 func names(nodes []domain.Node) []string {
 	out := make([]string, len(nodes))
 	for i, n := range nodes {
-		out[i] = n.ID
+		out[i] = n.Label
+		if out[i] == "" {
+			out[i] = n.ID
+		}
 	}
 	return out
 }
@@ -78,9 +81,10 @@ func containsID(ids []string, want string) bool {
 func TestFromIndex(t *testing.T) {
 	g := FromIndex(fakeIndex())
 
-	// Nodes: 5 symbols + 5 file + 1 module ("svc") = 11.
-	if len(g.Nodes) != 11 {
-		t.Fatalf("node count = %d, want 11", len(g.Nodes))
+	// Nodes: 5 symbols + 5 file + 1 module ("svc") + 2 unresolved inheritance
+	// references (Baz is a func and Animal is undeclared) = 13.
+	if len(g.Nodes) != 13 {
+		t.Fatalf("node count = %d, want 13", len(g.Nodes))
 	}
 	// Edges: 6 calls (Foo->Bar, Foo->Baz, Bar->Baz, Baz->Foo, HandleUsers->Foo,
 	// TestFoo->HandleUsers) + 1 inherits + 1 imports + 5 contains + 5 defines = 18.
@@ -442,10 +446,10 @@ func TestSameNamedSymbolsDoNotCollide(t *testing.T) {
 
 	// Both Save symbols become distinct nodes (not a single "Save").
 	byID := g.nodesByID()
-	if _, ok := byID["db.Save"]; !ok {
+	if _, ok := byID[ix.Symbols[0].DeclarationID()]; !ok {
 		t.Fatalf("missing node %q", "db.Save")
 	}
-	if _, ok := byID["api.Save"]; !ok {
+	if _, ok := byID[ix.Symbols[1].DeclarationID()]; !ok {
 		t.Fatalf("missing node %q", "api.Save")
 	}
 	// A node whose ID is exactly the bare name must not exist for either.

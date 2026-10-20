@@ -1,6 +1,6 @@
 # kern Benchmark Suite Index
 
-**Suite:** benchmarks · **Status:** multiple baselines, see each suite's page
+**Suite:** benchmarks · **Status:** multiple baselines — each page carries an explicit provenance label ([measured] / [historical] / [superseded] / [synthetic])
 
 This directory holds kern's benchmark suites. Each suite answers a different
 marketing claim with a machine-checkable protocol, honest numbers, and a
@@ -14,10 +14,13 @@ calls in the measurements.
 | Semantic retention | [`semantic-retention.md`](semantic-retention.md) | Compression keeps *meaning*, not just tokens (tier1 retention, symbol recall, call-graph fidelity, loss-adjusted savings) |
 | Graph latency | [`graph-latency.md`](graph-latency.md) | "Sub-millisecond graph": cold/warm index + query latency, honest verdict at fixture and ~12k-symbol scale |
 | Cold-start scale | [`cold-start.md`](cold-start.md) | "Slower than grep": one-shot cold-build/cold-load vs `grep -rn` across repo sizes (83 → 7,819 files), same-tree protocol |
+| Multi-repo latency | [`multi-repo-latency.md`](multi-repo-latency.md) | Real-repo measured baseline: cold/warm + query latency across 4 real codebases (979 → 20,316 symbols), plus the two indexer bugs the first round found |
 | Telemetry audit | [`telemetry-audit.md`](telemetry-audit.md) | Zero network egress in core packages (CI-enforced static import scan) |
 | Token savings | [`token-savings.md`](token-savings.md) | Compact context vs naive full-file context token reduction (machine-generated report) |
+| Index accuracy | [`accuracy.md`](accuracy.md) | Per-language index reliability: measured regex-vs-tree-sitter parity (precision/recall), tier table, Go's resolved extraction |
+| Agent-level evals | [`agent-evals.md`](agent-evals.md) | With vs without kern on the same tasks: deterministic discovery-cost suite (phase 1) + the real-LLM A/B protocol (phase 2) |
 | Command QA ledger | [`command-qa-ledger.md`](command-qa-ledger.md) | One-command-at-a-time QA verification and audit disposition log |
-| Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication scanner confusion matrix and precision floors |
+| Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication scanner confusion matrix and precision floors — [historical]: suite deleted in `a05c91c7`, scoring core survives in `internal/duplication` |
 
 ## The four benchmark dimensions (semantic retention)
 
@@ -45,6 +48,7 @@ docs/benchmarks/
   README.md              this suite index
   semantic-retention.md  detailed spec (metrics, gates, baseline) + fixtures map
   graph-latency.md       cold/warm + query latency methodology and results
+  multi-repo-latency.md measured 4-real-repo baseline (cold/warm + queries)
   telemetry-audit.md     zero-network-egress audit (CI-gated)
   token-savings.md       machine-generated token-savings report
   command-qa-ledger.md   one-command-at-a-time QA verification log
@@ -55,5 +59,4 @@ docs/benchmarks/
 
 - [`cmd/kern/cmd_bench.go`](../../cmd/kern/cmd_bench.go) — the `kern bench` latency harness.
 - [`docs/benchmarks/graph-latency.md`](graph-latency.md) — methodology the harness mirrors.
-- [`internal/bpreceipt/metrics/g12_test.go`](../../internal/bpreceipt/metrics/g12_test.go) — G12 cold-vs-warm latency tests.
 - [`evaluate/bench/main.go`](../../evaluate/bench/main.go) — token-reduction benchmarks (CI-gated).

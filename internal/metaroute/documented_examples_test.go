@@ -16,6 +16,11 @@ func TestClassifyMetaRequest_DocumentedExamples(t *testing.T) {
 		{"compress this log: ERROR boom\n at main.go:10", "kern_optimize"},
 		{"mask secrets in: token=sk-abc123", "kern_mask_pii"},
 		{"find the NewServer function", "kern_search"},
+		// P3-2: a locator about a kern tool is a search, not a tool
+		// invocation — the explicit-tool-name arm must not hijack it into
+		// RUNNING the tool. (A "handler"-bearing phrasing routes to
+		// kern_entry_points by the deliberate handler→entry-points arm.)
+		{"find where the kern_memory tool stores its lessons", "kern_search"},
 	}
 	for _, c := range cases {
 		got, _ := ClassifyMetaRequest(c.request)

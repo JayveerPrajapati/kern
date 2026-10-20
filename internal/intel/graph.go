@@ -36,9 +36,10 @@ type Graph struct {
 	// lifetime. byID maps node ID -> node; nameIndex maps a simple symbol name
 	// -> the node IDs that share it (for O(1) name resolution). indexOnce
 	// guards their one-time construction.
-	byID      map[string]domain.Node
-	nameIndex map[string][]string
-	indexOnce sync.Once
+	byID       map[string]domain.Node
+	nameIndex  map[string][]string
+	labelIndex map[string][]string
+	indexOnce  sync.Once
 
 	// nodePkg maps symbol node ID -> its package path, and pkgImports maps
 	// package path -> the import paths it declares (from the graph's
@@ -72,6 +73,17 @@ type Graph struct {
 	testsByPkg map[string][]string
 	testsOnce  sync.Once
 
+	// foreignBases is the set of import path bases ("http", "fmt") that are
+	// not project package directory bases. A callee key whose FIRST qualifier
+	// is one of these ("http.DefaultClient.Do") is a stdlib/vendor call and
+	// must never attribute its callers to a project symbol — even when the
+	// bare name is unique, the unique-simple-name resolution would otherwise
+	// pool every same-named external method call onto the one project
+	// definition. Mirrors the index's foreignImportBases contract
+	// (TestForeignCalleeNeverAliasesLocalSymbol). Built lazily alongside the
+	// other caches; the graph is read-only after construction.
+	foreignBases map[string]bool
+
 	// closureMemo caches full transitive closures keyed by (start node ID,
 	// traversal direction, precision mode). kern impact runs the same reverse
 	// closure up to three times (WhatAPIsAffected, WhatServicesAffected,
@@ -95,6 +107,7 @@ func FromIndex(ix *index.Index) Graph {
 		Project: domain.Project{Root: ix.Root},
 	}
 	entries := map[string]bool{}
+	seenDeclarations := map[string]bool{}
 
 	// Scope symbol node IDs by package so same-named symbols in different
 	// packages don't collide (e.g. two "func Save" in different packages used to
@@ -102,7 +115,7 @@ func FromIndex(ix *index.Index) Graph {
 	// path, falling back to the file's directory; the root package (".") keeps
 	// bare node IDs.
 	pkgByFile := graphPackagePathByFile(ix)
-	nodeID := func(s index.Symbol) string {
+	nodeLabel := func(s index.Symbol) string {
 		p := pkgByFile[s.File]
 		if p == "" {
 			p = filepath.Dir(s.File)
@@ -115,13 +128,19 @@ func FromIndex(ix *index.Index) Graph {
 
 	// Capture framework entry-point metadata (handler, route, etc.).
 	for _, s := range ix.Symbols {
-		id := nodeID(s)
+		id := s.DeclarationID()
+		if seenDeclarations[id] {
+			continue
+		}
+		seenDeclarations[id] = true
 		ds := domain.FromIndexSymbol(s)
 		g.Nodes = append(g.Nodes, domain.Node{
-			ID:     id,
-			Kind:   "symbol",
-			Label:  id,
-			Symbol: &ds,
+			ID:         id,
+			Kind:       "symbol",
+			Label:      nodeLabel(s),
+			Symbol:     &ds,
+			Package:    pkgByFile[s.File],
+			Resolution: "resolved",
 		})
 		if s.Entry || s.Route != "" || s.Framework != "" {
 			entries[id] = true
@@ -131,7 +150,12 @@ func FromIndex(ix *index.Index) Graph {
 	// Emit distinct file nodes (in symbol iteration order) plus their
 	// contains/defines edges.
 	seenFiles := map[string]bool{}
+	seenDefinitions := map[string]bool{}
 	for _, s := range ix.Symbols {
+		if seenDefinitions[s.DeclarationID()] {
+			continue
+		}
+		seenDefinitions[s.DeclarationID()] = true
 		fp := s.File
 		if fp == "" {
 			continue
@@ -145,8 +169,8 @@ func FromIndex(ix *index.Index) Graph {
 				File:  &domain.File{Path: fp},
 			})
 		}
-		g.Edges = append(g.Edges, domain.Edge{From: "file:" + fp, To: nodeID(s), Kind: "contains"})
-		g.Edges = append(g.Edges, domain.Edge{From: nodeID(s), To: "file:" + fp, Kind: "defines"})
+		g.Edges = append(g.Edges, domain.Edge{From: "file:" + fp, To: s.DeclarationID(), Kind: "contains"})
+		g.Edges = append(g.Edges, domain.Edge{From: s.DeclarationID(), To: "file:" + fp, Kind: "defines"})
 	}
 
 	for path, pkg := range ix.Pkgs {
@@ -159,21 +183,44 @@ func FromIndex(ix *index.Index) Graph {
 		})
 	}
 
-	// Call edges: caller -> callee.
-	for from, tos := range ix.Calls {
-		for _, ce := range tos {
-			g.Edges = append(g.Edges, domain.Edge{From: from, To: ce.Target, Kind: "calls"})
+	bindings := ix.CallBindings()
+	usedReferences := map[string]bool{}
+	for _, edge := range bindings.Edges {
+		if edge.SourceFile != "" || edge.Synth != "" {
+			usedReferences[edge.From], usedReferences[edge.To] = true, true
+		}
+	}
+	for _, node := range bindings.Nodes {
+		if node.Resolution != "resolved" && usedReferences[node.ID] {
+			g.Nodes = append(g.Nodes, domain.Node{ID: node.ID, Kind: "reference", Label: node.Name, Resolution: node.Resolution, Candidates: node.Candidates})
+		}
+	}
+	for _, edge := range bindings.Edges {
+		if edge.SourceFile != "" || edge.Synth != "" {
+			g.Edges = append(g.Edges, domain.Edge{From: edge.From, To: edge.To, Kind: "calls", File: edge.SourceFile,
+				Reference: edge.Reference, Resolution: edge.Resolution, Confidence: edge.ConfidenceLabel, Synth: edge.Synth})
+		}
+	}
+	for from, edges := range ix.Calls {
+		for _, edge := range edges {
+			if edge.SourceFile == "" && edge.Synth == "" {
+				g.Edges = append(g.Edges, domain.Edge{From: from, To: edge.Target, Kind: "calls", Confidence: edge.Confidence.String(), Synth: edge.Synth})
+			}
 		}
 	}
 
 	// Inheritance edges: subtype -> base, tagged kind parsed from the prefix.
-	for sub, bases := range ix.Inherits {
-		for _, tagged := range bases {
-			g.Edges = append(g.Edges, domain.Edge{
-				From: sub,
-				To:   inheritBase(tagged),
-				Kind: inheritKind(tagged),
-			})
+	inheritEdges, inheritNodes := ix.InheritBindings()
+	inheritUsed := map[string]bool{}
+	for _, edge := range inheritEdges {
+		inheritUsed[edge.From], inheritUsed[edge.To] = true, true
+		g.Edges = append(g.Edges, domain.Edge{From: edge.From, To: edge.To, Kind: edge.Kind,
+			Reference: edge.Reference, Resolution: edge.Resolution})
+	}
+	for _, node := range inheritNodes {
+		if node.Resolution != "resolved" && inheritUsed[node.ID] && !seenDeclarations[node.ID] && !usedReferences[node.ID] {
+			usedReferences[node.ID] = true
+			g.Nodes = append(g.Nodes, domain.Node{ID: node.ID, Kind: "reference", Label: node.Name, Resolution: node.Resolution, Candidates: node.Candidates})
 		}
 	}
 
@@ -193,11 +240,17 @@ func FromIndex(ix *index.Index) Graph {
 	}
 
 	g.Version = &domain.VersionMetadata{
-		BuiltAt:     ix.UpdatedAt,
-		SymbolCount: len(ix.Symbols),
-		EdgeCount:   len(g.Edges),
-		GraphHash:   graphHash(g),
+		SchemaVersion: index.GraphSchemaVersion,
+		BuiltAt:       ix.UpdatedAt,
+		SymbolCount:   len(seenDeclarations),
+		EdgeCount:     len(g.Edges),
+		GraphHash:     graphHash(g),
 	}
+	sort.Slice(g.Nodes, func(first, second int) bool { return g.Nodes[first].ID < g.Nodes[second].ID })
+	sort.Slice(g.Edges, func(first, second int) bool {
+		left, right := g.Edges[first], g.Edges[second]
+		return left.From+"\x00"+left.Kind+"\x00"+left.To+"\x00"+left.File < right.From+"\x00"+right.Kind+"\x00"+right.To+"\x00"+right.File
+	})
 
 	return Graph{Graph: g, entries: entries, precisionByLang: ix.PrecisionByLang}
 }
@@ -208,6 +261,9 @@ func FromIndex(ix *index.Index) Graph {
 func graphPackagePathByFile(ix *index.Index) map[string]string {
 	m := make(map[string]string, len(ix.Pkgs))
 	for path, pkg := range ix.Pkgs {
+		if pkg == nil {
+			continue
+		}
 		for _, f := range pkg.Files {
 			m[f] = path
 		}

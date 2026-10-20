@@ -237,16 +237,6 @@ func TestXMLEsc(t *testing.T) {
 	}
 }
 
-func TestKWSet(t *testing.T) {
-	kw := kwSet("a", "b")
-	if len(kw) != 2 || !kw["a"] || !kw["b"] {
-		t.Errorf("kwSet = %v", kw)
-	}
-	if kwSet()["x"] {
-		t.Error("kwSet() should not contain x")
-	}
-}
-
 func TestLoadFileRoundTrip(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go": helperSrc,

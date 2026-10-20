@@ -21,3 +21,10 @@ func TreesitterEnabled() bool { return treesitterEnabled() }
 func TreeSitterAvailable(lang string) bool {
 	return false
 }
+
+// TsExtract exposes the tree-sitter extractor to sibling packages (langparse
+// injects it into ExtractForeign) and to external tests. Same behavior as
+// tsExtract; the stub build returns the not-enabled error.
+func TsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
+	return tsExtract(rel, src, lang)
+}

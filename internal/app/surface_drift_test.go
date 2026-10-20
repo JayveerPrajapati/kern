@@ -49,8 +49,8 @@ func TestSurfaceTouchesFromGit(t *testing.T) {
 	git("config", "user.email", "drift@example.com")
 	git("config", "user.name", "Drift Test")
 
-	// c1: catalog only (internal/mcp/catalog/).
-	write("internal/mcp/catalog/tools.go", "catalog\n")
+	// c1: catalog only (internal/mcpcatalog/).
+	write("internal/mcpcatalog/tools.go", "catalog\n")
 	c1 := commit("catalog only")
 
 	// c2: plugin only (live .opencode copy).
@@ -62,15 +62,15 @@ func TestSurfaceTouchesFromGit(t *testing.T) {
 	write("README.md", "readme\n")
 	c3 := commit("docs only")
 
-	// c4: all three surfaces together (embedded plugin asset + tool-catalog.md).
-	write("internal/mcp/catalog/catalog.go", "catalog2\n")
-	write("internal/setup/assets/plugin/kern.ts", "plugin2\n")
+	// c4: all three surfaces together (bundled plugin asset + tool-catalog.md).
+	write("internal/mcpcatalog/catalog.go", "catalog2\n")
+	write("internal/agentwire/assets/plugin/kern.ts", "plugin2\n")
 	write("docs/tool-catalog.md", "catalog doc\n")
 	c4 := commit("all surfaces")
 
 	// c5: rename inside the catalog (--name-status emits R100 old new); the
 	// new path must still map to the catalog surface.
-	git("mv", "internal/mcp/catalog/catalog.go", "internal/mcp/catalog/manifest.go")
+	git("mv", "internal/mcpcatalog/catalog.go", "internal/mcpcatalog/manifest.go")
 	c5 := commit("rename catalog file")
 
 	records, err := SurfaceTouchesFromGit(root, 50)

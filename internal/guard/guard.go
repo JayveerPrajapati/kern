@@ -324,7 +324,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 		if fromDir == "" || toDir == "" || fromDir == toDir {
 			return
 		}
-		if rule := verdict(b.Rules, fromDir, toDir); rule != nil {
+		if rule := Verdict(b.Rules, fromDir, toDir); rule != nil {
 			violations = append(violations, Violation{
 				CallerFile: callerFile,
 				CalleeFile: calleeFile,
@@ -400,7 +400,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 					continue
 				}
 				if intel.ImportMatches(imp.Path, toDir) {
-					if rule := verdict(b.Rules, fromDir, toDir); rule != nil {
+					if rule := Verdict(b.Rules, fromDir, toDir); rule != nil {
 						violations = append(violations, Violation{
 							CallerFile: f,
 							CalleeFile: toDir + "/",
@@ -441,12 +441,12 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 	return violations, skipped
 }
 
-// verdict decides a from→to edge and is order-invariant. If ANY rule allows
+// Verdict decides a from→to edge and is order-invariant. If ANY rule allows
 // the pair the verdict is nil (permitted) — allow dominates no matter where
 // in the slice it appears. Only when no allow rule matches is the first
 // forbid rule that matches returned (a violation). If nothing matches, the
 // pair is permitted (default-permit for unconfigured pairs).
-func verdict(rules []domain.BoundaryRule, fromDir, toDir string) *domain.BoundaryRule {
+func Verdict(rules []domain.BoundaryRule, fromDir, toDir string) *domain.BoundaryRule {
 	for i := range rules {
 		if rules[i].Action == "allow" && DirMatch(rules[i].From, fromDir) && DirMatch(rules[i].To, toDir) {
 			return nil

@@ -25,6 +25,16 @@ const (
 	maxCapturedOutput     = 8 << 20
 )
 
+// DeniedError marks a governance refusal from kern_verify command mode —
+// the allowlist classification (classifyCommand) or the CheckExec firewall.
+// The CLI applies the exit-3 denial contract to it (see `kern exitcode`:
+// denials exit 3, findings exit 1); the wrapped error's message is
+// preserved verbatim so MCP surfaces render unchanged.
+type DeniedError struct{ Err error }
+
+func (e *DeniedError) Error() string { return e.Err.Error() }
+func (e *DeniedError) Unwrap() error { return e.Err }
+
 // Verify is the server path for kern_verify command mode: same runner as
 // VerifyCommand, but scoped to the server's workspace roots (root confinement
 // and the command audit still apply). The MCP handler calls this directly.
@@ -57,10 +67,10 @@ func verifyCommandCore(ctx context.Context, roots []string, args map[string]any)
 
 	command := strings.TrimSpace(mcpargs.ArgString(args, "command"))
 	if err := classifyCommand(command, detectToolchains(root)); err != nil {
-		return "", 0, fmt.Errorf("kern_verify command refused: %w", err)
+		return "", 0, &DeniedError{Err: fmt.Errorf("kern_verify command refused: %w", err)}
 	}
 	if err := governance.CheckExecCommand(command, root, "kern_verify"); err != nil {
-		return "", 0, err
+		return "", 0, &DeniedError{Err: err}
 	}
 
 	res := runCommand(ctx, root, command, commandTimeout(args))

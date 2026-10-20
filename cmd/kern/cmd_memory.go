@@ -12,14 +12,16 @@ import (
 // memoryUsage is the single source of the `kern memory` help text: printed
 // by bare `kern memory` (F4) and reused as the dispatch-table entry's usage
 // field for `kern memory --help`.
-const memoryUsage = "usage: kern memory add|list|recall|remove <...>\n" +
+const memoryUsage = "usage: kern memory add|list|recall|remove|prune <...>\n" +
 	"  subcommands:\n" +
 	"    add <lesson>        store a lesson ('remember' is an alias)\n" +
 	"    list                list stored lessons\n" +
 	"    recall <prompt>     ranked keyword recall\n" +
 	"    remove <n|prefix>   delete one entry by 1-based list index or text prefix\n" +
+	"    prune --auto        remove automatic captures from both stores and collapse exact duplicates\n" +
 	"  options:\n" +
-	"    --clear            clear/empty the whole store\n" +
+	"    --auto            tag the lesson as an automatic capture (add/remember); confirm auto prune\n" +
+	"    --clear            clear/empty the whole store (v1 + typed)\n" +
 	"    --json             emit JSON output\n" +
 	"    --limit            cap results at N\n" +
 	"    --root             project root (default: .)"
@@ -27,10 +29,30 @@ const memoryUsage = "usage: kern memory add|list|recall|remove <...>\n" +
 // memoryAdd stores a lesson in project memory. It is the shared body of
 // `kern memory add` and its alias entry `kern remember`. Explicit lessons
 // dual-write via memory.AddExplicit: the typed store (buddy's "Project
-// memory") and the v1 store (recall/list).
-func memoryAdd(ctx context.Context, root, lesson string) {
-	if err := memory.AddExplicit(root, lesson); err != nil {
+// memory") and the v1 store (recall/list). With auto=true the lesson is
+// written as an automatic capture (memory.AddAuto, v1 Source "auto") — the
+// plugin passes --auto in Wave 2 so session captures never enter the
+// explicit lessons path.
+func memoryAdd(ctx context.Context, root, lesson string, auto bool) {
+	if auto {
+		written, err := memory.AddAuto(root, lesson)
+		if err != nil {
+			fatal("Memory: %v", err)
+		}
+		if !written {
+			fmt.Println("already remembered (auto) — identical capture within 60s, not re-stored.")
+			return
+		}
+		fmt.Println("remembered (auto).")
+		return
+	}
+	written, err := memory.AddExplicit(root, lesson)
+	if err != nil {
 		fatal("Memory: %v", err)
+	}
+	if !written {
+		fmt.Println("already remembered — identical lesson within 60s, not re-stored.")
+		return
 	}
 	fmt.Println("remembered.")
 }
@@ -60,10 +82,10 @@ func runRemember(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	lesson := strings.Join(args, " ")
 	if lesson == "" {
-		fatalUsage("usage: kern remember <lesson>")
+		fatalUsage("usage: kern remember <lesson> [--auto]")
 	}
 	root := projectRoot(f)
-	memoryAdd(context.Background(), root, lesson)
+	memoryAdd(context.Background(), root, lesson, f.auto)
 
 }
 
@@ -80,7 +102,7 @@ func runMemory(rest []string) {
 			if lesson == "" {
 				fatalUsage("usage: kern memory add <lesson>")
 			}
-			memoryAdd(ctx, root, lesson)
+			memoryAdd(ctx, root, lesson, f.auto)
 			return
 		case "list":
 			entries := memory.List(root)
@@ -90,6 +112,10 @@ func runMemory(rest []string) {
 			}
 			if s := memory.FormatEntries(entries); s != "" {
 				fmt.Println(s)
+			} else {
+				// QA 6.3: an empty store printed an empty string (exit 0) —
+				// friendly pointer instead, machine-readable --json unchanged.
+				fmt.Println("no lessons stored yet (add one with: kern memory add <lesson>)")
 			}
 			return
 		case "recall":
@@ -104,7 +130,22 @@ func runMemory(rest []string) {
 			if lesson == "" {
 				fatalUsage("usage: kern memory remember <lesson>")
 			}
-			memoryAdd(ctx, root, lesson)
+			memoryAdd(ctx, root, lesson, f.auto)
+			return
+		case "prune":
+			// F2: bulk cleanup of automatic captures. Removes Source "auto"
+			// (and auto-shaped) entries from BOTH stores and collapses exact
+			// duplicates; genuine user lessons always survive.
+			if !f.auto {
+				fatalUsage("usage: kern memory prune --auto [--root ROOT] (prune only removes automatic captures; pass --auto to confirm)")
+			}
+			stats, perr := memory.PruneAuto(root)
+			if perr != nil {
+				fatal("memory prune: %v", perr)
+			}
+			fmt.Printf("pruned: %d auto captures removed (typed %d, v1 %d), %d exact duplicates collapsed (typed %d, v1 %d)\n",
+				stats.TypedRemoved+stats.V1Removed, stats.TypedRemoved, stats.V1Removed,
+				stats.TypedCollapsed+stats.V1Collapsed, stats.TypedCollapsed, stats.V1Collapsed)
 			return
 		case "remove":
 			// QA F5: targeted deletion — by 1-based list index or by text

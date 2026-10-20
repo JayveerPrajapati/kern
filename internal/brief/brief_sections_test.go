@@ -1,10 +1,14 @@
 package brief
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 func TestFrameworkEntriesSortedAndCapped(t *testing.T) {
@@ -16,7 +20,7 @@ func TestFrameworkEntriesSortedAndCapped(t *testing.T) {
 			{Entry: false, Framework: "", Name: "x", File: "a.py", Line: 3},
 		},
 	}
-	out := frameworkEntries(ix)
+	out, _ := frameworkEntries(ix)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 framework entries, got %d", len(out))
 	}
@@ -32,11 +36,17 @@ func TestFrameworkEntriesSortedAndCapped(t *testing.T) {
 func TestFrameworkEntriesCappedAt20(t *testing.T) {
 	ix := &index.Index{Symbols: make([]index.Symbol, 25)}
 	for i := range ix.Symbols {
-		ix.Symbols[i] = index.Symbol{Entry: true, Framework: "fw", Route: "/r", Name: "h", File: "f.go", Line: i + 1}
+		// Distinct (name, route) pairs so F2's dedupe does not collapse them
+		// before the cap is exercised.
+		ix.Symbols[i] = index.Symbol{Entry: true, Framework: "fw", Route: "/r" + strconv.Itoa(i), Name: "h" + strconv.Itoa(i), File: "f.go", Line: i + 1}
 	}
-	out := frameworkEntries(ix)
+	out, total := frameworkEntries(ix)
 	if len(out) != 20 {
 		t.Fatalf("expected capped at 20, got %d", len(out))
+	}
+	// F3-1: the pre-cap total is disclosed alongside the capped list.
+	if total != 25 {
+		t.Fatalf("expected total 25, got %d", total)
 	}
 }
 
@@ -166,27 +176,142 @@ func TestArchitectureSectionGatedLargeGraph(t *testing.T) {
 
 func TestStatsSectionRecordsExistingStats(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	b := &strings.Builder{}
-	statsSection(b)
-	if !strings.Contains(b.String(), "kern savings") {
-		t.Fatalf("expected kern savings section, got %q", b.String())
+	out := statsSection(t.TempDir())
+	if !strings.Contains(out, "kern savings") {
+		t.Fatalf("expected kern savings section, got %q", out)
 	}
 }
 
-// TestStatsSectionLabelsMachineWideScope pins M9: the ops/tokens/$ numbers
-// come from the machine-wide metrics recorder, so the digest must label them
-// as machine-wide (all projects) — never read as project-scoped metrics.
-func TestStatsSectionLabelsMachineWideScope(t *testing.T) {
+// TestStatsSectionNoMachineWideNumbers pins QA 6.7(a): the stats ledger is
+// machine-wide (entries carry no project root), so the digest must NOT
+// surface other projects' ops/tokens/$ numbers — it shows a pointer instead.
+// (The M9 label was not enough: the numbers themselves leaked cross-project
+// activity into a project digest.)
+func TestStatsSectionShowsRootedProjectStats(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	b := &strings.Builder{}
-	statsSection(b)
-	out := b.String()
-	if !strings.Contains(out, "machine-wide (all projects):") {
-		t.Fatalf("stats line must be labeled machine-wide, got %q", out)
+	rec, err := stats.NewRecorder()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The prefix must sit directly before the numbers, on the data line.
-	if !strings.Contains(out, "machine-wide (all projects): 0 ops") && !strings.Contains(out, "machine-wide (all projects): ") {
-		t.Fatalf("label must prefix the data line, got %q", out)
+	root := t.TempDir()
+	if err := rec.Record(stats.Entry{
+		Time:         time.Now(),
+		Operation:    stats.OpOptimizePrompt,
+		Root:         root,
+		BeforeTokens: 100,
+		AfterTokens:  40,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := statsSection(root)
+	for _, want := range []string{
+		"kern savings (project, last 30 days)",
+		"0 tool calls",
+		"1 optimization events",
+		"60 tokens saved",
+		"machine-wide view: `kern stats`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("project stats missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestStatsSectionNoMachineWideNumbers(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	out := statsSection(t.TempDir())
+	for _, leak := range []string{" ops", "tokens saved", "$", "cost saved", "machine-wide (all projects): "} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("digest stats section must not carry machine-wide numbers (%q), got %q", leak, out)
+		}
+	}
+	if !strings.Contains(out, "kern stats") {
+		t.Fatalf("stats section must point at `kern stats`, got %q", out)
+	}
+}
+
+// TestDigestHubsOrderedByCallerCount pins QA 5.6(b): the digest's hub list
+// ranks by ACTUAL caller count desc and drops 0-caller symbols. Here main
+// calls ten helpers (raw weight 10) while shared has three callers (raw 6) —
+// the community-weighted ranking would put main first; the digest must show
+// shared (3 callers) first and never list main.
+func TestDigestHubsOrderedByCallerCount(t *testing.T) {
+	symbols := []index.Symbol{
+		{Kind: "func", Name: "shared", File: "a.go", Line: 1},
+		{Kind: "func", Name: "f1", File: "a.go", Line: 2},
+		{Kind: "func", Name: "f2", File: "a.go", Line: 3},
+		{Kind: "func", Name: "f3", File: "a.go", Line: 4},
+		{Kind: "func", Name: "main", File: "a.go", Line: 5},
+	}
+	calls := map[string][]index.CallEdge{
+		"f1":   {{Target: "shared", Confidence: index.ConfidenceHigh}},
+		"f2":   {{Target: "shared", Confidence: index.ConfidenceHigh}},
+		"f3":   {{Target: "shared", Confidence: index.ConfidenceHigh}},
+		"main": {},
+	}
+	for i := 0; i < 10; i++ {
+		tgt := "t" + strconv.Itoa(i)
+		symbols = append(symbols, index.Symbol{Kind: "func", Name: tgt, File: "a.go", Line: 100 + i})
+		calls["main"] = append(calls["main"], index.CallEdge{Target: tgt, Confidence: index.ConfidenceHigh})
+	}
+	ix := &index.Index{
+		Symbols:    symbols,
+		Calls:      calls,
+		Callers:    map[string][]string{"shared": {"f1", "f2", "f3"}, "main": {}},
+		FileHashes: map[string]string{"a.go": "h"},
+	}
+	hubs := digestHubs(ix, 8)
+	if len(hubs) == 0 {
+		t.Fatal("expected hubs, got none")
+	}
+	for _, h := range hubs {
+		if h.Callers == 0 {
+			t.Errorf("0-caller symbol %s must not lead the digest hubs, got %+v", h.Symbol, hubs)
+		}
+	}
+	if hubs[0].Symbol != "shared" || hubs[0].Callers != 3 {
+		t.Fatalf("expected shared (3 callers) first, got %+v", hubs)
+	}
+	// The digest section itself renders the same ordering.
+	out := indexSection(ix)
+	if !strings.Contains(out, "shared (3 callers)") {
+		t.Errorf("indexSection must show shared with 3 callers, got %q", out)
+	}
+	if strings.Contains(out, "main (0 callers)") {
+		t.Errorf("indexSection must not list a 0-caller hub, got %q", out)
+	}
+}
+
+// TestArchitectureSectionCommunitiesCapped pins QA 6.7(b): the architecture
+// community list is bounded with a truncation pointer so a large repo cannot
+// push the digest past its byte budget.
+func TestArchitectureSectionCommunitiesCapped(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "main", File: "a.go", Line: 1},
+			{Kind: "func", Name: "helper", File: "b.go", Line: 1},
+		},
+		Calls: map[string][]index.CallEdge{
+			"main":   {{Target: "helper", Confidence: index.ConfidenceHigh}},
+			"helper": {{Target: "main", Confidence: index.ConfidenceHigh}},
+		},
+		Callers: map[string][]string{"main": {"helper"}, "helper": {"main"}},
+	}
+	// Force more communities than the cap by patching the architecture
+	// result: build via the real analysis then extend the slice.
+	arch := topology.AnalyzeArchitecture(ix)
+	for i := len(arch.Communities); i < 20; i++ {
+		arch.Communities = append(arch.Communities, topology.ArchCommunity{ID: "c" + strconv.Itoa(i), Size: 1, Hub: "h", Packages: []string{"pkg"}})
+	}
+	if len(arch.Communities) <= 12 {
+		t.Fatalf("fixture must exceed the community cap, got %d", len(arch.Communities))
+	}
+	out := renderArchitectureSection(&arch)
+	if strings.Count(out, "size ") != 12 {
+		t.Errorf("expected exactly 12 community rows, got %d:\n%s", strings.Count(out, "size "), out)
+	}
+	if !strings.Contains(out, "and 8 more communities") {
+		t.Errorf("expected a truncation pointer, got %q", out)
 	}
 }
 

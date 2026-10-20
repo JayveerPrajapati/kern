@@ -92,6 +92,46 @@ func TestRunProjectMissingRootFails(t *testing.T) {
 
 // assertExitCode recovers the exitError sentinel and asserts its code —
 // the shared contract check for the P2-8 straggler fixes.
+// TestExitcodeDocListsOnlyLiveCommands gates the `kern exitcode` doc text
+// (printed by runExitcode) against the dispatch table: every `kern <cmd>`
+// mentioned must be a live commandTable key. The exit contract is what
+// scripts and CI wrap — a pivot that deletes commands must scrub them from
+// this doc too (observed live: check, ci, request-approval, verify-receipt,
+// refactor-transaction, security and changes were all cited after deletion).
+func TestExitcodeDocListsOnlyLiveCommands(t *testing.T) {
+	doc := captureStdout(t, func() { runExitcode(nil) })
+
+	tableB, err := os.ReadFile("dispatch_table.go")
+	if err != nil {
+		t.Fatalf("read dispatch_table.go: %v", err)
+	}
+	live := map[string]bool{}
+	for _, m := range cliTableKeyRe.FindAllStringSubmatch(string(tableB), -1) {
+		live[m[1]] = true
+	}
+	if len(live) < 30 {
+		t.Fatalf("suspiciously small commandTable: %d keys parsed", len(live))
+	}
+
+	// Words that follow "kern" in prose but are not command invocations.
+	proseOnly := map[string]bool{
+		"exit": true, // "kern exit code conventions" (the doc's header line)
+	}
+	var ghost []string
+	seen := map[string]bool{}
+	for _, m := range cliDocCommandRe.FindAllStringSubmatch(doc, -1) {
+		cmd := m[1]
+		if strings.HasPrefix(cmd, "-") || seen[cmd] || proseOnly[cmd] || live[cmd] {
+			continue
+		}
+		seen[cmd] = true
+		ghost = append(ghost, cmd)
+	}
+	if len(ghost) > 0 {
+		t.Fatalf("`kern exitcode` doc cites %d dead commands: %s — prune them or point at the live spelling", len(ghost), strings.Join(ghost, ", "))
+	}
+}
+
 func assertExitCode(t *testing.T, want int, fn func()) {
 	t.Helper()
 	defer func() {
@@ -124,19 +164,32 @@ func TestRunMissingRootFails(t *testing.T) {
 // The parse error must now fail loud (exit 2).
 func TestParseSwallowBadFlagFails(t *testing.T) {
 	bad := []string{"--nope"}
-	cases := map[string]func([]string){
-		"evidence-anchor":    runEvidenceAnchor,
+	// Handlers still living in cmd/kern panic with the exitError sentinel;
+	// assertExitCode recovers it and checks the code.
+	panicking := map[string]func([]string){
 		"stream":             runStream,
-		"compose":            runCompose,
-		"prompt-fill":        runPromptFill,
-		"context-watch":      runContextWatch,
 		"agent-fingerprint":  runAgentFingerprint,
 		"memory-ranked":      runMemoryRanked,
 		"agent-coordination": runAgentCoordination,
-		"semantic-merge":     runSemanticMerge,
 	}
-	for name, fn := range cases {
+	for name, fn := range panicking {
 		t.Run(name, func(t *testing.T) { assertExitCode(t, 2, func() { fn(bad) }) })
+	}
+	// The mcp-mirror commands extracted to internal/mcp/* (workstream 3.6-A)
+	// return the exit code from their entry points instead of panicking.
+	returning := map[string]func([]string) int{
+		"evidence-anchor": runEvidenceAnchor,
+		"compose":         runComposeCore,
+		"prompt-fill":     runPromptFill,
+		"context-watch":   runContextWatch,
+		"semantic-merge":  runSemanticMerge,
+	}
+	for name, fn := range returning {
+		t.Run(name, func(t *testing.T) {
+			if code := fn(bad); code != 2 {
+				t.Fatalf("%s: exit code = %d, want 2 (usage error)", name, code)
+			}
+		})
 	}
 	t.Run("register-host-sampler", func(t *testing.T) { assertExitCode(t, 2, func() { runRegisterHostSampler(bad) }) })
 }

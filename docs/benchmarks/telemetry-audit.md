@@ -1,6 +1,6 @@
 # Telemetry Audit — zero network egress in core packages
 
-**Status:** enforced by CI (`go test ./internal/architecture`)
+**Status:** [measured] — enforced by CI (`go test ./internal/architecture`)
 **Date:** 2026-09-23
 **Git HEAD:** `3866e5a92d167a32be538e33f115bdc15253016c`
 
@@ -65,18 +65,14 @@ pass.
 
 | Package | Why it's exempt |
 | --- | --- |
-| `internal/enterprise` | Enterprise auth + org API (outbound and serving). |
 | `internal/fetch` | Outbound HTTP fetcher for pages/documents. |
 | `internal/llm` | Outbound LLM provider clients (OpenAI/Anthropic/Google/Ollama). |
 | `internal/mcp` | MCP loopback HTTP server (covers `internal/mcp/transport` TLS loopback listener and `internal/mcp/doc`, which uses `internal/fetch`). |
 | `internal/mcpclient` | Outbound MCP client. |
-| `internal/orgapprovals` | Org approvals REST surface (HTTP serving, mounted on the enterprise org API). |
 | `internal/prprovider` | PR-provider API clients (GitHub). |
 | `internal/relay` | Peer relay networking. |
 | `internal/resilience` | Chaos/injection scenarios spin up **local loopback** HTTP servers to simulate network failures; no outbound egress. |
 | `internal/runtime` | `live.go`: `LivePrometheusSource` / `LiveOtelSource` / `LiveKubernetesSource` poll remote endpoints. |
-| `internal/sdk` | Outbound kern-server REST client. |
-| `internal/web` | Local HTTP server (dashboard). |
 | `internal/webhook` | Outbound delivery of eventbus events to registered webhook URLs. |
 
 Verified non-allowlisted neighbors (checked, found network-free, no entry

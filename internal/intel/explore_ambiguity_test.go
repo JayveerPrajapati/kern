@@ -50,6 +50,64 @@ func TestAmbiguousAlternativesCapped(t *testing.T) {
 	}
 }
 
+// TestAmbiguousAlternativesCoversQualifiedCollisions pins the F3-7 fix: a
+// QUALIFIED query whose full name itself collides (two Server types each
+// defining dispatch) is as ambiguous as a bare name, and the render advice
+// adapts — an already-qualified query is pointed at the package-qualified
+// form, not the advice it just followed.
+func TestAmbiguousAlternativesCoversQualifiedCollisions(t *testing.T) {
+	one := sym("method", "dispatch", "internal/mcp/server.go", 952)
+	one.Receiver = "Server"
+	two := sym("method", "dispatch", "internal/web/server.go", 120)
+	two.Receiver = "Server"
+	ix := &index.Index{Root: "/kern", Symbols: []index.Symbol{one, two}}
+
+	got := ambiguousAlternatives(ix, "Server.dispatch", one)
+	if len(got) != 1 || !strings.Contains(got[0], "internal/web/server.go:120") {
+		t.Fatalf("qualified collision must list the other definition, got %v", got)
+	}
+
+	solo := sym("method", "dispatchTool", "internal/mcp/dispatch.go", 167)
+	solo.Receiver = "Server"
+	ix2 := &index.Index{Root: "/kern", Symbols: []index.Symbol{solo}}
+	if got := ambiguousAlternatives(ix2, "Server.dispatchTool", solo); got != nil {
+		t.Fatalf("unique qualified name must have no alternatives, got %v", got)
+	}
+
+	r := &ExploreReport{
+		Symbol:       "Server.dispatch",
+		Resolved:     "Server.dispatch",
+		Definition:   one,
+		Alternatives: []string{"Server.dispatch (internal/web/server.go:120)"},
+	}
+	if out := RenderExplore(r); !strings.Contains(out, "Pass a package-qualified name") {
+		t.Fatalf("qualified ambiguity advice must suggest the package-qualified form:\n%s", out)
+	}
+}
+
+// TestExploreCalleeKeepsUniqueQualifier pins the F3-7 fix: a callee whose
+// simple name is unique in the callee set renders with its cross-package
+// qualifier ("lib.Public", never a bare "Public"); a name shared by several
+// endpoints still collapses to the bare form (virtual dispatch — pinned by
+// TestExploreMinPrunesAmbiguous in confidence_test.go).
+func TestExploreCalleeKeepsUniqueQualifier(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"use/use.go": "package use\n\nimport \"lib\"\n\nfunc Use() { lib.Public() }\n",
+		"lib/lib.go": "package lib\n\nfunc Public() int { return 1 }\n",
+	})
+	ix := buildIndex(t, dir)
+	rep, err := Explore(ix, "Use", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(rep.Callees, "lib.Public") {
+		t.Fatalf("unique cross-package callee must keep its qualifier, got %v", rep.Callees)
+	}
+	if containsString(rep.Callees, "Public") {
+		t.Fatalf("callee must not render bare, got %v", rep.Callees)
+	}
+}
+
 func fixtureVsProductionIndex() *index.Index {
 	method := sym("method", "dispatch", "internal/mcp/server.go", 952)
 	method.Receiver = "Server"

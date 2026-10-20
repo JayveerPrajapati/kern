@@ -249,14 +249,15 @@ func TestValidateStringArgs(t *testing.T) {
 		}
 	}
 
-	// Non-string-typed props are out of scope: kern_retrieve's integer/boolean
-	// props must pass through even with non-scalar values (their handlers fail
-	// loud via atoiArg instead).
-	if err := validateStringArgs("kern_retrieve", map[string]any{"limit": map[string]any{}}); err != nil {
-		t.Errorf("non-string prop with object value should pass through, got %v", err)
+	// Arguments not declared in the schema pass through untouched (their
+	// handlers fail loud via atoiArg instead); the 2026-10-18 surface slim
+	// removed the tools that carried non-string-typed schema props, so the
+	// pass-through vehicle is an undeclared arg.
+	if err := validateStringArgs("kern_search", map[string]any{"zzz_undeclared": map[string]any{}}); err != nil {
+		t.Errorf("undeclared prop with object value should pass through, got %v", err)
 	}
-	if err := validateStringArgs("kern_retrieve", map[string]any{"with_freshness": []any{"x"}}); err != nil {
-		t.Errorf("non-string prop with array value should pass through, got %v", err)
+	if err := validateStringArgs("kern_search", map[string]any{"zzz_undeclared2": []any{"x"}}); err != nil {
+		t.Errorf("undeclared prop with array value should pass through, got %v", err)
 	}
 
 	// Unknown tool names validate nothing.

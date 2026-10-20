@@ -5,6 +5,7 @@ package index
 import (
 	"embed"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"sort"
 	"strings"
 	"testing"
@@ -116,10 +117,11 @@ var regexExtraEdges = map[string]map[string]map[string]bool{
 		"Greeter.loud":    {"loud": true},
 	},
 	"python": {
-		"Greeter.__init__": {"__init__": true},
-		"Greeter.greet":    {"greet": true},
-		"Greeter.loud":     {"loud": true},
-		"Child.greet":      {"greet": true},
+		"Greeter.__init__":    {"__init__": true},
+		"Greeter.greet":       {"greet": true},
+		"Greeter.loud":        {"loud": true},
+		"Child.greet":         {"greet": true},
+		"Overloaded.__init__": {"__init__": true},
 	},
 	"typescript": {
 		"Greeter.constructor": {"constructor": true},
@@ -195,9 +197,9 @@ func TestHeuristicTreesitterParity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lang := detectLang(rel, b)
+		lang := langparse.DetectLang(rel, b)
 		tsSyms, tsCalls, tsInh, _, errTS := tsExtract(rel, b, lang)
-		reSyms, reCalls, reInh, _, errRE := extractForeignRegex(rel, b, lang)
+		reSyms, reCalls, reInh, _, errRE := langparse.ExtractForeignRegex(rel, b, lang)
 		if errTS != nil {
 			t.Fatalf("%s: tree-sitter extraction failed: %v", rel, errTS)
 		}
@@ -302,7 +304,7 @@ func checkEdgeParity(t *testing.T, rel, lang string, tsSyms, reSyms []Symbol, ts
 		// ts-only edge (tsOnlyEdges) / ts-only-callee edge.
 		for target, tsConf := range ts[owner] {
 			if reConf, ok := reEdges[target]; ok {
-				if confRank(reConf) > confRank(tsConf) {
+				if langparse.ConfRank(reConf) > langparse.ConfRank(tsConf) {
 					t.Errorf("%s: %s -> %s over-claims: regex %s > tree-sitter %s",
 						rel, owner, target, reConf, tsConf)
 				}
@@ -312,7 +314,7 @@ func checkEdgeParity(t *testing.T, rel, lang string, tsSyms, reSyms []Symbol, ts
 			matchedForm := false
 			for reTarget, reConf := range reEdges {
 				if chainFormLastSegment(owner, target, reTarget) {
-					if confRank(reConf) > confRank(tsConf) {
+					if langparse.ConfRank(reConf) > langparse.ConfRank(tsConf) {
 						t.Errorf("%s: %s -> %s (chain form %s) over-claims: regex %s > tree-sitter %s",
 							rel, owner, reTarget, target, reConf, tsConf)
 					}
@@ -385,12 +387,12 @@ func TestParityCorpusReachesBothPaths(t *testing.T) {
 	for _, e := range entries {
 		rel := "testfixture/" + e.Name()
 		b, _ := parityFixtures.ReadFile(rel)
-		lang := detectLang(rel, b)
+		lang := langparse.DetectLang(rel, b)
 		tsSyms, tsCalls, _, _, err := tsExtract(rel, b, lang)
 		if err != nil {
 			t.Fatal(err)
 		}
-		reSyms, _, _, _, err := extractForeignRegex(rel, b, lang)
+		reSyms, _, _, _, err := langparse.ExtractForeignRegex(rel, b, lang)
 		if err != nil {
 			t.Fatal(err)
 		}

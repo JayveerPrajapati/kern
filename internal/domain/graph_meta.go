@@ -17,9 +17,10 @@ type Provenance struct {
 // graph. GraphHash is a stable hash of the graph content (sorted node IDs plus
 // sorted edge keys), so two equal graphs always hash identically.
 type VersionMetadata struct {
-	GraphHash   string    // hash of the full graph
-	CommitHash  string    // VCS commit when built (empty when untracked)
-	BuiltAt     time.Time // when the graph was built
-	SymbolCount int       // number of symbol nodes
-	EdgeCount   int       // number of edges
+	SchemaVersion int       `json:",omitempty"`
+	GraphHash     string    // hash of the full graph
+	CommitHash    string    // VCS commit when built (empty when untracked)
+	BuiltAt       time.Time // when the graph was built
+	SymbolCount   int       // number of symbol nodes
+	EdgeCount     int       // number of edges
 }

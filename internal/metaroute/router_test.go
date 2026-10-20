@@ -108,13 +108,12 @@ func TestClassifyMetaRequest_Branches(t *testing.T) {
 		{"mask_pii", "mask secrets and pii in: token=abc123", "kern_mask_pii", map[string]string{"text": "token=abc123"}},
 		{"arch", "show me the architecture", "kern_arch", nil},
 		{"code_graph", "who calls NewServer", "kern_graph", map[string]string{"symbol": "NewServer", "format": "one-line"}},
-		{"entry_points", "find the login handler", "kern_entry_points", nil},
-		{"verify_output", "verify the claim that x is safe", "kern_verify_output", nil},
-		{"safe_delete", "can i delete the Foo function", "kern_safe_delete", map[string]string{"symbol": "Foo"}},
-		{"analyze", "analyze adding a new route", "kern_analyze", nil},
-		{"dead_code", "is there dead code in this repo", "kern_dead", nil},
+		{"entry_points", "find the login handler", "kern_search", nil},
+		{"verify_output", "verify the claim that x is safe", "kern_search", nil},
+		{"safe_delete", "can i delete the Foo function", "kern_search", map[string]string{"query": "can i delete the Foo function"}},
+		{"analyze", "analyze adding a new route", "kern_impact", nil},
+		{"dead_code", "is there dead code in this repo", "kern_search", nil},
 		{"project_map", "show me the project map", "kern_project_map", nil},
-		{"commitmsg", "generate a commit message", "kern_commitmsg", nil},
 		{"explore_qualified_symbol", "how does Server.dispatch work", "kern_explore", map[string]string{"symbol": "Server.dispatch"}},
 		{"implementation_plan_routes", "show me the implementation plan", "kern_plan", nil},
 		// F-1: CLI/subcommand questions must not fall into the graph router's
@@ -126,20 +125,20 @@ func TestClassifyMetaRequest_Branches(t *testing.T) {
 		// kern_health. "how does the index work" names a bare lowercase
 		// symbol now, so it explores the index subsystem instead of
 		// degrading to a flat search.
-		{"index_rebuild", "refresh and rebuild the index for this repo now so it is fresh at HEAD", "kern_onboard", nil},
-		{"index_rebuild_short", "rebuild the index", "kern_onboard", nil},
-		{"index_reindex", "reindex this project", "kern_onboard", nil},
-		{"index_status", "is the index fresh", "kern_health", nil},
-		{"index_health_word", "index health", "kern_health", nil},
+		{"index_rebuild", "refresh and rebuild the index for this repo now so it is fresh at HEAD", "kern_buddy", nil},
+		{"index_rebuild_short", "rebuild the index", "kern_buddy", nil},
+		{"index_reindex", "reindex this project", "kern_buddy", nil},
+		{"index_status", "is the index fresh", "kern_verify", nil},
+		{"index_health_word", "index health", "kern_verify", nil},
 		{"index_plain_explores_symbol", "how does the index work", "kern_explore", map[string]string{"symbol": "index"}},
 		// LLM provider intents — chain/sampler/status questions route to
 		// kern_llm_providers; a "how does the llm provider work" question
 		// names the bare lowercase word "llm", which now explores instead of
 		// falling back to search.
-		{"llm_providers", "list the LLM provider chain and whether a host sampler is connected", "kern_llm_providers", nil},
-		{"llm_providers_short", "llm providers", "kern_llm_providers", nil},
-		{"host_sampler", "is the host sampler connected", "kern_llm_providers", nil},
-		{"which_local_agent", "which local agent should I use", "kern_llm_providers", nil},
+		{"llm_providers", "list the LLM provider chain and whether a host sampler is connected", "kern_search", nil},
+		{"llm_providers_short", "llm providers", "kern_search", nil},
+		{"host_sampler", "is the host sampler connected", "kern_search", nil},
+		{"which_local_agent", "which local agent should I use", "kern_search", nil},
 		{"llm_question_explores_bare_word", "how does the llm provider work", "kern_explore", map[string]string{"symbol": "llm"}},
 	}
 	for _, tc := range cases {
@@ -159,9 +158,9 @@ func TestClassifyMetaRequest_Branches(t *testing.T) {
 
 func TestClassifyMetaRequest_Flow(t *testing.T) {
 	cases := []classifyCase{
-		{"flow_no_symbol", "how does the bundle upload flow work end to end?", "kern_entry_points", nil},
-		{"flow_sym", "how does the UploadBundle flow work end to end?", "kern_near", map[string]string{"symbol": "UploadBundle", "depth": "4"}},
-		{"workflow_no_symbol", "explain the deployment workflow pipeline", "kern_entry_points", nil},
+		{"flow_no_symbol", "how does the bundle upload flow work end to end?", "kern_search", nil},
+		{"flow_sym", "how does the UploadBundle flow work end to end?", "kern_graph", map[string]string{"symbol": "UploadBundle"}},
+		{"workflow_no_symbol", "explain the deployment workflow pipeline", "kern_search", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,17 +185,17 @@ func TestClassifyMetaRequest_Flow(t *testing.T) {
 // kern_entry_points and plain "plan" stays on kern_plan.
 func TestClassifyMetaRequest_Retrieval(t *testing.T) {
 	cases := []classifyCase{
-		{"retrieve_query", "retrieve the context for Greet", "kern_retrieve", map[string]string{"query": "retrieve the context for Greet", "level": "l1"}},
-		{"retrieve_plain", "retrieve nearby symbols", "kern_retrieve", map[string]string{"level": "l1"}},
-		{"handle_word", "handle the Count symbol", "kern_retrieve", map[string]string{"level": "l1"}},
-		{"resolve_handle_id", "resolve handle abc123", "kern_resolve", map[string]string{"handle": "abc123"}},
-		{"resolve_id", "resolve a1b2c3d4", "kern_resolve", map[string]string{"handle": "a1b2c3d4"}},
+		{"retrieve_query", "retrieve the context for Greet", "kern_probe", map[string]string{"task": "retrieve the context for Greet"}},
+		{"retrieve_plain", "retrieve nearby symbols", "kern_probe", map[string]string{"task": "retrieve nearby symbols"}},
+		{"handle_word", "handle the Count symbol", "kern_probe", map[string]string{"task": "handle the Count symbol"}},
+		{"resolve_handle_id", "resolve handle abc123", "kern_search", map[string]string{"query": "resolve handle abc123"}},
+		{"resolve_id", "resolve a1b2c3d4", "kern_search", map[string]string{"query": "resolve a1b2c3d4"}},
 		{"plan_context", "plan context for adding a route", "kern_plan_context", nil},
 		{"context_plan", "context plan for the change", "kern_plan_context", nil},
 		{"explain_context", "explain context for NewServer", "kern_plan_context", nil},
 		{"planner", "use the planner to size the context", "kern_plan_context", nil},
 		// Regression guards: existing routes must win where they should.
-		{"handler_keeps_entry_points", "find the login handler", "kern_entry_points", nil},
+		{"handler_keeps_entry_points", "find the login handler", "kern_search", nil},
 		{"plan_keeps_kern_plan", "plan adding a greet function", "kern_plan", nil},
 	}
 	for _, tc := range cases {
@@ -240,8 +239,8 @@ func TestClassifyMetaRequest_NoteRoutes(t *testing.T) {
 
 func TestClassifyMetaRequest_SkillRoutes(t *testing.T) {
 	tool, args := metaroute.ClassifyMetaRequest("list the agent skills")
-	if tool != "kern_skill" || args["action"] != "catalog" {
-		t.Errorf("skill list -> %q %v, want kern_skill catalog", tool, args)
+	if tool != "kern_search" || args["query"] != "list the agent skills" {
+		t.Errorf("skill list -> %q %v, want kern_search with query", tool, args)
 	}
 }
 
@@ -250,11 +249,19 @@ func TestClassifyMetaRequest_MemoryRoutes(t *testing.T) {
 		{"recall memory about testing", "kern_memory", "recall"},
 		{"remember a lesson learned about the sandbox", "kern_memory", "recall"},
 		{"what memories do we have about release", "kern_memory", "recall"},
+		// Memory MECHANISM questions are searches, not recalls (P3-2): a
+		// locator/how-does phrasing about the memory store must not be
+		// hijacked by the bare "memory" word arm.
+		{"where does kern memory store its lessons", "kern_search", ""},
+		{"find the memory store file path", "kern_search", ""},
 	}
 	for _, c := range cases {
 		tool, args := metaroute.ClassifyMetaRequest(c.in)
 		if tool != c.wantTool {
 			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
+			continue
+		}
+		if c.wantTool != "kern_memory" {
 			continue
 		}
 		if got := args["action"]; got != c.wantAction {
@@ -264,14 +271,15 @@ func TestClassifyMetaRequest_MemoryRoutes(t *testing.T) {
 }
 
 func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
-	cases := []struct{ in, wantTool, wantSkill string }{
+	cases := []struct{ in, wantTool string }{
 		// Bare "safe change" without skill language deliberately stays
 		// kern_impact (impact analysis is the better answer than loading the
-		// runbook); explicit skill language routes to kern_skill load.
-		{"how do i make a safe change here", "kern_impact", ""},
-		{"use the incident triage skill", "kern_skill", "kern-incident-triage"},
-		{"show me the kern-safe-change runbook", "kern_skill", "kern-safe-change"},
-		{"what skills exist", "kern_skill", ""}, // generic -> catalog
+		// runbook); explicit skill language falls through to kern_search
+		// (the skills tool died in the 2026-10-18 surface slim).
+		{"how do i make a safe change here", "kern_impact"},
+		{"use the incident triage skill", "kern_search"},
+		{"show me the kern-safe-change runbook", "kern_search"},
+		{"what skills exist", "kern_search"},
 	}
 	for _, c := range cases {
 		tool, args := metaroute.ClassifyMetaRequest(c.in)
@@ -279,17 +287,11 @@ func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
 			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
 			continue
 		}
-		if c.wantTool != "kern_skill" {
+		if c.wantTool != "kern_search" {
 			continue
 		}
-		if c.wantSkill == "" {
-			if args["action"] != "catalog" {
-				t.Errorf("%q -> action %v, want catalog", c.in, args["action"])
-			}
-			continue
-		}
-		if args["action"] != "load" || args["skill"] != c.wantSkill {
-			t.Errorf("%q -> %v, want load %s", c.in, args, c.wantSkill)
+		if args["query"] != c.in {
+			t.Errorf("%q -> query %v, want %q", c.in, args["query"], c.in)
 		}
 	}
 }
@@ -311,15 +313,15 @@ func TestClassifyFileTools_FitContext(t *testing.T) {
 }
 
 // TestClassifyMetaRequest_AuditLog pins N1a: audit-intent requests route to
-// kern_audit instead of falling through the semantic fallback to a
-// symbol-search dead end.
+// kern_search with the request as query (the audit tool died in the
+// 2026-10-18 surface slim).
 func TestClassifyMetaRequest_AuditLog(t *testing.T) {
 	tool, args := metaroute.ClassifyMetaRequest("audit log")
-	if tool != "kern_audit" {
-		t.Fatalf("ClassifyMetaRequest(%q) = %q, want kern_audit", "audit log", tool)
+	if tool != "kern_search" {
+		t.Fatalf("ClassifyMetaRequest(%q) = %q, want kern_search", "audit log", tool)
 	}
-	if len(args) != 0 {
-		t.Errorf("kern_audit args = %v, want empty", args)
+	if args["query"] != "audit log" {
+		t.Errorf("kern_search args = %v, want query", args)
 	}
 }
 
@@ -335,7 +337,7 @@ func TestClassifyMetaRequest_AuditTrail(t *testing.T) {
 		"audit history for the last week",
 	} {
 		tool, _ := metaroute.ClassifyMetaRequest(req)
-		if tool != "kern_audit" {
+		if tool != "kern_search" {
 			t.Errorf("ClassifyMetaRequest(%q) = %q, want kern_audit", req, tool)
 		}
 	}
@@ -351,7 +353,7 @@ func TestClassifyMetaRequest_AuditSymbolNotHijacked(t *testing.T) {
 		"how does auditlog work",
 	} {
 		tool, _ := metaroute.ClassifyMetaRequest(req)
-		if tool == "kern_audit" {
+		if tool == "kern_search" {
 			t.Errorf("ClassifyMetaRequest(%q) = kern_audit, must stay a symbol question", req)
 		}
 		if tool != "kern_explore" {
@@ -403,12 +405,12 @@ func TestClassifyMetaRequest_StatusOfSymbol(t *testing.T) {
 		{"status_of_camel", "what's the status of TaskService", "kern_explore", map[string]string{"symbol": "TaskService"}},
 		{"status_of_long_form", "what is the status of TaskService", "kern_explore", map[string]string{"symbol": "TaskService"}},
 		{"status_of_article_camel", "status of the TaskService", "kern_explore", map[string]string{"symbol": "TaskService"}},
-		{"index_status_stays_health", "index status", "kern_health", nil},
-		{"status_of_project_stays_health", "status of the project", "kern_health", nil},
-		{"status_of_index_stays_health", "status of the index", "kern_health", nil},
-		{"build_status_stays_health", "build status", "kern_health", nil},
-		{"health_alone_stays_health", "health", "kern_health", nil},
-		{"status_of_lowercase_not_symbol", "status of dispatch", "kern_health", nil},
+		{"index_status_stays_health", "index status", "kern_verify", nil},
+		{"status_of_project_stays_health", "status of the project", "kern_verify", nil},
+		{"status_of_index_stays_health", "status of the index", "kern_verify", nil},
+		{"build_status_stays_health", "build status", "kern_verify", nil},
+		{"health_alone_stays_health", "health", "kern_verify", nil},
+		{"status_of_lowercase_not_symbol", "status of dispatch", "kern_verify", nil},
 		{"status_of_single_letter", "status of B", "kern_explore", map[string]string{"symbol": "B"}},
 	}
 	for _, tc := range cases {

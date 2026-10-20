@@ -72,6 +72,60 @@ func IsChangeVerb(w string) bool {
 	return changeVerbs[strings.ToLower(w)]
 }
 
+// commonWords is the combined stoplist bare-token extraction filters against:
+// change verbs plus common English words. Hoisted to package level so
+// IsCommonWord can consult the same list extraction uses — callers label
+// resolutions that landed on a symbol only because it shares a common
+// word's name as low confidence. B2, QA 2026-10-15.
+var commonWords = func() map[string]bool {
+	stop := map[string]bool{}
+	for w := range changeVerbs {
+		stop[w] = true
+	}
+	for _, w := range []string{
+		"the", "a", "an", "and", "or", "but", "not", "for", "with", "from",
+		"into", "to", "of", "in", "on", "at", "by", "is", "are", "was",
+		"were", "be", "been", "being", "has", "have", "had", "do", "does",
+		"did", "will", "would", "should", "could", "may", "might", "can",
+		"this", "that", "these", "those", "it", "its", "they", "them",
+		"their", "we", "you", "your", "our", "his", "her", "him", "she",
+		"who", "which", "what", "when", "where", "why", "how",
+		"method", "function", "file", "symbol", "code", "line", "lines",
+		"class", "struct", "type", "interface", "module", "package",
+		"variable", "constant", "field", "property", "parameter", "argument",
+		"return", "returns", "value", "values", "name", "names",
+		"true", "false", "null", "none", "nil", "void",
+		"new", "old", "all", "some", "any", "each", "every",
+		"first", "last", "next", "prev", "previous",
+		"use", "using", "used", "uses", "via", "through",
+		"about", "above", "below", "over", "under", "between",
+		"more", "less", "most", "least", "very", "much",
+		"than", "then", "so", "if", "else", "end", "begin", "start",
+		"test", "tests", "unit", "integration", "bug", "issue", "error",
+		"feature", "task", "todo", "note", "notes",
+		"get", "set", "put", "post", "make", "run", "try", "call",
+		"one", "two", "three", "four", "five",
+		// Filesystem / path words that appear as bare words around file paths
+		// but are not symbols.
+		"just", "prose", "here", "there", "symbols", "connections",
+		"directory", "folder", "path", "root", "source", "config",
+		"service", "handler", "client", "server", "response", "request",
+		"endpoint", "endpoints", "api", "apis", "rest", "lag",
+	} {
+		stop[strings.ToLower(w)] = true
+	}
+	return stop
+}()
+
+// IsCommonWord reports whether w (case-insensitive) is a common English /
+// change-verb word — the stoplist bare-token extraction applies unless the
+// token collides with a real index symbol. Used to label prose resolutions
+// that landed on a symbol only because it shares a common word's name
+// ("test", "server", "Add", ...) as low confidence.
+func IsCommonWord(w string) bool {
+	return commonWords[strings.ToLower(w)]
+}
+
 func extractSymbols(change string, ix *index.Index) []string {
 	change = strings.TrimSpace(change)
 	if change == "" {
@@ -134,42 +188,7 @@ func extractSymbols(change string, ix *index.Index) []string {
 	// word-bounded identifier of 3+ chars starting with a letter or underscore,
 	// so it captures loadQuestion, replicaCount, process_service_request and
 	// GetMySQLDB alike — not just uppercase-leading CamelCase.
-	stop := map[string]bool{}
-	for w := range changeVerbs {
-		stop[w] = true
-	}
-	for _, w := range []string{
-		"the", "a", "an", "and", "or", "but", "not", "for", "with", "from",
-		"into", "to", "of", "in", "on", "at", "by", "is", "are", "was",
-		"were", "be", "been", "being", "has", "have", "had", "do", "does",
-		"did", "will", "would", "should", "could", "may", "might", "can",
-		"this", "that", "these", "those", "it", "its", "they", "them",
-		"their", "we", "you", "your", "our", "his", "her", "him", "she",
-		"who", "which", "what", "when", "where", "why", "how",
-		"method", "function", "file", "symbol", "code", "line", "lines",
-		"class", "struct", "type", "interface", "module", "package",
-		"variable", "constant", "field", "property", "parameter", "argument",
-		"return", "returns", "value", "values", "name", "names",
-		"true", "false", "null", "none", "nil", "void",
-		"new", "old", "all", "some", "any", "each", "every",
-		"first", "last", "next", "prev", "previous",
-		"use", "using", "used", "uses", "via", "through",
-		"about", "above", "below", "over", "under", "between",
-		"more", "less", "most", "least", "very", "much",
-		"than", "then", "so", "if", "else", "end", "begin", "start",
-		"test", "tests", "unit", "integration", "bug", "issue", "error",
-		"feature", "task", "todo", "note", "notes",
-		"get", "set", "put", "post", "make", "run", "try", "call",
-		"one", "two", "three", "four", "five",
-		// Filesystem / path words that appear as bare words around file paths
-		// but are not symbols.
-		"just", "prose", "here", "there", "symbols", "connections",
-		"directory", "folder", "path", "root", "source", "config",
-		"service", "handler", "client", "server", "response", "request",
-		"endpoint", "endpoints", "api", "apis", "rest", "lag",
-	} {
-		stop[strings.ToLower(w)] = true
-	}
+	stop := commonWords
 	var bare, verbBare []string
 	for _, m := range bareRe.FindAllString(change, -1) {
 		// A token that resolves (case-sensitively) to a real index symbol

@@ -242,61 +242,6 @@ func TestAutoChainHostFirstWhenSamplerRegistered(t *testing.T) {
 // (no serve loop needed) and generation through the global MCP provider.
 // Registration is a governed exec surface, so the test opts in via
 // KERN_ALLOW_EXEC=1.
-func TestRegisterCommandSamplerTool(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1")
-	s := newTestServer()
-	ctx := context.Background()
-	p := llm.NewMCPProvider()
-	t.Cleanup(func() { _, _ = s.handleRegisterHostSampler(ctx, map[string]any{"command": ""}) })
-
-	// Register: `cat` echoes the user prompt from stdin.
-	out, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": "cat", "timeout": "30"})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if !strings.Contains(out, "host sampler registered") {
-		t.Errorf("registration message = %q", out)
-	}
-	res, err := p.Generate(ctx, "SYS", "hello via stdin", llm.Options{})
-	if err != nil {
-		t.Fatalf("Generate(cat): %v", err)
-	}
-	if res != "hello via stdin" {
-		t.Errorf("Generate(cat) = %q, want the stdin prompt echoed", res)
-	}
-
-	// System prompt flows via $KERN_SYSTEM_PROMPT.
-	if _, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": `printf 'sys=%s' "$KERN_SYSTEM_PROMPT"`}); err != nil {
-		t.Fatalf("register sys: %v", err)
-	}
-	res, err = p.Generate(ctx, "MY-SYS", "u", llm.Options{})
-	if err != nil {
-		t.Fatalf("Generate(sys): %v", err)
-	}
-	if res != "sys=MY-SYS" {
-		t.Errorf("Generate(sys) = %q, want sys=MY-SYS", res)
-	}
-
-	// A failing command surfaces its stderr.
-	if _, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": "echo boom >&2; exit 3"}); err != nil {
-		t.Fatalf("register fail: %v", err)
-	}
-	if _, err := p.Generate(ctx, "", "u", llm.Options{}); err == nil || !strings.Contains(err.Error(), "host sampler command failed") {
-		t.Errorf("expected a command-failure error, got %v", err)
-	}
-
-	// Unregister: the host leg is gone.
-	msg, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": ""})
-	if err != nil {
-		t.Fatalf("unregister: %v", err)
-	}
-	if !strings.Contains(msg, "unregistered") {
-		t.Errorf("unregister message = %q", msg)
-	}
-	if _, err := p.Generate(ctx, "", "u", llm.Options{}); err == nil {
-		t.Error("Generate must fail after unregister")
-	}
-}
 
 // TestRegisterCommandSamplerMultiKey: registrations under different keys
 // coexist (multi-agent/repo), and unregistering one key leaves the other.

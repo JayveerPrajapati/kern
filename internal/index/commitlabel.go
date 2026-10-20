@@ -95,14 +95,3 @@ func (ix *Index) persistIdentityLabel() error {
 	// index — the label is refreshed, nothing is rebuilt.
 	return ix.Save()
 }
-
-// SetMeta upserts a single meta row without touching symbols — the cheap
-// meta-only write path used to refresh the identity's git_commit label
-// without a rebuild. SQLite serialises writers under WAL, so this is safe
-// against concurrent Save calls.
-func (s *SQLiteStore) SetMeta(key, value string) error {
-	_, err := s.db.Exec(
-		"INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-		key, value)
-	return err
-}

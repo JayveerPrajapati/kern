@@ -39,7 +39,16 @@ func (s *Server) handleAnalyze(ctx context.Context, args map[string]any) (string
 }
 
 func (s *Server) handlePlan(ctx context.Context, args map[string]any) (string, error) {
-	return highlevel.Plan(ctx, s.highlevelHooks(), args)
+	h := s.highlevelHooks()
+	// B3: the context-sufficiency proof reads the served ledger's file
+	// coverage for THIS call's session key (agent_id|task, else "default").
+	h.ServedThisSession = func(files []string) map[string]bool {
+		if s.ledger == nil {
+			return map[string]bool{}
+		}
+		return s.ledger.FilesCovered(sessionKeyFor(args))
+	}
+	return highlevel.Plan(ctx, h, args)
 }
 
 func (s *Server) handleExecute(ctx context.Context, args map[string]any) (string, error) {

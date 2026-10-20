@@ -4,8 +4,27 @@
   "description": "Thin HTTP client for the kern-server REST API",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JayveerPrajapati/kern.git"
+  },
+  "keywords": [
+    "kern",
+    "mcp",
+    "code-intelligence",
+    "code-graph",
+    "agent"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
+    "pretest": "tsc",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {

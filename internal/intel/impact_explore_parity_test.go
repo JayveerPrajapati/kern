@@ -1,7 +1,6 @@
 package intel
 
 import (
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -191,10 +190,16 @@ func TestImpactExploreCallerParityBroad(t *testing.T) {
 	// a chained call to a fixture definition (the evaluate/*/fixture
 	// store.Save) that the shared index method bucket cannot express
 	// per-symbol, and the parity campaign's scope is production trust (entry
-	// resolution already pins "never resolve to a fixture").
+	// resolution already pins "never resolve to a fixture"). Test-file
+	// symbols are excluded for the mirror-image reason (close-phase
+	// 2026-10-08): the shared bucket attributes same-file test-local callers
+	// (draft_test.go's runBlueprintToolCLI -> build) that the graph's node
+	// model cannot express — verified pre-existing at fc387ef via a worktree
+	// A/B probe; excluding the class prevents sample drift from resurfacing
+	// each instance as the tree's symbol population shifts.
 	var eligible []index.Symbol
 	for _, s := range ix.Symbols {
-		if isFixtureFile(s.File) {
+		if isFixtureFile(s.File) || IsTestFile(s.File) {
 			continue
 		}
 		if len(ix.CallersFor(s)) == 0 || len(ix.CallsFor(s)) == 0 {
@@ -269,21 +274,8 @@ func TestImpactExploreCallerParityBroad(t *testing.T) {
 	t.Logf("parity sample: %d symbols (first-100 + every-50th stride + hub names + near-hub 2-4 names + pinned app.New), total symbols %d",
 		len(sample), len(ix.Symbols))
 
-	// Graph node IDs are package-scoped — the same formula FromIndex uses.
-	pkgByFile := graphPackagePathByFile(ix)
-	nodeID := func(s index.Symbol) string {
-		p := pkgByFile[s.File]
-		if p == "" {
-			p = filepath.Dir(s.File)
-		}
-		if p == "" || p == "." {
-			return s.FullName()
-		}
-		return p + "." + s.FullName()
-	}
-
 	for _, s := range sample {
-		target := nodeID(s)
+		target := s.DeclarationID()
 		if !g.Resolvable(target) {
 			t.Logf("%s (%s): graph node %q not resolvable — skipped (impact cannot address this symbol)",
 				s.FullName(), s.File, target)
@@ -359,6 +351,16 @@ var knownRawFormQuirks = map[string]bool{
 	// the normalized pin still hard-fails for both.
 	"Default|internal/metrics/metrics.go": true,
 	"Recall|internal/memory/memory.go":    true,
+	// NewTaskService (internal/tasklife/task.go, close-phase 2026-10-08):
+	// the same qualified-edge render quirk — the graph renders the
+	// tasklife-local callers "Plan"/"Run" under their node-qualified forms
+	// ("TaskService.Plan", "TaskService.Run") while CallersFor keeps the
+	// raw same-package bare bucket keys. Verified pre-existing at the
+	// pre-campaign fc387ef tree via a worktree A/B probe (normalized sets
+	// exactly equal, 148 vs 148 callers); it entered the stratified sample
+	// only when Wave-2 commits shifted the symbol population. The
+	// normalized pin still hard-fails for this symbol.
+	"NewTaskService|internal/tasklife/task.go": true,
 }
 
 func containsString(xs []string, want string) bool {

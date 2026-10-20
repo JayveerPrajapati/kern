@@ -9,6 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // TestToolCallRecordsPerToolEntry verifies the dispatch path appends one
@@ -84,8 +85,8 @@ func TestRecordToolCallSkipsSelfRecording(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	mcpserve.RecordToolCall("kern_search", nil, "a returned payload", "")
-	mcpserve.RecordToolCall("kern_optimize", nil, "must not be recorded at dispatch", "")
+	mcpserve.RecordToolCall("kern_search", nil, tokenize.Count("a returned payload"), "")
+	mcpserve.RecordToolCall("kern_optimize", nil, tokenize.Count("must not be recorded at dispatch"), "")
 
 	rec, err := stats.NewRecorder()
 	if err != nil {
@@ -110,7 +111,7 @@ func TestRenderStatsByTool(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	mcpserve.RecordToolCall("kern_search", nil, "hello world payload for the ledger", "")
+	mcpserve.RecordToolCall("kern_search", nil, tokenize.Count("hello world payload for the ledger"), "")
 
 	out, err := renderStatsByTool("", "")
 	if err != nil {

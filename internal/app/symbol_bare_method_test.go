@@ -60,8 +60,9 @@ func TestResolveSymbolBareMethodName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSymbol(dispatch): %v", err)
 	}
-	if sym != "Server.dispatch" && sym != "asrv.Server.dispatch" {
-		t.Errorf("resolveSymbol(dispatch) = %q; want Server.dispatch (the name explore resolves)", sym)
+	node, found := p.Graph().NodeByID(sym)
+	if !found || (node.Label != "Server.dispatch" && node.Label != "asrv.Server.dispatch") {
+		t.Errorf("resolveSymbol(dispatch) = %q (label %q); want Server.dispatch (the name explore resolves)", sym, node.Label)
 	}
 	if !fuzzy {
 		t.Error("resolveSymbol(dispatch) must report fuzzy=true so the dispatch -> Server.dispatch substitution is surfaced, not silent")

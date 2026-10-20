@@ -3,13 +3,14 @@
 A set of concrete, task-oriented recipes for working with kern from the CLI.
 Each recipe follows the same shape: **Goal** → **Command** → **What to look
 for**. All commands below exist in the dispatch table (`cmd/kern/dispatch_table.go`)
-— run `kern guide` or `kern <cmd> --help` for the full option list.
+— a parity test enforces this (`TestRecipesDocListsOnlyLiveCommands`); run
+`kern --all` for the full catalog or `kern <cmd> --help` for one command's
+options.
 
 Two prerequisites for everything here:
 
 ```bash
 kern index .        # build the symbol index for the current project
-kern watch .        # optional: keep it fresh while you work
 ```
 
 If a command misbehaves on a stale index, re-run `kern index --force`.
@@ -44,133 +45,93 @@ kern why <symbol>                # rationale: dependents, usage, references
 
 ```bash
 kern impact "<describe the change>"        # blast radius + risk level
+kern impact <symbol>                       # per-symbol dependents + covering tests
 kern why <symbol>                          # what depends on the symbol
-kern near <symbol>                         # structurally adjacent code
-kern rename <old> <new> --apply            # structural rename (AST-scoped)
+kern explore <symbol> --depth 0            # uncapped transitive blast radius
 ```
 
 **What to look for:**
 
 - `kern impact` prints the transitive blast radius and a risk rating. High risk
   or a wide radius → split the change or add tests first.
-- `kern rename` without `--apply` is a **preview** — run it, read the affected
-  sites, then apply. It is AST-scoped, so it rewrites call sites, not string
-  matches.
-- `kern what-if "<change>"` is an alias of `impact` if you prefer that phrasing.
+- The "Tests that cover it" section of `kern impact <symbol>` is your safety
+  net inventory before the edit.
+- Structural (AST-scoped) rename is not part of the CLI surface today; a plain
+  rename should be followed by `kern index --force` and a
+  `kern review` pass over the diff.
 
 ---
 
-## 3. Find dead code before deleting
+## 3. Review changes for risk
 
-**Goal:** Confirm a symbol really has no live callers before removing it.
-
-```bash
-kern dead [--json]        # symbols with zero references
-kern larges [--json]      # biggest files/symbols by size
-kern graph <symbol>       # verify: show callers before you trust `dead`
-```
-
-**What to look for:**
-
-- `kern dead` lists candidates; cross-check the top ones with `kern graph
-  <symbol>` — a symbol reached only from tests is still "dead" for production
-  purposes, but a symbol with generated or reflection-based callers may be a
-  false positive.
-- `kern larges` helps you pick high-value cleanup targets (big, low-reference
-  files).
-- After deleting, re-run `kern dead` and `kern index --force` — the count
-  should drop.
-
----
-
-## 4. Review changes for risk
-
-**Goal:** See what your working tree actually changes and whether it passes the
-project's own gates.
+**Goal:** See what your working tree actually changes and whether it passes
+the project's own gates.
 
 ```bash
-kern changes                     # summarize uncommitted changes vs the index
-kern review                      # alias of changes — same output
-kern check                       # run governance gates (architecture, security, ...)
+kern review                     # changed files vs the index, with risk verdict
 kern verify build,test,security,architecture,dependency
+kern sec                        # security findings (regex + optional gosec)
 ```
 
 **What to look for:**
 
-- `kern changes` links each changed file to affected symbols — read it before
-  the diff.
-- `kern check` returns PASS/BLOCK per gate; `kern check --ci` emits a machine
-  readable JSON verdict and matching exit code (0 = passed, 1 = failed).
+- `kern review` links each changed file to affected symbols — read it before
+  the diff. It exits 1 when changed files carry risk (the report is still on
+  stdout).
 - `kern verify <types>` accepts a comma-separated list of check types
   (`build,test,security,architecture,dependency,cve,license,secrets`) and
-  returns a typed verdict per check. If `security` blocks, run `kern sec` to see
+  returns a typed verdict per check. If `security` warns, run `kern sec` to see
   the findings.
+- For a fast pre-commit-shaped pass: `kern verify --fast` scopes build+tests to
+  uncommitted-changed packages only.
 
 ---
 
-## 5. Audit who did what
+## 4. Audit who did what
 
 **Goal:** Answer "who changed what, when, and why" for a file or area.
 
 ```bash
 kern audit [--json]      # governance/decision audit trail
-kern churn [--json]      # which files change most often
+kern audit --json        # chain integrity: total entries, broken links, tiers
 ```
 
 **What to look for:**
 
-- `kern audit` surfaces the recorded decision/approval trail (ADRs, approvals,
-  authorized contexts) — use it when you need provenance for a change.
-- `kern churn` ranks files by change frequency; high churn + high size
-  (`kern larges`) is where bugs concentrate.
+- `kern audit` surfaces the recorded decision/approval trail (approvals,
+  authorized contexts, bypasses) — use it when you need provenance for a change.
+- The chain summary (`broken`, `keyed` tier counts) is the tamper-evidence
+  verdict; `kern evidence export` bundles it verifiably (recipe 10).
 - For commit-level history use plain git (`git log --follow -- <file>`); kern
   adds the symbol-level and governance view.
 
 ---
 
-## 6. Triage a prod crash
+## 5. Triage a crash or error
 
-**Goal:** Map a stack trace or alert to the symbols and code that produced it.
+**Goal:** Map a stack trace or failing output to the symbols and code that
+produced it.
 
 ```bash
-kern trace <stacktrace-file>            # map a stack trace onto AST symbols
 kern probe "<what is the task?>"        # anchor a prose task to symbols
-kern incident <alert-json>              # run the incident pipeline (Workflow D)
-kern runtime status                     # what production adapters are wired?
-kern runtime drift                      # runtime routes vs code routes
+kern optimize --kind log "<stacktrace>"  # compress: keep errors + frames
+kern why <symbol>                        # who depends on the failing symbol
+kern explore <symbol>                    # the failing call neighborhood
 ```
 
 **What to look for:**
 
-- `kern trace` takes a file (or `-` for stdin) and resolves each frame to a
-  symbol — the crash's call path becomes searchable and reviewable.
 - `kern probe` turns a vague description ("users can't log in after deploy")
   into concrete anchor symbols.
-- `kern incident <alert-json>` runs Alert → Correlate → Root Cause → Fix →
-  Sandbox → Verify locally; production fixes stop at the approval gate by
-  default. Feed it a snapshot: `kern incident <alert-json> <snapshot.json>`.
+- `kern optimize --kind log` strips noise while preserving errors and stack
+  frames — paste the compressed trace into your issue tracker.
+- The deeper automated incident workflow (Alert → Correlate → Root Cause →
+  Fix → Verify) is orchestrated through the SRE specialist role — reach it via
+  `kern run "<intent>"` or the bundled skills (see `docs/skills.md`).
 
 ---
 
-## 7. Correlate an alert to code
-
-**Goal:** Tie telemetry/deployment evidence to the exact symbols involved.
-
-```bash
-kern correlate <alert-json> [--code]    # alert → service → deploy → commit → symbol
-kern incident list                      # browse past incidents
-```
-
-**What to look for:**
-
-- `kern correlate` builds the deep evidence chain; `--code` adds the
-  incident→twin→code correlation section.
-- The output ends at task/PR/agent links — that is the hand-off point for a fix.
-- Everything runs locally off the runtime snapshot; no vendor calls.
-
----
-
-## 8. Check index health
+## 6. Check index health
 
 **Goal:** Confirm the binary, agent wiring, and index are all operational.
 
@@ -188,16 +149,15 @@ kern index --force           # rebuild the index from scratch
 
 ---
 
-## 9. Compress a file for an agent
+## 7. Compress a file for an agent
 
 **Goal:** Hand an LLM the essential slice of a file/log — not the whole thing.
 
 ```bash
 kern compact <file>                      # symbol-aware compacted view of a file
 kern optimize <prompt>                   # strip filler, mask secrets, keep code/paths
-kern terse "<text>"                      # aggressive single-pass compression
 kern fit-context --file a.go,b.go --max-tokens 2000   # fit files to a budget
-kern budget "<text>" --max 500           # trim text to a token budget
+kern swap <doc.md> --max 4000             # budget-swap path-tagged fenced code blocks
 ```
 
 **What to look for:**
@@ -211,32 +171,35 @@ kern budget "<text>" --max 500           # trim text to a token budget
 
 ---
 
-## 10. Search semantically
+## 8. Search semantically
 
 **Goal:** Find symbols by meaning and prose, not just exact names.
 
 ```bash
 kern search "<query>"                    # ranked AST symbol search
 kern search "<query>" --semantic         # semantic (embedding) mode
-kern doc-search "<query>"                # search bundled/processed docs
+kern docs "<query>"                      # search indexed repo docs
 kern probe "<natural language task>"     # map prose to anchor symbols
 ```
 
 **What to look for:**
 
 - Plain `kern search` is sub-millisecond and deterministic — start here.
-- `--semantic` and `doc-search` broaden recall when the name isn't obvious.
+- `--semantic` broadens recall when the name isn't obvious; it needs a local
+  Ollama (the command warns and falls back to ranked search without one).
+- `kern docs` searches only indexed repo docs — repos without a docs tree
+  report that instead of a bare no-match.
 - `kern probe` is the right tool when the query is a *task* ("Add returns wrong
   result"), not a name.
 
 ---
 
-## 11. Check architecture drift
+## 9. Check architecture drift
 
 **Goal:** Verify the code still matches the intended layered architecture.
 
 ```bash
-kern arch [--json]           # architecture summary: layers, edges, violations
+kern arch [--json]           # architecture summary: communities, hubs, coupling
 kern guard check             # enforce boundary rules (inferred if unconfigured)
 kern guard init              # scaffold .kern/boundaries.json from the codebase
 kern doctor --arch-drift     # report drift against ARCHITECTURE.md ledger
@@ -244,49 +207,15 @@ kern doctor --arch-drift     # report drift against ARCHITECTURE.md ledger
 
 **What to look for:**
 
-- `kern arch` gives the overview; `kern guard check` fails on violations
-  (reverse dependencies, layer skips). Without a boundaries file it infers
-  defaults, so the guard is on by default.
+- `kern arch` gives the overview (communities, hubs, cross-community edges);
+  `kern guard check` fails on violations (reverse dependencies, layer skips).
+  Without a boundaries file it infers defaults, so the guard is on by default.
 - `--sarif` emits SARIF 2.1.0 if you need to feed findings into another tool.
 - A clean `kern guard check` is the "no drift" signal; zero findings is the goal.
 
 ---
 
-## 12. Find test gaps
-
-**Goal:** Know which symbols are exercised and which are not.
-
-```bash
-kern test-gaps [--json]      # untested / thinly-tested symbols
-```
-
-**What to look for:**
-
-- Focus on gaps in symbols you are about to change (cross-reference with
-  `kern impact` output). `testgaps` is an alias with identical behavior.
-- After adding tests, re-run and watch the gap list shrink — that is the
-  measurable definition of "better covered".
-
----
-
-## 13. Find duplication
-
-**Goal:** Locate structurally duplicated code before refactoring.
-
-```bash
-kern twin [--root .]         # structural duplication report
-```
-
-**What to look for:**
-
-- `kern twin` finds near-identical structures across files/languages. Each
-  cluster is a consolidation candidate — but check `kern why <symbol>` on each
-  twin before merging: "keep first occurrence" contracts exist for a reason.
-- Pair with `kern larges` to prioritize: big duplicated files first.
-
----
-
-## 14. Ship an evidence bundle
+## 10. Ship an evidence bundle
 
 **Goal:** Produce a verifiable record of what the repo claims (index, gates,
 audit chain) and let anyone check it later.
@@ -310,27 +239,24 @@ kern anchor <anchor-id>                      # resolve a specific evidence ancho
 
 ---
 
-## 15. Get the lay of the land
+## 11. Get the lay of the land
 
 **Goal:** Orient in an unfamiliar repo in under a minute.
 
 ```bash
-kern entries                # entry points (aliases: entry-points)
-kern larges                 # biggest files
-kern cycles                 # circular dependency clusters
-kern communities            # coupled groups of symbols
-kern flows                  # symbol flow between layers
-kern bridges                # coupling points between subsystems
+kern buddy                  # onboarding digest: conventions, layout, gotchas
+kern project-map            # every source file with symbols + line counts
+kern arch                   # subsystem communities, hubs, coupling
+kern graph <symbol>         # call-graph neighborhood of a hub symbol
 ```
 
 **What to look for:**
 
-- `kern entries` shows where execution starts; `kern larges` shows where the
-  weight is; `kern cycles` and `kern communities` reveal the coupling hot
-  spots. Together they tell you where to read first and where refactoring will
-  be painful.
-- This is the cheapest possible onboarding pass — all index reads, no file
-  walks.
+- `kern buddy` (the same engine the MCP `kern_buddy` tool serves) is the
+  cheapest onboarding pass — index reads, no file walks.
+- `kern project-map` shows where the weight is; `kern arch` reveals the coupling
+  hot spots. Together they tell you where to read first and where refactoring
+  will be painful.
 
 ---
 
@@ -344,6 +270,8 @@ kern bridges                # coupling points between subsystems
 - **MCP equivalents.** Every CLI command here has an MCP tool counterpart
   (`kern_*`) — see `docs/tool-catalog.md`. `kern_meta` routes natural-language
   requests to the right tool automatically.
-- **Aliases.** `review` = `changes`, `what-if` = `impact`, `testgaps` =
-  `test-gaps`, `entries` = `entry-points`, `kernops` = `ops`. Either spelling
-  works.
+- **Aliases.** `ask` = `meta`. Either spelling works.
+- **Repeat reads.** Re-read the same file/symbol without paying for a re-render:
+  `kern explore <symbol> --etag <E>` (and `context`/`compact`/`search`) — an
+  unchanged target returns the tiny `unchanged (etag E)` marker instead of the
+  full response.

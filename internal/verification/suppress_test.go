@@ -4,7 +4,7 @@ package verification
 // matching semantics (line-specific and file-wide), reason surfacing in the
 // rendered output, verdict semantics (unsuppressed findings still fail,
 // all-suppressed passes), the optional .kern/verify-suppressions.json user
-// file (including malformed input), and a pin that the 13 built-in defaults
+// file (including malformed input), and a pin that the 16 built-in defaults
 // match the CURRENT scanner output so they cannot silently drift.
 
 import (
@@ -213,7 +213,7 @@ func TestMalformedSuppressionFileIgnored(t *testing.T) {
 	}
 }
 
-// TestBuiltinSuppressionsMatchCurrentScan pins the exact 13 built-in defaults
+// TestBuiltinSuppressionsMatchCurrentScan pins the exact 16 built-in defaults
 // against the CURRENT scanner output on kern's own repository, so the
 // defaults cannot silently drift: every built-in entry must still match a
 // real finding at its file:line:rule (line-specific) or at least one finding
@@ -286,10 +286,29 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 	}
 }
 
-// TestBuiltinCountIsThirteen pins the default list size so adding/removing a
-// triage entry is a deliberate, test-visible act.
-func TestBuiltinCountIsThirteen(t *testing.T) {
-	if len(defaultSuppressions) != 13 {
-		t.Errorf("len(defaultSuppressions) = %d, want 13 (the verified finding set on kern's repo)", len(defaultSuppressions))
+// TestBuiltinCountIsSixteen pins the default list size so adding/removing a
+// triage entry is a deliberate, test-visible act. 16 -> 14 on 2026-10-18:
+// the two internal/blueprint/adapters/kern unsafe-exec entries left with the
+// blueprint family (P4 deletion). 14 -> 13 on 2026-10-19: the ci.yml:198
+// hardcoded-secret entry went stale when the IPV6 rule stopped matching the
+// single-char ::a group of the GitHub Actions ::error:: workflow-command
+// prefix (QA 2026-10-19 — the IPV6 rule now requires ≥2-char hex groups).
+// 13 -> 16 on 2026-10-19: triage pass adding the evaluate/bench fixture
+// unsafe-http entry, the calibrate rev-list unsafe-exec entry and the
+// commitmsg changelog wrapper unsafe-exec entry (all line-specific).
+// 16 -> 15 on 2026-10-19: the commitmsg changelog entry was removed with the
+// `kern commitmsg` command (the changelog draft feature was deleted; only
+// `kern commit` survives in internal/commitmsg). 15 -> 16 on 2026-10-19:
+// added the surviving kern commit git wrappers (commitmsgcmd.go:225) the
+// staged scan re-flagged once the changelog entry was gone. 16 -> 83 on
+// 2026-10-21: the full dogfood triage pass — the remaining 67 unsuppressed
+// unsafe-exec/unsafe-http findings on kern's own tree, triaged class by
+// class (fixed-argv git plumbing, scanner probes, operator-configured
+// LLM/SDK/webhook endpoints, the governed sandbox/exec machinery). After
+// this, an UNSUPPRESSED security finding on kern's own tree is a real
+// signal again, not noise.
+func TestBuiltinCountIsSixteen(t *testing.T) {
+	if len(defaultSuppressions) != 83 {
+		t.Errorf("len(defaultSuppressions) = %d, want 83 (the verified finding set on kern's repo)", len(defaultSuppressions))
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
@@ -146,6 +147,12 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 // KERN_EXEC_TIMEOUT is unset or invalid.
 const defaultExecTimeout = 5 * time.Minute
 
+// maxExecMaxOut is the hard ceiling (4 MiB) on a single script's retained
+// stdout. A larger --max value is clamped so the in-memory anchor store and
+// the exec-runs disk mirror stay bounded; the local operator can raise the
+// ceiling per-invocation with KERN_EXEC_MAX_BYTES.
+const maxExecMaxOut = 4 << 20
+
 // execTimeout returns the execution timeout for RunBuild: the KERN_EXEC_TIMEOUT
 // env var parsed as a Go duration (e.g. "90s", "10m") when set and valid,
 // otherwise the 5-minute default. Invalid or non-positive values fall back to
@@ -191,6 +198,20 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 	}
 
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
+	// Output shaping + kept-run re-slice (the kern_verify contract):
+	// anchor=<id> re-slices a previously KEPT run with a different
+	// output= mode WITHOUT re-executing anything — it must therefore sit
+	// BEFORE the governance gate (no code runs on this path) and before
+	// the code-required check. output= summary|tail:N|lines:A-B|full
+	// (default full: kern_exec's contract is exact answers, so shaping is
+	// opt-in).
+	if id := mcpargs.ArgString(args, "anchor"); id != "" {
+		full, err := execution.LoadExecRun(root, id)
+		if err != nil {
+			return "", err
+		}
+		return execution.ShapeExecOutput(mcpargs.ArgString(args, "output"), full, execution.ExecMeta{Anchor: id})
+	}
 	if err := governance.CheckExecCommand(mcpargs.ArgString(args, "code"), root); err != nil {
 		return "", err
 	}
@@ -219,6 +240,21 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 			return "", fmt.Errorf("max: invalid integer %q", v)
 		}
 		if n > 0 {
+			// Hard cap: retained stdout is bounded so a runaway script
+			// cannot balloon the in-memory anchor store or the exec-runs
+			// disk mirror without limit. Anything above the cap is clamped;
+			// the local operator can raise the ceiling per-invocation via
+			// KERN_EXEC_MAX_BYTES (a positive integer; invalid or unset
+			// values keep the default cap).
+			cap := maxExecMaxOut
+			if ov := strings.TrimSpace(os.Getenv("KERN_EXEC_MAX_BYTES")); ov != "" {
+				if c, err := strconv.Atoi(ov); err == nil && c > 0 {
+					cap = c
+				}
+			}
+			if n > cap {
+				n = cap
+			}
 			run.MaxOut = n
 		}
 	}
@@ -226,5 +262,27 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 	if res.Err != nil {
 		return "", fmt.Errorf("kern_exec: %s", pii.Mask(res.Err.Error()).Text)
 	}
-	return pii.Mask(res.Stdout).Text, nil
+	masked := pii.Mask(res.Stdout)
+	// Keep the full (masked) output: in-memory anchor + on-disk copy, so a
+	// shaped call can always be widened (output=full) or re-windowed later
+	// without re-running the script.
+	anchor := optimize.StoreAnchor(masked.Text)
+	execution.SaveExecRun(root, anchor, masked.Text)
+	out, err := execution.ShapeExecOutput(mcpargs.ArgString(args, "output"), masked.Text, execution.ExecMeta{
+		Runtime: res.Runtime,
+		DurMS:   res.Duration.Milliseconds(),
+		Exit:    res.ExitCode,
+		Anchor:  anchor,
+	})
+	if err != nil {
+		return "", err
+	}
+	// Post-hoc steering: a script that statically reads files AND returned
+	// a large raw stdout is a dump through the wrong door (the token-cheap
+	// surfaces are kern_explore/kern_search). Advisory only — appended,
+	// never blocking, never mutating the payload above it.
+	if footer := execution.DumpSteer(run.Code, masked.Text, anchor); footer != "" {
+		out += "\n" + footer + "\n"
+	}
+	return out, nil
 }

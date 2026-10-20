@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,10 +44,11 @@ const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) -
 // config and must stay committable, so only these specific paths are ignored,
 // never ".blueprint/" wholesale.
 //
-// Ownership: the PROJECT .gitignore block for these entries belongs to
-// internal/bpcli/cli's ensureBlueprintRuntimeGitignored (a separate marked
-// block appended by `kern install hook` / blueprint install, which also
-// carries sec-cache.json). setup
+// Ownership: the PROJECT .gitignore block for these entries used to belong
+// to the removed blueprint family — internal/bpcli/cli's
+// ensureBlueprintRuntimeGitignored appended a separate marked block (also
+// carrying sec-cache.json); the family was deleted in the P4 pivot
+// (a05c91c7). setup
 // writes them only to the machine-global ignore (WireGlobalGitignore) —
 // do NOT re-add them to gitignoreBody: check strips in-block entries as
 // legacy, so duplicating them there dirties .gitignore on every
@@ -103,9 +105,8 @@ func GitignoreGenerated(root string) Result {
 // gitignoreBody is the entry list of the generated .gitignore block (between
 // the header marker and the close marker). Kept as a named string so the
 // canonical block can be matched verbatim for idempotency. The .blueprint
-// runtime entries are deliberately absent: that block is owned by
-// internal/bpcli/cli's ensureBlueprintRuntimeGitignored (see
-// blueprintRuntimeEntries above).
+// runtime entries are deliberately absent: their project-level block was
+// owned by the removed blueprint family (see blueprintRuntimeEntries above).
 var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
 .mcp.json
 .claude/
@@ -181,8 +182,11 @@ func gitConfigIgnore() string {
 
 // backupFile copies path to path+".bak.<timestamp>" before a rewrite so a
 // destructive edit never destroys the user's original content without recourse.
-// Duplicated from internal/setup (where wireGlobalRulesFile and the global
-// AGENTS/Claude writers also use it) so the leaf stays decoupled from setup.
+// After the copy it prunes this file's older backups down to the 3 most
+// recent (pruneOldBackups), so repeated setup runs cannot litter config dirs
+// with unbounded .bak.<timestamp> copies. Duplicated from internal/agentwire
+// (where wireGlobalRulesFile and the global AGENTS/Claude writers use it) so
+// the leaf stays decoupled from setup.
 func backupFile(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 {
@@ -193,7 +197,47 @@ func backupFile(path string) error {
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	return os.WriteFile(path+".bak."+ts, b, mode)
+	if err := os.WriteFile(path+".bak."+ts, b, mode); err != nil {
+		return err
+	}
+	// Best-effort hygiene: pruning failure must not fail the backup — the
+	// backup copy is the safety-critical part, cleanup is not.
+	_ = pruneOldBackups(path)
+	return nil
+}
+
+// pruneOldBackups deletes backup siblings of path (path+".bak.<timestamp>")
+// beyond the 3 most recent, so a managed file never accumulates more than 3
+// backups. The .bak.<timestamp> suffix sorts lexicographically (fixed-width
+// YYYYMMDD-HHMMSS), so "most recent" is simply the 3 highest names. Same
+// keep-3 policy as internal/agentwire's pruneOldBackups; duplicated here
+// because the leaf must not import agentwire.
+func pruneOldBackups(path string) error {
+	base := filepath.Base(path)
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var baks []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), base+".bak.") {
+			baks = append(baks, e.Name())
+		}
+	}
+	if len(baks) <= 3 {
+		return nil
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(baks)))
+	for _, name := range baks[3:] {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WireGlobalGitignore ensures that ~/.config/git/ignore (or the custom
@@ -235,11 +279,75 @@ func WireGlobalGitignore() Result {
 	if len(content) == 0 || strings.HasSuffix(content, "\n") {
 		separator = ""
 	}
-	newContent := content + separator + "# kern global exclude (prevents accidental git commits across all repos)\n" + strings.Join(missing, "\n") + "\n"
+	newContent := content + separator + globalIgnoreComment + "\n" + strings.Join(missing, "\n") + "\n"
 	if err := os.WriteFile(ignorePath, []byte(newContent), 0o644); err != nil {
 		return Result{Agent: "global-gitignore", Path: ignorePath, Note: err.Error()}
 	}
 	return Result{Agent: "global-gitignore", Installed: true, Path: ignorePath, Note: "added " + strings.Join(missing, ", ") + " to global git ignore"}
+}
+
+// globalIgnoreComment heads the block WireGlobalGitignore appends; it is also
+// the only anchor UnwireGlobalGitignore trusts as proof the lines are kern's.
+const globalIgnoreComment = "# kern global exclude (prevents accidental git commits across all repos)"
+
+// UnwireGlobalGitignore removes the block WireGlobalGitignore appended: the
+// kern comment line plus the kern entries directly under it. Entries the user
+// wrote themselves (no kern comment above them) are never touched. A file
+// that is empty afterwards (kern created it) is deleted; otherwise the
+// pre-edit content is backed up first. dryRun reports without writing.
+func UnwireGlobalGitignore(dryRun bool) Result {
+	path := gitConfigIgnore()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{Agent: "global-gitignore", Skipped: true, Path: path, Note: "not present"}
+		}
+		return Result{Agent: "global-gitignore", Path: path, Note: err.Error()}
+	}
+	owned := map[string]bool{".kern/": true}
+	for _, e := range blueprintRuntimeEntries {
+		owned[e] = true
+	}
+	lines := strings.Split(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	found := false
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != globalIgnoreComment {
+			kept = append(kept, lines[i])
+			continue
+		}
+		found = true
+		for i+1 < len(lines) && owned[strings.TrimSpace(lines[i+1])] {
+			i++
+		}
+	}
+	if !found {
+		return Result{Agent: "global-gitignore", Skipped: true, Path: path, Note: "no kern block in global git ignore"}
+	}
+	rest := strings.Join(kept, "\n")
+	if strings.TrimSpace(rest) == "" {
+		if dryRun {
+			return Result{Agent: "global-gitignore", Installed: true, Path: path, Note: "[dry-run] would delete " + path + " (only held the kern block)"}
+		}
+		if err := os.Remove(path); err != nil {
+			return Result{Agent: "global-gitignore", Path: path, Note: err.Error()}
+		}
+		return Result{Agent: "global-gitignore", Installed: true, Path: path, Note: "deleted " + path + " (only held the kern block)"}
+	}
+	if dryRun {
+		return Result{Agent: "global-gitignore", Installed: true, Path: path, Note: "[dry-run] would remove the kern block from global git ignore"}
+	}
+	if err := backupFile(path); err != nil {
+		return Result{Agent: "global-gitignore", Path: path, Note: "backup: " + err.Error()}
+	}
+	mode := os.FileMode(0o644)
+	if info, serr := os.Stat(path); serr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(path, []byte(rest), mode); err != nil {
+		return Result{Agent: "global-gitignore", Path: path, Note: err.Error()}
+	}
+	return Result{Agent: "global-gitignore", Installed: true, Path: path, Note: "removed the kern block from global git ignore"}
 }
 
 // WireLocalGitExclude ensures that <root>/.git/info/exclude contains .kern/ so that

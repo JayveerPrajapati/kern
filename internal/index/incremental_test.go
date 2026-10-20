@@ -48,7 +48,8 @@ func canonical(t *testing.T, ix *Index) *Index {
 		t.Fatalf("canonical: unmarshal: %v", err)
 	}
 	c.UpdatedAt = time.Time{}
-	c.Identity = nil // captured per-build (timestamps inside)
+	c.Identity = nil            // captured per-build (timestamps inside)
+	c.BuildStats = BuildStats{} // provenance (kind/ms/workers/reused), not content
 	return &c
 }
 

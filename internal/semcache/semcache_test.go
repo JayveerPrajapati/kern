@@ -237,6 +237,39 @@ func TestStatsCounters(t *testing.T) {
 	}
 }
 
+// TestStatsSurfacesPersistedCounters: Stats reports the durable cross-process
+// counters (a prior process's accounting) even when this process performed no
+// lookups of its own — a fresh `kern semcache stats` must see the cache
+// compounding instead of zeros.
+func TestStatsSurfacesPersistedCounters(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = Clear("")
+	ns := "persisted-stats"
+	// Seed a real index via the public API so the namespace is discoverable,
+	// then simulate a prior process's accounting with a higher counters file.
+	_ = Store(ns, "the database connection failed during migration", "p")
+	if err := os.WriteFile(countersPath(ns), []byte(`{"hits":7,"misses":3,"saved_bytes":2048,"evictions":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := st[ns]
+	if !ok {
+		t.Fatalf("namespace %q not reported", ns)
+	}
+	if s.Hits != 7 || s.Misses != 3 {
+		t.Fatalf("persisted hit/miss counters not surfaced: %+v", s)
+	}
+	if s.SavedBytes != 2048 || s.Evictions != 2 {
+		t.Fatalf("persisted saved/eviction counters not surfaced: %+v", s)
+	}
+	if s.Entries != 1 {
+		t.Fatalf("expected 1 entry, got %d", s.Entries)
+	}
+}
+
 // TestLookupTouchRefreshesAt: a hit advances the matched entry's last-use At
 // (throttled by touchPersistInterval) and persists it, so LRU eviction and
 // idle-time TTL semantics survive restarts.

@@ -66,6 +66,7 @@ func main() { _ = helper() }
 // builds the index itself (load-or-build like the standalone main) and must
 // report the impact-F1 section.
 func TestRunOnTinyGitRepo(t *testing.T) {
+	t.Parallel()
 	dir := tinyGitRepo(t)
 	var buf bytes.Buffer
 	if err := Run(dir, 2, []float64{2.0, 4.0}, &buf); err != nil {
@@ -94,6 +95,7 @@ func TestRunErrorsOnNonGitDir(t *testing.T) {
 // thresholds) tuple must replay the stored report with the "cached" marker
 // line, byte-identical to the fresh report.
 func TestCacheWarmRerun(t *testing.T) {
+	t.Parallel()
 	dir := tinyGitRepo(t)
 
 	var first bytes.Buffer
@@ -124,6 +126,7 @@ func TestCacheWarmRerun(t *testing.T) {
 // TestCacheMissOnChangedInputs: a different threshold sweep (or window) is a
 // different key and must recompute, not replay the previous entry.
 func TestCacheMissOnChangedInputs(t *testing.T) {
+	t.Parallel()
 	dir := tinyGitRepo(t)
 
 	var a bytes.Buffer

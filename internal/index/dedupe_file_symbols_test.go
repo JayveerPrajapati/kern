@@ -76,6 +76,32 @@ func TestCheckFileSymbolConflictsDifferentReceiverIsNotACollision(t *testing.T) 
 	}
 }
 
+// TestCheckFileSymbolConflictsOverloadsAllowed: same-name methods with
+// DIFFERENT parameter lists are legitimate overloads (Java-family), not
+// duplicate identities — WD-6: two addCharacteristic overloads (3 vs 4
+// params) blocked a whole repo's index before Params became the
+// discriminator. Equal Params (the same signature twice) still fails loud.
+func TestCheckFileSymbolConflictsOverloadsAllowed(t *testing.T) {
+	syms := []Symbol{
+		{Kind: "method", Name: "addCharacteristic", Receiver: "InventoryUtils", File: "InventoryUtils.java", Line: 192, End: 198, Lang: "java",
+			Params: []string{"List characteristicList", "String name", "Object value"}},
+		{Kind: "method", Name: "addCharacteristic", Receiver: "InventoryUtils", File: "InventoryUtils.java", Line: 201, End: 204, Lang: "java",
+			Params: []string{"List characteristicList", "String name", "Object value", "Supplier exceptionSupplier"}},
+	}
+	if err := checkFileSymbolConflicts("InventoryUtils.java", syms); err != nil {
+		t.Fatalf("overloads with different params must not conflict, got: %v", err)
+	}
+	dupes := []Symbol{
+		{Kind: "method", Name: "addCharacteristic", Receiver: "InventoryUtils", File: "InventoryUtils.java", Line: 192, End: 198, Lang: "java",
+			Params: []string{"List characteristicList", "String name"}},
+		{Kind: "method", Name: "addCharacteristic", Receiver: "InventoryUtils", File: "InventoryUtils.java", Line: 201, End: 204, Lang: "java",
+			Params: []string{"List characteristicList", "String name"}},
+	}
+	if err := checkFileSymbolConflicts("InventoryUtils.java", dupes); err == nil {
+		t.Fatal("same identity AND same params on different lines is a true duplicate — must fail loud")
+	}
+}
+
 // TestCheckFileSymbolConflictsMarkerKindsExempt: entry (route heuristics —
 // several routes can name the same handler) and heading (repeated doc
 // titles) markers legitimately repeat in one file and are exempt from the

@@ -365,3 +365,49 @@ func TestCompressLogTruncateRules(t *testing.T) {
 		t.Errorf("expected outside steps to be omitted, got:\n%s", got)
 	}
 }
+
+func TestCompactCommandOutputFiltersNoise(t *testing.T) {
+	out := CompactCommandOutput(strings.Join([]string{
+		"[INFO] starting work",
+		"[DEBUG] tracing internals",
+		"Downloading 100%",
+		"progress: 10/10",
+		"real warning: disk full",
+		"",
+		"error: build failed",
+		"plain useful line",
+	}, "\n"))
+	got := strings.Split(out, "\n")
+	for _, want := range []string{"real warning: disk full", "error: build failed", "plain useful line"} {
+		if !contains(got, want) {
+			t.Fatalf("expected %q kept, got %q", want, got)
+		}
+	}
+	for _, drop := range []string{"[INFO]", "[DEBUG]", "Downloading", "progress:"} {
+		if contains(got, drop) {
+			t.Fatalf("expected %q filtered, got %q", drop, got)
+		}
+	}
+}
+
+func TestIsJSONShaped(t *testing.T) {
+	for _, yes := range []string{"{}", " []", "\n\t{\"a\": 1}"} {
+		if !IsJSONShaped(yes) {
+			t.Fatalf("expected %q JSON-shaped", yes)
+		}
+	}
+	for _, no := range []string{"plain text", " cmd: foo", "", "   "} {
+		if IsJSONShaped(no) {
+			t.Fatalf("expected %q NOT JSON-shaped", no)
+		}
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if strings.Contains(h, needle) {
+			return true
+		}
+	}
+	return false
+}

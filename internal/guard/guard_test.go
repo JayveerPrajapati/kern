@@ -39,10 +39,10 @@ func TestVerdictOrderInvariance(t *testing.T) {
 		{From: "web", To: "db", Action: "allow"},
 		{From: "web", To: "db", Action: "forbid"},
 	}
-	if got := verdict(forbidThenAllow, "web", "db"); got != nil {
+	if got := Verdict(forbidThenAllow, "web", "db"); got != nil {
 		t.Errorf("forbid-then-allow: expected ALLOW (nil), got %+v", got)
 	}
-	if got := verdict(allowThenForbid, "web", "db"); got != nil {
+	if got := Verdict(allowThenForbid, "web", "db"); got != nil {
 		t.Errorf("allow-then-forbid: expected ALLOW (nil), got %+v", got)
 	}
 }
@@ -50,7 +50,7 @@ func TestVerdictOrderInvariance(t *testing.T) {
 // TestVerdictForbidWhenNoAllow verifies a lone forbid rule rejects the pair.
 func TestVerdictForbidWhenNoAllow(t *testing.T) {
 	rules := []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
-	got := verdict(rules, "web", "db")
+	got := Verdict(rules, "web", "db")
 	if got == nil {
 		t.Fatal("lone forbid rule: expected FORBID, got nil (permitted)")
 	}
@@ -63,7 +63,7 @@ func TestVerdictForbidWhenNoAllow(t *testing.T) {
 // permitted (default-permit), unchanged by the fix.
 func TestVerdictDefaultPermit(t *testing.T) {
 	rules := []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
-	if got := verdict(rules, "api", "db"); got != nil {
+	if got := Verdict(rules, "api", "db"); got != nil {
 		t.Errorf("unconfigured pair should default to permitted, got %+v", got)
 	}
 }

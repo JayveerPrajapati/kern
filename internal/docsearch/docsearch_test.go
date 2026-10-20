@@ -299,6 +299,113 @@ func TestMergeFetchedSearchableAndReplaceable(t *testing.T) {
 	}
 }
 
+// TestLoadPurgesDeletedDocs: a persisted doc index must never keep serving
+// fragments of files that no longer exist under root. Found by the
+// 2026-10-15 live QA campaign: kern_doc search returned scored fragments
+// (0.984) for a deleted, never-committed report because the persisted
+// index is only rebuilt when absent — deleted docs left ghost chunks
+// forever. Load now purges them; fetched docs (fetch/) are exempt (their
+// source lives in the global docs-fetch cache, not the project tree).
+func TestLoadPurgesDeletedDocs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gone.md"), []byte("live test report with unique findings about the exit code contract"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.md"), []byte("keeper document about the deploy pipeline"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := IndexDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// A fetched doc merged before the deletion must survive the purge.
+	fetched := strings.Repeat("The react useState hook manages component state. ", 40)
+	if _, err := MergeFetched(dir, "react", fetched); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "gone.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := Load(dir)
+	if loaded == nil {
+		t.Fatal("index not persisted")
+	}
+	var hasKeep, hasFetch bool
+	for _, d := range loaded.Docs {
+		if d.Chunk.File == "gone.md" {
+			t.Fatal("ghost chunk for deleted gone.md survived Load")
+		}
+		switch d.Chunk.File {
+		case "keep.md":
+			hasKeep = true
+		case "fetch/react.md":
+			hasFetch = true
+		}
+	}
+	if !hasKeep {
+		t.Fatal("existing on-disk doc was wrongly purged")
+	}
+	if !hasFetch {
+		t.Fatal("fetched doc was wrongly purged (fetch/ must be exempt from the ghost purge)")
+	}
+
+	// The purge is persisted: a second Load serves the same clean index.
+	reloaded := Load(dir)
+	if reloaded == nil {
+		t.Fatal("purged index not persisted")
+	}
+	for _, d := range reloaded.Docs {
+		if d.Chunk.File == "gone.md" {
+			t.Fatal("ghost chunk reappeared after persisted purge")
+		}
+	}
+}
+
+// TestPurgeDeletedCountsAndDrops locks the method contract directly: one
+// chunk per deleted file is dropped and counted; present files and fetched
+// documents are untouched.
+func TestPurgeDeletedCountsAndDrops(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("alpha document content for the search index here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.md"), []byte("beta document content for the search index here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := IndexDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeFetched(dir, "react", strings.Repeat("The react useState hook manages component state. ", 40)); err != nil {
+		t.Fatal(err)
+	}
+	before := len(Load(dir).Docs)
+	if err := os.Remove(filepath.Join(dir, "a.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := Load(dir)
+	var alphaChunks int
+	for _, d := range loaded.Docs {
+		if d.Chunk.File == "a.md" {
+			alphaChunks++
+		}
+	}
+	if alphaChunks != 0 {
+		t.Fatalf("%d ghost chunks for deleted a.md survived", alphaChunks)
+	}
+	if got := len(loaded.Docs); got != before-1 {
+		t.Fatalf("expected %d docs after purging a.md's single chunk, got %d", before-1, got)
+	}
+}
+
 // TestIndexDirPreservesFetchedDocs: a full re-index (what `kern docs index`
 // and kern_doc do) must not silently drop documents previously merged
 // via MergeFetched — indexing must not undo fetching.

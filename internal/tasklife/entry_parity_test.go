@@ -116,3 +116,49 @@ func TestImpactExploreEntryResolutionParity(t *testing.T) {
 		}
 	}
 }
+
+// TestImpactExploreCallerCountParity pins the QA 2026-10-19 item 5 fix: for
+// an AMBIGUOUS hub name, kern impact and kern_explore report the SAME
+// symbol's caller count. Root cause of the divergence: the graph's own
+// bare-name resolution picked an arbitrary first-match definition while
+// explore's ResolveEntry picked the largest-footprint one, so the two
+// surfaces counted DIFFERENT symbols' callers (live case: "Reset" — explore
+// 0 callers of SafetyBudget.Reset vs impact 7 callers of config.Reset).
+// Both surfaces now resolve to the same definition and their caller counts
+// agree; both renders label their counting universe ("unique simple names of
+// direct callers" vs "graph nodes") so a residual difference can never be
+// misread as a bug.
+func TestImpactExploreCallerCountParity(t *testing.T) {
+	ix, err := index.Build("../..")
+	if err != nil {
+		t.Fatalf("index.Build(../..): %v", err)
+	}
+	g := intel.FromIndex(ix)
+	p := &resolveOnlyPlatform{root: "../..", ix: ix, graph: &g}
+
+	for _, name := range []string{"New", "Run", "Reset"} {
+		if defs := g.DefsWithSimpleName(name); len(defs) < 2 {
+			t.Skipf("%q is no longer ambiguous in this tree (%d defs); caller-count parity pin needs a multi-definition hub", name, len(defs))
+		}
+
+		// kern impact's entry (tasklife.resolveSymbol — the explore-aligned
+		// resolution) and the explore report for the same query.
+		target, fuzzy, err := resolveSymbol(p, name)
+		if err != nil {
+			t.Fatalf("resolveSymbol(%q): %v", name, err)
+		}
+		if !fuzzy {
+			t.Errorf("resolveSymbol(%q) = %q: expected fuzzy=true for an ambiguous hub", name, target)
+		}
+		rep, err := intel.Explore(ix, name, 0, 0)
+		if err != nil {
+			t.Fatalf("Explore(%q): %v", name, err)
+		}
+		impactCallers := g.DirectCallersNames(target, false)
+
+		if len(rep.Callers) != len(impactCallers) {
+			t.Errorf("caller count divergence for %q: explore=%d (%v), impact=%d (%v) — same resolved target %q must count the same way (explore: unique simple names of direct callers; impact: graph nodes)",
+				name, len(rep.Callers), rep.Callers, len(impactCallers), impactCallers, target)
+		}
+	}
+}

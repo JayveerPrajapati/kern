@@ -325,5 +325,16 @@ func FetchAnchor(ctx context.Context, args map[string]any) (string, error) {
 	if id == "" {
 		return "", fmt.Errorf("anchor_id is required")
 	}
-	return optimize.FetchAnchor(id)
+	raw, err := optimize.FetchAnchor(id)
+	if err != nil {
+		// There are two anchor systems and this tool serves only one (QA
+		// 2026-10-15 finding 8): the optimize-family anchor store, which is
+		// in-memory and process-local. Anchors minted by the MCP output
+		// sandbox (the "[kern: Truncated … Anchor: anchor-…]" markers) live
+		// in the retained-output cursor store and are recovered by
+		// re-calling the SAME tool with a slice= argument — tell the caller
+		// which one this id is not, and how to reach the other.
+		return "", fmt.Errorf("%w — note: this store is in-memory and process-local; if %q came from a truncated tool output, re-call the SAME tool with slice=%s:tail:N (or slice=%s:lines:A-B) to recover the retained output", err, id, id, id)
+	}
+	return raw, nil
 }

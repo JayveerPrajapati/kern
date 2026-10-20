@@ -15,6 +15,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
+// ApprovalKindExecCommand marks an approval minted for a concrete mcp-exec
+// command (a HIGH/CRITICAL command.execute gate with non-empty command text).
+// The approval's TaskID binds it to the command's SHA-256 and its
+// EvidenceRefs carry the exact command text; the kind makes the
+// "allowed for <command>" semantics explicit so auditors and CLI output can
+// distinguish command approvals from generic action approvals. The empty
+// string is the default for non-exec approvals.
+const ApprovalKindExecCommand = "allowed-for-command"
+
 // ApprovalWorkflow manages human-in-the-loop approvals for high-risk actions.
 // Approvals can live purely in memory (the default) or be backed by the
 // project's approval file (NewPersistedApprovalWorkflow), which restores
@@ -107,11 +116,16 @@ func (w *ApprovalWorkflow) Request(taskID, requester, reason string) (domain.App
 // The persisted copy is upserted with the full binding so a restarted process
 // restores the complete record, not the base fields only. Like Request, it
 // returns an error when the approval cannot be persisted, so the caller can
-// fail closed instead of parking an approval no other process can see.
-func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string) (domain.Approval, error) {
+// fail closed instead of parking an approval no other process can see. An
+// optional final kind (variadic, typically ApprovalKindExecCommand) classifies
+// the approval; callers that pass none get the empty generic kind.
+func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string, kinds ...string) (domain.Approval, error) {
 	a, err := w.Request(taskID, requester, reason)
 	if err != nil {
 		return a, err
+	}
+	if len(kinds) > 0 {
+		a.Kind = kinds[0]
 	}
 	a.RiskLevel = riskLevel
 	a.PolicyIDs = policyIDs

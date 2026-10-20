@@ -1,12 +1,12 @@
 package tokstats
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // writeTree writes a deterministic file tree to a temp dir (the index test
@@ -161,6 +161,38 @@ func TestFileTokenCountBounded(t *testing.T) {
 	fileTokenSavingsCache.mu.Unlock()
 	if size > savingsCacheCap {
 		t.Fatalf("cache grew to %d entries, cap is %d", size, savingsCacheCap)
+	}
+}
+
+// TestRuleInjectionTokens pins the `kern stats --net` cost side: the
+// rules-injection figure is the token count of the repo AGENTS.md/CLAUDE.md
+// plus the global ~/.claude/CLAUDE.md; missing files count 0 and the counts
+// come from the same mtime+size cache as the graph savings.
+func TestRuleInjectionTokens(t *testing.T) {
+	// Isolate the global slot so this machine's real ~/.claude/CLAUDE.md
+	// cannot leak into the assertion.
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	if got := RuleInjectionTokens(root); got != 0 {
+		t.Fatalf("empty root should count 0 rule tokens, got %d", got)
+	}
+	content := strings.Repeat("package rule\n", 40)
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	with := RuleInjectionTokens(root)
+	if with == 0 {
+		t.Fatal("present AGENTS.md must contribute rule tokens")
+	}
+	if got := RuleInjectionTokens(root); got != with {
+		t.Fatalf("cached re-read should be stable, got %d then %d", with, got)
+	}
+	// Editing the file (mtime/size change) invalidates the cache.
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(content+content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := RuleInjectionTokens(root); got <= with {
+		t.Fatalf("doubled rule file must raise the token count, got %d (was %d)", got, with)
 	}
 }
 

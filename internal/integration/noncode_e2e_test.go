@@ -263,10 +263,10 @@ func TestPytestWhatTestsCover(t *testing.T) {
 	}
 	sawRunChecksTest := false
 	for _, n := range cover {
-		if !strings.Contains(n.ID, "test_") {
-			t.Errorf("covering node %q is not a pytest test", n.ID)
+		if !strings.Contains(n.Label, "test_") {
+			t.Errorf("covering node %q (%q) is not a pytest test", n.ID, n.Label)
 		}
-		if strings.Contains(n.ID, "test_run_checks") {
+		if strings.Contains(n.Label, "test_run_checks") {
 			sawRunChecksTest = true
 		}
 	}

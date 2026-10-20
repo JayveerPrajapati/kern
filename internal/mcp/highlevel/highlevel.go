@@ -22,10 +22,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/loop"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	rootpkg "github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
@@ -54,6 +54,26 @@ type Hooks struct {
 	// >30s verify as dead). pct is the cumulative percentage (0-100); msg
 	// names the phase ("running build…", "running tests…"). Nil is a no-op.
 	Progress func(pct int, msg string)
+	// ServedThisSession reports which of the given affected files the session
+	// has already been served (the served-ledger file-coverage bridge, B3).
+	// The adapter wires it to the server's per-session ledger keyed by the
+	// call's session key. Nil is a no-op: the context-sufficiency section is
+	// then omitted (no data). Used by Plan only.
+	ServedThisSession func(files []string) map[string]bool
+}
+
+// taskLine returns the task-annotation footer ONLY when the Task record was
+// persisted and is queryable via `kern task <id>` (the store-assigned
+// "t-<n>" namespace). An ephemeral "a-<n>" ID dies with the process, so
+// printing it in the payload is bookkeeping noise (QA 6.6); the persisted ID
+// is a real handle the caller can reference, so it stays. extra carries a
+// per-tool suffix (" — incident: X", " — N steps, risk=R") already prefixed
+// with " — ".
+func taskLine(t *agent.Task, extra string) string {
+	if t == nil || !strings.HasPrefix(t.ID, "t-") {
+		return ""
+	}
+	return fmt.Sprintf("\n[task: %s — state: %s%s]\n", t.ID, t.State, extra)
 }
 
 // platform resolves the shared application Platform for a root through the
@@ -119,7 +139,7 @@ func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	out := "ANALYSIS for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	out := "ANALYSIS for: " + change + "\n" + text + taskLine(t, "")
 	if profileName := mcpargs.ArgString(args, "profile"); profileName != "" {
 		p, ok := profiles.NewRegistryWithUserProfiles(root).Select(profileName)
 		if !ok {
@@ -159,7 +179,16 @@ func Plan(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "PLAN for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s — %d steps, risk=%s]\n", t.ID, t.State, len(plan.ImplementationSteps), plan.Risk), nil
+	out := "PLAN for: " + change + "\n" + text + taskLine(t, fmt.Sprintf(" — %d steps, risk=%s", len(plan.ImplementationSteps), plan.Risk))
+	// B3/B5 (anti-stall campaign Phase 3): append the context-sufficiency
+	// proof ("do I have everything?") and the first slice ("what is the
+	// cheapest first move?") — deterministic, output-only extensions over
+	// data the Plan workflow already holds (the context packet's files,
+	// symbols, lines and dependency edges).
+	if t != nil && t.ContextPacket != nil {
+		out = appendPlanExtensions(out, h, args, t.ContextPacket)
+	}
+	return out, nil
 }
 
 // Execute implements kern_execute: applies a patch through TaskService.Execute
@@ -191,7 +220,7 @@ func Execute(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	// to the caller (same gate as kern_exec/kern_sandbox).
 	fmt.Fprintf(&eb, "%s\n", pii.Mask(t.Output).Text)
 	fmt.Fprintf(&eb, "diff:\n%s\n", pii.Mask(diff).Text)
-	fmt.Fprintf(&eb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+	fmt.Fprintf(&eb, "%s", taskLine(t, ""))
 	return eb.String(), nil
 }
 
@@ -284,16 +313,16 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// output (the highlevel surface returns text, not JSON).
 	var verifyOpts []verification.Option
 	var notes []string
-	if full && verifyTypeHasTest(types) {
+	if full && catalog.ContainsVerifyTestType(types) {
 		verifyOpts = append(verifyOpts, verification.FullTests(true))
 		notes = append(notes, "full suite (complete test run)")
 	}
-	if fastMode && verifyTypeHasTest(types) {
+	if fastMode && catalog.ContainsVerifyTestType(types) {
 		if pkgs := verification.ChangedTestPackages(rootpkg.ResolveRoot(root)); len(pkgs) > 0 {
 			verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
 			notes = append(notes, fmt.Sprintf("changed packages (%d): %s", len(pkgs), strings.Join(pkgs, " ")))
 		} else {
-			types = dropVerifyTestTypes(types)
+			types = catalog.DropVerifyTestTypes(types)
 			notes = append(notes, "no changed Go packages — running build only")
 		}
 	}
@@ -337,7 +366,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 				fmt.Fprintf(&vb, "%s\n", line)
 			}
-			fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+			fmt.Fprintf(&vb, "%s", taskLine(t, ""))
 			return render(vb.String()), nil
 		}
 		return "", err
@@ -356,7 +385,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 			fmt.Fprintf(&vb, "%s\n", line)
 		}
-		fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+		fmt.Fprintf(&vb, "%s", taskLine(t, ""))
 		return render(vb.String()), nil
 	}
 	var vb strings.Builder
@@ -368,40 +397,8 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 		fmt.Fprintf(&vb, "%s\n", line)
 	}
-	fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+	fmt.Fprintf(&vb, "%s", taskLine(t, ""))
 	return render(vb.String()), nil
-}
-
-// verifyTypeHasTest reports whether the requested verify types include the
-// test step. The substring match mirrors the engine's type dispatcher
-// (test/unit/integration), so `types "build,unit"` and "build,test" both
-// count. It drives the fast/full tier notes: a build-only or compliance-only
-// run has no test step to scope or run in full mode.
-func verifyTypeHasTest(types []string) bool {
-	for _, t := range types {
-		tl := strings.ToLower(strings.TrimSpace(t))
-		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
-			return true
-		}
-	}
-	return false
-}
-
-// dropVerifyTestTypes removes the test-step entries (test/unit/integration)
-// from a verify types list — the fast tier's build-only fallback when there
-// are no changed Go packages to test. The substring match mirrors
-// verifyTypeHasTest, so the two can never disagree about what counts as the
-// test step.
-func dropVerifyTestTypes(types []string) []string {
-	out := make([]string, 0, len(types))
-	for _, t := range types {
-		tl := strings.ToLower(strings.TrimSpace(t))
-		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
 }
 
 // Incident implements kern_incident: ingest an alert (or list/add heal
@@ -446,13 +443,13 @@ func Incident(ctx context.Context, h Hooks, args map[string]any) (string, error)
 		if err != nil {
 			return "", err
 		}
-		return text + fmt.Sprintf("\n[task: %s — state: %s — incident: %s]\n", t.ID, t.State, al.ID), nil
+		return text + taskLine(t, " — incident: "+al.ID), nil
 	}
 	t, inc, text, err := ts.InvestigateIncident(al)
 	if err != nil {
 		return "", err
 	}
-	return text + fmt.Sprintf("\n[task: %s — state: %s — incident: %s]\n", t.ID, t.State, inc.ID), nil
+	return text + taskLine(t, " — incident: "+inc.ID), nil
 }
 
 // WhatIf implements kern_what_if: simulates a change through TaskService,
@@ -498,7 +495,7 @@ func WhatIf(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if t.ImpactReport != nil && t.ImpactReport.NotResolved {
 		text += "\nwarning: " + t.ImpactReport.NotResolvedWarning + "\n"
 	}
-	return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	return text + taskLine(t, ""), nil
 }
 
 // Impact implements kern_impact (and the risk=true contract formerly served
@@ -544,7 +541,7 @@ func Impact(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// renderImpactText already emits the "IMPACT for: <target>" header (the
 	// impact renderer is shared with the CLI and REST surfaces), so prepending
 	// it here produced a duplicated header (same bug as the CLI side).
-	return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	return text + taskLine(t, ""), nil
 }
 
 // Agents implements kern_agents: lists the specialist roles and the task
@@ -650,7 +647,7 @@ func Loop(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if res.Learned != nil {
 		fmt.Fprintf(&lb, "learned: %s\n", res.Learned.ID)
 	}
-	fmt.Fprintf(&lb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+	fmt.Fprintf(&lb, "%s", taskLine(t, ""))
 	return lb.String(), nil
 }
 
@@ -799,13 +796,13 @@ func Correlate(ctx context.Context, h Hooks, args map[string]any) (string, error
 		if err != nil {
 			return "", err
 		}
-		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+		return text + taskLine(t, ""), nil
 	}
 	t, _, text, err := ts.Correlate(al)
 	if err != nil {
 		return "", err
 	}
-	return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	return text + taskLine(t, ""), nil
 }
 
 // Learn implements kern_learn: learns lessons from the task history above a
@@ -832,7 +829,7 @@ func Learn(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	return text + taskLine(t, ""), nil
 }
 
 // Modernize implements kern_modernize: generates a modernization plan via
@@ -851,7 +848,7 @@ func Modernize(ctx context.Context, h Hooks, args map[string]any) (string, error
 	if err != nil {
 		return "", err
 	}
-	return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	return text + taskLine(t, ""), nil
 }
 
 // Audit implements kern_audit: surfaces every firewall decision/approval from

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-26
 **Revision:** `7d8c5d5` (`git rev-parse --short HEAD` at measurement time)
-**Suite:** cold-start-scale · **Status:** baseline established 2026-09-26
+**Suite:** cold-start-scale · **Status:** [measured] — baseline established 2026-09-26
 
 ## 1. Purpose
 
@@ -97,6 +97,26 @@ Run spread (min–max): tiny build 92–103, load 82–88, grep 66–70 ·
 small build 449–457, load 129–138, grep 495–501 · medium build
 2,170–2,238, load 565–578, grep 1,559–1,820 · big2 build 11,802–11,830,
 load 862–882, grep 5,547–6,051.
+
+**Refresh (2026-10-08, `d0e44ce`, same machine + same-tree protocol):** the
+medium rung (this repo) re-measured at **2,029 files** — cold-build 1,618 ms
+(build 1,605–1,684) · cold-load 463 ms (446–475) · grep 1,515 ms (1,507–1,538,
+960 matching lines). The table above keeps the original 2026-09-26 baseline.
+
+**Refresh (2026-10-19, `10987fc`, same machine + same-tree protocol):** the
+medium rung (this repo) re-measured at **1,952 files** — cold-build 2,068 ms
+(2,017–2,070) · cold-load 852 ms (792–858) · grep 1,271 ms (1,231–1,329,
+1,048 matching lines). The table above keeps the original 2026-09-26 baseline.
+
+**A/B control (2026-10-19, `10987fc` vs parent `b068ba92`, same tree):** the
+2,068/852 ms figures above are environment-inflated — a CyberArk EDR
+extension pinned at ~105% CPU and loadavg 3.6→5.4 ran through the
+measurement. A same-tree alternating A/B of the parent binary vs the
+streamed-build binary shows **no regression from commit `10987fc`**:
+cold-build old 1,923 ms vs new 1,953 ms (overlapping spreads); cold-load new
+854 ms vs old 859 ms (statistically identical — the load path never touches
+the changed `buildParallel`). Both binaries reproduce the elevated absolute
+numbers on this machine, confirming environmental drift, not this commit.
 
 ## 4. The venv-heavy repo (big1) — why file counts mislead
 

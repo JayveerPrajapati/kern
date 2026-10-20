@@ -79,6 +79,23 @@ func TestPlanContextChangeRequired(t *testing.T) {
 	}
 }
 
+// B2 (QA 2026-10-15): a change that fuzzy-resolves must surface the same
+// low-confidence note Analyze prefixes to its text, so the plan never reads
+// as a confident identification of a symbol the user did not name.
+func TestPlanContextSurfacesFuzzyResolutionNote(t *testing.T) {
+	h, root := newFixtureHooks(t)
+	// "server" word-matches NewServer on the fixture and fuzzy-resolves.
+	out, err := PlanContext(context.Background(), h, map[string]any{
+		"root": root, "change": "server",
+	})
+	if err != nil {
+		t.Fatalf("PlanContext: %v", err)
+	}
+	if !strings.Contains(out, "fuzzy match") {
+		t.Errorf("fuzzy-resolved change must surface the low-confidence note on the plan, got:\n%s", out)
+	}
+}
+
 func TestPlanContextPlatformError(t *testing.T) {
 	spyErr := errors.New("platform unavailable")
 	h := Hooks{

@@ -37,6 +37,8 @@
 <script>
 const g = {{.JSON}};
 const whole = (g.root === '');
+const roots = new Set(g.root_ids || []);
+function nodeLabel(node) { return node.name || node.id; }
 const colors = {{.Colors}};
 const COL = {caller: 120, def: 360, callee: 600};
 const layers = {caller: [], def: [], callee: []};
@@ -65,8 +67,6 @@ function addEdge(from, to, confidence) {
   } else if (confidence === 'INFERRED' || confidence === 'medium') {
     e.setAttribute('stroke', '#f59e0b');
   }
-    e.setAttribute('stroke', '#f59e0b');
-  }
   const mk = document.createElementNS(NS, 'marker');
   mk.setAttribute('id', 'arrow' + (edgemap.size));
   mk.setAttribute('viewBox', '0 0 10 10'); mk.setAttribute('refX', '9'); mk.setAttribute('refY', '5');
@@ -87,7 +87,7 @@ function draw() {
   if (whole) return wholeDraw();
   g.nodes.forEach(n => {
     const [cx, cy] = slot(n, n.role || 'callee');
-    const tw = Math.min(textWidth(n.id), 180);
+    const tw = Math.min(textWidth(nodeLabel(n)), 180);
     const rw = tw + 22, rh = 30;
     const g2 = document.createElementNS(NS, 'g');
     g2.setAttribute('class', 'node');
@@ -99,7 +99,7 @@ function draw() {
     const t = document.createElementNS(NS, 'text');
     t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
     t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '11');
-    t.textContent = n.id;
+    t.textContent = nodeLabel(n);
     g2.appendChild(rect); g2.appendChild(t);
     g2.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
     g2.addEventListener('mouseenter', () => highlight(n, true));
@@ -127,9 +127,9 @@ function layout() {
         l.setAttribute('d', 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2);
         return;
       }
-      let x1 = a.rx + (e.from === g.root ? a.w / 2 : -a.w / 2);
+      let x1 = a.rx + (roots.has(e.from) ? a.w / 2 : -a.w / 2);
       let y1 = a.ry + bend;
-      let x2 = b.rx + (e.to === g.root ? -b.w / 2 : b.w / 2);
+      let x2 = b.rx + (roots.has(e.to) ? -b.w / 2 : b.w / 2);
       let y2 = b.ry + bend;
       l.setAttribute('x1', x1); l.setAttribute('y1', y1);
       l.setAttribute('x2', x2); l.setAttribute('y2', y2);
@@ -168,7 +168,7 @@ function wholeDraw() {
   g.nodes.forEach(n => {
     const b = bands.find(bb => bb.pos[n.id]);
     const cx = b.pos[n.id][0], cy = b.pos[n.id][1];
-    const tw = Math.min(textWidth(n.id), 170);
+    const tw = Math.min(textWidth(nodeLabel(n)), 170);
     const rw = tw + 16, rh = 22;
     const g3 = document.createElementNS(NS, 'g');
     g3.setAttribute('class', 'node');
@@ -179,7 +179,7 @@ function wholeDraw() {
     const t = document.createElementNS(NS, 'text');
     t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
     t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '10');
-    t.textContent = n.id;
+    t.textContent = nodeLabel(n);
     g3.appendChild(rect); g3.appendChild(t);
     g3.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
     g3.addEventListener('mouseenter', () => highlight(n, true));
@@ -208,14 +208,21 @@ function highlight(n, on) {
   });
 }
 const side = document.getElementById('side');
+function htmlText(value) {
+  const element = document.createElement('span');
+  element.textContent = String(value);
+  return element.innerHTML;
+}
 function detail(n) {
-  side.innerHTML = '<div class="title">' + (n.role || '') + '</div><div style="font-size:15px;margin:4px 0">' + n.id + '</div>' +
-    '<div>kind: <span class="dim">' + (n.kind || '-') + '</span></div>' +
-    '<div>file: <span class="dim">' + (n.file || '-') + '</span></div>' +
-    '<div>line: <span class="dim">' + (n.line || '-') + '</span></div>' +
-    (n.pkg ? '<div>pkg: <span class="dim">' + n.pkg + '</span></div>' : '') +
-    (n.community ? '<div>community: <span class="dim">' + n.community + '</span></div>' : '') +
-    '<div style="margin-top:8px" class="dim">' + n.id + ' has ' + (g.edges.filter(e => e.from === n.id).length) + ' outgoing, ' + (g.edges.filter(e => e.to === n.id).length) + ' incoming edges.</div>';
+  side.innerHTML = '<div class="title">' + htmlText(n.role || '') + '</div><div style="font-size:15px;margin:4px 0">' + htmlText(nodeLabel(n)) + '</div>' +
+    '<div>kind: <span class="dim">' + htmlText(n.kind || '-') + '</span></div>' +
+    '<div>file: <span class="dim">' + htmlText(n.file || '-') + '</span></div>' +
+    '<div>line: <span class="dim">' + htmlText(n.line || '-') + '</span></div>' +
+    '<div>resolution: <span class="dim">' + htmlText(n.resolution || '-') + '</span></div>' +
+    (n.candidates ? '<div>candidate declarations: <span class="dim">' + n.candidates.length + '</span></div>' : '') +
+    (n.pkg ? '<div>pkg: <span class="dim">' + htmlText(n.pkg) + '</span></div>' : '') +
+    (n.community ? '<div>community: <span class="dim">' + htmlText(n.community) + '</span></div>' : '') +
+    '<div style="margin-top:8px" class="dim">' + htmlText(nodeLabel(n)) + ' has ' + (g.edges.filter(e => e.from === n.id).length) + ' outgoing, ' + (g.edges.filter(e => e.to === n.id).length) + ' incoming edges.</div>';
 }
 function legend() {
   const seen = {};
@@ -227,7 +234,7 @@ search.addEventListener('input', () => {
   g.nodes.forEach(n => {
     const el = nodeEl.get(n.id);
     if (!el) return;
-    const hit = !q || n.id.toLowerCase().includes(q) || (n.file || '').toLowerCase().includes(q);
+    const hit = !q || nodeLabel(n).toLowerCase().includes(q) || (n.file || '').toLowerCase().includes(q);
     el.style.opacity = hit ? '1' : '0.12';
   });
   g.edges.forEach(e => {
@@ -237,7 +244,7 @@ search.addEventListener('input', () => {
   });
 });
 draw(); legend();
-if (nodeById[g.root]) detail(nodeById[g.root]);
+if (g.root_ids && nodeById[g.root_ids[0]]) detail(nodeById[g.root_ids[0]]);
 else detail({id: 'whole repo', kind: 'index', role: 'whole repo', file: g.nodes.length + ' symbols, ' + g.edges.length + ' edges'});
 </script>
 </body>

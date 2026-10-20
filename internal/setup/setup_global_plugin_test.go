@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // TestWireCodexEnablesHooksFeature verifies that wireCodex writes both the
@@ -106,7 +108,9 @@ func TestWireCodexInsertsIntoExistingFeatures(t *testing.T) {
 
 // TestWireGlobalPlugin verifies that wireGlobalPlugin installs the embedded
 // plugin into both global plugin paths, that a re-run reports "current"
-// without rewriting, and that a user-customized copy is left untouched.
+// without rewriting, and that a user-customized copy is backed up and then
+// refreshed (the backup-then-refresh policy that makes doctor's "run: kern
+// setup --global" remedy converge while keeping user edits recoverable).
 func TestWireGlobalPlugin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -117,7 +121,7 @@ func TestWireGlobalPlugin(t *testing.T) {
 		t.Fatalf("PluginAsset: %v", err)
 	}
 
-	first := wireGlobalPlugin()
+	first := agentwire.WireGlobalPlugin()
 	if !first.Installed {
 		t.Fatalf("first wireGlobalPlugin not installed: %+v", first)
 	}
@@ -135,7 +139,7 @@ func TestWireGlobalPlugin(t *testing.T) {
 		}
 	}
 
-	second := wireGlobalPlugin()
+	second := agentwire.WireGlobalPlugin()
 	if !second.Installed {
 		t.Fatalf("second wireGlobalPlugin not installed: %+v", second)
 	}
@@ -143,22 +147,35 @@ func TestWireGlobalPlugin(t *testing.T) {
 		t.Fatalf("expected re-run to report current, got: %s", second.Note)
 	}
 
-	// A user-modified copy must be left untouched.
+	// A user-modified copy is backed up and refreshed: the deployed copy
+	// converges on the embedded asset, and the user's bytes survive in the
+	// side-by-side .kern-bak-* backup.
 	custom := []byte("// user edit\n")
 	modPath := paths[0]
 	if err := os.WriteFile(modPath, custom, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	third := wireGlobalPlugin()
-	if !strings.Contains(third.Note, "customized") {
-		t.Fatalf("expected customized notice, got: %s", third.Note)
+	third := agentwire.WireGlobalPlugin()
+	if !strings.Contains(third.Note, "backed up") {
+		t.Fatalf("expected customized backup+refresh notice, got: %s", third.Note)
 	}
 	b, rerr := os.ReadFile(modPath)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	if string(b) != string(custom) {
-		t.Fatalf("customized plugin was overwritten: got %q, want %q", b, custom)
+	if string(b) != string(asset) {
+		t.Fatalf("customized plugin must be refreshed to the embedded asset (len %d vs %d)", len(b), len(asset))
+	}
+	baks, gerr := filepath.Glob(modPath + ".kern-bak-*")
+	if gerr != nil || len(baks) != 1 {
+		t.Fatalf("expected exactly one backup of the customized copy, got %v (err %v)", baks, gerr)
+	}
+	saved, serr := os.ReadFile(baks[0])
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if string(saved) != string(custom) {
+		t.Fatalf("backup must preserve the user's bytes verbatim: got %q, want %q", saved, custom)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -52,7 +53,13 @@ func annotate(result *VerificationResult) []domain.Claim {
 	}
 
 	if b := result.Build; b != nil {
-		appendFact("build", fmt.Sprintf("build verification %s", OkWord(b.OK)))
+		if strings.HasPrefix(b.Output, SkipPrefix) {
+			// 6.1: a build that was NOT executed (no build step declared)
+			// must never claim a plain PASS in the evidence stream.
+			appendFact("build", "build verification SKIPPED ("+FirstLine(strings.TrimPrefix(b.Output, SkipPrefix))+")")
+		} else {
+			appendFact("build", fmt.Sprintf("build verification %s", OkWord(b.OK)))
+		}
 	}
 	if t := result.UnitTests; t != nil {
 		if t.Status == StatusSkipped || t.Status == StatusNoRunner {

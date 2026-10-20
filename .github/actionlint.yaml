@@ -1,0 +1,9 @@
+# actionlint's built-in label list does not know macos-15-intel, which is a
+# real, GA GitHub-hosted runner: x86_64 macOS 15 image, available since
+# 2025-09-19 (github.blog/changelog/2025-09-19) through ~August 2027.
+# release.yml's build-native matrix (darwin/amd64 `-full` asset) relies on it,
+# so whitelist the label here — the mechanism actionlint provides for valid
+# labels added after its release. Revisit when migrating to macos-26-intel.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

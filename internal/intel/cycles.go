@@ -144,8 +144,8 @@ func packageImportGraph(ix *index.Index) (map[string][]string, []CycleEdge) {
 		}
 		// Per-file imports: exact attribution. An import path resolves to
 		// exactly ONE local package: the longest dir that matches it.
-		// Matching against every dir would bind ".../blueprint/service" to
-		// the parent "internal/blueprint" too, fabricating cross-package
+		// Matching against every dir would bind ".../mcp/doc" to
+		// the parent "internal/mcp" too, fabricating cross-package
 		// edges and false cycles.
 		// Go test files are not part of the production package dependency
 		// DAG: their imports (often the tested package's siblings) would

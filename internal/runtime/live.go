@@ -29,6 +29,23 @@ type liveSource struct {
 	// version skew) on every poll; a persistent failure must be visible
 	// without spamming the log each interval.
 	parseErrOnce sync.Once
+	// fetchErrOnce logs the first transport error per source only (same
+	// suppression rationale as parseErrOnce). fetchErrs/lastFetchErr count
+	// every failure so an unreachable endpoint is distinguishable from a
+	// quiet one (see FetchErrors).
+	fetchErrOnce sync.Once
+	fetchErrs    int
+	lastFetchErr string
+}
+
+// FetchErrors reports the transport-failure count and the most recent error.
+// It exists so an unreachable or unauthorized endpoint (every poll failing)
+// is distinguishable from a reachable endpoint with no data — without it a
+// bad URL looks identical to "no telemetry".
+func (s *liveSource) FetchErrors() (int, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fetchErrs, s.lastFetchErr
 }
 
 // newLiveSource creates the shared base. The poll loop is NOT started here —
@@ -79,6 +96,17 @@ func (s *liveSource) Commits() []Commit {
 func (s *liveSource) fetchAndIngest(fetch func() ([]byte, error), parse func([]byte) error) {
 	data, err := fetch()
 	if err != nil {
+		// Transport failures (unreachable endpoint, auth rejected, HTTP
+		// error status) must be visible: count every one, surface the last
+		// via FetchErrors, and log the first per source (further failures
+		// suppressed — see fetchErrOnce).
+		s.mu.Lock()
+		s.fetchErrs++
+		s.lastFetchErr = err.Error()
+		s.mu.Unlock()
+		s.fetchErrOnce.Do(func() {
+			log.Printf("live %s: fetch error (first only, further failures suppressed): %v", s.name, err)
+		})
 		return
 	}
 	s.mu.Lock()
@@ -134,15 +162,21 @@ type LivePrometheusSource struct {
 
 // NewLivePrometheusSource creates a live Prometheus source that polls the
 // given URL (e.g. "http://prometheus:9090/api/v1/query?query=up") on the given
-// interval. A nil/empty URL returns nil (caller should check). The source
-// starts polling immediately.
-func NewLivePrometheusSource(url string, interval time.Duration) *LivePrometheusSource {
+// interval. A nil/empty URL returns nil (caller should check). A non-empty
+// token adds a Bearer Authorization header on every request — LoadSource reads
+// it from KERN_PROMETHEUS_TOKEN (env only, never a config-file key, so
+// credentials cannot leak into .kern/config.json). The source starts polling
+// immediately.
+func NewLivePrometheusSource(url, token string, interval time.Duration) *LivePrometheusSource {
 	if url == "" {
 		return nil
 	}
 	base := newLiveSource("prometheus", interval, 10*time.Second)
 	src := &LivePrometheusSource{liveSource: base}
 	fetch := func() ([]byte, error) {
+		if token != "" {
+			return httpGetAuth(base.client, url, token)
+		}
 		return httpGet(base.client, url)
 	}
 	parse := func(data []byte) error {
@@ -170,14 +204,20 @@ type LiveOtelSource struct {
 
 // NewLiveOtelSource creates a live OTel source that polls the given URL
 // (e.g. "http://otel-collector:4318/v1/metrics") on the given interval. The
-// endpoint should return OTLP-style JSON. The source starts polling immediately.
-func NewLiveOtelSource(url string, interval time.Duration) *LiveOtelSource {
+// endpoint should return OTLP-style JSON. A non-empty token adds a Bearer
+// Authorization header on every request — LoadSource reads it from
+// KERN_OTEL_TOKEN (env only, never a config-file key). The source starts
+// polling immediately.
+func NewLiveOtelSource(url, token string, interval time.Duration) *LiveOtelSource {
 	if url == "" {
 		return nil
 	}
 	base := newLiveSource("otel", interval, 10*time.Second)
 	src := &LiveOtelSource{liveSource: base}
 	fetch := func() ([]byte, error) {
+		if token != "" {
+			return httpGetAuth(base.client, url, token)
+		}
 		return httpGet(base.client, url)
 	}
 	parse := func(data []byte) error {

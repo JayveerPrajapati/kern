@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/lock"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // mcpCallLast runs a tools/call and returns the final response, skipping any
@@ -49,24 +49,24 @@ func mcpLastOK(t *testing.T, name string, args map[string]any) string {
 func TestToolCallCoverage(t *testing.T) {
 	root := mcpProject(t)
 	rootArg := map[string]any{"root": root}
-	// kern_sandbox is a governed exec surface; opt in so the test exercises
+	// kern_exec is a governed exec surface; opt in so the test exercises
 	// the actual execution path rather than the governance denial.
 	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1")
 
 	// All index-backed calls share one root, so one server builds the index
 	// once instead of once per call; the calls stay sequential (slow tools
 	// emit progress notifications, handled by the batch harness).
 	resps := mcpBatch(t, []mcpCallSpec{
-		{"kern_validate", map[string]any{"root": root, "timeout": "60"}},
-		{"kern_validate", map[string]any{"root": root, "command": "true", "raw": "true"}},
-		{"kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"}},
-		{"kern_frameworks", rootArg},
+		{"kern_exec", map[string]any{"root": root, "code": "printf ok"}},
+		{"kern_exec", map[string]any{"root": root, "code": "sh -c 'printf ok'"}},
+		{"kern_arch", rootArg},
 		{"kern_swap", map[string]any{"root": root, "text": "this is a short sample"}},
 		{"kern_doc", map[string]any{"root": root, "action": "index"}},
 		{"kern_doc", map[string]any{"root": root, "action": "search", "query": "package", "k": "3"}},
-		{"kern_precache", rootArg},
+		{"kern_search", map[string]any{"root": root, "query": "Greet"}},
 		{"kern_probe", map[string]any{"root": root, "task": "Greet"}},
-		{"kern_repo_search", map[string]any{"root": root, "query": "definitely-no-such-symbol-xyz"}},
+		{"kern_search", map[string]any{"root": root, "query": "definitely-no-such-symbol-xyz"}},
 		{"kern_heal", map[string]any{"root": root, "max_rounds": "1", "timeout": "60"}},
 	})
 	assertOK := func(i int) string {
@@ -80,18 +80,18 @@ func TestToolCallCoverage(t *testing.T) {
 		}
 		return text
 	}
-	out := assertOK(9) // kern_repo_search
+	out := assertOK(8) // kern_search no-match
 	if !strings.Contains(out, "no symbols matched") {
-		t.Logf("kern_repo_search returned: %q", out)
+		t.Logf("kern_search returned: %q", out)
 	}
 	// kern_heal on a healthy project returns immediately without an LLM.
-	out = assertOK(10) // kern_heal
+	out = assertOK(9) // kern_heal
 	if !strings.Contains(out, "healed OK") {
 		t.Fatalf("expected healed OK on healthy project, got %q", out)
 	}
 	for i := 0; i < len(resps); i++ {
 		switch i {
-		case 9, 10:
+		case 8, 9:
 			continue // asserted above
 		default:
 			assertOK(i)
@@ -132,13 +132,14 @@ and returns a handle. Call <code>widget.Release</code> to free resources.</p>`))
 // after it.
 func TestProgressNotificationsBeforeResult(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // kern_exec is a governed exec surface
 	root := mcpProject(t)
 	// Progress is only emitted when the client supplies a progressToken in
 	// the request's _meta (MCP spec — no unsolicited tokens); include one so
 	// the slow tool still fires notifications.
-	args, _ := json.Marshal(map[string]any{"root": root, "command": "sh -c 'printf ok'"})
-	req := writeReq("tools/call", 50, `{"name":"kern_sandbox","arguments":`+string(args)+`,"_meta":{"progressToken":"t1"}}`)
+	args, _ := json.Marshal(map[string]any{"root": root, "code": "printf ok"})
+	req := writeReq("tools/call", 50, `{"name":"kern_exec","arguments":`+string(args)+`,"_meta":{"progressToken":"t1"}}`)
 	in := strings.NewReader(req + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
@@ -183,18 +184,19 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 		t.Fatalf("expected final result for id 50, got %+v", last)
 	}
 	if text, isErr := toolResultText(t, last); isErr {
-		t.Fatalf("sandbox tool errored: %s", text)
+		t.Fatalf("exec tool errored: %s", text)
 	}
 }
 
 // TestHTTPNoProgressNotifications verifies the HTTP transport returns exactly
 // the tool result without any push-style notifications.
 func TestHTTPNoProgressNotifications(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // kern_exec is a governed exec surface
 	root := mcpProject(t)
 	params := map[string]any{
 		"jsonrpc": "2.0", "id": 60, "method": "tools/call",
-		"params": map[string]any{"name": "kern_sandbox", "arguments": map[string]any{"root": root, "command": "sh -c 'printf ok'"}},
+		"params": map[string]any{"name": "kern_exec", "arguments": map[string]any{"root": root, "code": "printf ok"}},
 	}
 	body, _ := json.Marshal(params)
 	rr := doHTTP(t, newHTTPServer(), "POST", "application/json", string(body), nil)
@@ -370,7 +372,7 @@ func TestStaleIndexRebuiltOnSecondCall(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "extra.go"), []byte("package main\nfunc Extra() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := mcpAssertOK(t, "kern_entry_points", map[string]any{"root": root})
+	out := mcpAssertOK(t, "kern_search", map[string]any{"root": root, "query": "Extra"})
 	_ = out
 	out = mcpLastOK(t, "kern_search", map[string]any{"root": root, "query": "Extra"})
 	if !strings.Contains(out, "Extra") {
@@ -443,52 +445,31 @@ func TestRootConfinementEnvAndSymlink(t *testing.T) {
 	}
 }
 
-// TestRootConfinementBlocksValidateRoot verifies that kern_validate's root
-// argument (the run_build merge absorbed its dir handling into root) is
-// confined to the server workspace like every other path argument.
-func TestRootConfinementBlocksValidateRoot(t *testing.T) {
+// TestRootConfinementBlocksExecRoot verifies that kern_exec's root
+// argument is confined to the server workspace like every other path
+// argument (the run_build merge absorbed dir handling into root).
+func TestRootConfinementBlocksExecRoot(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("KERN_ALLOW_EXEC", "1") // so sandbox succeeds once inside the workspace
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // so exec succeeds once inside the workspace
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard) // confined to cwd
 	ctx := context.Background()
-	_, err := s.runTool(ctx, "1", "", "kern_validate", map[string]any{"root": root, "command": "cat /etc/passwd"})
+	_, err := s.runTool(ctx, "1", "", "kern_exec", map[string]any{"root": root, "code": "cat /etc/passwd"})
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
 		t.Fatalf("expected workspace confinement error, got %v", err)
 	}
-	_, err = s.runTool(ctx, "1", "", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"})
+	_, err = s.runTool(ctx, "1", "", "kern_exec", map[string]any{"root": root, "code": "echo hi"})
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
-		t.Fatalf("expected sandbox confinement error, got %v", err)
+		t.Fatalf("expected exec confinement error, got %v", err)
 	}
 	// Same server, workspace extended to the project root: both allowed.
 	s.roots = []string{root}
-	if _, err := s.runTool(ctx, "1", "", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"}); err != nil {
-		t.Fatalf("sandbox inside workspace should run: %v", err)
+	if _, err := s.runTool(ctx, "1", "", "kern_exec", map[string]any{"root": root, "code": "echo hi"}); err != nil {
+		t.Fatalf("exec inside workspace should run: %v", err)
 	}
-	if _, err := s.runTool(ctx, "1", "", "kern_validate", map[string]any{"root": root, "command": "echo ok", "raw": "true"}); err != nil {
-		t.Fatalf("validate inside workspace should run: %v", err)
-	}
-}
-
-// TestSandboxManifestViaMCP verifies the kern_sandbox tool surfaces the
-// post-run impact manifest (created/modified/deleted lines + summary) when the
-// command changes the tree.
-func TestSandboxManifestViaMCP(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1")       // kern_sandbox is a governed exec surface
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
-	root := mcpProject(t)
-	out := mcpLastOK(t, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'echo x > created.go && echo y >> app.go'"})
-	if !strings.Contains(out, "=== sandbox impact manifest ===") {
-		t.Fatalf("expected manifest section in output, got %q", out)
-	}
-	if !strings.Contains(out, "+ created.go (") {
-		t.Fatalf("expected created entry for created.go, got %q", out)
-	}
-	if !strings.Contains(out, "~ app.go (") {
-		t.Fatalf("expected modified entry for app.go, got %q", out)
-	}
-	if !strings.Contains(out, "2 change(s)") {
-		t.Fatalf("expected summary line, got %q", out)
+	if _, err := s.runTool(ctx, "1", "", "kern_exec", map[string]any{"root": root, "code": "echo ok"}); err != nil {
+		t.Fatalf("exec inside workspace should run: %v", err)
 	}
 }
 
@@ -576,7 +557,7 @@ func TestSlowToolSetDerivedFromCatalog(t *testing.T) {
 		}
 	}
 	// The task contract: index/build/scan tools emit progress…
-	for _, want := range []string{"kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair", "kern_doc"} {
+	for _, want := range []string{"kern_heal", "kern_verify", "kern_exec", "kern_run", "kern_doc"} {
 		if !slowTools[want] {
 			t.Errorf("expected %s to be a slow (progress-emitting) tool", want)
 		}

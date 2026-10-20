@@ -5,6 +5,7 @@ package lock
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -78,7 +79,15 @@ func Acquire(root, scope string) (*Lock, error) {
 	}
 	h := holder{Scope: scope, PID: os.Getpid(), AcquiredAt: time.Now().UTC()}
 	if data, err := json.Marshal(h); err == nil {
-		_, _ = f.Write(data)
+		if _, werr := f.Write(data); werr != nil {
+			// The lock file's holder identity is what stale-lock reclaim
+			// reads to decide the file is dead; an empty lock file would be
+			// reclaimed (and the lock stolen) by the first contender. Fail
+			// the acquire instead of holding a lock others can take.
+			_ = f.Close()
+			_ = os.Remove(p)
+			return nil, fmt.Errorf("lock: write holder %s: %w", p, werr)
+		}
 	}
 	return &Lock{f: f, path: p, Scope: scope, Root: root}, nil
 }

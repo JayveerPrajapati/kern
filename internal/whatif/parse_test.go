@@ -194,3 +194,19 @@ func TestIsChangeVerb(t *testing.T) {
 		}
 	}
 }
+
+// TestIsCommonWord pins the shared stoplist consulted by IsCommonWord: whole
+// common words and change verbs are common; compound symbol names are not
+// (B2, QA 2026-10-15).
+func TestIsCommonWord(t *testing.T) {
+	for _, w := range []string{"test", "file", "server", "update", "Add", "RENAME"} {
+		if !IsCommonWord(w) {
+			t.Errorf("IsCommonWord(%q) = false, want true", w)
+		}
+	}
+	for _, w := range []string{"TestAdd", "NewServer", "Greet", "RetryPolicy", "Fit", ""} {
+		if IsCommonWord(w) {
+			t.Errorf("IsCommonWord(%q) = true, want false", w)
+		}
+	}
+}

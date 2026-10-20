@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // nonPathArgs are catalog arguments whose schema text mentions a file or

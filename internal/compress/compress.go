@@ -12,6 +12,50 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/terse"
 )
 
+// IsJSONShaped reports whether s begins (after leading whitespace) with a
+// JSON object or array opener — the cheap first-byte gate the opencode plugin
+// uses for the same purpose ("JSON is data, not log noise"). It gates the
+// governed RunBuild compactor: JSON child output must pass through verbatim.
+func IsJSONShaped(s string) bool {
+	t := strings.TrimLeft(s, " \t\r\n")
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+}
+
+// CompactCommandOutput line-compacts a governed command's combined output:
+// it keeps the first 60 lines plus every error/fail/warn-shaped line, drops
+// blank/[info]/[debug]/progress filler, and always caps the result with an
+// explicit "… (N lines omitted)" tail so a truncated log is never mistaken
+// for the full output. Callers must gate it with IsJSONShaped first — the
+// line-level splice destroys JSON documents (observed live: a governed
+// `kern audit --json` came back with dozens of spliced "Result": "error"
+// lines from different entries — unparseable garbage).
+func CompactCommandOutput(out string) string {
+	lines := strings.Split(out, "\n")
+	var keep []string
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" {
+			continue
+		}
+		low := strings.ToLower(t)
+		if strings.HasPrefix(low, "[info]") || strings.HasPrefix(low, "[debug]") ||
+			strings.HasPrefix(low, "downloading") || strings.HasPrefix(low, "progress") {
+			continue
+		}
+		if len(keep) < 60 || strings.Contains(low, "error") || strings.Contains(low, "fail") || strings.Contains(low, "warn") {
+			keep = append(keep, t)
+		}
+	}
+	// Always cap — and say so, so a truncated build log is never mistaken for
+	// the full output.
+	if len(keep) > 120 {
+		omitted := len(keep) - 120
+		keep = keep[:120]
+		keep = append(keep, fmt.Sprintf("… (%d lines omitted)", omitted))
+	}
+	return strings.Join(keep, "\n")
+}
+
 var (
 	timestampRe    = regexp.MustCompile(`(?i)(^\s*\[?(([\d]{2,4}[-/:][\d]{2}[-/:][\d]{2,4}[ T])?[\d]{2}:[\d]{2}(:[\d]{2}([\.,]\d+)?)?(Z|[+-][\d:]{2,5})?)\]?\s*)`)
 	infoLevelRe    = regexp.MustCompile(`(?i)(^\s*(INFO|DEBUG|TRACE|VERBOSE|NOTICE)\s*[:=#]?\s*)`)

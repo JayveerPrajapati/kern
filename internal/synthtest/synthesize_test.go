@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+// TestSynthesizeAutoGapNoGapsDistinctError pins the B1 fix: auto-gap that
+// fills nothing must report "no untested hotspots" — not the generic
+// missing-source error that conflated it with "you passed no file". The
+// wording matters: hotspot = untested symbol WITH production callers, so
+// untested symbols can still exist when this fires.
+func TestSynthesizeAutoGapNoGapsDistinctError(t *testing.T) {
+	_, err := Synthesize(Request{AutoGap: true, Root: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "no untested hotspots") {
+		t.Fatalf("want distinct no-hotspots error, got: %v", err)
+	}
+}
+
+// TestSynthesizeNoSourceMessageNamesFix pins the B1 fix: target alone (no
+// file, no code) must fail with the explanatory message that names the
+// actual requirement, not the self-contradicting "must be provided".
+func TestSynthesizeNoSourceMessageNamesFix(t *testing.T) {
+	_, err := Synthesize(Request{Target: "Multiply", Root: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "target alone does not select a source file") {
+		t.Fatalf("want explanatory no-source error, got: %v", err)
+	}
+}
+
 func TestSynthesizeStandaloneFunction(t *testing.T) {
 	code := `package mathutil
 

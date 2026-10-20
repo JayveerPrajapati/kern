@@ -6,6 +6,40 @@ import (
 	"testing"
 )
 
+// TestCommunityLabelsExcludesTestSymbols pins the test-symbol filter:
+// symbols defined in _test.go files (or named Test*/Benchmark*) never become
+// community nodes, so digest/graph layers are not named after test functions.
+func TestCommunityLabelsExcludesTestSymbols(t *testing.T) {
+	ix := &Index{
+		Symbols: []Symbol{
+			{Kind: "func", Name: "produce", File: "app.go", Line: 1},
+			{Kind: "func", Name: "consume", File: "app.go", Line: 10},
+			{Kind: "func", Name: "TestProduceConsume", File: "app_test.go", Line: 5},
+			{Kind: "func", Name: "BenchmarkProduce", File: "bench_test.go", Line: 3},
+		},
+		Calls: map[string][]CallEdge{
+			"produce":            {CallEdge{Target: "consume", Confidence: ConfidenceHigh}},
+			"consume":            {CallEdge{Target: "produce", Confidence: ConfidenceHigh}},
+			"TestProduceConsume": {CallEdge{Target: "produce", Confidence: ConfidenceHigh}},
+		},
+	}
+	labels := ix.CommunityLabels()
+	// Production symbols participate.
+	for _, local := range []string{"produce", "consume"} {
+		if _, ok := labels[local]; !ok {
+			t.Errorf("production symbol %q should be a community node, but it's missing", local)
+		}
+	}
+	// Test symbols never become nodes — neither as callers nor as callees.
+	for _, ts := range []string{"TestProduceConsume", "BenchmarkProduce"} {
+		if _, ok := labels[ts]; ok {
+			t.Errorf("test symbol %q must not be a community node, but got label %q", ts, labels[ts])
+		}
+	}
+}
+
+// TestCommunityLabelsSmallRepo builds a small real repo and pins non-empty
+// clustering (the test-symbol filter must not starve a production graph).
 func TestCommunityLabelsSmallRepo(t *testing.T) {
 	dir := writeTree(t, map[string]string{"main.go": srcMain})
 	ix, err := Build(dir)

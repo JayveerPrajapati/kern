@@ -6,29 +6,33 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
-	"github.com/JayveerPrajapati/kern/internal/config"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/draft"
-	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
-	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
-	"github.com/JayveerPrajapati/kern/internal/skills"
 	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verifycmd"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
-
-	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
-	"path/filepath"
 )
+
+// printTaskFooter prints the task-annotation line ONLY when the Task record
+// is persisted and queryable via `kern task <id>` (the store-assigned
+// "t-<n>" namespace). An ephemeral "a-<n>" ID dies with the process, so
+// annotating it is bookkeeping noise (QA 6.6). extra carries a per-command
+// suffix (" — risk=R", " — N steps, risk=R") already prefixed with " — ".
+func printTaskFooter(t *agent.Task, extra string) {
+	if t == nil || !strings.HasPrefix(t.ID, "t-") {
+		return
+	}
+	fmt.Printf("\n[task: %s — state: %s%s]\n", t.ID, t.State, extra)
+}
 
 func runAnalyze(cmd string, rest []string) {
 	f, args := parseFlagsOrDie(rest)
@@ -115,7 +119,7 @@ func runAnalyze(cmd string, rest []string) {
 			}
 			fmt.Println("PLAN for: " + change)
 			fmt.Print(text)
-			fmt.Printf("\n[task: %s — state: %s — %d steps, risk=%s]\n", t.ID, t.State, len(plan.ImplementationSteps), plan.Risk)
+			printTaskFooter(t, fmt.Sprintf(" — %d steps, risk=%s", len(plan.ImplementationSteps), plan.Risk))
 			return
 		}
 		var t *agent.Task
@@ -144,7 +148,7 @@ func runAnalyze(cmd string, rest []string) {
 		}
 		fmt.Println("ANALYSIS for: " + change)
 		fmt.Print(text)
-		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+		printTaskFooter(t, "")
 		return
 	}
 	if cmd == "plan" {
@@ -233,7 +237,7 @@ func runExecute(rest []string) {
 	} else {
 		fmt.Printf("diff:\n%s\n", diff)
 	}
-	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	printTaskFooter(t, "")
 }
 
 // joinVerbPositionals detects the unquoted-sentence pattern on the analysis
@@ -379,814 +383,41 @@ func runImpact(rest []string) {
 	if len(teams) > 0 {
 		fmt.Println("Affected teams: " + strings.Join(teams, ", "))
 	}
-	fmt.Printf("\n[task: %s — state: %s — risk=%s]\n", t.ID, t.State, rep.Risk)
+	printTaskFooter(t, " — risk="+rep.Risk)
 }
 
-// verifyExitCode maps a verification verdict to its process exit code:
-// FAIL is the only hard failure (1); WARN and SKIPPED
-// are reported outcomes and exit 0; PASS/PASS_WITH_WARNING exit 0. The --json
-// and text paths share this single mapping so they can never drift.
+// verifyExitCode maps a verification verdict to its process exit code — a
+// thin delegate of verifycmd.VerifyExitCode (workstream 3.6-A — verify
+// family extraction). The wrapper stays so cmd_exitcode_test.go's contract
+// tests keep pinning the mapping from the CLI side.
 func verifyExitCode(v verdict.Verdict) int {
-	if v == verdict.VerdictFail {
-		return 1
-	}
-	return 0
+	return verifycmd.VerifyExitCode(v)
 }
 
 // verifyOutcomeLine returns the human-readable outcome line for a
-// verification verdict (F7/F19): "verification FAILED" is reserved for a FAIL
-// verdict; WARN and SKIPPED are reported outcomes with their own wording, and
-// a SKIPPED verdict names the reason (e.g. "govulncheck not installed",
-// "license manifest missing") when one is recorded.
+// verification verdict (F7/F19) — a thin delegate of
+// verifycmd.VerifyOutcomeLine (workstream 3.6-A — verify family extraction).
 func verifyOutcomeLine(v verdict.VerificationResult) string {
-	switch v.Verdict {
-	case verdict.VerdictFail:
-		return "verification FAILED — see report above; fix failing checks and rerun kern verify"
-	case verdict.VerdictWarn:
-		return "verification WARNED — see report above; address the warnings and rerun kern verify"
-	case verdict.VerdictSkipped:
-		line := "verification SKIPPED — missing tools or dependencies are not a hard failure"
-		if reasons := verifySkippedReasons(&v); len(reasons) > 0 {
-			line += ": " + strings.Join(reasons, "; ")
-		}
-		return line + " (install the tool or provide the manifest, then rerun kern verify)"
-	case verdict.VerdictPass, verdict.VerdictPassWithWarning:
-		return "verification PASSED — see report above"
-	default:
-		return "verification incomplete (" + string(v.Verdict) + ") — see report above"
-	}
+	return verifycmd.VerifyOutcomeLine(v)
 }
 
-// verifySkippedReasons collects the first-line SKIPPED reasons from a
-// verification result's sub-checks (govulncheck absent, license/dependency
-// manifest missing, unisolated test set, ...), so a SKIPPED outcome line
-// explains why instead of a bare verdict.
-func verifySkippedReasons(v *verdict.VerificationResult) []string {
-	if v == nil {
-		return nil
-	}
-	var reasons []string
-	collect := func(s string) {
-		if s = strings.TrimSpace(strings.SplitN(s, "\n", 2)[0]); s != "" {
-			reasons = append(reasons, s)
-		}
-	}
-	if v.CVE != nil && v.CVE.Status == verdict.StatusSkipped {
-		collect(v.CVE.Detail)
-	}
-	if v.License != nil && v.License.Skipped != "" {
-		collect(v.License.Skipped)
-	}
-	if v.Dependency != nil && v.Dependency.Skipped != "" {
-		collect(v.Dependency.Skipped)
-	}
-	if v.Secrets != nil && v.Secrets.Status == verdict.StatusSkipped {
-		collect(v.Secrets.Detail)
-	}
-	if v.UnitTests != nil && v.UnitTests.Status == verdict.StatusSkipped {
-		collect(v.UnitTests.Output)
-	}
-	if v.Integration != nil && v.Integration.Status == verdict.StatusSkipped {
-		collect(v.Integration.Output)
-	}
-	return reasons
-}
-
-// verifyTestsDetail returns the detail lines printed after the tests status
-// line in the default `kern verify` render (F13): nothing for a green run
-// (passing-test spam suppressed), the failing tests' excerpts for a failed
-// one, and a pointer to the audit log that holds the FULL output whenever
-// the engine wrote one.
-func verifyTestsDetail(t *verdict.TestResult) []string {
-	var lines []string
-	if !t.OK && strings.TrimSpace(t.Output) != "" {
-		if x := verdict.TestFailureExcerpt(t.Output, 40); x != "" {
-			lines = append(lines, x)
-		}
-	}
-	if t.LogPath != "" {
-		lines = append(lines, "full log: "+t.LogPath)
-	}
-	return lines
-}
-
-// containsVerifyTestType reports whether the requested verify types include
-// the test step. The substring match mirrors the engine's type dispatcher
-// (test/unit/integration), so `--types "build,unit"` and positional
-// "build,test" both count. Drives the -short/--full mode note: a build-only
-// or compliance-only run has no test step to run short, so no note prints.
-func containsVerifyTestType(types []string) bool {
-	for _, t := range types {
-		tl := strings.ToLower(strings.TrimSpace(t))
-		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
-			return true
-		}
-	}
-	return false
-}
-
-// dropVerifyTestTypes removes the test-step entries (test/unit/integration)
-// from a verify types list — the --fast build-only fallback when there are
-// no changed Go packages to test. Explicit compliance checks added via
-// --cve/--license/--secrets survive. The substring match mirrors
-// containsVerifyTestType, so the two can never disagree about what counts
-// as the test step.
-func dropVerifyTestTypes(types []string) []string {
-	out := make([]string, 0, len(types))
-	for _, t := range types {
-		tl := strings.ToLower(strings.TrimSpace(t))
-		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
-}
-
-// isTestdataPath reports whether path lives under a testdata/ directory
-// (fixtures — they never run in the test step, so their changes must not
-// scope a verify run to a package that only touched fixtures).
-func isTestdataPath(path string) bool {
-	return path == "testdata" || strings.HasPrefix(path, "testdata/") || strings.Contains(path, "/testdata/")
-}
-
-// changedSincePackages derives the Go packages whose files changed since a
-// git ref (committed after the ref, uncommitted, or untracked), for
-// `kern verify --changed-since <ref>`. It mirrors verification.ChangedTestPackages'
-// package derivation (each changed .go file's dir → ./<dir>, root-package
-// files → ./) over the UNION of `git diff --name-only <ref> --` (tracked
-// changes since the ref, including uncommitted ones) and
-// `git status --porcelain -uall` (untracked files). testdata/ paths are
-// skipped, and files that no longer exist on disk (deleted) are dropped so
-// the scope never names a nonexistent package. An invalid ref returns an
-// error (the caller reports it as a usage error, exit 2); an empty result
-// means "no Go changes since the ref".
-func changedSincePackages(root, ref string) ([]string, error) {
-	// Validate the ref up front: a typo'd ref would otherwise read as "no
-	// changes" (git diff against an empty tree) and silently run the full
-	// suite — the caller must reject it as a usage error instead.
-	if _, err := mcp.GitOutput(root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-		return nil, fmt.Errorf("invalid git ref %q", ref)
-	}
-	out, err := mcp.GitOutput(root, "diff", "--name-only", ref, "--")
-	if err != nil {
-		return nil, err
-	}
-	files := map[string]bool{}
-	for _, line := range strings.Split(out, "\n") {
-		if p := strings.TrimSpace(line); p != "" {
-			files[p] = true
-		}
-	}
-	status, err := mcp.GitOutput(root, "status", "--porcelain", "-uall")
-	if err != nil {
-		return nil, err
-	}
-	for _, line := range strings.Split(status, "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		path := strings.TrimSpace(line[3:])
-		// strip rename "old -> new": the new path is the one that exists
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
-		}
-		files[path] = true
-	}
-	seen := map[string]bool{}
-	for path := range files {
-		if !strings.HasSuffix(path, ".go") {
-			continue
-		}
-		if isTestdataPath(path) {
-			continue
-		}
-		// Deleted files: the diff lists them, but a package whose .go files
-		// no longer exist on disk must not be part of the scope.
-		if _, serr := os.Stat(filepath.Join(root, filepath.FromSlash(path))); serr != nil {
-			continue
-		}
-		dir := filepath.Dir(filepath.ToSlash(path))
-		if dir == "." {
-			dir = "" // root-package files
-		}
-		pkg := "./" + dir
-		if !seen[pkg] {
-			seen[pkg] = true
-		}
-	}
-	pkgs := make([]string, 0, len(seen))
-	for pkg := range seen {
-		pkgs = append(pkgs, pkg)
-	}
-	sort.Strings(pkgs)
-	return pkgs, nil
-}
-
-func runVerify(rest []string) {
+// runVerify implements `kern verify`. The default verification path's
+// business logic lives in internal/verifycmd (workstream 3.6-A — verify
+// family extraction): this is a thin delegate that pre-checks command mode
+// (`kern verify --command`, owned by runVerifyCommand) and forwards
+// everything else to the entry point. verifycmd recovers its own exitError
+// sentinel and returns the exit code; a non-zero code is re-raised here with
+// cmd/kern's exitError so the pinned cmd/kern exit-contract tests
+// (expectExit on runVerify) and main()'s sentinel recovery keep working
+// unchanged.
+func runVerify(rest []string) int {
 	if runVerifyCommand(rest) {
-		return
+		return 0
 	}
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+	if code := verifycmd.VerifyRun(rest); code != 0 {
+		panic(exitError{code: code})
 	}
-	root := projectRoot(f)
-	// Silent-orchestrator verification modes (tracker: CLI flags spec
-	// Enhancements). Exactly one mode per invocation — mixing them is a usage
-	// error, not a best-effort union.
-	modes := 0
-	if f.verifyPipeline {
-		modes++
-	}
-	if f.verifySilent {
-		modes++
-	}
-	if f.verifyTokenReduction {
-		modes++
-	}
-	if f.evalDir != "" {
-		modes++
-	}
-	if f.skillDir != "" {
-		modes++
-	}
-	if f.scanPath != "" {
-		modes++
-	}
-	if modes > 1 {
-		fatal("use only one of --verify-pipeline/--verify-silent/--verify-token-reduction/--eval/--skill/--scan")
-	}
-	// Optional positional symbol for the Verify* helpers: `kern verify
-	// --verify-pipeline <symbol>` targets one symbol; without it the helpers
-	// run on "" and report the failed step (still exit 0, degraded).
-	symbol := ""
-	if len(args) > 0 {
-		symbol = args[0]
-	}
-	switch {
-	case f.verifyPipeline:
-		// End-to-end silent-orchestration run: index → context envelope →
-		// deterministic planner → progressive-disclosure retrieval → host
-		// injection/extraction into a temp copy of the repo.
-		rep := verification.VerifyFullPipeline(root, symbol)
-		if f.json {
-			rep.Version = version
-			printJSON(rep)
-			if !rep.EnvelopeValid {
-				fatal("verify-pipeline: envelope invalid — see JSON output above")
-			}
-			return
-		}
-		fmt.Printf("envelope_valid: %t\n", rep.EnvelopeValid)
-		fmt.Printf("plan_produced: %t\n", rep.PlanProduced)
-		fmt.Printf("handles_resolved: %t\n", rep.HandlesResolved)
-		fmt.Printf("injected: %t\n", rep.Injected)
-		fmt.Printf("extracted: %t\n", rep.Extracted)
-		fmt.Printf("silent: %t\n", rep.Silent)
-		fmt.Printf("token_reduction: %.2f\n", rep.TokenReduction)
-		fmt.Printf("evidence_retained: %.2f\n", rep.EvidenceRetained)
-		for _, s := range rep.Steps {
-			fmt.Printf("  - %s\n", s)
-		}
-		if !rep.EnvelopeValid {
-			fatal("verify-pipeline: envelope invalid — see output above")
-		}
-		return
-	case f.verifySilent:
-		// Kern-invisibility check: the rendered pipeline must not leak
-		// kern-internal markers to a user/LLM. Without a target symbol,
-		// report the pass rate over a deterministic sample of core symbols
-		// instead of a guaranteed failure (north-star NS-4).
-		if symbol == "" {
-			rep, err := verification.ScanSilent(root, "internal", 100)
-			if err != nil {
-				fatal("silent scan: %v", err)
-			}
-			if f.json {
-				printJSON(map[string]any{
-					"version":    version,
-					"scanned":    rep.Symbols,
-					"silent":     rep.Silent,
-					"violations": rep.Violations,
-					"findings":   rep.Findings,
-				})
-				return
-			}
-			rate := 0.0
-			if rep.Symbols > 0 {
-				rate = float64(rep.Silent) / float64(rep.Symbols)
-			}
-			fmt.Printf("silent orchestration: %d/%d symbols silent (%.0f%%)\n", rep.Silent, rep.Symbols, rate*100)
-			for _, fnd := range rep.Findings {
-				fmt.Printf("  - %s (%s): %s\n", fnd.Symbol, fnd.File, strings.Join(fnd.Reasons, "; "))
-			}
-			return
-		}
-		ok, reasons := verification.VerifySilentOrchestration(root, symbol)
-		if f.json {
-			printJSON(map[string]any{"version": version, "ok": ok, "reasons": reasons})
-			if !ok {
-				fatal("verify-silent: orchestration leak detected — see JSON output above")
-			}
-			return
-		}
-		if ok {
-			fmt.Println("silent orchestration: PASS")
-		} else {
-			fmt.Println("silent orchestration: FAIL")
-		}
-		for _, r := range reasons {
-			fmt.Printf("  - %s\n", r)
-		}
-		if !ok {
-			fatal("verify-silent: orchestration leak detected — see output above")
-		}
-		return
-	case f.verifyTokenReduction:
-		// Token-reduction proof without critical-evidence loss via the eval
-		// harness (baseline = full packet, candidate = ~50% budget fit).
-		res, err := verification.VerifyTokenReduction(root, symbol)
-		if err != nil {
-			fatal("VerifyTokenReduction: %v", err)
-		}
-		if f.json {
-			res.Version = version
-			printJSON(res)
-			return
-		}
-		fmt.Printf("score: %.2f\n", res.Score)
-		fmt.Printf("token_reduction: %.2f\n", res.TokenReduction)
-		fmt.Printf("evidence_retention: %.2f\n", res.EvidenceRetention)
-		fmt.Printf("error_rate: %.2f\n", res.ErrorRate)
-		fmt.Printf("reproducible: %t\n", res.Reproducible)
-		fmt.Printf("samples: %d\n", len(res.Samples))
-		return
-	case f.evalDir != "":
-		// --eval DIR: run the deterministic eval harness over user-supplied
-		// baseline/candidate samples (one JSON file per sample).
-		samples, err := eval.LoadSamplesFromDir(f.evalDir)
-		if err != nil {
-			fatal("Eval: %v", err)
-		}
-		// Standard rubric (the eval package's own tests use the same
-		// assertions): at least half the critical evidence must survive and
-		// at most half the samples may fail.
-		h := eval.NewEvalHarness(samples, 0, []eval.Assertion{
-			eval.AssertEvidenceRetention(0.5),
-			eval.AssertErrorRate(0.5),
-		})
-		res := h.Run()
-		if f.json {
-			res.Version = version
-			printJSON(res)
-			return
-		}
-		fmt.Printf("score: %.2f\n", res.Score)
-		fmt.Printf("token_reduction: %.2f\n", res.TokenReduction)
-		fmt.Printf("evidence_retention: %.2f\n", res.EvidenceRetention)
-		fmt.Printf("error_rate: %.2f\n", res.ErrorRate)
-		fmt.Printf("reproducible: %t\n", res.Reproducible)
-		fmt.Printf("samples: %d\n", len(res.Samples))
-		return
-	case f.skillDir != "":
-		// --skill DIR: validate every portable skill (each immediate
-		// subdirectory containing a SKILL.md). The Skill struct carries no
-		// signature field, so only ValidateSkill applies.
-		skillList, err := skills.LoadSkillsFromDir(f.skillDir)
-		if err != nil {
-			fatal("Skills: %v", err)
-		}
-		valid := []string{}
-		invalid := []string{}
-		for _, s := range skillList {
-			if verr := skills.ValidateSkill(s); verr != nil {
-				fmt.Printf("skill %s: INVALID: %v\n", s.Name, verr)
-				invalid = append(invalid, fmt.Sprintf("%s: %v", s.Name, verr))
-				continue
-			}
-			fmt.Printf("skill %s (%s): valid\n", s.Name, s.Source)
-			valid = append(valid, s.Name)
-		}
-		if f.json {
-			printJSON(map[string]any{"version": version, "valid": valid, "invalid": invalid})
-			if len(invalid) > 0 {
-				fatal("verify: %d invalid skill(s) — see JSON output above", len(invalid))
-			}
-			return
-		}
-		if len(invalid) > 0 {
-			fatal("verify: %d invalid skill(s) — see output above", len(invalid))
-		}
-		return
-	case f.scanPath != "":
-		// Path-aware silent scan: check every indexed symbol whose file
-		// matches the scan path (exact file or directory prefix) for
-		// silent-orchestration marker leaks.
-		rep, err := verification.ScanSilent(root, f.scanPath, 0)
-		if err != nil {
-			fatal("Scan: %v", err)
-		}
-		if f.json {
-			rep.Version = version
-			printJSON(rep)
-			return
-		}
-		fmt.Printf("silent scan: %s — %d/%d symbols clean, %d violations\n", rep.Path, rep.Silent, rep.Symbols, rep.Violations)
-		for _, fi := range rep.Findings {
-			fmt.Printf("  - %s (%s): %s\n", fi.Symbol, fi.File, strings.Join(fi.Reasons, "; "))
-		}
-		fmt.Printf("- scanned %d symbols (limit 200)\n", rep.Symbols)
-		return
-	}
-	// A bare `kern verify` (no checks requested at all) would default to a full
-	// build+test run (~minutes) before reporting anything — a usage error
-	// instead, consistent with search/explore/impact (audit L1). The mode flags
-	// above and the compliance trio below are explicit requests and keep working
-	// with no positional.
-	if f.types == "" && len(args) == 0 && !f.fast && !f.cve && !f.license && !f.secrets && f.changedSince == "" {
-		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]\n"+
-			"  no checks requested — try 'kern verify build,test', or run your own gate with\n"+
-			"  'kern verify --command \"go test ./...\"'; valid types: %s", verifyTypeList())
-	}
-	// Two forms share this subcommand. The high-level form is
-	// `kern verify <types>` (or `kern verify` with no positional, defaulting
-	// to build,test); the classic claims form is `kern verify <file|-> [root]`.
-	// `--types` is accepted as an explicit alias for the positional form so
-	// CLI matches the MCP `kern_verify(types=...)` surface.
-	if f.types != "" || len(args) == 0 || isVerifyTypes(args[0]) {
-		typesArg := "build,test"
-		if f.types != "" {
-			typesArg = f.types
-		} else if len(args) > 0 && args[0] != "" {
-			typesArg = args[0]
-		}
-		var types []string
-		for _, t := range strings.Split(typesArg, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				types = append(types, t)
-			}
-		}
-		// H4: --types values must map to real checks. An unknown value was
-		// previously split and passed to the engine, which ran nothing and reported
-		// a false-green "verdict: PASS / insufficient data" (exit 0). Reject it
-		// loudly as a usage error (exit 2).
-		for _, t := range types {
-			if !validVerifyType(t) {
-				fatalUsage("invalid --types value '%s' (valid: %s)", t, verifyTypeList())
-			}
-		}
-		// --fast: pre-commit tier — build + changed-package tests only.
-		// It skips security/architecture/dependency/reuse/e2e/static/perf
-		// and keeps the -short suite (the default). --fast wins over any
-		// explicit type list; the opt-in compliance flags (--cve/--license/
-		// --secrets) below still append. --full beats --fast: when both are
-		// given, --fast is ignored entirely (full suite, default scope).
-		fastMode := f.fast && !f.full
-		if fastMode {
-			types = []string{"build", "test"}
-		}
-		// Opt-in compliance checks (--cve/--license/--secrets): each flag
-		// appends its check to the requested types — the compliance trio runs
-		// ONLY when explicitly requested, never by default.
-		if f.cve {
-			types = append(types, "cve")
-		}
-		if f.license {
-			types = append(types, "license")
-		}
-		if f.secrets {
-			types = append(types, "secrets")
-		}
-		// Verification runs build/test commands (arbitrary host code); it must
-		// pass the governance firewall, fail closed (same gate as kern_validate
-		// and the MCP kern_verify tool). The concrete verify command is bound to
-		// any approval, so a HIGH/CRITICAL denial persists a command-bound,
-		// human-resolvable approval (`kern approve <id>`) under the project root
-		// instead of an in-memory approval nobody can resolve (oracle-gate).
-		if err := governance.CheckExecCommand("kern verify "+strings.Join(types, " "), root); err != nil {
-			fatal("Verify: %v", err)
-		}
-		// Test-step mode (P1): the default test step runs `go test -short`
-		// so a bare `kern verify` finishes in ~1min instead of ~4; --full
-		// opts into the COMPLETE suite. -short is the default and may be
-		// passed explicitly; --full wins when both are given. The visible
-		// mode note teaches the lever. An explicit KERN_VERIFY_TEST env /
-		// verify.test config override replaces the test command verbatim
-		// (the engine honors it first), so the note says so instead of
-		// claiming a mode that does not apply. The note never pollutes
-		// --json output (machine-readable contract).
-		var verifyOpts []verification.Option
-		if !f.json && containsVerifyTestType(types) {
-			if override := config.String(root, "KERN_VERIFY_TEST", "verify.test", ""); override != "" {
-				fmt.Println("tests: using KERN_VERIFY_TEST / verify.test override (not -short/--full)")
-			} else if f.full {
-				verifyOpts = append(verifyOpts, verification.FullTests(true))
-				fmt.Println("full suite (short mode: kern verify -short)")
-			} else if fastMode {
-				fmt.Println("fast mode (build + changed tests)")
-			} else {
-				fmt.Println("short mode (full suite: kern verify --full)")
-			}
-		}
-		p, perr := app.New(root)
-		if perr != nil {
-			fatal("%v — run kern index to rebuild it", perr)
-		}
-		ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
-		// --changed: scope the test step to packages with uncommitted
-		// changes vs HEAD (incremental verification; the 2-minute full
-		// suite stays the default for --full). --fast implies the same
-		// scoping (fastMode is false when --full is present, so the
-		// combination stays a --full run). No changed Go packages: --changed
-		// falls back to the default scope; the fast tier falls back to
-		// build-only — never a silent empty run.
-		if (f.changed || fastMode) && containsVerifyTestType(types) {
-			if pkgs := verification.ChangedTestPackages(root); len(pkgs) > 0 {
-				verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
-				if !f.json {
-					fmt.Printf("changed packages (%d): %s\n", len(pkgs), strings.Join(pkgs, " "))
-				}
-			} else if fastMode {
-				types = dropVerifyTestTypes(types)
-				if !f.json {
-					fmt.Println("no changed Go packages — running build only")
-				}
-			} else if !f.json {
-				fmt.Println("no changed Go packages — running the default scope")
-			}
-		}
-		// --changed-since <ref>: CI-oriented scoping — verify exactly the
-		// packages touched since a git ref (committed after the ref,
-		// uncommitted, or untracked .go files), with the static-analysis
-		// check (vet) added so the run covers build+vet+test for the
-		// changed surface. A ref with no Go changes since it prints
-		// NO-GO-CHANGES and exits 0 — a clean diff is a success for CI,
-		// never a fall-through to the full ./... suite.
-		if f.changedSince != "" {
-			pkgs, err := changedSincePackages(root, f.changedSince)
-			if err != nil {
-				fatalUsage("verify: %v", err)
-			}
-			if len(pkgs) == 0 {
-				fmt.Printf("NO-GO-CHANGES since %s — nothing to verify\n", f.changedSince)
-				return
-			}
-			verifyOpts = append(verifyOpts, verification.TestPackages(pkgs))
-			types = append(types, "static-analysis")
-			if !f.json {
-				fmt.Printf("changed packages since %s (%d): %s\n", f.changedSince, len(pkgs), strings.Join(pkgs, " "))
-			}
-		}
-		verifyStart := time.Now()
-		_, v, err := ts.Verify(types, verifyOpts...)
-		// CLI telemetry: the in-process recorder is loaded/saved by main()
-		// for every invocation, so this lands in the persisted snapshot
-		// (`kern stats performance`).
-		metrics.Default().RecordVerification(time.Since(verifyStart))
-		if err != nil {
-			// A FAIL/WARN/SKIPPED verdict is a valid outcome: surface the typed
-			// verdict and per-check status instead of a bare error.
-			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil || v.CVE != nil || v.License != nil || v.Secrets != nil {
-				if f.json {
-					v.Version = version
-					printJSON(v)
-					// F7/F19 exit contract: FAIL is the only hard failure (1);
-					// WARN/SKIPPED are reported outcomes (0) — the JSON payload
-					// itself is the report. Both paths share verifyExitCode so
-					// they can never drift.
-					if verifyExitCode(v.Verdict) != 0 {
-						fatal("verify: FAIL — see JSON output above")
-					}
-					return
-				}
-				fmt.Println(verdict.RenderCompact(v))
-				// Calibration (Feature Batch C): aggregate confidence line on the
-				// non-pass path too (best-effort; omitted when there is no data).
-				if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
-					fmt.Println(line)
-				}
-				if verifyExitCode(v.Verdict) != 0 {
-					fatal("verification FAILED — see report above; fix failing checks and rerun kern verify")
-				}
-				// WARN/SKIPPED are reported outcomes, not failures: exit 0 and
-				// never print "verification FAILED" for them (F7).
-				fmt.Println(verifyOutcomeLine(v))
-				return
-			}
-			fatal("Verify: %v", err)
-		}
-		if f.json {
-			v.Version = version
-			printJSON(v)
-			return
-		}
-		fmt.Printf("verdict: %s\n", v.Verdict)
-		fmt.Printf("summary: %s\n", v.Summary)
-		if v.Build != nil {
-			if v.Build.OK && strings.HasPrefix(v.Build.Output, verdict.SkipPrefix) {
-				// A build that was NOT executed (no supported project type,
-				// D1): render the explicit skip, never a contradictory "OK".
-				// The reason already appears in the summary line above, so the
-				// detail line carries only the status (no duplication).
-				fmt.Println("build: SKIPPED")
-			} else {
-				st := "FAIL"
-				if v.Build.OK {
-					st = "OK"
-				}
-				fmt.Printf("build: %s (duration %s)\n", st, v.Build.Duration)
-				if out := clipText(v.Build.Output, 500); out != "" {
-					fmt.Println(out)
-				}
-			}
-		}
-		if v.UnitTests != nil {
-			switch {
-			case v.UnitTests.Status == verdict.StatusSkipped, v.UnitTests.Status == verdict.StatusNoRunner:
-				// F3: a not-executed suite reports SKIPPED, never "OK passed=0".
-				fmt.Printf("tests: SKIPPED %s\n", verdict.FirstLine(v.UnitTests.Output))
-			case v.UnitTests.Status == verdict.StatusWarn:
-				// F3: a diagnostic-only run (zero failed tests) reports WARN.
-				fmt.Printf("tests: WARN passed=%d failed=%d skipped=%d (duration %s)\n", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration)
-				if out := clipText(v.UnitTests.Output, 500); out != "" {
-					fmt.Println(out)
-				}
-			default:
-				st := "FAIL"
-				if v.UnitTests.OK {
-					st = "OK"
-				}
-				fmt.Printf("tests: passed=%d failed=%d skipped=%d %s (duration %s)\n", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, st, v.UnitTests.Duration)
-				// F13: the default render shows counts plus the FAILING
-				// tests' excerpts only — passing-test spam (=== RUN /
-				// --- PASS lines) is suppressed, and the audit log holds
-				// the full output for anyone who needs it.
-				for _, ln := range verifyTestsDetail(v.UnitTests) {
-					fmt.Println(ln)
-				}
-			}
-		}
-		if v.Security != nil {
-			st := "FAIL"
-			if v.Security.OK {
-				st = "OK"
-			}
-			detail := fmt.Sprintf("security: %s findings=%d critical=%d high=%d low=%d", st, v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
-			if v.Security.Suppressed > 0 {
-				detail += fmt.Sprintf(" (%d suppressed)", v.Security.Suppressed)
-			}
-			fmt.Println(detail)
-			for i, fd := range v.Security.Findings {
-				if i >= 10 {
-					break
-				}
-				if fd.Suppressed {
-					fmt.Printf("  - [suppressed] %s:%d [%s] %s: %s — %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message, fd.SuppressionReason)
-				} else {
-					fmt.Printf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message)
-				}
-			}
-		}
-		if v.Architecture != nil {
-			st := "OK"
-			if !v.Architecture.OK {
-				st = "FAIL"
-			}
-			fmt.Printf("architecture: %s\n", st)
-			for _, viol := range v.Architecture.Violations {
-				fmt.Printf("  - %s\n", viol)
-			}
-		}
-		if v.Dependency != nil {
-			if v.Dependency.Skipped != "" {
-				fmt.Printf("dependency: SKIPPED %s\n", v.Dependency.Skipped)
-			} else {
-				st := "OK"
-				if !v.Dependency.OK {
-					st = "FAIL"
-				}
-				fmt.Printf("dependency: %s nodes=%d edges=%d\n", st, v.Dependency.GraphNodes, v.Dependency.GraphEdges)
-				for _, fd := range v.Dependency.Findings {
-					fmt.Printf("  - %s\n", fd)
-				}
-			}
-		}
-		if v.CVE != nil {
-			if v.CVE.Status == "SKIPPED" {
-				fmt.Printf("cve: SKIPPED %s\n", v.CVE.Detail)
-			} else {
-				st := "OK"
-				if !v.CVE.OK {
-					st = "FAIL"
-				}
-				fmt.Printf("cve: %s vulnerabilities=%d\n", st, v.CVE.Count)
-				for i, fd := range v.CVE.Findings {
-					if i >= 10 {
-						fmt.Printf("  ... and %d more vulnerabilities\n", len(v.CVE.Findings)-10)
-						break
-					}
-					fmt.Printf("  - %s %s: %s\n", fd.ID, fd.Module, fd.Summary)
-				}
-			}
-		}
-		if v.License != nil {
-			if v.License.Skipped != "" {
-				fmt.Printf("license: SKIPPED %s\n", v.License.Skipped)
-			} else {
-				st := "OK"
-				if !v.License.OK {
-					st = "FAIL"
-				}
-				fmt.Printf("license: %s modules=%d\n", st, len(v.License.Modules))
-				for _, m := range v.License.Modules {
-					fmt.Printf("  - %s: %s\n", m.Module, m.License)
-				}
-				for i, fd := range v.License.Findings {
-					if i >= 10 {
-						fmt.Printf("  ... and %d more license findings\n", len(v.License.Findings)-10)
-						break
-					}
-					fmt.Printf("  ! %s\n", fd)
-				}
-			}
-		}
-		if v.Secrets != nil {
-			if v.Secrets.Status == "SKIPPED" {
-				fmt.Printf("secrets: SKIPPED %s\n", v.Secrets.Detail)
-			} else {
-				st := "OK"
-				if !v.Secrets.OK {
-					st = "FAIL"
-				}
-				fmt.Printf("secrets: %s findings=%d\n", st, v.Secrets.Count)
-				if v.Secrets.Detail != "" {
-					fmt.Printf("  %s\n", v.Secrets.Detail)
-				}
-				for i, fd := range v.Secrets.Findings {
-					if i >= 10 {
-						fmt.Printf("  ... and %d more findings\n", len(v.Secrets.Findings)-10)
-						break
-					}
-					fmt.Printf("  - %s %s:%d [%s] %s\n", fd.Commit, fd.File, fd.Line, fd.Kind, fd.Snippet)
-				}
-			}
-		}
-		// Calibration (Feature Batch C): append the aggregate confidence line at
-		// the end of the rendered report (best-effort; omitted when the model has
-		// no data or a read fails).
-		if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
-			fmt.Println(line)
-		}
-		return
-	}
-	in := "-"
-	if len(args) > 0 && args[0] != "" {
-		in = args[0]
-		args = args[1:]
-	}
-	if len(args) > 0 {
-		root = args[0]
-	}
-	var b []byte
-	if in == "-" {
-		b, err = readStdin()
-	} else if st, serr := os.Stat(in); serr == nil && st.IsDir() {
-		fatal("%q is a directory — kern verify checks a file of claims, e.g. \"kern verify <output.txt>\"; pipe stdin with '-'", in)
-	} else {
-		b, err = os.ReadFile(in)
-	}
-	if err != nil {
-		// Dogfooding A2-1b: `kern verify <unknown-positional>` used to fall
-		// into the claims-file form and fail with a bare "open bogus: no such
-		// file" — no hint that a check-TYPES value was intended. When the
-		// positional is not an existing file and does not look like a path
-		// (no separator), point at the types form explicitly.
-		if !strings.ContainsAny(in, "/\\") {
-			fatal("Verify: %v — did you mean a check type? run `kern verify build,test` (or `kern verify --types build,test`); valid types: %s", err, verifyTypeList())
-		}
-		fatal("Verify: %v", err)
-	}
-	if len(strings.TrimSpace(string(b))) == 0 {
-		fatal("no claims to verify: %q is empty (pass a file of agent output or '-' for stdin)", in)
-	}
-	ix, ierr := loadOrBuild(root)
-	if ierr != nil {
-		ix = nil
-	}
-	rep := verification.Sorted(verification.Verify(ix, root, string(b)))
-	if f.json {
-		rep.Version = version
-		printJSON(rep)
-		if !rep.OK {
-			fatal("verify: %d unverifiable/missing references — see JSON output above", len(rep.Missing))
-		}
-		return
-	}
-	fmt.Println(verification.Render(rep))
-	if !rep.OK {
-		fatal("verify: %d unverifiable/missing references", len(rep.Missing))
-	}
+	return 0
 }
 
 // runCheckDraft implements `kern check-draft <file|-> [root] [--lang LANG]`:
@@ -1212,7 +443,7 @@ func runCheckDraft(rest []string) int {
 	}
 	var b []byte
 	if in == "-" {
-		b, err = readStdin()
+		b, err = cliflags.ReadStdin()
 	} else {
 		b, err = os.ReadFile(in)
 	}
@@ -1255,7 +486,7 @@ func runChanges(cmd string, rest []string) {
 			}
 		}
 	} else {
-		from, to := splitRange(f.range_)
+		from, to := cliflags.SplitRange(f.range_)
 		changes, err = intel.FilesForRangeL(root, from, to)
 		if err != nil {
 			fatal("Changes: %v", err)
@@ -1385,7 +616,7 @@ func runCorrelate(rest []string) {
 			fatal("Correlate: %v", err)
 		}
 		fmt.Print(text)
-		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+		printTaskFooter(t, "")
 		return
 	}
 	t, _, text, err := ts.Correlate(al)
@@ -1393,7 +624,7 @@ func runCorrelate(rest []string) {
 		fatal("Correlate: %v", err)
 	}
 	fmt.Print(text)
-	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	printTaskFooter(t, "")
 }
 
 func runLearn(rest []string) {
@@ -1415,7 +646,7 @@ func runLearn(rest []string) {
 		fatal("Learn: %v", err)
 	}
 	fmt.Print(text)
-	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	printTaskFooter(t, "")
 }
 
 func runModernize(rest []string) {
@@ -1434,7 +665,7 @@ func runModernize(rest []string) {
 		fatal("Modernize: %v", err)
 	}
 	fmt.Print(text)
-	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	printTaskFooter(t, "")
 }
 
 // runRun implements `kern run <intent>` — the kern_run entry point (Strict

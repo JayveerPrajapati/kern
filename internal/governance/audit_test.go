@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -275,22 +276,73 @@ func TestVerifyChainLegacyValidationOutcomeHash(t *testing.T) {
 		t.Fatal("chain should be intact before rewriting entry 1's hash")
 	}
 
-	// Rewrite the middle entry's hash with the legacy formula, as the
-	// in-transition binary would have persisted it, and relink its
-	// successor off the stored (legacy) hash — the chain after a
+	// Rewrite the FIRST entry's hash with the legacy formula, as the
+	// in-transition binary would have persisted it (older formulas come
+	// before newer ones in a real upgraded chain), and relink its
+	// successors off the stored (legacy) hash — the chain after a
 	// legacy-formula entry still links via stored hashes.
-	l.entries[1].ValidationOutcome = &ValidationOutcome{Status: "WARN", ExitCode: 0,
+	l.entries[0].ValidationOutcome = &ValidationOutcome{Status: "WARN", ExitCode: 0,
 		BlockedFiles: []string{"internal/app/platform.go"}, CorrelationID: "bp-1", Findings: 52}
-	l.entries[1].Hash = computeAuditHashLegacy(l.entries[1], l.entries[0].Hash)
+	l.entries[0].Hash = computeAuditHashLegacy(l.entries[0], "")
+	l.entries[1].Hash = computeAuditHash(l.entries[1], l.entries[0].Hash)
 	l.entries[2].Hash = computeAuditHash(l.entries[2], l.entries[1].Hash)
 	if !l.VerifyChain() {
 		t.Fatal("VerifyChain() = false for legacy-formula entry with ValidationOutcome, want true")
 	}
 
 	// Tampering with the legacy entry's covered fields must still break.
-	l.entries[1].AgentID = "evil-agent"
+	l.entries[0].AgentID = "evil-agent"
 	if l.VerifyChain() {
 		t.Error("VerifyChain() = true after tampering with legacy entry, want false")
+	}
+}
+
+// TestVerifyChainRejectsFormatDowngrade pins the audit-downgrade fix: the
+// plain and legacy formulas need no secret, so a keyed chain must not accept
+// an unkeyed entry after a keyed one. Without the monotonic rule, a writer
+// with store access could forge or splice entries that still "verify".
+func TestVerifyChainRejectsFormatDowngrade(t *testing.T) {
+	overrideAuditChainSecret(t)
+	l := NewAuditLog().WithStore(storage.NewLocal(t.TempDir()))
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	if !l.VerifyChain() {
+		t.Fatal("keyed chain must verify")
+	}
+	if got := l.ChainTierReport(); got.Keyed != 2 || got.Unkeyed() != 0 || got.Broken != 0 {
+		t.Fatalf("tiers = %+v, want 2 keyed", got)
+	}
+
+	// Forge a third entry with the secret-free plain formula.
+	forged := entry("", "forged")
+	forged.Hash = computeAuditHashPlain(forged, l.entries[1].Hash)
+	l.entries = append(l.entries, forged)
+	if l.VerifyChain() {
+		t.Fatal("VerifyChain() = true for a plain-formula entry after keyed entries, want false (downgrade)")
+	}
+	got := l.ChainTierReport()
+	if got.Downgraded != 1 || got.Broken != 1 || got.Keyed != 2 {
+		t.Fatalf("tiers = %+v, want 1 downgraded/broken and 2 keyed", got)
+	}
+}
+
+// A chain that was entirely written before keys existed still verifies, but
+// is reported as unkeyed so callers can say it only proves ordering.
+func TestChainTierReportUnkeyedChain(t *testing.T) {
+	overrideAuditChainSecret(t)
+	l := NewAuditLog().WithStore(storage.NewLocal(t.TempDir()))
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	prev := ""
+	for i := range l.entries {
+		l.entries[i].Hash = computeAuditHashPlain(l.entries[i], prev)
+		prev = l.entries[i].Hash
+	}
+	if !l.VerifyChain() {
+		t.Fatal("pre-HMAC plain chain must still verify")
+	}
+	if got := l.ChainTierReport(); got.Plain != 2 || got.Keyed != 0 || got.Unkeyed() != 2 {
+		t.Fatalf("tiers = %+v, want 2 plain / 0 keyed", got)
 	}
 }
 
@@ -1449,11 +1501,14 @@ func TestSequentialPersistedAppendsNoLockWarning(t *testing.T) {
 	}
 }
 
-// TestLockWarningFiresOnlyWhenLockUnavailable pins that the warning is
-// reserved for genuine unavailability: when the lock file cannot be opened
-// at all (missing parent directory), the warning fires (once) after the
-// bounded retries — and the entry is still recorded (liveness wins).
-func TestLockWarningFiresOnlyWhenLockUnavailable(t *testing.T) {
+// TestAuditLockMissingDirAutoCreatedAndLocked pins the 5.5 fix: a lock path
+// whose parent directory does not exist must be SELF-HEALED (the audit dir is
+// MkdirAll'd before acquisition) and the write must happen UNDER the lock —
+// the old behavior logged "proceeding unlocked" and wrote the chain unlocked,
+// explicitly permitting tamper-evident-chain forks. After the fix the dir and
+// lock file exist, no lock warning fires, and the chain verifies end-to-end
+// from a fresh process.
+func TestAuditLockMissingDirAutoCreatedAndLocked(t *testing.T) {
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
 	lock := filepath.Join(dir, "missing-dir", ".lock") // parent dir does not exist
@@ -1464,12 +1519,95 @@ func TestLockWarningFiresOnlyWhenLockUnavailable(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 	auditLockWarnOnce = sync.Once{}
 
-	l.Record(entry("", "agent-unlocked"))
-	if got := buf.String(); !strings.Contains(got, "could not be acquired") {
-		t.Fatalf("expected the lock warning when the lock file is unavailable, got:\n%s", got)
+	l.Record(entry("", "agent-locked"))
+	if got := buf.String(); strings.Contains(got, "could not be acquired") || strings.Contains(got, "proceeding unlocked") {
+		t.Fatalf("lock warning fired for a self-healing missing dir:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "missing-dir")); err != nil {
+		t.Fatalf("lock parent dir not auto-created: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("lock file not created: %v", err)
 	}
 	if len(l.All()) != 1 {
-		t.Fatalf("entry lost when the lock is unavailable: %d entries", len(l.All()))
+		t.Fatalf("entry lost: %d entries", len(l.All()))
+	}
+	// A fresh process must replay one contiguous, verified chain.
+	fresh := NewAuditLog().WithStore(store)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	brk, verified := fresh.VerifyChainReport()
+	if brk != -1 || verified != 1 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 1)", brk, verified)
+	}
+}
+
+// TestAuditLockUnacquirableFailsClosed pins the 5.5 fail-closed contract: a
+// lock that cannot be acquired at all (its parent path is a regular file, so
+// even MkdirAll cannot create it) must NEVER degrade the chain to an
+// unlocked write. AppendExternal returns the error and leaves the in-memory
+// log untouched; the Record path drops the entry with the loss counted and
+// sidecar-marked (surfaced by `kern doctor`) — a governance write failing
+// loudly beats an unlocked chain. The old behavior logged "proceeding
+// unlocked" and wrote the chain unlocked.
+func TestAuditLockUnacquirableFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // redirect the dropped-audit sidecar
+
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(blocker, ".lock") // parent is a regular file: unacquirable
+
+	// AppendExternal must fail loudly and not touch the in-memory log.
+	l := NewAuditLog().WithStore(store).WithLockPath(lock)
+	err := l.AppendExternal(entry("", "agent-blocked"))
+	if err == nil {
+		t.Fatal("AppendExternal must fail when the audit lock cannot be acquired, got nil")
+	}
+	if !strings.Contains(err.Error(), "audit lock") {
+		t.Errorf("error should name the audit lock, got: %v", err)
+	}
+	if l.Len() != 0 {
+		t.Errorf("AppendExternal mutated the in-memory log on lock failure: %d entries", l.Len())
+	}
+
+	// The Record path must drop loudly (sidecar) instead of writing unlocked.
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	auditLockWarnOnce = sync.Once{}
+
+	r := NewAuditLog().WithStore(store).WithLockPath(lock)
+	r.Record(entry("", "agent-dropped"))
+	if got := buf.String(); strings.Contains(got, "proceeding unlocked") {
+		t.Fatalf("fail-open log line still emitted:\n%s", got)
+	}
+	if got := r.Dropped(); got != 1 {
+		t.Fatalf("Dropped() = %d, want 1 (a lock-failed entry must be counted as dropped)", got)
+	}
+	if len(r.All()) != 1 {
+		t.Fatalf("in-memory entry count = %d, want 1 (a drop must not lose the in-memory entry)", len(r.All()))
+	}
+	sidecar, err := os.ReadFile(filepath.Join(home, ".kern", "audit", "dropped.jsonl"))
+	if err != nil {
+		t.Fatalf("dropped-audit sidecar not written: %v", err)
+	}
+	if n := strings.Count(string(sidecar), "\n"); n != 1 {
+		t.Fatalf("sidecar has %d lines, want 1", n)
+	}
+
+	// The persisted chain must be untouched: nothing was written unlocked.
+	fresh := NewAuditLog().WithStore(store)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if got := len(fresh.All()); got != 0 {
+		t.Fatalf("persisted chain has %d entries after lock failure, want 0 (no unlocked write)", got)
 	}
 }
 
@@ -1517,5 +1655,164 @@ func TestAppendExternalFailsBoundedWhenLockHeld(t *testing.T) {
 	// resolves far faster; a generous 5s ceiling proves FAILED-not-hung.
 	if elapsed > 5*time.Second {
 		t.Fatalf("AppendExternal blocked for %s — the lock retry must be bounded", elapsed)
+	}
+}
+
+// TestPersistFailureCountsDroppedAndMarksSidecar pins the dropped-entry
+// contract: a store-write failure must not crash Record, must be counted in
+// Dropped(), and must leave a durable marker in the global sidecar
+// (~/.kern/audit/dropped.jsonl) so `kern doctor` can surface the loss.
+func TestPersistFailureCountsDroppedAndMarksSidecar(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A store rooted under a regular FILE fails every Put (the path can
+	// never become a directory) — the canonical persistence failure.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := NewAuditLog().WithStore(storage.NewLog(filepath.Join(blocker, "audit")))
+	l.Record(AuditEntry{Action: "tool_call", Resource: "kern_search"})
+	if got := l.Dropped(); got != 1 {
+		t.Fatalf("Dropped() = %d, want 1 (a failed store write must be counted as dropped)", got)
+	}
+	sidecar, err := os.ReadFile(filepath.Join(home, ".kern", "audit", "dropped.jsonl"))
+	if err != nil {
+		t.Fatalf("dropped-audit sidecar not written: %v", err)
+	}
+	if n := strings.Count(string(sidecar), "\n"); n != 1 {
+		t.Fatalf("sidecar has %d lines, want 1", n)
+	}
+	var m struct {
+		Action   string `json:"action"`
+		Resource string `json:"resource"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimRight(string(sidecar), "\n")), &m); err != nil {
+		t.Fatalf("sidecar line is not JSON: %v", err)
+	}
+	if m.Action != "tool_call" || m.Resource != "kern_search" {
+		t.Fatalf("sidecar marker = %+v, want action tool_call / resource kern_search", m)
+	}
+	// The in-memory log stays usable: the entry survives the failed persist.
+	if got := len(l.All()); got != 1 {
+		t.Fatalf("in-memory entry count = %d, want 1 (a drop must not lose the in-memory entry)", got)
+	}
+}
+
+// TestAuditMirrorSurvivesRootWipe pins the out-of-repo mirror: every entry
+// persisted to the project store is appended (best-effort) to the mirror
+// JSONL, so wiping the repository root — including its .kern/audit —
+// leaves the forensic copy intact and parseable.
+func TestAuditMirrorSurvivesRootWipe(t *testing.T) {
+	root := t.TempDir()
+	mirror := filepath.Join(t.TempDir(), "survivor", "mirror.jsonl")
+	auditDir := filepath.Join(root, ".kern", "audit")
+	l := NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock")).
+		WithMirror(mirror)
+	for i := 0; i < 3; i++ {
+		l.Record(AuditEntry{AgentID: "probe", Action: "probe", Resource: fmt.Sprintf("res-%d", i), Result: "allowed", Timestamp: time.Now()})
+	}
+	// Approve/reject decisions persist via AppendExternal — the mirror must
+	// cover that write path too, not just Record/persist.
+	if err := l.AppendExternal(AuditEntry{AgentID: "cli-user", Action: "approve", Resource: "appr-test", Result: "approved", Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AppendExternal: %v", err)
+	}
+	// Wipe the repo root (audit store included) — the mirror must survive.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+	data, err := os.ReadFile(mirror)
+	if err != nil {
+		t.Fatalf("mirror must survive the root wipe: %v", err)
+	}
+	var ids []string
+	for _, ln := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if ln == "" {
+			continue
+		}
+		var e AuditEntry
+		if err := json.Unmarshal([]byte(ln), &e); err != nil {
+			t.Fatalf("mirror line not parseable JSON: %v (%q)", err, ln)
+		}
+		ids = append(ids, e.ID)
+	}
+	if len(ids) != 4 {
+		t.Fatalf("mirror line count = %d, want 4 (3 Record + 1 AppendExternal; got %v)", len(ids), ids)
+	}
+}
+
+// TestMirrorForStableAndDisableable pins MirrorFor: the path is stable for
+// the same absolute audit dir, distinct across projects, and empty when the
+// operator disables the feature or the home cannot be resolved.
+func TestMirrorForStableAndDisableable(t *testing.T) {
+	base := t.TempDir()
+	orig := auditMirrorDir
+	auditMirrorDir = func() (string, error) { return base, nil }
+	t.Cleanup(func() { auditMirrorDir = orig })
+
+	// Under go test the mirror is force-disabled unless KERN_AUDIT_MIRROR=1
+	// (test TempDir stores must not mint mirror files in the real home).
+	t.Setenv("KERN_AUDIT_MIRROR", "1")
+	a := MirrorFor("/repo/x/.kern/audit")
+	b := MirrorFor("/repo/x/.kern/audit")
+	c := MirrorFor("/repo/y/.kern/audit")
+	if a == "" || a != b {
+		t.Fatalf("MirrorFor must be stable, got %q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("distinct projects must map to distinct mirrors (%q)", a)
+	}
+	if !strings.HasPrefix(a, base) {
+		t.Fatalf("mirror must live under the configured base, got %q", a)
+	}
+	// Disabled via env: empty path, WithMirror no-ops.
+	t.Setenv("KERN_AUDIT_MIRROR", "")
+	if got := MirrorFor("/repo/x/.kern/audit"); got != "" {
+		t.Fatalf("unset env under go test must disable the mirror (testing guard), got %q", got)
+	}
+	t.Setenv("KERN_AUDIT_MIRROR", "0")
+	if got := MirrorFor("/repo/x/.kern/audit"); got != "" {
+		t.Fatalf("KERN_AUDIT_MIRROR=0 must disable the mirror, got %q", got)
+	}
+	// Unresolvable home: empty path, never a panic.
+	auditMirrorDir = func() (string, error) { return "", errors.New("no home") }
+	if got := MirrorFor("/repo/x/.kern/audit"); got != "" {
+		t.Fatalf("unresolvable home must disable the mirror, got %q", got)
+	}
+}
+
+// DurationMs (latency-visibility L3) follows the Principal conditional-clause
+// pattern: a set value is folded into the chain-hash framing so it is
+// tamper-evident, while a zero value contributes NOTHING — the serialized
+// bytes stay identical to the legacy format, so chains written by older
+// binaries still verify. This pins both properties.
+func TestAuditChainDurationMsClause(t *testing.T) {
+	base := AuditEntry{ID: "audit-1", AgentID: "a", Action: "tool_call", Resource: "kern_exec", Result: "allowed"}
+	withDur := base
+	withDur.DurationMs = 3412
+
+	var b bytes.Buffer
+	writeAuditChainFields(&b, base, "prevhash")
+	legacy := b.String()
+
+	b.Reset()
+	writeAuditChainFields(&b, withDur, "prevhash")
+	withClause := b.String()
+
+	if withClause != legacy+"|3412" {
+		t.Fatalf("DurationMs clause wrong:\nwith = %q\nwant = %q", withClause, legacy+"|3412")
+	}
+	// The two entries hash differently (field is tamper-covered)...
+	if computeAuditHashPlain(base, "prevhash") == computeAuditHashPlain(withDur, "prevhash") {
+		t.Fatal("DurationMs must change the chain hash")
+	}
+	// ...and a zero DurationMs hashes exactly like a legacy entry (no field).
+	zero := base
+	zero.DurationMs = 0
+	if computeAuditHashPlain(zero, "prevhash") != computeAuditHashPlain(base, "prevhash") {
+		t.Fatal("zero DurationMs must hash byte-identically to legacy")
 	}
 }

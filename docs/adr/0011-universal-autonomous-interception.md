@@ -1,5 +1,7 @@
 # Kern: Universal Autonomous Governance & Agent-First Operating Engine
 
+> **Historical record.** Tool names, counts, and defaults in this document reflect the version at the time it was written. See the [Tool Selection Guide](../tool-selection.md) for the current catalog and default surface.
+
 **Author/Target:** Kern Core Architecture & Universal Agent Autonomy  
 **Status:** Master architecture specification & implementation roadmap — corrected 2026-09-28 against the implemented code (sections marked ⚠️ describe design intent that is NOT implemented as written)  
 **Target Repository:** this repository (the kern monorepo; file links are repo-relative)  

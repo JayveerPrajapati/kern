@@ -9,6 +9,9 @@ package governance
 // Obfuscated exec (base64 -d | sh, python -c "...") is residual risk.
 
 import (
+	"net"
+	"os"
+	"regexp"
 	"strings"
 )
 
@@ -24,6 +27,10 @@ const (
 	DangerDestructive DangerClass = "destructive"
 	// DangerPipeInstall matches curl/wget | sh-style network-pipe installs.
 	DangerPipeInstall DangerClass = "pipe-install"
+	// DangerNetworkFetch matches a plain curl/wget/fetch invocation — an
+	// unattended outbound download (the download+interpret case is
+	// pipe-install above).
+	DangerNetworkFetch DangerClass = "network-fetch"
 	// DangerInstaller matches npm/pip/go/apt/brew/make install (unless the
 	// segment carries --dry-run).
 	DangerInstaller DangerClass = "installer"
@@ -31,9 +38,9 @@ const (
 
 // ClassifyDangerousCommand returns the highest-precedence dangerous class
 // matched by the command and a human-readable reason (empty when the command
-// is not dangerous). Precedence: destructive > pipe-install > installer.
-// The command may join simple commands with shell separators; classification
-// is per-segment with one level of recursion into sh -c "...".
+// is not dangerous). Precedence: destructive > pipe-install > network-fetch
+// > installer. The command may join simple commands with shell separators;
+// classification is per-segment with one level of recursion into sh -c "...".
 func ClassifyDangerousCommand(command string) (DangerClass, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -57,6 +64,13 @@ func ClassifyDangerousCommand(command string) (DangerClass, string) {
 	// stage interprets.
 	if cls, why := classifyPipeInstall(stages); cls != DangerNone {
 		return cls, why
+	}
+	// Network-fetch: any stage invoking a plain downloader (F2-2 — a plain
+	// fetch has no interpreter in a pipeline, so pipe-install misses it).
+	for _, s := range stages {
+		if cls, why := classifySegment(s.text); cls == DangerNetworkFetch {
+			return cls, why
+		}
 	}
 	// Installer: per-stage, after destructive.
 	for _, s := range stages {
@@ -155,11 +169,51 @@ func classifySegment(seg string) (DangerClass, string) {
 		return cls, why
 	}
 
+	// Network-fetch (after destructive; F2-2): a plain curl/wget/fetch
+	// invocation is an unattended outbound download — approval-gated like
+	// installers (`kern build "curl http://…"` executed a real network
+	// fetch while verify --command refuses the same command).
+	// KERN_ALLOW_LOOPBACK=1 is the explicit opt-out for loopback-only
+	// targets: local-dev health probes (kern-server, localhost fixtures)
+	// are the common no-risk case. Never a blanket exemption — a loopback
+	// listener can proxy outward, and URL-less invocations stay gated.
+	if name == "curl" || name == "wget" || name == "fetch" {
+		if os.Getenv("KERN_ALLOW_LOOPBACK") == "1" && loopbackOnlySegment(seg) {
+			return DangerNone, ""
+		}
+		return DangerNetworkFetch, name + " performs an outbound network fetch"
+	}
+
 	// Installer triggers (after destructive; --dry-run exempts).
 	if strings.Contains(seg, "--dry-run") {
 		return DangerNone, ""
 	}
 	return classifyInstaller(name, tokens)
+}
+
+// loopbackOnlySegment reports whether EVERY http(s) URL in the command
+// targets a loopback host. A command with no URL never qualifies (the
+// redirect/fetch target cannot be proven from the text alone).
+func loopbackOnlySegment(seg string) bool {
+	re := regexp.MustCompile(`https?://[^/\s"']+`)
+	found := false
+	for _, m := range re.FindAllString(seg, -1) {
+		found = true
+		host := m
+		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		if host == "localhost" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			continue
+		}
+		return false
+	}
+	return found
 }
 
 // stripPrefixes removes leading sudo/doas and VAR=VALUE environment prefixes

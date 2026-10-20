@@ -37,6 +37,14 @@ type AgentIdentity struct {
 	// org-wins precedence. The per-project agents.json store never carries
 	// it — org roles live only in the org role store.
 	Role string
+	// TokenSecret is the optional HMAC secret for signed agent identities:
+	// when non-empty, requests asserting this agent's ID must also present
+	// a valid agent_token (govtoken.Issue/Verify) or the MCP boundary
+	// fails closed — agent_id alone is client-asserted and untrusted.
+	// Empty = unsigned identity (legacy behavior, token checks skipped).
+	// Persisted to the 0600 agent store (PascalCase like the other
+	// fields), never returned by list.
+	TokenSecret string
 }
 
 // NewAgent creates a new agent identity with the given permissions. The

@@ -5,20 +5,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/rulesblock"
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
-// globalHomeDir resolves the user's home directory. It is a variable so tests
-// can point it at a temp directory and never touch the real home.
-var globalHomeDir = func() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	return home
+// globalHomeDir resolves the user's home directory. The canonical variable
+// lives in internal/agentwire (GlobalHomeDir) so the wiring steps extracted
+// there share the same overridable home; this forwarding func keeps the
+// setup-internal call sites unchanged.
+var globalHomeDir = func() string { return agentwire.GlobalHomeDir() }
+
+// GlobalRulesPaths returns the six host GLOBAL instruction paths where the
+// kern agent-usage rules live. Implemented in internal/agentwire.
+func GlobalRulesPaths() []string {
+	return agentwire.GlobalRulesPaths()
+}
+
+// WireGlobalRules manages the kern agent-usage rules in every host's GLOBAL
+// instructions slot. Implemented in internal/agentwire.
+func WireGlobalRules() []Status {
+	return agentwire.WireGlobalRules()
 }
 
 // globalAGENTSPath returns the path to the global AGENTS.md.
@@ -31,20 +38,11 @@ func globalClaudePath() string {
 	return filepath.Join(globalHomeDir(), ".claude", "CLAUDE.md")
 }
 
-// globalPluginPath returns the path to the global opencode kern plugin.
-func globalPluginPath() string {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		base = filepath.Join(globalHomeDir(), ".config")
-	}
-	return filepath.Join(base, "opencode", "plugins", "kern.ts")
-}
-
 // WireGlobal writes the kern-first instruction to globally-read locations so
 // agents in ANY project see it, not just the one where setup ran. An empty
 // agents list means "all known agents"; otherwise only the listed agents are
 // wired. The global AGENTS.md (the universal instruction file) is always
-// written, mirroring the project-level wireAgentRules behaviour.
+// written, mirroring the project-level WireAgentRules behaviour.
 func WireGlobal(agents []string) []Status {
 	enabled := func(name string) bool {
 		if len(agents) == 0 {
@@ -69,7 +67,7 @@ func WireGlobal(agents []string) []Status {
 		out = append(out, copyGlobalPlugin())
 	}
 	out = append(out, wireGlobalGitHooks())
-	out = append(out, wireGlobalSkills()...)
+	out = append(out, agentwire.WireGlobalSkills()...)
 	return out
 }
 
@@ -89,7 +87,7 @@ func writeGlobalAGENTS() Status {
 		existing = string(b)
 	}
 	// Version guard (C7): never clobber wiring written by a NEWER kern.
-	if v := managedStamp(existing); v != "" && managedNewerThanRunning(v) {
+	if v := agentwire.ManagedStamp(existing); v != "" && agentwire.ManagedNewerThanRunning(v) {
 		return Status{Agent: "global-AGENTS.md", Installed: true, Path: path, Note: "kern section is newer (kern-version " + v + ") — left untouched; remove the stamp line to force a rewrite"}
 	}
 	existing = strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
@@ -97,7 +95,7 @@ func writeGlobalAGENTS() Status {
 	if err != nil {
 		return Status{Agent: "global-AGENTS.md", Path: path, Note: err.Error()}
 	}
-	final = insertManagedStamp(final)
+	final = agentwire.InsertManagedStamp(final)
 	if existing != "" && final == existing {
 		return Status{Agent: "global-AGENTS.md", Installed: true, Path: path, Note: "kern-first policy already present"}
 	}
@@ -129,7 +127,7 @@ func writeGlobalClaude() Status {
 		existing = string(b)
 	}
 	// Version guard (C7): never clobber wiring written by a NEWER kern.
-	if v := managedStamp(existing); v != "" && managedNewerThanRunning(v) {
+	if v := agentwire.ManagedStamp(existing); v != "" && agentwire.ManagedNewerThanRunning(v) {
 		return Status{Agent: "claude-global", Installed: true, Path: path, Note: "kern section is newer (kern-version " + v + ") — left untouched; remove the stamp line to force a rewrite"}
 	}
 	// Strip BOTH managed formats so the file converges to a single kern
@@ -142,7 +140,7 @@ func writeGlobalClaude() Status {
 	if err != nil {
 		return Status{Agent: "claude-global", Path: path, Note: err.Error()}
 	}
-	final = insertManagedStamp(final)
+	final = agentwire.InsertManagedStamp(final)
 	if existing != "" && final == existing {
 		return Status{Agent: "claude-global", Installed: true, Path: path, Note: "kern-first policy already present"}
 	}
@@ -161,7 +159,7 @@ func writeGlobalClaude() Status {
 // plugins directory so in-place output compression and session memory work in
 // every project. Skipped when opencode isn't installed.
 func copyGlobalPlugin() Status {
-	dst := globalPluginPath()
+	dst := agentwire.GlobalPluginPath()
 	opencodeDir := filepath.Dir(filepath.Dir(dst))
 	if _, err := os.Stat(opencodeDir); err != nil {
 		return Status{Agent: "opencode-plugin-global", Skipped: true, Path: dst, Note: "opencode not installed — skipped"}
@@ -174,13 +172,23 @@ func copyGlobalPlugin() Status {
 		if bytes.Equal(cur, src) {
 			return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin already current"}
 		}
-		// Same policy as wireGlobalPlugin (F-DR1): a previously shipped
-		// version is kern's own deployment and is updated; only an
-		// unrecognized copy is treated as user-customized and never
-		// overwritten. This writer previously clobbered ANY non-current
-		// copy — including hand edits — with no policy at all.
+		// Same policy as WireGlobalPlugin (F-DR1): a previously shipped
+		// version is kern's own deployment and is updated; an unrecognized
+		// copy is treated as user-customized — backed up next to the
+		// original, then refreshed, so doctor's "run: kern setup --global"
+		// remedy converges instead of leaving a stale copy silently winning
+		// opencode's plugin load forever. (This writer previously clobbered
+		// ANY non-current copy — including hand edits — with no policy at
+		// all.)
 		if !isShippedPluginVersion(cur) {
-			return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin is customized — left untouched"}
+			bak, berr := agentwire.BackupDivergentPlugin(dst, cur)
+			if berr != nil {
+				return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin is customized — left untouched (backup failed: " + berr.Error() + ")"}
+			}
+			if err := os.WriteFile(dst, src, 0o644); err != nil {
+				return Status{Agent: "opencode-plugin-global", Path: dst, Note: err.Error()}
+			}
+			return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin customized — backed up to " + bak + " and refreshed (user edits preserved in the backup)"}
 		}
 		if err := os.WriteFile(dst, src, 0o644); err != nil {
 			return Status{Agent: "opencode-plugin-global", Path: dst, Note: err.Error()}
@@ -197,35 +205,25 @@ func copyGlobalPlugin() Status {
 }
 
 // ruleFileMode returns the permission bits for a rule file: existing files
-// keep their current bits, new files default to 0644.
+// keep their current bits, new files default to 0644. Implemented in
+// internal/agentwire (RuleFileMode).
 func ruleFileMode(path string) os.FileMode {
-	if info, err := os.Stat(path); err == nil {
-		return info.Mode().Perm()
-	}
-	return 0o644
+	return agentwire.RuleFileMode(path)
 }
 
 // backupFile copies path to path+".bak.<timestamp>" before a rewrite so a
 // destructive edit never destroys the user's original content without recourse.
+// Implemented in internal/agentwire (BackupFile).
 func backupFile(path string) error {
-	b, err := os.ReadFile(path)
-	if err != nil || len(b) == 0 {
-		return nil
-	}
-	ts := time.Now().Format("20060102-150405")
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	return os.WriteFile(path+".bak."+ts, b, mode)
+	return agentwire.BackupFile(path)
 }
 
 // removeKernSection removes EVERY kern-managed block from s — both the
 // marker-delimited format and the unmarked "# kern usage rules" format —
-// preserving all other content. The pure text manipulation lives in
-// internal/rulesblock; this wrapper keeps the setup-internal signature.
+// preserving all other content. Implemented in internal/agentwire
+// (RemoveKernSection); this delegator keeps the setup-internal signature.
 func removeKernSection(s string) (string, error) {
-	return rulesblock.ExciseKernBlock(s)
+	return agentwire.RemoveKernSection(s)
 }
 
 // mergePrepend removes any existing kern section from existing and prepends
@@ -244,16 +242,8 @@ func mergePrepend(existing, kern string) (string, error) {
 }
 
 // mergeAppend removes any existing kern section from existing and appends the
-// fresh kern block at the end, preserving all other content.
+// fresh kern block at the end, preserving all other content. Implemented in
+// internal/agentwire (MergeAppend).
 func mergeAppend(existing, kern string) (string, error) {
-	cleaned, err := removeKernSection(existing)
-	if err != nil {
-		return "", err
-	}
-	cleaned = strings.TrimRight(cleaned, "\n")
-	kern = strings.TrimRight(kern, "\n")
-	if cleaned == "" {
-		return kern + "\n", nil
-	}
-	return cleaned + "\n\n" + kern + "\n", nil
+	return agentwire.MergeAppend(existing, kern)
 }

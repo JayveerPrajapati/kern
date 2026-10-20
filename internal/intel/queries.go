@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -8,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // maxHops caps transitive graph traversals so cyclic call graphs cannot cause
@@ -86,6 +86,14 @@ func (g *Graph) buildAdjacencyOpt(strict bool) (outgoing, incoming map[string][]
 		if e.Kind != "calls" {
 			continue
 		}
+		if e.Resolution != "" {
+			if strict && (e.Resolution != "resolved" || g.precisionByLang[langByID[e.From]] != "resolved") {
+				continue
+			}
+			outgoing[e.From] = append(outgoing[e.From], e.To)
+			incoming[e.To] = append(incoming[e.To], e.From)
+			continue
+		}
 		from, fromOK := canonical(e.From)
 		if strict {
 			if p := g.precisionByLang[langByID[from]]; p != "resolved" {
@@ -93,6 +101,15 @@ func (g *Graph) buildAdjacencyOpt(strict bool) (outgoing, incoming map[string][]
 			}
 		}
 		to, ok := canonical(e.To)
+		// A foreign-qualified callee ("http.DefaultClient.Do") never names a
+		// local symbol: bypass the unique-name resolution so the edge links to
+		// the raw external key instead of the same-named project symbol
+		// (parity with the index's CallersFor, which never attributes foreign
+		// keys — TestForeignCalleeNeverAliasesLocalSymbol).
+		if g.foreignCallee(e.To) {
+			ok = false
+			to = e.To
+		}
 		if !ok {
 			// Cross-package callee recorded as an import-qualified
 			// reference ("index.Load") whose simple name alone is
@@ -135,16 +152,26 @@ func (g *Graph) initIndex() {
 	g.indexOnce.Do(func() {
 		g.byID = make(map[string]domain.Node, len(g.Nodes))
 		g.nameIndex = make(map[string][]string)
+		g.labelIndex = make(map[string][]string)
 		for _, n := range g.Nodes {
 			g.byID[n.ID] = n
 			if n.Symbol != nil {
 				g.nameIndex[n.Symbol.Name] = append(g.nameIndex[n.Symbol.Name], n.ID)
+				g.labelIndex[n.Label] = append(g.labelIndex[n.Label], n.ID)
 			}
 		}
 		g.nodePkg = make(map[string]string)
 		g.pkgImports = make(map[string][]string)
 		for _, n := range g.Nodes {
 			if n.Symbol == nil || n.Symbol.Qualified == "" {
+				continue
+			}
+			if n.Package != "" {
+				g.nodePkg[n.ID] = n.Package
+				continue
+			}
+			if strings.HasPrefix(n.ID, "decl:") {
+				g.nodePkg[n.ID] = filepath.Dir(n.Symbol.File)
 				continue
 			}
 			// Node IDs are "<pkg>.<Qualified>" (package-scoped); stripping the
@@ -158,6 +185,28 @@ func (g *Graph) initIndex() {
 		for _, e := range g.Edges {
 			if e.Kind == "imports" {
 				g.pkgImports[e.From] = append(g.pkgImports[e.From], e.To)
+			}
+		}
+		// Foreign import bases: bases of imported package paths ("http",
+		// "fmt") that are not project package directory bases. The index's
+		// foreignImportBases uses ix.Pkgs + pkg.Imports; here the module
+		// nodes carry the package paths and pkgImports the import paths, so
+		// the same set is derivable from the graph alone.
+		dirBases := map[string]bool{}
+		for _, n := range g.Nodes {
+			if n.Kind != "module" {
+				continue
+			}
+			if base := filepath.Base(n.ID); base != "" {
+				dirBases[base] = true
+			}
+		}
+		g.foreignBases = map[string]bool{}
+		for _, imps := range g.pkgImports {
+			for _, imp := range imps {
+				if base := filepath.Base(imp); base != "" && !dirBases[base] {
+					g.foreignBases[base] = true
+				}
 			}
 		}
 	})
@@ -192,6 +241,12 @@ func (g *Graph) resolveNodeID(ref string) (string, bool) {
 	g.initIndex()
 	if _, ok := g.byID[ref]; ok {
 		return ref, true
+	}
+	if ids := g.labelIndex[ref]; len(ids) > 0 {
+		if len(ids) == 1 {
+			return ids[0], true
+		}
+		return ref, false
 	}
 	bare := ref
 	if i := strings.LastIndexByte(bare, '.'); i >= 0 {
@@ -440,7 +495,7 @@ func transitive(start string, neighbor map[string][]string, maxDepth int) []stri
 	for depth := 0; len(queue) > 0 && depth < maxDepth; depth++ {
 		var next []string
 		for _, cur := range queue {
-			if strings.HasPrefix(cur, ambiguousPrefix) {
+			if strings.HasPrefix(cur, ambiguousPrefix) || strings.HasPrefix(cur, "ref:") {
 				continue // opaque: reached, never expanded
 			}
 			for _, nb := range neighbor[cur] {
@@ -562,6 +617,7 @@ func (g *Graph) DirectCallersNames(symbol string, strict bool) []string {
 
 	byID := g.nodesByID()
 	seen := map[string]bool{}
+	seenNames := map[string]bool{}
 	var out []string
 	for _, e := range g.Edges {
 		if e.Kind != "calls" {
@@ -614,8 +670,13 @@ func (g *Graph) DirectCallersNames(symbol string, strict bool) []string {
 			} else {
 				name = n.Symbol.Name
 			}
+		} else if n, ok := byID[from]; ok && n.Label != "" {
+			name = n.Label
 		}
-		out = append(out, name)
+		if !seenNames[name] {
+			seenNames[name] = true
+			out = append(out, name)
+		}
 	}
 	return out
 }
@@ -623,7 +684,7 @@ func (g *Graph) DirectCallersNames(symbol string, strict bool) []string {
 // endpointNamesNode reports whether a raw "calls" edge endpoint names the
 // target node via its receiver-qualified form. The raw edges record method
 // calls receiver-qualified ("Server.dispatch") while node IDs are
-// package-scoped ("internal/bpcli/mcp.Server.dispatch"), and the bare-name
+// package-scoped ("internal/mcp/server.dispatch"), and the bare-name
 // index cannot disambiguate a receiver-qualified name shared by methods in
 // different packages (two packages may each define Server.dispatch). The
 // node's own receiver type + name is the most specific evidence the
@@ -639,6 +700,18 @@ func (g *Graph) endpointNamesNode(ref, target string) bool {
 	return qual == tn.Symbol.Receiver && bare == tn.Symbol.Name
 }
 
+// foreignCallee reports whether a recorded callee reference's first qualifier
+// is a foreign package import base ("http.DefaultClient.Do" — the stdlib http
+// client method). Such a callee can never name a local symbol, even when its
+// bare name is unique; the index side enforces the same contract (CallersFor's
+// widening and TestForeignCalleeNeverAliasesLocalSymbol).
+func (g *Graph) foreignCallee(ref string) bool {
+	if i := strings.IndexByte(ref, '.'); i > 0 {
+		return g.foreignBases[ref[:i]]
+	}
+	return false
+}
+
 // calleeIsTarget reports whether a "calls" edge's callee endpoint names the
 // target node. The direct/import-qualified resolution (ResolveEdgeEndpoint)
 // is tried first; when its caller pre-condition fails — the caller endpoint
@@ -647,6 +720,20 @@ func (g *Graph) endpointNamesNode(ref, target string) bool {
 // package and on the target's own package respectively. A foreign or
 // unresolvable callee (e.g. "fmt.Println", "buf.Save") never matches.
 func (g *Graph) calleeIsTarget(e domain.Edge, target string) bool {
+	if e.Resolution != "" {
+		return e.To == target
+	}
+	// A foreign-qualified callee never names a local symbol, even when the
+	// local bare name is unique: the unique-simple-name resolution
+	// (resolveNodeID case 1) would otherwise attribute every stdlib/vendor
+	// method call sharing the name to the one project symbol that defines it
+	// (the Go stdlib http.DefaultClient.Do call in TestV1EventsStreamSSE was
+	// attributed to internal/mcp/highlevel.Do). Mirrors the index's
+	// TestForeignCalleeNeverAliasesLocalSymbol contract.
+	g.initIndex()
+	if g.foreignCallee(e.To) {
+		return false
+	}
 	// A bare callee that is a Go predeclared identifier ("append", "len")
 	// binds to the builtin unless the CALLER's package shadows it with a
 	// package-level definition (Go scoping; methods are never bare-callable,
@@ -688,6 +775,19 @@ func (g *Graph) calleeIsTarget(e domain.Edge, target string) bool {
 				if id, ok := g.resolveEndpointPackageAware(e.To, cid, false, false); ok {
 					resolved = true
 					if id == target {
+						// A BARE reference never names a method under GO
+						// SCOPING (a bare call binds to a package-level func
+						// or the builtin). The caller-anchored resolution of a
+						// bare callee must not land on a same-named method —
+						// the import-based fallback below would otherwise
+						// attribute the local closure "add" inside
+						// TaskService.impactCitedFiles to
+						// PlaybookStore.add. Go-only, mirroring the
+						// ResolveEdgeEndpoint branch: in TS/Python/Java a bare
+						// reference CAN name a method.
+						if tn, ok2 := g.byID[id]; ok2 && tn.Symbol != nil && tn.Symbol.Receiver != "" && tn.Symbol.Language == "go" {
+							continue
+						}
 						return true
 					}
 				}
@@ -723,8 +823,8 @@ func (g *Graph) calleeIsTarget(e domain.Edge, target string) bool {
 		// the callee WITHOUT disambiguation. That resolution is provisional:
 		// fall through to the package-aware fallbacks below, which anchor on
 		// the caller's package and only match when the endpoint genuinely
-		// names the target (the Go tests call internal/commitmsg.Changelog,
-		// never the markdown heading). Any other (import-qualified /
+		// names the target (the Go tests call package-local Changelog-style
+		// helpers, never the markdown heading). Any other (import-qualified /
 		// unique-name) resolution is authoritative: a callee that resolved
 		// to a different symbol does not call the target.
 		if _, direct := g.byID[e.To]; !direct {
@@ -1010,8 +1110,13 @@ func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
 			}
 			continue
 		}
-		out = append(out, id)
+		if node, found := byID[id]; found && node.Label != "" {
+			out = append(out, node.Label)
+		} else {
+			out = append(out, id)
+		}
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1083,13 +1188,21 @@ func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
 		// Callee endpoint: resolved names where possible, the raw endpoint
 		// verbatim otherwise — a foreign callee like "fmt.Println" survives
 		// instead of emptying the section (WhatDoesXDependOnNames parity).
+		// A foreign-qualified callee ("http.DefaultClient.Do") is never
+		// resolved to the same-named project symbol (its bare name may be
+		// unique; the call is still the stdlib method, not the project's).
 		name := e.To
-		if toID, ok := g.ResolveEdgeEndpoint(e.To, e.From); ok {
-			if n, ok2 := byID[toID]; ok2 && n.Symbol != nil {
-				if n.Symbol.Qualified != "" {
-					name = n.Symbol.Qualified
-				} else {
-					name = n.Symbol.Name
+		if node, found := byID[e.To]; found && node.Kind == "reference" {
+			name = node.Label
+		}
+		if !g.foreignCallee(e.To) {
+			if toID, ok := g.ResolveEdgeEndpoint(e.To, e.From); ok {
+				if n, ok2 := byID[toID]; ok2 && n.Symbol != nil {
+					if n.Symbol.Qualified != "" {
+						name = n.Symbol.Qualified
+					} else {
+						name = n.Symbol.Name
+					}
 				}
 			}
 		}
@@ -1249,7 +1362,7 @@ func isTest(s *domain.Symbol) bool {
 	if s == nil {
 		return false
 	}
-	if s.Kind == "heading" || index.IsDocFile(s.File) {
+	if s.Kind == "heading" || langparse.IsDocFile(s.File) {
 		return false
 	}
 	name, file := s.Name, s.File

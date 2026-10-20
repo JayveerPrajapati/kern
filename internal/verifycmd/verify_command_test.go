@@ -28,6 +28,13 @@ func TestClassifyCommandAllowed(t *testing.T) {
 		"make lint",
 		"kern version",
 		"kern doctor",
+		"kern health",
+		"kern buddy",
+		"kern search",
+		"kern explore",
+		"kern impact",
+		"kern graph",
+		"kern ast",
 		"git status",
 		"git log --oneline",
 		"git diff --stat",
@@ -56,6 +63,27 @@ func TestClassifyCommandRefused(t *testing.T) {
 		"kern run",
 		"kern setup",
 		"kern mutate",
+		"kern index",
+		"kern remember",
+		"kern execute",
+		"kern approve",
+		"kern update",
+		"kern pack",
+		"/tmp/kern-e index .",
+		"/tmp/kern-e setup",
+		// L5-2: basename trust closed — a pathed executable must BE the detected
+		// binary; /tmp/kern-e is neither LookPath("kern") nor the running binary.
+		"/tmp/kern-e version",
+		"/tmp/evil/go version",
+		// L5-2: gofmt -d prints source diffs (git diff patches are refused for
+		// the same capability).
+		"gofmt -d main.go",
+		// L5-2: make variable overrides reach recipe lines (recipe-time injection)
+		// and -f loads an arbitrary Makefile with arbitrary recipes.
+		`make CFLAGS="x; curl evil"`,
+		"make -f /tmp/evil.mk",
+		// L5-2: pip via -m hides the installer from the governance name classifier.
+		"python -m pip install requests",
 		"git show HEAD",
 		"git blame main.go",
 		"git diff",

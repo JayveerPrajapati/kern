@@ -185,6 +185,91 @@ func TestGitignoreGeneratedCoversNewAgents(t *testing.T) {
 	}
 }
 
+// TestBackupFilePrunesOldBackups pins the backup-retention contract (4.10):
+// writing a managed file keeps at most the 3 most recent .bak.<timestamp>
+// backups, so repeated setup runs cannot litter config dirs (the same
+// keep-3 policy internal/agentwire applies — gitblocks' backupFile previously
+// wrote .bak.<timestamp> copies without ever pruning them).
+func TestBackupFilePrunesOldBackups(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitignore")
+	if err := os.WriteFile(path, []byte("managed content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Four pre-existing backups, oldest first in name (fixed-width
+	// YYYYMMDD-HHMMSS sorts lexicographically).
+	for _, ts := range []string{
+		"20200101-000000",
+		"20200102-000000",
+		"20200103-000000",
+		"20200104-000000",
+	} {
+		if err := os.WriteFile(path+".bak."+ts, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// backupFile writes a fifth (.bak.<now>) and must prune back to the 3
+	// newest: the just-written backup plus 20200104 and 20200103.
+	if err := backupFile(path); err != nil {
+		t.Fatalf("backupFile: %v", err)
+	}
+	entries, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("after backupFile, %d backups remain, want 3: %v", len(entries), entries)
+	}
+	joined := ""
+	for _, e := range entries {
+		joined += filepath.Base(e) + " "
+	}
+	for _, want := range []string{".bak.20200104-000000", ".bak.20200103-000000"} {
+		if !contains(entries, want) {
+			t.Errorf("newest pre-existing backup %s was pruned; remaining: %s", want, joined)
+		}
+	}
+	for _, gone := range []string{".bak.20200102-000000", ".bak.20200101-000000"} {
+		if contains(entries, gone) {
+			t.Errorf("old backup %s should have been pruned; remaining: %s", gone, joined)
+		}
+	}
+}
+
+// TestBackupFileKeepsFewerThanFour pins the no-op side: with 3 or fewer
+// backups already present, backupFile prunes nothing.
+func TestBackupFileKeepsFewerThanFour(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitignore")
+	if err := os.WriteFile(path, []byte("managed content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, ts := range []string{"20200101-000000", "20200102-000000"} {
+		if err := os.WriteFile(path+".bak."+ts, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backupFile(path); err != nil {
+		t.Fatalf("backupFile: %v", err)
+	}
+	entries, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("with 2 pre-existing backups, %d remain after backupFile, want 3 (nothing pruned): %v", len(entries), entries)
+	}
+}
+
+func contains(entries []string, suffix string) bool {
+	for _, e := range entries {
+		if strings.Contains(filepath.Base(e), suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWireGlobalGitignoreBlueprintRuntime(t *testing.T) {
 	dir := withTempHome(t) // HOME + XDG_CONFIG_HOME -> dir/.config
 	if err := os.MkdirAll(filepath.Join(dir, ".config", "git"), 0o755); err != nil {

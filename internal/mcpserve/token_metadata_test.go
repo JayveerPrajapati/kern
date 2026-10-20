@@ -3,6 +3,8 @@ package mcpserve
 import (
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 func TestCountRequestTokens(t *testing.T) {
@@ -20,7 +22,7 @@ func TestCountRequestTokens(t *testing.T) {
 func TestTokenMetadataFor(t *testing.T) {
 	t.Parallel()
 	args := map[string]any{"text": strings.Repeat("word ", 500)}
-	meta := tokenMetadataFor("kern_x", args, "short output")
+	meta := tokenMetadataFor("kern_x", args, tokenize.Count("short output"))
 	if meta.TokensUsed <= 0 {
 		t.Errorf("TokensUsed = %d, want > 0", meta.TokensUsed)
 	}
@@ -42,7 +44,7 @@ func TestTokenMetadataForClampsSavings(t *testing.T) {
 	t.Parallel()
 	// A response larger than the request (the common case: search/read tools
 	// return more than they consume) must report zero savings, not negative.
-	meta := tokenMetadataFor("kern_x", map[string]any{}, strings.Repeat("word ", 2000))
+	meta := tokenMetadataFor("kern_x", map[string]any{}, tokenize.Count(strings.Repeat("word ", 2000)))
 	if meta.Savings != 0 {
 		t.Errorf("Savings = %d, want 0 when response exceeds request", meta.Savings)
 	}

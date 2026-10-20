@@ -10,9 +10,10 @@ import (
 
 func (s *Server) memoryHooks() mcpmemory.Hooks {
 	return mcpmemory.Hooks{
-		Add: func(ctx context.Context, root, lesson string) error {
+		Add: func(ctx context.Context, root, lesson string) (bool, error) {
 			// Explicit user lessons dual-write (typed store + v1) so they
-			// surface in buddy's "Project memory" (P2-14 follow-up).
+			// surface in buddy's "Project memory" (P2-14 follow-up). The
+			// bool propagates the dedup window result for the truthful ack.
 			return memory.AddExplicit(root, lesson)
 		},
 		List: func(ctx context.Context, root string) ([]memory.Entry, error) {

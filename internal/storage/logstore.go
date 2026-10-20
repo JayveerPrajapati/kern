@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // chainFile is the append-only JSON-lines file a LogStore writes. Every line
@@ -52,6 +53,26 @@ type TailReader interface {
 // {"k":...,"v":...}; the last complete entry is never lost.
 type LogStore struct {
 	dir string
+
+	// shadowMu guards the legacy-shadow memo below. The memo is process-local
+	// (per LogStore instance): it never substitutes for on-disk state, it only
+	// lets Put skip a shadow os.Remove that would observe ENOENT anyway in a
+	// store that holds no legacy per-key files.
+	shadowMu sync.Mutex
+	// shadowChecked records that the one-time directory scan has run.
+	shadowChecked bool
+	// shadowGone memoizes that the store directory holds no legacy per-key
+	// shadow files (*.json), learned by the one-time scan and re-established
+	// by RewriteAll (which removes every legacy file). When set, Put skips
+	// the redundant per-write shadow removal. Cleared whenever a shadow is
+	// actually observed (a removal removed a file) or a chain write fails
+	// (the failed write preserves a shadow per the crash contract), so a
+	// reappearing shadow is removed by the next write — the memo never
+	// permanently blinds the removal path.
+	shadowGone bool
+	// shadowRemovals counts shadow os.Remove attempts (diagnostics; tests
+	// assert the memoized skip keeps this at zero in migrated stores).
+	shadowRemovals int64
 }
 
 // NewLog returns a LogStore rooted at dir. The directory is created lazily on
@@ -63,7 +84,10 @@ func NewLog(dir string) *LogStore {
 // Put appends one JSON line {"k":key,"v":value} to <dir>/chain.jsonl in O(1).
 // A stale legacy per-key file for the same key is removed only AFTER the
 // append succeeds, so a failed write never destroys the prior value (the
-// legacy shadow still holds it and the caller can retry).
+// legacy shadow still holds it and the caller can retry). Once the store has
+// been confirmed to hold no legacy per-key files (one-time directory scan,
+// re-established by RewriteAll), the per-write shadow removal is memoized
+// away: the shadow cannot exist, so the syscall would only return ENOENT.
 func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) error {
 	if err := validateKey(key); err != nil {
 		return err
@@ -71,6 +95,11 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
+	// One-time memo: confirm whether the store still holds legacy per-key
+	// shadows. A scan failure (unreadable directory) is conservative — the
+	// memo stays "not gone", so the per-write removal below keeps running
+	// exactly as before; the scan never introduces a new failure mode.
+	s.confirmShadowState()
 	f, err := os.OpenFile(filepath.Join(s.dir, chainFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -83,17 +112,77 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	line = append(line, '\n')
 	if _, err := f.Write(line); err != nil {
 		// The chain write failed: the legacy shadow (still present) preserves
-		// the prior value, and the caller can retry.
+		// the prior value, and the caller can retry. The failed write can
+		// leave a shadow in place, so the memoized "shadow gone" state must
+		// be cleared — the next Put of this key must remove it again.
+		s.noteShadowMayExist()
 		return err
 	}
 	// The write succeeded; drop a stale legacy shadow so a reader (which
 	// prefers the per-key file) cannot observe an outdated value. A failed
 	// removal is surfaced — the shadow would silently win over the fresh
-	// chain line.
+	// chain line. When the memo has confirmed the store holds no legacy
+	// shadows, this removal is skipped: the syscall would only return ENOENT.
+	s.shadowMu.Lock()
+	if s.shadowGone {
+		s.shadowMu.Unlock()
+		return nil
+	}
+	s.shadowRemovals++
+	s.shadowMu.Unlock()
 	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	if err == nil {
+		// A shadow was actually present: the store is not confirmed
+		// shadow-free, so keep the per-write removal (exact legacy behavior).
+		s.noteShadowMayExist()
+	}
 	return nil
+}
+
+// confirmShadowState runs the one-time directory scan that memoizes whether
+// the store holds legacy per-key shadow files. When the scan finds none, the
+// per-write shadow removal in Put is skipped for the rest of the process
+// (the audit append path writes a new key per entry, so without this memo
+// every Record would pay a shadow os.Remove that can only return ENOENT).
+// When the scan finds any legacy file, removal runs per write exactly as
+// before. The scan's filter mirrors listLegacy: legacy shadows are *.json
+// files excluding .tmp files and directories (chain.jsonl and the mirror
+// never match). A scan failure is conservative: the memo stays "not gone".
+func (s *LogStore) confirmShadowState() {
+	s.shadowMu.Lock()
+	defer s.shadowMu.Unlock()
+	if s.shadowChecked {
+		return
+	}
+	s.shadowChecked = true
+	s.shadowGone = true // until a legacy file is found
+	des, err := os.ReadDir(s.dir)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Unreadable directory: keep the per-write removal.
+			s.shadowGone = false
+		}
+		return
+	}
+	for _, de := range des {
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		s.shadowGone = false
+		return
+	}
+}
+
+// noteShadowMayExist clears the "no legacy shadows" memo: a chain write
+// failed (a shadow may be preserved by the crash contract) or a shadow was
+// actually observed, so the next write must remove again and re-learn.
+func (s *LogStore) noteShadowMayExist() {
+	s.shadowMu.Lock()
+	defer s.shadowMu.Unlock()
+	s.shadowGone = false
 }
 
 // Get returns the value stored under key. A legacy per-key file wins over a
@@ -252,6 +341,10 @@ func (s *LogStore) Delete(ctx context.Context, key string) error {
 	}
 	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
+	} else if err == nil {
+		// A legacy shadow was actually present: the store is not confirmed
+		// shadow-free, so the memo must not blind later Put removals.
+		s.noteShadowMayExist()
 	}
 	path := filepath.Join(s.dir, chainFile)
 	data, err := os.ReadFile(path)
@@ -328,6 +421,13 @@ func (s *LogStore) RewriteAll(ctx context.Context, entries []Entry) error {
 			return err
 		}
 	}
+	// The rewrite replaced the store's ENTIRE content: every legacy per-key
+	// file is gone, so the memo can confirm the store is shadow-free again
+	// and Put can skip the redundant per-write shadow removal.
+	s.shadowMu.Lock()
+	s.shadowChecked = true
+	s.shadowGone = true
+	s.shadowMu.Unlock()
 	return nil
 }
 

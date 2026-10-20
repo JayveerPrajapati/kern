@@ -2,6 +2,7 @@ package index
 
 import (
 	"embed"
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"testing"
 )
 
@@ -32,8 +33,8 @@ func TestRegexExtractorBaselineOverCorpus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lang := detectLang(rel, b)
-		syms, calls, _, _, err := extractForeignRegex(rel, b, lang)
+		lang := langparse.DetectLang(rel, b)
+		syms, calls, _, _, err := langparse.ExtractForeignRegex(rel, b, lang)
 		if err != nil {
 			t.Fatalf("%s: %v", rel, err)
 		}
@@ -46,14 +47,15 @@ func TestRegexExtractorBaselineOverCorpus(t *testing.T) {
 	// parity gate's tolerance tables in parity_test.go.
 	want := map[string]regexExtraction{
 		"testfixture/fixtures.py": {
-			symbols: 9,
+			symbols: 11,
 			edges: map[string]int{
-				"make_greeter":     2,
-				"Greeter.__init__": 1,
-				"Greeter.greet":    1,
-				"Greeter.loud":     3,
-				"Child.greet":      1,
-				"top_level":        4,
+				"make_greeter":        2,
+				"Greeter.__init__":    1,
+				"Greeter.greet":       1,
+				"Greeter.loud":        3,
+				"Child.greet":         1,
+				"top_level":           4,
+				"Overloaded.__init__": 1,
 			},
 		},
 		"testfixture/fixtures.ts": {
@@ -110,8 +112,8 @@ func TestRegexExtractorDeterministicOnCorpus(t *testing.T) {
 	for _, e := range entries {
 		rel := "testfixture/" + e.Name()
 		b, _ := paritySmokeFixtures.ReadFile(rel)
-		lang := detectLang(rel, b)
-		syms, calls, _, _, err := extractForeignRegex(rel, b, lang)
+		lang := langparse.DetectLang(rel, b)
+		syms, calls, _, _, err := langparse.ExtractForeignRegex(rel, b, lang)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,8 +122,8 @@ func TestRegexExtractorDeterministicOnCorpus(t *testing.T) {
 	for _, e := range entries {
 		rel := "testfixture/" + e.Name()
 		b, _ := paritySmokeFixtures.ReadFile(rel)
-		lang := detectLang(rel, b)
-		syms, calls, _, _, err := extractForeignRegex(rel, b, lang)
+		lang := langparse.DetectLang(rel, b)
+		syms, calls, _, _, err := langparse.ExtractForeignRegex(rel, b, lang)
 		if err != nil {
 			t.Fatal(err)
 		}

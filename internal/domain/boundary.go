@@ -78,6 +78,10 @@ type SafetyBudget struct {
 	// independently of the total MaxToolCalls counter. A kind with a positive
 	// limit is enforced by Exceeded().
 	MaxToolCallsByKind map[string]int `json:"max_tool_calls_by_kind,omitempty"`
+	// MaxToolCallsByPhase caps tool-call volume per agent phase (e.g.
+	// "explore"), independently of the total MaxToolCalls counter and of the
+	// ByKind caps. A phase with a positive limit is enforced by Exceeded().
+	MaxToolCallsByPhase map[string]int `json:"max_tool_calls_by_phase,omitempty"`
 	// CurrentEnv is the environment the task operates in (e.g. "production").
 	// When non-empty and not in AllowedEnvs, Exceeded() reports an exceeded env.
 	CurrentEnv string `json:"current_env,omitempty"`
@@ -90,6 +94,7 @@ type SafetyBudget struct {
 	costUsed          float64
 	runtimeStart      time.Time
 	toolCallsByKind   map[string]int
+	toolCallsByPhase  map[string]int
 }
 
 // DefaultSafetyBudget returns a conservative default budget.
@@ -125,6 +130,20 @@ func (b *SafetyBudget) TrackToolCallKind(kind string) {
 	b.toolCallsByKind[kind]++
 }
 
+// TrackToolCallPhase increments the per-phase tool-call counter for the given
+// phase. It is the per-phase counterpart to TrackToolCall/TrackToolCallKind:
+// callers can cap e.g. "explore" calls independently of the total and per-kind
+// budgets.
+func (b *SafetyBudget) TrackToolCallPhase(phase string) {
+	if phase == "" {
+		return
+	}
+	if b.toolCallsByPhase == nil {
+		b.toolCallsByPhase = map[string]int{}
+	}
+	b.toolCallsByPhase[phase]++
+}
+
 // TrackEnv sets the environment the task operates in. Exceeded() then reports
 // an exceeded env when CurrentEnv is non-empty and not in AllowedEnvs.
 func (b *SafetyBudget) TrackEnv(env string) {
@@ -137,8 +156,9 @@ func (b *SafetyBudget) ToolCallsUsed() int {
 }
 
 // Reset zeroes all runtime usage counters so the budget can be reused for a
-// new run. It clears the total and per-kind call counts, file/token/cost/runtime
-// usage and the current environment, but preserves the configured limits.
+// new run. It clears the total and per-kind/per-phase call counts,
+// file/token/cost/runtime usage and the current environment, but preserves
+// the configured limits.
 func (b *SafetyBudget) Reset() {
 	b.filesUsed = 0
 	b.toolCallsUsed = 0
@@ -147,6 +167,7 @@ func (b *SafetyBudget) Reset() {
 	b.costUsed = 0
 	b.runtimeStart = time.Time{}
 	b.toolCallsByKind = nil
+	b.toolCallsByPhase = nil
 	b.CurrentEnv = ""
 }
 
@@ -165,6 +186,18 @@ func (b *SafetyBudget) Exceeded() (bool, string) {
 		for _, kind := range kinds {
 			if limit := b.MaxToolCallsByKind[kind]; limit > 0 && b.toolCallsByKind[kind] >= limit {
 				return true, "max_tool_calls_by_kind exceeded: " + kind
+			}
+		}
+	}
+	if len(b.MaxToolCallsByPhase) > 0 {
+		phases := make([]string, 0, len(b.MaxToolCallsByPhase))
+		for p := range b.MaxToolCallsByPhase {
+			phases = append(phases, p)
+		}
+		sort.Strings(phases)
+		for _, phase := range phases {
+			if limit := b.MaxToolCallsByPhase[phase]; limit > 0 && b.toolCallsByPhase[phase] >= limit {
+				return true, "max_tool_calls_by_phase exceeded: " + phase
 			}
 		}
 	}

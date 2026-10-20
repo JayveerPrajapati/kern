@@ -52,13 +52,16 @@ func (t T%d) Method%d() int { return t.V + %d }
 }
 
 // assertIndexesByteIdentical zeroes the wall-clock fields that legitimately
-// differ between two builds (UpdatedAt, and the identity's BuiltAt stamp,
-// which buildIdentity derives from UpdatedAt) and then requires the marshaled
-// indexes to match byte for byte.
+// differ between two builds (UpdatedAt, the identity's BuiltAt stamp, which
+// buildIdentity derives from UpdatedAt, and BuildStats — kind/ms/workers/
+// reused record HOW the index was produced, not its content) and then
+// requires the marshaled indexes to match byte for byte.
 func assertIndexesByteIdentical(t *testing.T, a, b *Index) {
 	t.Helper()
 	a.UpdatedAt = time.Time{}
 	b.UpdatedAt = time.Time{}
+	a.BuildStats = BuildStats{}
+	b.BuildStats = BuildStats{}
 	if a.Identity != nil {
 		a.Identity.BuiltAt = time.Time{}
 	}

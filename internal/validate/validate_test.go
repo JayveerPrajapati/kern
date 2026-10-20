@@ -2,6 +2,7 @@ package validate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -338,5 +339,69 @@ func TestDetectNoModuleGoVetPerFile(t *testing.T) {
 	}
 	if l.Cmd != "go" || l.Kind != "lint" {
 		t.Fatalf("DetectKind(lint) = %+v; want go vet", l)
+	}
+}
+
+// TestDetectKindBuildStepOptional pins 6.1: a package.json WITHOUT a "build"
+// script (or a Makefile WITHOUT a build target) must resolve the build kind
+// to ErrNoKindCommand — so verification can report an honest skip instead of
+// a vacuous "build: OK" (the old `node --check index.js` fallback) or a
+// false FAIL (`make build` with no such target). With the step declared, the
+// real command is detected.
+func TestDetectKindBuildStepOptional(t *testing.T) {
+	// package.json with no build script: no build step -> ErrNoKindCommand.
+	noScript := t.TempDir()
+	if err := os.WriteFile(filepath.Join(noScript, "package.json"), []byte(`{"name":"x","scripts":{"test":"node test.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DetectKind(noScript, "build"); !errors.Is(err, ErrNoKindCommand) {
+		t.Fatalf("package.json without build script: DetectKind(build) err = %v, want ErrNoKindCommand", err)
+	}
+	if _, err := DetectKind(noScript, "test"); err != nil {
+		t.Skipf("npm not on PATH: %v", err)
+	}
+
+	// package.json WITH a build script: npm run build is the build step.
+	withScript := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withScript, "package.json"), []byte(`{"name":"x","scripts":{"build":"node index.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := DetectKind(withScript, "build")
+	if err != nil {
+		t.Fatalf("package.json with build script: DetectKind(build) = %v", err)
+	}
+	if c.Cmd != "npm" || strings.Join(c.Args, " ") != "run build --silent" || c.Kind != "build" {
+		t.Fatalf("DetectKind(build) = %+v; want npm run build --silent (kind build)", c)
+	}
+
+	// Makefile with no build target: no build step -> ErrNoKindCommand.
+	noTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(noTarget, "Makefile"), []byte("test:\n\tgo test ./...\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DetectKind(noTarget, "build"); !errors.Is(err, ErrNoKindCommand) {
+		t.Fatalf("Makefile without build target: DetectKind(build) err = %v, want ErrNoKindCommand", err)
+	}
+
+	// Makefile WITH a build target: make build is the build step.
+	withTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withTarget, "Makefile"), []byte("build:\n\tgo build ./...\ntest: build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err = DetectKind(withTarget, "build")
+	if err != nil {
+		t.Fatalf("Makefile with build target: DetectKind(build) = %v", err)
+	}
+	if c.Cmd != "make" || strings.Join(c.Args, " ") != "build" || c.Kind != "build" {
+		t.Fatalf("DetectKind(build) = %+v; want make build (kind build)", c)
+	}
+
+	// A .PHONY declaration alone is not a build target.
+	phonyOnly := t.TempDir()
+	if err := os.WriteFile(filepath.Join(phonyOnly, "Makefile"), []byte(".PHONY: build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DetectKind(phonyOnly, "build"); !errors.Is(err, ErrNoKindCommand) {
+		t.Fatalf(".PHONY-only Makefile: DetectKind(build) err = %v, want ErrNoKindCommand", err)
 	}
 }

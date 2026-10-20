@@ -69,6 +69,15 @@ type IndexProvenance struct {
 	FreshnessVerdict string `json:"freshness_verdict"`
 }
 
+// maxResponseSymbols caps the structured Symbols listing. A broad search
+// returns hundreds of symbols; one entry is ~106 bytes of JSON, so an
+// uncapped listing dwarfs the content text it attests (measured: 615
+// entries = 65KB structured on a 16.7KB text, deep-verify L1 F1-2). The
+// content text always carries the complete per-symbol file:line listing —
+// the structured set is machine-readable redundancy, capped at roughly
+// the text budget.
+const maxResponseSymbols = 128
+
 // SymbolProvenance is one symbol the response actually returned.
 type SymbolProvenance struct {
 	Name      string `json:"name"`
@@ -78,17 +87,22 @@ type SymbolProvenance struct {
 }
 
 // Provenance is the structured evidence attached to a retrieval response's
-// MCP result envelope. Invariant: Symbols MUST equal the set of symbols
-// actually returned by the tool — in governed mode that is the filtered
-// subset of the authorized scope, and the authorizing fingerprint covers
-// exactly that set. Denied symbols are never listed (they would leak their
-// existence); the denial stays in the auditable proof only.
+// MCP result envelope. Invariant: Symbols equals the set of symbols actually
+// returned by the tool, up to maxResponseSymbols — in governed mode that is
+// the filtered subset of the authorized scope, and the authorizing
+// fingerprint (computed from the authorization decision, not this list)
+// covers exactly the authorized set. Denied symbols are never listed (they
+// would leak their existence); the denial stays in the auditable proof
+// only. When the returned set exceeds maxResponseSymbols, Symbols carries
+// the first maxResponseSymbols entries and SymbolsTruncated is set; the
+// content text remains the complete listing.
 type Provenance struct {
-	SchemaVersion   int                `json:"schema_version"`
-	Mode            ProvenanceMode     `json:"mode"`
-	AuthorizingRule *AuthorizingRule   `json:"authorizing_rule,omitempty"`
-	Index           IndexProvenance    `json:"index"`
-	Symbols         []SymbolProvenance `json:"symbols"`
+	SchemaVersion    int                `json:"schema_version"`
+	Mode             ProvenanceMode     `json:"mode"`
+	AuthorizingRule  *AuthorizingRule   `json:"authorizing_rule,omitempty"`
+	Index            IndexProvenance    `json:"index"`
+	Symbols          []SymbolProvenance `json:"symbols"`
+	SymbolsTruncated bool               `json:"symbols_truncated,omitempty"`
 }
 
 // IndexIdentity builds the index-identity portion of a stamp. commit resolves
@@ -112,6 +126,17 @@ func IndexIdentity(ix *index.Index, commit func(string) string) IndexProvenance 
 	return p
 }
 
+// capSymbols bounds the structured listing to maxResponseSymbols. A returned
+// set larger than the cap keeps the first entries (highest-ranked for
+// search-style results) and reports truncation; the content text remains the
+// complete listing.
+func capSymbols(symbols []SymbolProvenance) ([]SymbolProvenance, bool) {
+	if len(symbols) <= maxResponseSymbols {
+		return symbols, false
+	}
+	return symbols[:maxResponseSymbols], true
+}
+
 // Raw builds index-identity-only provenance for ungoverned responses:
 // retrieval calls without agent_id, and non-retrieval tools that loaded an
 // index.
@@ -119,11 +144,13 @@ func Raw(ix *index.Index, commit func(string) string, symbols []SymbolProvenance
 	if symbols == nil {
 		symbols = []SymbolProvenance{}
 	}
+	symbols, truncated := capSymbols(symbols)
 	return &Provenance{
-		SchemaVersion: SchemaVersion,
-		Mode:          ProvenanceModeRaw,
-		Index:         IndexIdentity(ix, commit),
-		Symbols:       symbols,
+		SchemaVersion:    SchemaVersion,
+		Mode:             ProvenanceModeRaw,
+		Index:            IndexIdentity(ix, commit),
+		Symbols:          symbols,
+		SymbolsTruncated: truncated,
 	}
 }
 
@@ -136,6 +163,7 @@ func Governed(ix *index.Index, commit func(string) string, policySource string, 
 	if symbols == nil {
 		symbols = []SymbolProvenance{}
 	}
+	symbols, truncated := capSymbols(symbols)
 	policy := "permissive-default"
 	if policySource == PolicySourceTaskScope || policySource == PolicySourceDefaultScoped {
 		policy = "deny-unlisted"
@@ -152,21 +180,23 @@ func Governed(ix *index.Index, commit func(string) string, policySource string, 
 		rule.Policy = proof.Decision.Deny.Policy
 	}
 	return &Provenance{
-		SchemaVersion:   SchemaVersion,
-		Mode:            ProvenanceModeGoverned,
-		AuthorizingRule: rule,
-		Index:           IndexIdentity(ix, commit),
-		Symbols:         symbols,
+		SchemaVersion:    SchemaVersion,
+		Mode:             ProvenanceModeGoverned,
+		AuthorizingRule:  rule,
+		Index:            IndexIdentity(ix, commit),
+		Symbols:          symbols,
+		SymbolsTruncated: truncated,
 	}
 }
 
 // Summary renders the compact one-line index stamp appended to the content
-// text. It is derived from the same index-identity source as the structured
-// provenance field — the verdict and commit come from the structured field,
-// never a second computation — plus index stats (symbol, edge and package
-// counts, build age) that are not part of the wire schema. String-parsing
-// clients can keep relying on this line; structured clients use the
-// provenance field.
+// text: the verdict/commit from the structured provenance field plus index
+// stats. It prints ONLY when the index state is unusual (QA 2026-10-19): a
+// fully-fresh git worktree whose recorded commit equals HEAD renders nothing;
+// STALE/unknown verdicts, HEAD skew, and non-git roots print. Self-heal: a
+// fresh verdict with a different HEAD is a content-equal commit bump — the
+// recorded label is persisted to the new HEAD (index.RefreshCommitLabel) so
+// the skew warning stops after this call.
 func Summary(ix *index.Index, p *Provenance) string {
 	if ix == nil {
 		return ""
@@ -184,22 +214,39 @@ func Summary(ix *index.Index, p *Provenance) string {
 	if verdict == "" {
 		verdict = string(index.FreshnessUnknown)
 	}
-	// the freshness verdict is tree-based and
-	// stays honest, but a plain "fresh · commit X" hides commit skew — the
-	// index can be one or more commits behind HEAD while the tree still
-	// matches (docs-only commits excluded from the tree probe, probe
-	// failure falling back to content hashes, non-git roots). Surface the
-	// current HEAD next to the build commit whenever they differ.
+	// The verdict is tree-based; surface HEAD whenever it differs from the
+	// recorded commit so commit skew is never hidden behind "fresh".
+	head := headCommitCached(ix.Root)
+	if head != "" && head == p.Index.GitCommit && verdict == string(index.FreshnessFresh) {
+		return "" // fully fresh and in sync: nothing unusual to print
+	}
 	suffix := ""
-	if head := headCommitCached(ix.Root); head != "" && head != p.Index.GitCommit {
+	if head != "" && head != p.Index.GitCommit {
 		if verdict == string(index.FreshnessFresh) {
-			suffix = fmt.Sprintf(" · HEAD %s (commit differs; indexed content still matches)", head)
+			// Content-equal commit bump: persist the new HEAD as the recorded
+			// label (provenance, never a rebuild) so the warning self-heals.
+			refreshed := ""
+			if changed, err := index.RefreshCommitLabel(ix.Root, ix); err == nil && changed {
+				refreshed = "; label refreshed"
+			}
+			suffix = fmt.Sprintf(" · HEAD %s (commit differs; indexed content still matches%s)", head, refreshed)
 		} else {
 			suffix = fmt.Sprintf(" · HEAD %s (index behind HEAD)", head)
 		}
 	}
 	return fmt.Sprintf("[kern] index: %d symbols, %d call edges, %d packages · built %s ago · %s · commit %s%s",
 		len(ix.Symbols), edges, len(ix.Pkgs), age, verdict, p.Index.GitCommit, suffix)
+}
+
+// IndexStamp renders the compact one-line index stamp for surfaces that
+// have an index but no Provenance envelope (the CLI query commands). It is
+// byte-identical to the MCP provenance summary — same age/verdict/commit/
+// HEAD-skew fields — so the CLI and MCP footers stay consistent.
+func IndexStamp(ix *index.Index) string {
+	if ix == nil {
+		return ""
+	}
+	return Summary(ix, Raw(ix, headCommitCached, nil))
 }
 
 // headCommitCache memoizes the current HEAD short sha per root for a few

@@ -210,3 +210,54 @@ func hasImplements(edges []domain.Edge) bool {
 	}
 	return false
 }
+
+// TestExtractSkipsTestFiles pins F3-4: route registrations in test files
+// mirror real handlers without being the repo's HTTP surface — they must
+// not become entities.
+func TestExtractSkipsTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+func main() {
+	r.GET("/real", h)
+}
+`), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(`package main
+func TestRoutes() {
+	r.GET("/from-test", h)
+}
+`), 0644)
+	_ = os.MkdirAll(filepath.Join(dir, "testdata"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "testdata", "fixture.py"), []byte("@app.route(\"/fixture\")\n"), 0644)
+	e := New(dir)
+	nodes, _, err := e.Extract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].API.Path != "/real" {
+		t.Fatalf("nodes = %+v, want only /real", nodes)
+	}
+}
+
+// TestExtractSkipsCommentLines pins F3-4's "GET ..." garbage: route
+// registrations documented in comments (including this extractor's own
+// pattern docs) must not become entities.
+func TestExtractSkipsCommentLines(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+// Django (Python): urlpatterns = [ path("...", view) ].
+// r.GET("/doc", h)
+/* app.get("/block", h) */
+func main() {
+	r.GET("/real", h) // trailing comment mentioning r.GET("/nope", h)
+}
+`), 0644)
+	e := New(dir)
+	nodes, _, err := e.Extract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].API.Path != "/real" {
+		t.Fatalf("nodes = %+v, want only /real", nodes)
+	}
+}

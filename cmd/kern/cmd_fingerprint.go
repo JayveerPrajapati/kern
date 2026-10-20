@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/contextcli"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
@@ -116,7 +117,7 @@ func runFingerprint(rest []string) {
 
 	if f.json {
 		printJSON(map[string]any{
-			"schema_version": kernJSONContractVersion,
+			"schema_version": contextcli.KernJSONContractVersion,
 			"fingerprints":   out,
 		})
 		return

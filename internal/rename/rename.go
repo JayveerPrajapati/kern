@@ -15,6 +15,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/filecache"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -444,6 +446,10 @@ func Apply(root string, r *Report) (int, error) {
 			restore(backedUp)
 			return 0, err
 		}
+		// The file's content just changed; drop any cached bytes so the next
+		// read re-reads from disk even if size and mtime happen to coincide
+		// (the filecache freshness gate is size:mtime, not a content hash).
+		filecache.Default.Invalidate(abs)
 		applied += len(edits)
 	}
 	for _, abs := range deleteAbs {
@@ -451,6 +457,7 @@ func Apply(root string, r *Report) (int, error) {
 			restore(backedUp)
 			return 0, err
 		}
+		filecache.Default.Invalidate(abs)
 		applied++
 	}
 
@@ -528,7 +535,15 @@ func splice(src []byte, edits []Edit) ([]byte, error) {
 func restore(backedUp map[string]string) {
 	for abs, bp := range backedUp {
 		if b, err := os.ReadFile(bp); err == nil {
-			_ = os.WriteFile(abs, b, 0o644)
+			if werr := os.WriteFile(abs, b, 0o644); werr != nil {
+				// Fail loud: a silently-failed rollback leaves the source
+				// file in its partially-modified state while the command
+				// reports failure. The backup stays in place for manual
+				// recovery.
+				log.Printf("kern rename: WARNING: rollback write %s failed (backup at %s): %v", abs, bp, werr)
+				continue
+			}
+			filecache.Default.Invalidate(abs)
 		}
 	}
 }

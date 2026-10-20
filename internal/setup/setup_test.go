@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
+	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 )
 
 func TestMergeJSONAddsKern(t *testing.T) {
@@ -141,6 +143,7 @@ func TestWireCreatesProjectFiles(t *testing.T) {
 }
 
 func TestWireIsIdempotent(t *testing.T) {
+	testEnv(t) // sandboxed HOME: no kern-managed global slots -> full AGENTS.md
 	dir := t.TempDir()
 	Wire(dir, []string{"mcp", "opencode"}, false, false)
 	Wire(dir, []string{"mcp", "opencode"}, false, false)
@@ -158,6 +161,7 @@ func TestWireIsIdempotent(t *testing.T) {
 }
 
 func TestWirePeerAgentRules(t *testing.T) {
+	testEnv(t) // sandboxed HOME: no kern-managed global slots -> full host files
 	dir := t.TempDir()
 	// Existing host files get the same single-source rules; setup must not
 	// create host rule files that do not exist.
@@ -201,7 +205,7 @@ func TestCheckReports(t *testing.T) {
 // TestWireAllAgents wires every JSON-config adapter and asserts each produced
 // config contains a valid kern entry pointing at the kern-mcp binary. This is
 // the invariant that "all tools reach all agents": every agent consumes the
-// same MCP server, so the 46-tool catalog is universally available the moment
+// same MCP server, so the full tool catalog is universally available the moment
 // each config registers kern.
 func TestWireAllAgents(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -261,7 +265,7 @@ func TestPluginMatchesMCPCatalog(t *testing.T) {
 		}
 		mcpSet[n] = true
 	}
-	if len(mcpSet) < 40 {
+	if len(mcpSet) < 30 {
 		t.Fatalf("suspiciously small MCP catalog: %d tools", len(mcpSet))
 	}
 
@@ -327,7 +331,7 @@ func TestDocsStateMCPToolCount(t *testing.T) {
 			count++
 		}
 	}
-	if count < 40 {
+	if count < 30 {
 		t.Fatalf("suspiciously small MCP catalog: %d tools", count)
 	}
 	want := strconv.Itoa(count)
@@ -351,11 +355,22 @@ func TestDocsStateMCPToolCount(t *testing.T) {
 		}
 	}
 
-	check("README banner", readme, `\(6 high-level tools by default, `+want+` in full mode\)`)
+	defTools := strconv.Itoa(len(toolsurface.Default))
+	check("README banner", readme, `\(`+defTools+` tools advertised by default, `+want+` in full mode\)`)
 	check("README MCP section", readme, `by default, `+want+` in full mode\)`)
 	check("README full-mode note", readme, `full `+want+`-tool catalog`)
-	check("AGENTS kern_meta section", agents, `among `+want+` individual `+"`kern_\\*`"+` tools`)
-	check("AGENTS catalog section", agents, `ships `+want+` `+"`kern_\\*`"+` MCP tools`)
+	// The repo root AGENTS.md is the THIN variant (single-sourcing dogfood,
+	// commit 6e5bf4f: the kern-managed global slot carries the full rules):
+	// it states the count once, in the KERN_MCP_FULL line. The embedded
+	// asset stays the FAT template `kern setup` writes to projects — both of
+	// its count claims stay pinned against the live catalog too.
+	check("AGENTS thin full-mode note", agents, `KERN_MCP_FULL=1 for all `+want+`\b`)
+	emb, err := rulesFS.ReadFile("assets/AGENTS.md")
+	if err != nil {
+		t.Fatalf("read embedded AGENTS.md: %v", err)
+	}
+	check("AGENTS asset kern_meta section", string(emb), `among `+want+` individual `+"`kern_\\*`"+` tools`)
+	check("AGENTS asset catalog section", string(emb), `ships `+want+` `+"`kern_\\*`"+` MCP tools`)
 }
 
 // TestDocsStateREADMEClaims is the README doc-drift gate: claims that
@@ -386,7 +401,7 @@ func TestDocsStateREADMEClaims(t *testing.T) {
 	}{
 		{"Go version badge", `Go_1\.27\+`},
 		{"Go install note", `Go 1\.27\+`},
-		{"MCP tool count split", `200\+ CLI commands and ` + want + ` MCP tools`},
+		{"MCP tool count split", `60\+ CLI commands and ` + want + ` MCP tools`},
 		{"benchmark synthetic label", `synthetic`},
 		{"licensing note (MPL-2.0 accept)", `MPL-2\.0`},
 	}
@@ -400,6 +415,149 @@ func TestDocsStateREADMEClaims(t *testing.T) {
 	if !strings.Contains(lic, "MIT License") {
 		t.Error("LICENSE does not state MIT License (README badge may have drifted)")
 	}
+}
+
+// TestDocToolCountsDerived is the rec-1d drift gate ("generate, don't
+// hand-write, counts"): every hand-written tool count in the shipped doc
+// set must equal a LIVE-DERIVED number — the full catalog, the default
+// surface, or the legacy high-level surface. Unlike the sentence-pinned
+// checks above, this scans tool-count POSITIONS generically, so a count
+// claim drifts the test the day it is written and a stale one fails with
+// file+line (this is the gate that would have caught the D5 lesson:
+// banner said 7 while the README body still said 6).
+//
+// Deliberately OUT of scope, honestly: benchmark numbers (symbols, files,
+// latencies) are machine- and commit-dependent measurements, not derivable
+// from code — they carry "git <hash>" stamps and the measurement protocol
+// in docs/benchmarks/. docs/adr/ is excluded as historical record (ADRs
+// are dated snapshots, like git log).
+func TestDocToolCountsDerived(t *testing.T) {
+	full := 0
+	for _, n := range mcp.ToolNames() {
+		if strings.HasPrefix(n, "kern_") {
+			full++
+		}
+	}
+	def := len(toolsurface.Default)
+	hl := mcp.HighLevelToolsCount()
+	if full < 25 || def < 5 || hl < 3 || full == def || def == hl {
+		t.Fatalf("implausible derived counts — full=%d default=%d highLevel=%d (broken derivation would silently pass)", full, def, hl)
+	}
+
+	readRoot := func(rel string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(b)
+	}
+	docs := map[string]string{
+		"README.md":                  readRoot("README.md"),
+		"AGENTS.md":                  readRoot("AGENTS.md"),
+		"docs/architecture.md":       readRoot("docs/architecture.md"),
+		"docs/tool-selection.md":     readRoot("docs/tool-selection.md"),
+		"docs/tool-catalog.md":       readRoot("docs/tool-catalog.md"),
+		"docs/mcp-client.md":         readRoot("docs/mcp-client.md"),
+		"docs/mcp/README.md":         readRoot("docs/mcp/README.md"),
+		"docs/mcp/protocol.md":       readRoot("docs/mcp/protocol.md"),
+		"docs/mcp/versioning.md":     readRoot("docs/mcp/versioning.md"),
+		"docs/mcp/tool-contracts.md": readRoot("docs/mcp/tool-contracts.md"),
+	}
+	if emb, err := rulesFS.ReadFile("assets/AGENTS.md"); err != nil {
+		t.Fatalf("read embedded AGENTS.md: %v", err)
+	} else {
+		docs["assets/AGENTS.md"] = string(emb)
+	}
+
+	// Tool-count positions: a 1-3 digit number adjacent to (within a short
+	// gap of) the word "tool(s)", plus the fixed phrasings the docs use.
+	// The gap class (letters, spaces, hyphens, backticks, asterisks,
+	// underscores) admits "N high-level tools", "N `kern_*` MCP tools" and
+	// "among N individual `kern_*` tools" while rejecting the near-misses
+	// that are NOT counts: list ordinals ("3. **Tool catalog**"), section
+	// headings ("## 5. Tool catalog configuration"), HTTP statuses
+	// ("denials → 403, tool failures → 500") and code refs ("3.4
+	// `tools/list`" — skipped manually in the loop below, since RE2 has no
+	// lookahead).
+	patterns := []string{
+		`\b(\d{1,3})[ \t` + "`" + `*a-zA-Z_\-]{0,20}tools?\b`,
+		`\b(\d{1,3}) in full mode\b`,
+		`Only (\d{1,3}) are advertised`,
+		`Default surface: (\d{1,3}) tools`,
+		`Total tools\s*\|\s*(\d{1,3})`,
+		`\|\s*\*\*Total\*\*\s*\|\s*(\d{1,3})\s*\|`,
+		`count \((\d{1,3})\)`,
+	}
+	for name, text := range docs {
+		for _, pat := range patterns {
+			re := regexp.MustCompile(pat)
+			for _, loc := range re.FindAllStringSubmatchIndex(text, -1) {
+				if loc[1] < len(text) && text[loc[1]] == '/' {
+					continue // "tools/list", "tools/call" — code refs, not counts
+				}
+				n, err := strconv.Atoi(text[loc[2]:loc[3]])
+				if err != nil {
+					continue
+				}
+				switch n {
+				case full, def, hl:
+					// live-derived: the only numbers allowed in a
+					// tool-count position
+				default:
+					line := 1 + strings.Count(text[:loc[0]], "\n")
+					t.Errorf("%s:%d: states %d in a tool-count position — must be the live-derived full catalog (%d), default surface (%d), or legacy high-level surface (%d)", name, line, n, full, def, hl)
+				}
+			}
+		}
+	}
+
+	// The D5 gap proper: in the README's default-surface section, the
+	// table rows marked *(default)* must be exactly the toolsurface.Default
+	// set (the section legitimately lists non-default tools as context —
+	// only the marked rows carry the membership claim, and they drifted
+	// once already).
+	sec := readmeDefaultSection(readRoot("README.md"))
+	if sec == "" {
+		t.Fatal("README default-surface section not found (focused N-tool high-level surface … full N-tool catalog)")
+	}
+	got := map[string]bool{}
+	for _, m := range regexp.MustCompile("`(kern_[a-z0-9_]+)`\\*\\* \\*\\(default\\)\\*").FindAllStringSubmatch(sec, -1) {
+		got[m[1]] = true
+	}
+	if len(got) == 0 {
+		t.Fatal("no *(default)*-marked rows found in the README surface table — marker format drifted?")
+	}
+	want := map[string]bool{}
+	for _, n := range toolsurface.Default {
+		want[n] = true
+	}
+	for n := range want {
+		if !got[n] {
+			t.Errorf("README surface table has no *(default)*-marked row for %q — every toolsurface.Default tool must be listed as default", n)
+		}
+	}
+	for n := range got {
+		if !want[n] {
+			t.Errorf("README surface table marks %q as *(default)* but it is NOT on toolsurface.Default — stale table", n)
+		}
+	}
+}
+
+// readmeDefaultSection slices the README paragraph that enumerates the
+// default surface, from the "focused N-tool default surface" claim to
+// the "full N-tool catalog" sentence that follows it.
+func readmeDefaultSection(readme string) string {
+	begin := regexp.MustCompile(`focused \d+-tool default surface`)
+	end := regexp.MustCompile(`full \d+-tool catalog`)
+	b := begin.FindStringIndex(readme)
+	if b == nil {
+		return ""
+	}
+	e := end.FindStringIndex(readme[b[1]:])
+	if e == nil {
+		return readme[b[0]:]
+	}
+	return readme[b[0] : b[1]+e[1]]
 }
 
 func allInstalled(sts []Status, agent string) bool {
@@ -812,10 +970,14 @@ func TestWireDetectWiresInstructions(t *testing.T) {
 }
 
 // TestAGENTSMdParity is the AGENTS.md analog of the plugin parity invariant:
-// the embedded asset (what `kern setup` installs everywhere) must be
-// byte-identical to the repo's own root AGENTS.md. A fix applied to the
-// working copy but not synced would ship to every user while the repo itself
-// reads stale instructions — and vice versa. Sync with:
+// the embedded asset (what `kern setup` installs everywhere) must stay in sync
+// with the repo's own root AGENTS.md. Single-sourcing dogfood (commit
+// 6e5bf4f): the repo root is intentionally the THIN variant — the full rules
+// live in the kern-managed global slot — while the asset remains the FAT
+// template for projects with no global slot; byte-equality is intentionally
+// false in that mode, and the invariant becomes COUNT parity: the thin root
+// must state the same registered catalog size the asset ships. A fat root
+// still requires byte-equality. Sync with:
 //
 //	cp AGENTS.md internal/setup/assets/AGENTS.md
 func TestAGENTSMdParity(t *testing.T) {
@@ -827,8 +989,22 @@ func TestAGENTSMdParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read repo AGENTS.md: %v", err)
 	}
-	if !bytes.Equal(emb, repo) {
-		t.Error("internal/setup/assets/AGENTS.md drifted from AGENTS.md — run: cp AGENTS.md internal/setup/assets/AGENTS.md")
+	thin := bytes.Contains(repo, []byte("kern usage rules — thin"))
+	if !thin {
+		if !bytes.Equal(emb, repo) {
+			t.Error("internal/setup/assets/AGENTS.md drifted from AGENTS.md — run: cp AGENTS.md internal/setup/assets/AGENTS.md")
+		}
+		return
+	}
+	count := 0
+	for _, n := range mcp.ToolNames() {
+		if strings.HasPrefix(n, "kern_") {
+			count++
+		}
+	}
+	re := regexp.MustCompile(`KERN_MCP_FULL=1 for all ` + strconv.Itoa(count) + `\b`)
+	if !re.Match(repo) {
+		t.Errorf("thin AGENTS.md does not state the registered catalog size (%d tools) — pattern %q", count, re.String())
 	}
 }
 
@@ -891,24 +1067,24 @@ func TestGlobalSkillCopiesParity(t *testing.T) {
 		canonical[s] = data
 	}
 	checked := 0
-	for _, target := range globalSkillTargets {
-		if target.isCursor {
+	for _, target := range agentwire.GlobalSkillTargets {
+		if target.IsCursor {
 			continue // Cursor targets are converted .mdc rules, not SKILL.md copies
 		}
-		homeDir := filepath.Join(home, target.homeDirCheck)
+		homeDir := filepath.Join(home, target.HomeDirCheck)
 		if _, err := os.Stat(homeDir); err != nil {
 			continue // homeDirCheck dir not present on this machine (e.g. CI) — nothing to compare
 		}
 		checked++
 		for _, s := range skillNames {
-			p := filepath.Join(home, target.skillsDir, s, "SKILL.md")
+			p := filepath.Join(home, target.SkillsDir, s, "SKILL.md")
 			data, err := os.ReadFile(p)
 			if err != nil {
-				t.Errorf("%s missing for target %s — run: kern setup to sync", p, target.agent)
+				t.Errorf("%s missing for target %s — run: kern setup to sync", p, target.Agent)
 				continue
 			}
 			if !bytes.Equal(canonical[s], data) {
-				t.Errorf("%s drifted from canonical internal/skills/assets/%s/SKILL.md (target %s) — run: kern setup to sync", p, s, target.agent)
+				t.Errorf("%s drifted from canonical internal/skills/assets/%s/SKILL.md (target %s) — run: kern setup to sync", p, s, target.Agent)
 			}
 		}
 	}

@@ -125,3 +125,65 @@ func TestScanTreeSkipsFixtureDirs(t *testing.T) {
 		t.Fatalf("expected exactly the app.go finding, got %+v", findings)
 	}
 }
+
+// TestScanFileNetmaskInDocstringSuppressed (QA 2026-10-19): requests'
+// utils.py:744 — "Example: if mask is 24 function returns 255.255.255.0" —
+// was flagged as an error-severity hardcoded-secret IP. The netmask sits in
+// a Python docstring (documentation), not a credential: address literals in
+// comment/docstring spans must be suppressed for the IP label.
+func TestScanFileNetmaskInDocstringSuppressed(t *testing.T) {
+	src := []byte(`def dotted_netmask(mask: int) -> str:
+    """Converts mask from /xx format to xxx.xxx.xxx.xxx
+
+    Example: if mask is 24 function returns 255.255.255.0
+
+    :rtype: str
+    """
+    bits = 0xFFFFFFFF ^ (1 << 32 - mask) - 1
+    return socket.inet_ntoa(struct.pack(">I", bits))
+`)
+	for _, f := range ScanFile("src/requests/utils.py", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "IP") {
+			t.Fatalf("docstring netmask flagged as secret: %+v", f)
+		}
+	}
+	// Positive control: the same address in real code (not a docstring)
+	// must still be flagged — the suppression is span-scoped, not global.
+	real := ScanFile("net.go", []byte("MASK = 255.255.255.0\n"))
+	var caught bool
+	for _, f := range real {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IP") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("netmask in real code must still be flagged, got %+v", real)
+	}
+}
+
+// TestScanFilePythonSliceNotIPV6 (QA 2026-10-19): requests' utils.py:1028 —
+// "if sample[1::2] == _null2" — was flagged as a bogus IPV6 match. A Python
+// slice's single-char groups must not read as an address; the IPV6 rule
+// requires ≥2-char hex groups.
+func TestScanFilePythonSliceNotIPV6(t *testing.T) {
+	src := []byte(`    if sample[::2] == _null2:  # 1st and 3rd are null
+        if sample[1::2] == _null2:  # 2nd and 4th are null
+            return "utf-16-le"
+`)
+	for _, f := range ScanFile("src/requests/utils.py", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "IPV6") {
+			t.Fatalf("python slice flagged as ipv6 secret: %+v", f)
+		}
+	}
+	// Positive control: a real public IPv6 in code is still flagged.
+	real := ScanFile("net.go", []byte("upstream := 2606:4700:4700::1111\n"))
+	var caught bool
+	for _, f := range real {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IPV6") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("public IPv6 in real code must still be flagged, got %+v", real)
+	}
+}

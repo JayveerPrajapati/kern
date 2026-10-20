@@ -55,10 +55,8 @@ func TestWholeGraphDegreeCountsResolvedOnly(t *testing.T) {
 	if !wired || !peer {
 		t.Fatalf("Wired and Peer must be kept; nodes: %+v", g.Nodes)
 	}
-	for _, e := range g.Edges {
-		if e.From == "Wired" && e.To == "Peer" {
-			return // pass
-		}
+	if findEdge(g, "Wired", "Peer") != nil {
+		return
 	}
 	t.Fatalf("expected the Wired→Peer edge, got %+v", g.Edges)
 }

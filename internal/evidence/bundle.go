@@ -37,6 +37,13 @@ import (
 // change to the wire format; Verify rejects bundles with a different version.
 const SchemaVersion = 1
 
+// scopeSymbolsCap bounds how many authorized-symbol refs an evidence bundle
+// serializes for an unconstrained (taskless) export. The full authorized set
+// is always covered by the proof fingerprint; this only caps the refs written
+// into the bundle so a signed evidence artifact stays reviewable instead of
+// multi-MB (live-observed: 20k symbols / 26MB for one export).
+const scopeSymbolsCap = 128
+
 // Bundle is the exportable evidence artifact: the three pillars plus a
 // snapshot of the audit chain, sealed by a SHA-256 content hash.
 type Bundle struct {
@@ -84,10 +91,16 @@ type SignatureSection struct {
 // AuthorizationSection captures an authorization decision and its auditable
 // proof. Reconstructed is true when the proof was re-derived at export time
 // (there is no persisted per-call proof to fetch — always the case today).
+// For taskless exports the authorized scope can span the whole index; the
+// bundle serializes at most ScopeSymbolsCap refs to stay reviewable, with
+// ScopeSymbolsTotal / ScopeCapped recording the true count and whether a cap
+// was applied so the sample is explicit, never silent.
 type AuthorizationSection struct {
-	Proof         governance.AuthorizationProof `json:"proof"`
-	Scope         governance.AuthorizedScope    `json:"scope"`
-	Reconstructed bool                          `json:"reconstructed"`
+	Proof             governance.AuthorizationProof `json:"proof"`
+	Scope             governance.AuthorizedScope    `json:"scope"`
+	Reconstructed     bool                          `json:"reconstructed"`
+	ScopeSymbolsTotal int                           `json:"scope_symbols_total"`
+	ScopeCapped       bool                          `json:"scope_capped"`
 }
 
 // FreshnessSection captures the freshness proof of the index the bundle was
@@ -199,14 +212,33 @@ func Generate(root, agentID, task string, ix *index.Index) (*Bundle, error) {
 	if aerr != nil && aerr != governance.ErrUnauthorized {
 		return nil, fmt.Errorf("evidence: authorize context: %w", aerr)
 	}
+	// Bound the serialized scope for taskless exports: an unconstrained
+	// authorize enumerates every symbol in the index, which turns a signed
+	// evidence bundle into a multi-MB wall of refs (live-observed: 20k
+	// symbols / 26MB for one export). Cap the refs written into the bundle
+	// and record the true total + cap flag so the sample is explicit. The
+	// proof's fingerprint still covers the FULL authorized set (unchanged),
+	// so verification integrity is untouched — only the serialized sample is
+	// bounded. The same bounded scope feeds lineage so both pillars stay
+	// coherent.
+	scope := resp.Scope
+	scopeSymbolsTotal := len(scope.Symbols)
+	if len(scope.Symbols) > scopeSymbolsCap {
+		scope.Symbols = scope.Symbols[:scopeSymbolsCap]
+	}
+	if len(scope.Edges) > scopeSymbolsCap*4 {
+		scope.Edges = scope.Edges[:scopeSymbolsCap*4]
+	}
 	b.Authorization = &AuthorizationSection{
-		Proof:         resp.Proof,
-		Scope:         resp.Scope,
-		Reconstructed: true,
+		Proof:             resp.Proof,
+		Scope:             scope,
+		Reconstructed:     true,
+		ScopeSymbolsTotal: scopeSymbolsTotal,
+		ScopeCapped:       scopeSymbolsTotal > scopeSymbolsCap,
 	}
 
-	// Pillar 3: lineage from the authorized scope (symbols + call edges).
-	b.Lineage = lineageFromScope(resp.Scope, task)
+	// Pillar 3: lineage from the (bounded) authorized scope.
+	b.Lineage = lineageFromScope(scope, task)
 
 	// Audit chain snapshot: replay the persisted trail and snapshot every
 	// entry, ValidationOutcome included.

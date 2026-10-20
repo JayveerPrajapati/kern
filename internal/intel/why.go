@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // CallerRef is one caller of a symbol plus a one-line rationale and the
@@ -162,26 +163,116 @@ func sourceLines(root, file string, from, to int) []string {
 
 // FormatWhy renders the why report for the terminal.
 func FormatWhy(info WhyInfo) string {
+	return formatWhy(info, "", 0)
+}
+
+// FormatWhyBudgeted is formatWhy for the budgeted-explore surface
+// (internal/explorebudget): source is the report's source block (the doc
+// comment dedups against it) and maxTok bounds the caller list with a
+// "+N more (raise max_tokens)" marker.
+func FormatWhyBudgeted(info WhyInfo, source string, maxTok int) string {
+	return formatWhy(info, source, maxTok)
+}
+
+// formatWhy is the shared why renderer. source is the report's source block:
+// when it already shows the symbol's doc comment verbatim (the == source ==
+// block of kern_explore --explain), the doc is referenced instead of repeated
+// so it renders exactly once (QA 2026-10-19 item 1); an empty source keeps
+// the full doc (standalone kern why). maxTok > 0 bounds the caller list with
+// a "+N more (raise max_tokens)" marker, dropping the whole section when even
+// its header cannot fit (QA 2026-10-19 item 2).
+func formatWhy(info WhyInfo, source string, maxTok int) string {
 	s := info.Symbol
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s %s  %s:%d\n", s.Kind, s.FullName(), s.File, s.Line)
 	if info.Doc != "" {
-		fmt.Fprintf(&b, "\ndoc:\n  %s\n", strings.ReplaceAll(info.Doc, "\n", "\n  "))
+		if source != "" && sourceShowsDoc(source, info.Doc) {
+			// The doc comment is already visible in the report's source
+			// block above — reference it, never repeat it.
+			b.WriteString("\ndoc: see the == source == block above (rendered once)\n")
+		} else {
+			fmt.Fprintf(&b, "\ndoc:\n  %s\n", strings.ReplaceAll(info.Doc, "\n", "\n  "))
+		}
 	} else {
 		b.WriteString("\ndoc: (none)\n")
 	}
 	fmt.Fprintf(&b, "\nincoming edges: %d, outgoing calls: %d\n", info.InEdges, info.Callees)
 	if len(info.Callers) > 0 {
 		b.WriteString("\nwho depends on it and why:\n")
-		for _, c := range info.Callers {
-			tag := ""
-			if c.Confidence != "" {
-				tag = " [" + c.Confidence + "]"
+		if maxTok <= 0 {
+			for _, c := range info.Callers {
+				b.WriteString(callerRow(c))
 			}
-			fmt.Fprintf(&b, "  %-28s %s:%d%s  %s\n", c.Name, c.File, c.Line, tag, c.Rationale)
+		} else {
+			// Measure the FULL list before deciding: the budgeted branch only
+			// trims when the whole list cannot fit (QA 2026-10-19 item 2).
+			core := tokenize.Count(b.String())
+			rows := make([]string, len(info.Callers))
+			toks := make([]int, len(info.Callers))
+			total := 0
+			for i, c := range info.Callers {
+				rows[i] = callerRow(c)
+				toks[i] = tokenize.Count(rows[i])
+				total += toks[i]
+			}
+			if core+total <= maxTok {
+				for _, r := range rows {
+					b.WriteString(r)
+				}
+			} else {
+				room := maxTok - core
+				kept := 0
+				for i := range rows {
+					rest := len(rows) - i - 1
+					m := ""
+					if rest > 0 {
+						m = fmt.Sprintf("+%d more (raise max_tokens)\n", rest)
+					}
+					if toks[i]+tokenize.Count(m) > room {
+						break
+					}
+					b.WriteString(rows[i])
+					kept++
+					room -= toks[i]
+				}
+				if kept < len(rows) {
+					fmt.Fprintf(&b, "+%d more (raise max_tokens)\n", len(rows)-kept)
+				}
+			}
 		}
 	} else {
 		b.WriteString("\nno callers in the index\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// callerRow renders one "who depends on it and why" row.
+func callerRow(c CallerRef) string {
+	tag := ""
+	if c.Confidence != "" {
+		tag = " [" + c.Confidence + "]"
+	}
+	return fmt.Sprintf("  %-28s %s:%d%s  %s\n", c.Name, c.File, c.Line, tag, c.Rationale)
+}
+
+// sourceShowsDoc reports whether the source block already contains the doc
+// comment verbatim: the first two doc lines (with or without their "//"
+// prefix — the source block is line-numbered) must both appear. The
+// two-line check keeps a coincidental short first-line match from wrongly
+// suppressing a doc that the token fitting folded out of the source.
+func sourceShowsDoc(source, doc string) bool {
+	lines := strings.Split(doc, "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return false
+	}
+	hit := func(l string) bool {
+		return strings.Contains(source, l) || strings.Contains(source, "// "+l)
+	}
+	if !hit(lines[0]) {
+		return false
+	}
+	if len(lines) == 1 {
+		return true
+	}
+	return hit(lines[1])
 }

@@ -1,6 +1,10 @@
 package index
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/langparse"
+)
 
 // TestQuickExt pins the index's extension pre-filter: QuickExt accepts any
 // source extension in quickExt's case list (case-insensitively) and rejects
@@ -35,8 +39,8 @@ func TestQuickExt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := QuickExt(tt.rel); got != tt.want {
-				t.Errorf("QuickExt(%q) = %v, want %v", tt.rel, got, tt.want)
+			if got := langparse.QuickExt(tt.rel); got != tt.want {
+				t.Errorf("langparse.QuickExt(%q) = %v, want %v", tt.rel, got, tt.want)
 			}
 		})
 	}

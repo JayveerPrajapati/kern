@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/topology"
 )
 
 // Change is the impact analysis for a single changed file.
@@ -61,7 +62,13 @@ func AnalyzeChanges(ix *index.Index, files []string) *ChangesReport {
 func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport {
 	covered := coveredSet(ix)
 	fileMap := buildFileMap(ix)
-	hubs := hubSet(ix)
+	hubs := topology.HubSet(ix)
+	callsHub := map[string]bool{}
+	for _, edge := range topology.ResolvedCommunityCalls(ix) {
+		if hubs[edge.To] {
+			callsHub[edge.From] = true
+		}
+	}
 
 	var report ChangesReport
 	bestBlast := 0
@@ -72,22 +79,39 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 		if _, indexed := ix.FileHashes[f]; !indexed {
 			continue
 		}
-		changed := changedSymbols(ix, f, fc.Ranges)
-		if len(changed) == 0 {
+		changedDefs := changedSymbolDefs(ix, f, fc.Ranges)
+		if len(changedDefs) == 0 {
 			continue
 		}
+		changed := make([]string, len(changedDefs))
+		for i, d := range changedDefs {
+			changed[i] = d.FullName()
+		}
+		slices.Sort(changed)
 		_, blastDist := BlastRadius(ix, changed)
 		var callers, transitive int
 		seenCaller := map[string]bool{}
-		for _, s := range changed {
-			// fileMap is hoisted once above; prodCallers would rebuild it per
-			// symbol (O(len(Symbols)) inside this loop — quadratic on large
-			// repos). prodCallersWithFileMap reuses the hoisted map (kern
-			// churn took ~7.8s on the kern repo because of this).
-			for _, c := range prodCallersWithFileMap(ix, s, fileMap) {
+		// callerDirs collects the package directory of each distinct caller.
+		// Callers come from CallersFor (package-aware) so a changed `New` is
+		// not credited with the callers of an unrelated package's `New`.
+		callerDirs := map[string]bool{}
+		for _, def := range changedDefs {
+			for _, c := range ix.CallersFor(def) {
+				cf := fileMap[c]
+				if cd, ok := findCallerDef(ix, c, def); ok && cd.File != "" {
+					cf = cd.File
+				}
+				if cf != "" && IsTestFile(cf) {
+					continue
+				}
 				if !seenCaller[c] {
 					seenCaller[c] = true
 					callers++
+				}
+				if cf != "" {
+					if d := filepath.Dir(cf); d != "." {
+						callerDirs[d] = true
+					}
 				}
 			}
 		}
@@ -108,25 +132,17 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 				allTested = false
 				gaps = append(gaps, s)
 			}
-			if hubs[s] {
+		}
+		for _, definition := range changedDefs {
+			id := definition.DeclarationID()
+			if hubs[id] {
 				risk += 1.0
 			}
-			// A changed symbol that calls into a hub broadcasts its change
-			// through every caller of the hub.
-			for _, ce := range ix.Calls[s] {
-				if hubs[ce.Target] {
-					risk += 0.5
-					break
-				}
+			if callsHub[id] {
+				risk += 0.5
 			}
 		}
-		dirs := map[string]bool{}
-		for _, c := range seenCallerSet(ix, changed) {
-			if d := dirOf(fileMap, c); d != "" {
-				dirs[d] = true
-			}
-		}
-		crossPkg := len(dirs) > 1
+		crossPkg := len(callerDirs) > 1
 		if crossPkg {
 			risk += 1.5
 		}
@@ -177,8 +193,21 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 // changedSymbols returns the non-test symbols of f that the diff ranges touch.
 // Empty ranges mean the whole file is considered changed.
 func changedSymbols(ix *index.Index, f string, ranges []LineRange) []string {
+	defs := changedSymbolDefs(ix, f, ranges)
+	out := make([]string, 0, len(defs))
+	for _, s := range defs {
+		out = append(out, s.FullName())
+	}
+	slices.Sort(out)
+	return out
+}
+
+// changedSymbolDefs is changedSymbols returning the definitions themselves, so
+// callers can look up package-aware callers instead of the shared bare-name
+// bucket.
+func changedSymbolDefs(ix *index.Index, f string, ranges []LineRange) []index.Symbol {
 	syms := ix.SymbolsByFile[f]
-	out := make([]string, 0, len(syms))
+	out := make([]index.Symbol, 0, len(syms))
 	for _, s := range syms {
 		if IsTestFile(s.File) {
 			continue
@@ -186,9 +215,8 @@ func changedSymbols(ix *index.Index, f string, ranges []LineRange) []string {
 		if len(ranges) > 0 && !overlap(s.Line, s.End, ranges) {
 			continue
 		}
-		out = append(out, s.FullName())
+		out = append(out, s)
 	}
-	slices.Sort(out)
 	return out
 }
 
@@ -238,20 +266,6 @@ func blastKeys(m map[string]int) []string {
 	return out
 }
 
-func seenCallerSet(ix *index.Index, symbols []string) []string {
-	seen := map[string]bool{}
-	for _, s := range symbols {
-		for _, c := range ix.Callers[s] {
-			seen[c] = true
-		}
-	}
-	var out []string
-	for c := range seen {
-		out = append(out, c)
-	}
-	return out
-}
-
 func contains(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -286,6 +300,9 @@ func RenderChanges(report *ChangesReport) string {
 	}
 	if len(report.Changes) == 0 {
 		b.WriteString("  (no indexed symbols in the changed files)\n")
+		if len(report.Files) > 0 {
+			b.WriteString("  hint: brand-new or recently-created files are invisible until the index is rebuilt — run `kern index` (or the repo watcher will) then re-review\n")
+		}
 	}
 	out := strings.TrimSuffix(b.String(), "\n")
 	report.DeliveredTokens = tokenize.Count(out)

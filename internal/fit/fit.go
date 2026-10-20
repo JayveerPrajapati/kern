@@ -58,18 +58,24 @@ func FitContext(ctx context.Context, req Request) (*Result, error) {
 		absRoot = req.Root
 	}
 
-	// Resolve target files
+	// Resolve target files. Explicit --files entries are tracked as caller
+	// requests: an unreadable one is a caller error, not something to skip.
 	targetFiles := make(map[string]bool)
+	explicit := make(map[string]bool)
+	addTarget := func(key string) {
+		targetFiles[key] = true
+		explicit[key] = true
+	}
 	for _, f := range req.Files {
 		clean := filepath.Clean(f)
 		if filepath.IsAbs(clean) {
 			if rel, err := filepath.Rel(absRoot, clean); err == nil && !strings.HasPrefix(rel, "..") {
-				targetFiles[rel] = true
+				addTarget(rel)
 			} else {
-				targetFiles[clean] = true
+				addTarget(clean)
 			}
 		} else {
-			targetFiles[clean] = true
+			addTarget(clean)
 		}
 	}
 
@@ -120,14 +126,37 @@ func FitContext(ctx context.Context, req Request) (*Result, error) {
 		}, nil
 	}
 
-	// Read file contents
+	// Read file contents. An explicitly requested file that cannot be read is
+	// a caller error — fail loudly naming it (QA 2026-10-15: a missing path
+	// used to be silently skipped, and the fitted result read as an empty
+	// success). Files resolved from the index that no longer exist are
+	// skipped with a loud log line (stale index); if every resolved file is
+	// unreadable the call still fails instead of returning empty content.
 	fileContents := make(map[string]string)
+	var explicitMissing, indexMissing []string
 	for _, rel := range filesList {
 		full := filepath.Join(absRoot, rel)
 		data, err := os.ReadFile(full)
 		if err == nil {
 			fileContents[rel] = string(data)
+			continue
 		}
+		if explicit[rel] {
+			explicitMissing = append(explicitMissing, rel)
+		} else {
+			indexMissing = append(indexMissing, rel)
+		}
+	}
+	if len(explicitMissing) > 0 {
+		sort.Strings(explicitMissing)
+		return nil, fmt.Errorf("fit: cannot read requested file(s): %s — no such file or unreadable, relative to root %s", strings.Join(explicitMissing, ", "), absRoot)
+	}
+	if len(fileContents) == 0 && len(filesList) > 0 {
+		sort.Strings(indexMissing)
+		return nil, fmt.Errorf("fit: none of the resolved files could be read: %s — the index may be stale (re-run kern index) or the root is wrong (%s)", strings.Join(indexMissing, ", "), absRoot)
+	}
+	for _, rel := range indexMissing {
+		log.Printf("fit: skipping unreadable index-resolved file %s (stale index?)", rel)
 	}
 
 	// Try Tier 1: Full source

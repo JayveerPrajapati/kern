@@ -31,3 +31,15 @@ def top_level():
     h = helper(2)
     c = Child("kid")
     return h + len(c.greet())
+
+
+class Overloaded:
+    # typing.@overload stubs are signatures only — BOTH extractors must
+    # skip them so the real __init__ implementation below owns the
+    # identity (duplicate-gate fix; live repro psf/requests auth.py).
+    @overload
+    def __init__(self, x: int) -> None: ...
+    @overload
+    def __init__(self, x: str) -> None: ...
+    def __init__(self, x):
+        self.x = x

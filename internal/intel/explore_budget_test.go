@@ -74,3 +74,41 @@ func TestExploreBudgetedCalleeSkeletons(t *testing.T) {
 		t.Errorf("render missing callee skeleton section:\n%s", out)
 	}
 }
+
+// TestRenderExploreExplainDocRenderedOnce pins the QA 2026-10-19 item 1 fix:
+// with explain=true the symbol's doc comment renders EXACTLY once — the
+// == source == block carries it verbatim and the == why == section
+// references it instead of repeating it. Standalone FormatWhy (kern why)
+// keeps the full doc. The budgeted render variant lives in
+// internal/explorebudget (its cap-enforcement test is explorebudget_test.go).
+func TestRenderExploreExplainDocRenderedOnce(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go":       "package lib\n\n// Public returns the public value.\n// It is the fixture entry point.\nfunc Public() string { return inner() }\n\nfunc inner() string { return \"x\" }\n",
+		"client/client.go": srcClient,
+	})
+	ix := buildIndex(t, dir)
+	rep, err := Explore(ix, "Public", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, ok := Why(ix, "Public")
+	if !ok {
+		t.Fatal("Why did not resolve Public")
+	}
+	if info.Doc == "" {
+		t.Fatal("fixture broken: Public must carry a doc comment")
+	}
+	docFirstLine := "Public returns the public value"
+
+	out := RenderExploreExplain(rep, info)
+	if got := strings.Count(out, docFirstLine); got != 1 {
+		t.Errorf("doc comment rendered %d times, want exactly 1 (source block only):\n%s", got, out)
+	}
+	if !strings.Contains(out, "doc: see the == source == block above (rendered once)") {
+		t.Errorf("why section must reference, not repeat, the doc:\n%s", out)
+	}
+	// The standalone why surface keeps the full doc.
+	if !strings.Contains(FormatWhy(info), docFirstLine) {
+		t.Error("standalone FormatWhy must keep the full doc comment")
+	}
+}

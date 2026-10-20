@@ -25,12 +25,16 @@ func provenanceProject(t *testing.T) string {
 	files := map[string]string{
 		"app.go": `package main
 
+import "demo/public"
+
 // Greet says hello.
-func Greet() { println(PublicA()) }
+func Greet() { println(public.PublicA()) }
 
 func main() { Greet() }
 `,
 		"public/a.go": `package public
+
+import "demo/secret"
 
 // PublicA returns the length of the secret value.
 func PublicA() int { return len(secret.SecretB()) }

@@ -13,9 +13,9 @@ import (
 	"syscall"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
 	"github.com/JayveerPrajapati/kern/internal/mcp/transport"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 func runMCP(rest []string) {
@@ -93,7 +93,7 @@ func runMCP(rest []string) {
 }
 
 // runMCPToolsList prints the full MCP tool catalog, grouped by category.
-// It is the discoverability front door for the ~145-tool surface: the
+// It is the discoverability front door for the 31-tool surface: the
 // default MCP advertisement exposes only the minimal toolsurface.Set() set
 // and hides the rest behind the kern_meta router, so a user (or agent)
 // otherwise has no way to enumerate every capability, its phase and its
@@ -107,7 +107,11 @@ func runMCPToolsList(rest []string) {
 		fatalUsage("kern mcp tools: %v", err)
 	}
 	// A bare positional arg filters by category: `kern mcp tools graph`.
-	if fs.NArg() > 0 && *category == "" {
+	// The literal "list" is the explicit no-filter form the docs and guard
+	// teach (`kern mcp tools list`): it must never be parsed as a category
+	// name (the "no tools in category \"list\"" bug — the exact command
+	// every new user types first).
+	if fs.NArg() > 0 && *category == "" && fs.Arg(0) != "list" {
 		*category = fs.Arg(0)
 	}
 
@@ -120,7 +124,21 @@ func runMCPToolsList(rest []string) {
 			}
 		}
 		if len(filtered) == 0 {
-			fatal("kern mcp tools: no tools in category %q", *category)
+			// A declared-but-empty category (e.g. governance after the
+			// 2026-10-18 surface slim) prints a note and exits 0; an
+			// unknown category is a typo and fails loudly.
+			known := false
+			for _, c := range catalog.CategoryNames() {
+				if c == *category {
+					known = true
+					break
+				}
+			}
+			if !known {
+				fatal("kern mcp tools: no tools in category %q", *category)
+			}
+			fmt.Printf("kern MCP catalog: no tools in category %q\n", *category)
+			return
 		}
 		tools = filtered
 	}

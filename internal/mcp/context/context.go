@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/brief"
@@ -62,6 +63,13 @@ func Compact(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	// F5: never serve credential-shaped files to a connected agent. The
+	// blocklist is conservative (fsutil.LooksLikeCredentialFile); the
+	// operator can read the file directly, an agent cannot be trusted with
+	// its contents even inside the workspace root.
+	if fsutil.LooksLikeCredentialFile(abs) {
+		return "", fmt.Errorf("refusing to read %s: credential-shaped filename %q — kern does not serve credential file contents to connected agents", path, filepath.Base(abs))
+	}
 	content, err := code.ReadFile(abs)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", path, err)
@@ -85,8 +93,22 @@ func Compact(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	return code.RenderTier(abs, content, tier), nil
 }
 
+// buddyWarmWG tracks Buddy's background index warms so callers that own the
+// root's lifetime (tests, short-lived embedders) can join them via
+// buddyWarmWG.Wait before tearing the root down — a warm that races its
+// root's removal leaves the persist path writing into a half-deleted tree
+// (sqlite disk-I/O error + a JSON-cache fallback that recreates .kern).
+var buddyWarmWG sync.WaitGroup
+
+// BuddyWarmWait blocks until all background index warms initiated by Buddy have completed.
+func BuddyWarmWait() {
+	buddyWarmWG.Wait()
+}
+
 // Buddy builds a session digest for the root (index warm-up happens in the
-// background so later calls render the fast path).
+// background so later calls render the fast path). no_memory skips the
+// digest's "Project memory" and "Recent session activity" sections — for
+// subagent lanes that already carry session context.
 func Buddy(ctx context.Context, args map[string]any) (string, error) {
 	root := mcpargs.ArgString(args, "root")
 	if root == "" {
@@ -94,12 +116,14 @@ func Buddy(ctx context.Context, args map[string]any) (string, error) {
 		root = cwd
 	}
 	// Warm the index in the background so later calls render the fast path.
+	buddyWarmWG.Add(1)
 	go func() {
+		defer buddyWarmWG.Done()
 		if werr := brief.Warm(root); werr != nil {
 			fmt.Fprintf(os.Stderr, "kern: buddy: could not warm index for %q: %v\n", root, werr)
 		}
 	}()
-	out, err := brief.Build(root)
+	out, err := brief.BuildWithOptions(root, brief.Options{NoMemory: mcpargs.ArgBool(args, "no_memory")})
 	if err != nil {
 		return "", err
 	}

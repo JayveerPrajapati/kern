@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
@@ -12,8 +13,8 @@ import (
 // leaf, advertisement filters against this map; drift would make the
 // annotation lie).
 func TestDefaultToolsMatchToolsurface(t *testing.T) {
-	if len(defaultTools) != 6 {
-		t.Fatalf("defaultTools size = %d, want 6", len(defaultTools))
+	if len(defaultTools) != 29 {
+		t.Fatalf("defaultTools size = %d, want 29", len(defaultTools))
 	}
 	if len(toolsurface.Default) != len(defaultTools) {
 		t.Fatalf("toolsurface.Default size = %d, defaultTools size = %d — surface drift", len(toolsurface.Default), len(defaultTools))
@@ -22,5 +23,35 @@ func TestDefaultToolsMatchToolsurface(t *testing.T) {
 		if !defaultTools[n] {
 			t.Errorf("toolsurface.Default names %q but toolpolicy.defaultTools does not", n)
 		}
+	}
+}
+
+// TestSurfaceCountsPinned derives the three surface facts every doc, plugin
+// mirror and gate agrees on (perfection plan B2): the full catalog, the
+// default advertised surface, and the full-only tools. Surface changes are
+// deliberate: any drift here means the catalog, the default surface, or the
+// KERN_MCP_FULL gating moved, and this pin must be updated IN THE SAME
+// change — alongside the docs gates (TestDocToolCountsDerived,
+// TestCurrentDocsToolNamesMatchCatalog) and the plugin mirrors
+// (TestPluginMatchesMCPCatalog, TestPluginDefaultToolsMatchGoDefaultTools)
+// that pin the downstream copies.
+func TestSurfaceCountsPinned(t *testing.T) {
+	full := ToolNames()
+	if len(full) != 31 {
+		t.Fatalf("full catalog = %d tools, want 31 — an unapproved surface change (updating this pin is a deliberate act)", len(full))
+	}
+	if len(defaultTools) != 29 {
+		t.Fatalf("default surface = %d tools, want 29 — an unapproved surface change", len(defaultTools))
+	}
+	var fullOnly []string
+	for _, n := range full {
+		if !defaultTools[n] {
+			fullOnly = append(fullOnly, n)
+		}
+	}
+	slices.Sort(fullOnly)
+	want := []string{"kern_arch", "kern_graph"}
+	if !slices.Equal(fullOnly, want) {
+		t.Fatalf("full-only tools = %v, want %v — the default surface and the full catalog drifted apart (31 full / 29 default implies exactly these two full-only)", fullOnly, want)
 	}
 }

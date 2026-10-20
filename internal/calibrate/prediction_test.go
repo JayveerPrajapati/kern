@@ -80,17 +80,46 @@ func TestRecordPredictionRoundTrip(t *testing.T) {
 func TestRecordPredictionCapTrimsOldest(t *testing.T) {
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < predictionLogCap+10; i++ {
-		if err := RecordPrediction(root, Prediction{
+	// Seed predictionLogCap+9 entries directly in ONE write instead of calling
+	// RecordPrediction predictionLogCap+10 times: every call rewrites the whole
+	// growing log atomically (appendJSONLLine -> WriteFileAtomic), so the old
+	// loop performed ~2.5GB of disk I/O. The append-past-cap trim contract is
+	// exercised identically by seeding the pre-trim state + one append.
+	if err := os.MkdirAll(filepath.Dir(predictionLogPath(root)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var b strings.Builder
+	for i := 0; i < predictionLogCap+9; i++ {
+		p := Prediction{
 			Kind:      "impact",
 			Change:    "c",
 			Target:    "t",
 			Subsystem: "web",
 			TS:        base.Add(time.Duration(i) * time.Second),
-		}); err != nil {
-			t.Fatalf("RecordPrediction %d: %v", i, err)
 		}
+		p.ID = predictionID(p)
+		line, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal seed %d: %v", i, err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
 	}
+	if err := os.WriteFile(predictionLogPath(root), []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+
+	// One append past the cap triggers the trim.
+	if err := RecordPrediction(root, Prediction{
+		Kind:      "impact",
+		Change:    "c",
+		Target:    "t",
+		Subsystem: "web",
+		TS:        base.Add(time.Duration(predictionLogCap+9) * time.Second),
+	}); err != nil {
+		t.Fatalf("RecordPrediction: %v", err)
+	}
+
 	lines, err := readJSONLines(predictionLogPath(root))
 	if err != nil {
 		t.Fatalf("read: %v", err)

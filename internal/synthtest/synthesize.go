@@ -527,6 +527,15 @@ func Synthesize(req Request) (*Result, error) {
 		}
 	}
 
+	// Auto-gap was asked for but filled nothing: distinguish "no untested
+	// hotspots" from the generic missing-source error below (the former
+	// conflated both into one misleading message). Hotspot = an untested
+	// symbol WITH production callers; symbols nothing calls are excluded
+	// from the ranking, so untested symbols can still exist.
+	if req.AutoGap && targetFile == "" && req.Code == "" {
+		return nil, fmt.Errorf("auto-gap found no untested hotspots — nothing to synthesize (see kern testgaps for all untested symbols)")
+	}
+
 	var srcBytes []byte
 	if req.Code != "" {
 		srcBytes = []byte(req.Code)
@@ -547,7 +556,7 @@ func Synthesize(req Request) (*Result, error) {
 		}
 		srcBytes = b
 	} else {
-		return nil, fmt.Errorf("either target file or code snippet must be provided")
+		return nil, fmt.Errorf("no source to synthesize from: pass a file (--file <file>, file=..., or the CLI positional form) or a code snippet (code=...); target alone does not select a source file")
 	}
 
 	fset := token.NewFileSet()
@@ -744,10 +753,18 @@ func Synthesize(req Request) (*Result, error) {
 		// write is rolled back and the apply refused, with the failure
 		// output in the message.
 		if verr := validateGeneratedTest(diskPath, testFuncName); verr != nil {
+			// Roll back the apply so the refused write never leaves the tree
+			// in a half-state. A rollback failure is surfaced in the message,
+			// never silent: the user's original file may have been replaced.
+			rollback := ""
 			if testFileExisted {
-				_ = os.WriteFile(diskPath, []byte(oldTestContent), 0o644)
+				if rerr := os.WriteFile(diskPath, []byte(oldTestContent), 0o644); rerr != nil {
+					rollback = "; rollback failed (original content NOT restored): " + rerr.Error()
+				}
 			} else {
-				_ = os.Remove(diskPath)
+				if rerr := os.Remove(diskPath); rerr != nil {
+					rollback = "; rollback failed (generated test file left in place): " + rerr.Error()
+				}
 			}
 			return &Result{
 				TargetSymbol: targetSymbol,
@@ -757,7 +774,7 @@ func Synthesize(req Request) (*Result, error) {
 				TestCode:     testCode,
 				Applied:      false,
 				Cases:        casesList,
-				Message:      "apply refused: " + verr.Error(),
+				Message:      "apply refused: " + verr.Error() + rollback,
 			}, nil
 		}
 		applied = true

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"sort"
 	"testing"
 )
@@ -39,9 +40,9 @@ func TestDedupeKeepsHighestConfidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := dedupeCallEdges(tc.in)
+			out := langparse.DedupeCallEdges(tc.in)
 			if len(out) != 1 {
-				t.Fatalf("dedupeCallEdges(%v) = %v; want exactly 1 edge", tc.in, out)
+				t.Fatalf("langparse.DedupeCallEdges(%v) = %v; want exactly 1 edge", tc.in, out)
 			}
 			if out[0].Target != "T" || out[0].Confidence != tc.want {
 				t.Errorf("kept %+v; want {T %s}", out[0], tc.want)
@@ -51,18 +52,29 @@ func TestDedupeKeepsHighestConfidence(t *testing.T) {
 }
 
 // TestDedupeTieKeepsFirst: for equal confidence the FIRST occurrence wins,
-// preserving input order determinism. Synth distinguishes the two edges.
+// preserving input order determinism.
 func TestDedupeTieKeepsFirst(t *testing.T) {
 	in := []CallEdge{
 		{Target: "T", Confidence: ConfidenceHigh, Synth: "router:first"},
-		{Target: "T", Confidence: ConfidenceHigh, Synth: "router:second"},
+		{Target: "T", Confidence: ConfidenceHigh, Synth: "router:first"},
 	}
-	out := dedupeCallEdges(in)
+	out := langparse.DedupeCallEdges(in)
 	if len(out) != 1 {
-		t.Fatalf("dedupeCallEdges(%v) = %v; want exactly 1 edge", in, out)
+		t.Fatalf("langparse.DedupeCallEdges(%v) = %v; want exactly 1 edge", in, out)
 	}
 	if out[0].Synth != "router:first" {
 		t.Errorf("tie kept %+v; want the first occurrence (Synth router:first)", out[0])
+	}
+}
+
+func TestDedupePreservesDistinctProvenance(t *testing.T) {
+	in := []CallEdge{
+		{Target: "T", SourceFile: "source.go", Confidence: ConfidenceHigh},
+		{Target: "T", SourceFile: "source.go", Confidence: ConfidenceLow, Synth: "dispatch"},
+		{Target: "T", SourceFile: "source.go", Confidence: ConfidenceMedium, Dynamic: true},
+	}
+	if out := langparse.DedupeCallEdges(in); len(out) != len(in) {
+		t.Fatalf("dedupe lost binding/dispatch provenance: %+v", out)
 	}
 }
 
@@ -74,7 +86,7 @@ func TestDedupeSortedByTarget(t *testing.T) {
 		{Target: "alpha", Confidence: ConfidenceMedium},
 		{Target: "mid", Confidence: ConfidenceLow},
 	}
-	out := dedupeCallEdges(in)
+	out := langparse.DedupeCallEdges(in)
 	if !sort.SliceIsSorted(out, func(i, j int) bool { return out[i].Target < out[j].Target }) {
 		t.Fatalf("output not sorted by target: %v", out)
 	}
@@ -102,9 +114,9 @@ func TestDedupePromotionPathStillWorks(t *testing.T) {
 		{Target: "Open", Confidence: ConfidenceMedium},
 		{Target: "Open", Confidence: ConfidenceLow},
 	}
-	out := dedupeCallEdges(in)
+	out := langparse.DedupeCallEdges(in)
 	if len(out) != 1 {
-		t.Fatalf("dedupeCallEdges(%v) = %v; want exactly 1 edge", in, out)
+		t.Fatalf("langparse.DedupeCallEdges(%v) = %v; want exactly 1 edge", in, out)
 	}
 	if out[0].Target != "Open" || out[0].Confidence != ConfidenceMedium {
 		t.Errorf("promote-style dedupe kept %+v; want {Open MEDIUM}", out[0])

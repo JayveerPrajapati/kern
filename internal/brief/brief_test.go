@@ -120,7 +120,11 @@ func TestBuildDefaultDigestOmitsPerFileMap(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module demo\n\ngo 1.22\n")
-	for i := 0; i < 400; i++ {
+	// 150 files keep the digest contract exercised at a realistic size while
+	// keeping the test fast: the heavy cost is Warm's full index build, and
+	// the assertions (sections present, no per-file listing, <10KB) hold at
+	// any moderate file count. Was 400 -> ~16s of index build.
+	for i := 0; i < 150; i++ {
 		write(t, dir, fmt.Sprintf("f%03d.go",
 			i), fmt.Sprintf("package main\n\n// file %d with unique filler words for the summary.\n\nfunc F%d() int { return %d }\n", i, i, i))
 	}
@@ -138,8 +142,8 @@ func TestBuildDefaultDigestOmitsPerFileMap(t *testing.T) {
 		}
 	}
 	// The trailing section is the COMPACT overview: file counts, no
-	// per-file listing. (go.mod + 400 .go files = 401.)
-	if !strings.Contains(out, "401 files") {
+	// per-file listing. (go.mod + 150 .go files = 151.)
+	if !strings.Contains(out, "151 files") {
 		t.Fatalf("expected compact file count, got:\n%s", out)
 	}
 	if strings.Contains(out, "f000.go") {
@@ -232,7 +236,7 @@ func TestBuildProjectMemoryReadsTypedStore(t *testing.T) {
 
 	// Auto captures (v1 store) render only as Recent session activity and
 	// never leak into Project memory.
-	if err := memory.AddAuto(dir, "User: give me a summary of dispatch"); err != nil {
+	if _, err := memory.AddAuto(dir, "User: give me a summary of dispatch"); err != nil {
 		t.Fatal(err)
 	}
 	out, err = Build(dir)
@@ -260,10 +264,10 @@ func TestExplicitUserLessonSurfacesInProjectMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := memory.AddExplicit(dir, "Tenant ids must always be namespaced in Redis keys"); err != nil {
+	if _, err := memory.AddExplicit(dir, "Tenant ids must always be namespaced in Redis keys"); err != nil {
 		t.Fatal(err)
 	}
-	if err := memory.AddAuto(dir, "User: give me a summary of dispatch"); err != nil {
+	if _, err := memory.AddAuto(dir, "User: give me a summary of dispatch"); err != nil {
 		t.Fatal(err)
 	}
 

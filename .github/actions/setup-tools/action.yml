@@ -58,5 +58,5 @@ runs:
         which gitleaks && gitleaks version
         which jscpd && jscpd --version
         which kern && kern version
-        kern check --help >/dev/null 2>&1 || true
-        kern ci --help >/dev/null 2>&1 || true
+        kern verify --help >/dev/null 2>&1 || true
+        kern guard --help >/dev/null 2>&1 || true

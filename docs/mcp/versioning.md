@@ -59,8 +59,8 @@ negotiating any of them can talk to this server.
 
 ## 3. Tool catalog
 
-The catalog is the contract clients depend on most: 117 tools at HEAD, registered in
-`internal/mcp/tools.go` and served via `tools/list`. Every tool entry carries
+The catalog is the contract clients depend on most: 31 tools at HEAD, registered in
+`internal/mcpcatalog/tools.go` and served via `tools/list`. Every tool entry carries
 `name`, `description`, `inputSchema`, `phase` and `riskLevel`.
 
 ### Compatibility rules
@@ -83,13 +83,13 @@ The catalog is the contract clients depend on most: 117 tools at HEAD, registere
 - A tool or parameter being removed is first marked **deprecated** in its
   `description` (and in `tool-contracts.md`) for at least one minor release.
 - Deprecated tools keep working until their removal release.
-- The catalog count (117) and the `ToolNames()` set are enforced by catalog-parity
+- The catalog count (31) and the `ToolNames()` set are enforced by catalog-parity
   invariants (plugin ↔ MCP, docs ↔ MCP) — a change to the registration table that
   breaks parity fails CI.
 
 ### Breaking changes
 
-- **2026-10-01 — memory tool consolidation + `kern_do` (117 tools).** The four
+- **2026-10-01 — memory tool consolidation + `kern_do` (the then-current catalog).** The four
   memory tools `kern_memory_add`, `kern_memory_list`, `kern_memory_recall` and
   `kern_memory_ranked` were removed and replaced by a single `kern_memory` tool
   that dispatches on a required `action` parameter (`add|list|recall|ranked|
@@ -98,7 +98,7 @@ The catalog is the contract clients depend on most: 117 tools at HEAD, registere
   ≥1-minor-release deprecation policy above: the four removed names fail with
   "unknown tool" immediately, and clients must migrate to
   `kern_memory {action=add|list|recall|ranked|remove|clear}`.
-- **2026-10-01 — 8-family action-arg consolidation (117 tools).** Twenty-six
+- **2026-10-01 — 8-family action-arg consolidation (the then-current catalog).** Twenty-six
   tools were removed and replaced by eight consolidated tools that dispatch on
   a required `action` (or `entity`) parameter: `kern_agent`
   (action=message|interrupt|fingerprint|coordination|rbac) replaces
@@ -143,7 +143,7 @@ Server configuration knobs are part of the contract:
 
 ## 5. Document contract
 
-- `tool-contracts.md` is generated from `internal/mcp/tools.go` — the registration
+- `tool-contracts.md` is generated from `internal/mcpcatalog/tools.go` — the registration
   table is the source of truth, and regenerating the doc must not change any tool's
   contract.
 - `protocol.md` documents the wire behavior; changes to the wire behavior must be

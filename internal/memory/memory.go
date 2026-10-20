@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,6 +92,13 @@ func Path(root string) string {
 func Load(root string) Store {
 	var s Store
 	if err := readJSON(Path(root), &s); err != nil {
+		// Corrupt (already renamed to .corrupt by readJSON, data preserved
+		// for recovery) or unreadable: log it — a silent reset would let the
+		// next write look like a wipe (L5-3). Absent-file is the normal
+		// first-use path and also lands here quietly.
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("memory: v1 store unreadable for %s (%v); starting empty (backup at .corrupt if corrupt)", root, err)
+		}
 		return Store{Root: root}
 	}
 	if s.Entries == nil {
@@ -128,12 +136,15 @@ func Add(root, lesson string) error {
 	if isAutoCapture(lesson) {
 		source = "auto"
 	}
-	return addWithSource(root, lesson, source)
+	_, err := addWithSource(root, lesson, source)
+	return err
 }
 
 // AddAuto appends an explicitly automatic capture (raw prompt, tool outcome)
-// tagged Source "auto". Use it from session-capture code paths.
-func AddAuto(root, lesson string) error {
+// tagged Source "auto". Use it from session-capture code paths. The bool
+// reports whether a fresh entry landed — an identical capture within the
+// 60s dedup window is swallowed (false, nil).
+func AddAuto(root, lesson string) (bool, error) {
 	return addWithSource(root, lesson, "auto")
 }
 
@@ -154,35 +165,87 @@ func AddAuto(root, lesson string) error {
 //
 // Automatic session captures are NOT routed here — hook/plugin capture uses
 // AddAuto (v1, Source "auto") and stays in "Recent session activity".
-func AddExplicit(root, lesson string) error {
+func AddExplicit(root, lesson string) (bool, error) {
 	if strings.TrimSpace(lesson) == "" {
-		return nil
+		return false, nil
 	}
+	// Explicit is always genuine (L5-4): the caller chose to remember this
+	// text, so its Source is "user" in both stores no matter what it starts
+	// with — a real lesson like "Edited files must always ship with tests"
+	// stays recallable and prune --auto-safe. Auto routing is signal-driven
+	// only: the plugin/hooks pass --auto (AddAuto); the prefix classifier
+	// stays on the legacy Add entry point and Load's read-side migration.
 	if _, err := NewMemoryStore(root).Add(domain.Memory{
 		Type:    domain.MemoryLesson,
 		Content: lesson,
 		Source:  "user",
 		Scope:   "project",
 	}); err != nil {
-		return err
+		return false, err
 	}
-	// v1 write with Source "" = explicit, so recall/list keep finding it and
-	// it is never labeled [auto].
-	return addWithSource(root, lesson, "")
+	// v1 write with Source "user" (not "") so Load's legacy migration
+	// cannot relabel auto-shaped explicit lessons as auto, and recall/list
+	// keep finding it (they only filter Source "auto").
+	return addWithSource(root, lesson, "user")
 }
 
-func addWithSource(root, lesson, source string) error {
+// addTypedAuto writes an auto capture to the typed store, skipping the write
+// when an identical capture already landed within the 60s dedup window (the
+// same window addWithSource uses for the v1 store): several agent surfaces
+// can fire the same conversation event within seconds, and the explicit
+// path must not triplicate it in the typed store either. The bool reports
+// whether a fresh typed entry landed.
+func addTypedAuto(root, lesson string) (bool, error) {
+	st := NewMemoryStore(root)
+	mems, err := st.CurrentMemories("")
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	for _, m := range mems { // newest-first (sortRecency)
+		if now.Sub(m.CreatedAt) > 60*time.Second {
+			break // entries are chronological: older ones are out of window
+		}
+		if m.Content == lesson {
+			return false, nil
+		}
+	}
+	_, err = st.Add(domain.Memory{
+		Type:    domain.MemoryLesson,
+		Content: lesson,
+		Source:  "auto",
+		Scope:   "project",
+	})
+	return true, err
+}
+
+func addWithSource(root, lesson, source string) (bool, error) {
 	if strings.TrimSpace(lesson) == "" {
-		return nil
+		return false, nil
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	// Cross-process serialization (L5-3): the plugin's `kern remember
+	// --auto` subprocess and the MCP server's in-process AddExplicit both
+	// run Load→append→writeJSON; last-writer-wins dropped the other's
+	// entry. The sidecar .lock (OS-dropped if a holder crashes) serializes
+	// load-modify-write across processes; mu stays for in-process callers.
+	fl, err := cache.LockFile(Path(root))
+	if err != nil {
+		return false, fmt.Errorf("memory: lock store: %w", err)
+	}
+	defer fl.Unlock()
 	s := Load(root)
 	// Dedupe automatic captures: the same conversation event can be
 	// captured by several agent surfaces (opencode plugin, Claude
 	// PostToolUse, Codex/Gemini hooks) firing within seconds of each
-	// other, which previously triplicated every auto entry. Explicit user
-	// lessons (source "") are never deduped.
+	// other, which previously triplicated every auto entry. The window is
+	// signal-driven (L5-4): it fires only for source "auto" writes — the
+	// auto entry points (AddAuto, auto-classified legacy Add) — and an
+	// auto duplicate of an already-stored genuine lesson dedupes too. A
+	// genuine explicit lesson (source "user") is never deduped, whatever
+	// its text starts with (deliberate re-remember is user intent; pinned
+	// by test).
 	if source == "auto" {
 		now := time.Now().UTC()
 		for i := len(s.Entries) - 1; i >= 0; i-- {
@@ -191,13 +254,13 @@ func addWithSource(root, lesson, source string) error {
 				break // entries are chronological: older ones are out of window
 			}
 			if e.Text == lesson {
-				return nil
+				return false, nil
 			}
 		}
 	}
 	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson, Source: source})
 	s.Entries = trimToCap(s.Entries)
-	return writeJSON(Path(root), s)
+	return true, writeJSON(Path(root), s)
 }
 
 // trimToCap enforces the maxEntries hard cap without letting an automatic
@@ -232,8 +295,28 @@ func trimToCap(entries []Entry) []Entry {
 }
 
 // List returns the lessons for root, most recent first.
+//
+// The read is serialized with writers (QA 5.4): the MCP server dispatches
+// tools/call requests concurrently (one goroutine per call), so a recall sent
+// right after an add could read the store file BEFORE the add's atomic rename
+// landed — "add then recall within one session" missed the just-added lesson.
+// mu (in-process) and the cross-process file lock (the same one writers hold)
+// order the read after any in-flight write, so add→recall in one session
+// deterministically sees the write.
 func List(root string) []Entry {
-	s := Load(root)
+	mu.Lock()
+	defer mu.Unlock()
+	fl, err := cache.LockFile(Path(root))
+	if err != nil {
+		return reverseEntries(Load(root)) // degrade loudly to the atomic read; writes stay safe
+	}
+	defer fl.Unlock()
+	return reverseEntries(Load(root))
+}
+
+// reverseEntries renders a store newest-first (the display order every list
+// surface uses; the store keeps append order on disk).
+func reverseEntries(s Store) []Entry {
 	out := make([]Entry, len(s.Entries))
 	for i, e := range s.Entries {
 		out[len(s.Entries)-1-i] = e
@@ -241,24 +324,39 @@ func List(root string) []Entry {
 	return out
 }
 
-// Clear removes all lessons for root.
+// Clear removes all lessons for root from BOTH stores: the v1 lesson store
+// AND the typed store. `kern memory clear` / kern_memory clear previously
+// emptied only the v1 store, leaving buddy's "Project memory" (typed store)
+// populated with the very lessons the user asked to clear.
 func Clear(root string) error {
 	mu.Lock()
 	defer mu.Unlock()
-	err := os.Remove(Path(root))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+	fl, err := cache.LockFile(Path(root)) // cross-process L5-3
+	if err != nil {
+		return fmt.Errorf("memory: lock store: %w", err)
 	}
-	return err
+	defer fl.Unlock()
+	err = os.Remove(Path(root))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return NewMemoryStore(root).Clear()
 }
 
 // RemoveIndex deletes the entry at the given 1-based position in the
 // order 'kern memory list' shows (newest first) and returns it, so the
 // caller can show what went. QA F5: targeted removal — Clear stays the
-// whole-store nuke.
+// whole-store nuke. The removal is mirrored in the typed store (every
+// entry with the same content) so the lesson stops rendering in buddy's
+// "Project memory" too.
 func RemoveIndex(root string, n int) (Entry, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	fl, err := cache.LockFile(Path(root)) // cross-process L5-3
+	if err != nil {
+		return Entry{}, fmt.Errorf("memory: lock store: %w", err)
+	}
+	defer fl.Unlock()
 	s := Load(root)
 	if n < 1 || n > len(s.Entries) {
 		return Entry{}, fmt.Errorf("index %d out of range (1..%d) — see 'kern memory list'", n, len(s.Entries))
@@ -268,23 +366,198 @@ func RemoveIndex(root string, n int) (Entry, error) {
 	idx := len(s.Entries) - n
 	removed := s.Entries[idx]
 	s.Entries = append(s.Entries[:idx], s.Entries[idx+1:]...)
-	return removed, writeJSON(Path(root), s)
+	if err := writeJSON(Path(root), s); err != nil {
+		return Entry{}, err
+	}
+	if _, err := NewMemoryStore(root).RemoveContent(removed.Text); err != nil {
+		return Entry{}, err
+	}
+	return removed, nil
 }
 
 // RemovePrefix deletes the first stored entry whose text starts with the
-// given prefix and returns it. Empty store or no match is an error.
+// given prefix and returns it. Empty store or no match is an error. The
+// typed store is mirrored too: every entry whose content starts with the
+// prefix is removed (the typed store can hold several captures sharing the
+// prefix, e.g. triplicated "Edited ..." snapshots).
 func RemovePrefix(root, prefix string) (Entry, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	fl, err := cache.LockFile(Path(root)) // cross-process L5-3
+	if err != nil {
+		return Entry{}, fmt.Errorf("memory: lock store: %w", err)
+	}
+	defer fl.Unlock()
 	s := Load(root)
 	for i, e := range s.Entries {
 		if strings.HasPrefix(e.Text, prefix) {
 			removed := e
 			s.Entries = append(s.Entries[:i], s.Entries[i+1:]...)
-			return removed, writeJSON(Path(root), s)
+			if err := writeJSON(Path(root), s); err != nil {
+				return Entry{}, err
+			}
+			if _, err := NewMemoryStore(root).RemovePrefix(prefix); err != nil {
+				return Entry{}, err
+			}
+			return removed, nil
 		}
 	}
 	return Entry{}, fmt.Errorf("no memory entry starts with %q — see 'kern memory list'", prefix)
+}
+
+// PruneStats reports what `kern memory prune --auto` removed.
+type PruneStats struct {
+	// TypedRemoved counts typed entries dropped for being Source "auto" or
+	// auto-shaped content (raw prompts, tool outcomes, edited-file
+	// snapshots, failed commands).
+	TypedRemoved int
+	// TypedCollapsed counts exact-duplicate typed entries reduced to their
+	// most recent copy.
+	TypedCollapsed int
+	// V1Removed counts v1 entries dropped for being Source "auto".
+	V1Removed int
+	// V1Collapsed counts exact-duplicate v1 entries reduced to their most
+	// recent copy.
+	V1Collapsed int
+}
+
+// PruneAuto bulk-removes automatic captures from BOTH stores and collapses
+// exact duplicates, keeping each distinct lesson's most recent copy — the
+// cleanup path for the pre-F2 junk (failed commands, triplicated "Edited X"
+// snapshots) and for auto captures generally.
+//
+// Typed store: entries with Source "auto" OR auto-shaped content
+// (isAutoCapture) are removed — the auto-shaped check catches legacy
+// captures written as Source "user" before F2 routing. v1 store: Source
+// "auto" entries are removed (auto-shaped entries are already relabeled
+// "auto" by Load's migration).
+//
+// Genuine lessons are never fully removed: after the auto removal, exact
+// duplicates (identical content) collapse to their most recent copy, so a
+// user/learning lesson is at worst deduplicated, never deleted.
+func PruneAuto(root string) (PruneStats, error) {
+	var stats PruneStats
+
+	// Typed store (released before the v1 lock: the only nested ordering
+	// in the package is v1-lock→typed-lock, kept deadlock-free).
+	st := NewMemoryStore(root)
+	tfl, err := cache.LockFile(st.path) // cross-process L5-3
+	if err != nil {
+		return stats, fmt.Errorf("memory: lock typed store: %w", err)
+	}
+	st.mu.Lock()
+	ms := st.load()
+	typedKept := make([]domain.Memory, 0, len(ms))
+	for _, m := range ms {
+		if m.Source == "auto" || (m.Source == "" && isAutoCapture(m.Content)) {
+			stats.TypedRemoved++
+			continue
+		}
+		typedKept = append(typedKept, m)
+	}
+	typedKept, stats.TypedCollapsed = collapseTypedDuplicates(typedKept)
+	if len(typedKept) != len(ms) {
+		if err := st.save(typedKept); err != nil {
+			st.mu.Unlock()
+			tfl.Unlock()
+			return stats, err
+		}
+	}
+	st.mu.Unlock()
+	tfl.Unlock()
+
+	// v1 store.
+	mu.Lock()
+	defer mu.Unlock()
+	fl, err := cache.LockFile(Path(root)) // cross-process L5-3
+	if err != nil {
+		return stats, fmt.Errorf("memory: lock store: %w", err)
+	}
+	defer fl.Unlock()
+	s := Load(root)
+	v1Kept := make([]Entry, 0, len(s.Entries))
+	for _, e := range s.Entries {
+		if e.Source == "auto" {
+			stats.V1Removed++
+			continue
+		}
+		v1Kept = append(v1Kept, e)
+	}
+	v1Kept, stats.V1Collapsed = collapseEntryDuplicates(v1Kept)
+	if len(v1Kept) != len(s.Entries) {
+		if err := writeJSON(Path(root), Store{Root: root, Entries: v1Kept}); err != nil {
+			return stats, err
+		}
+	}
+	return stats, nil
+}
+
+// collapseTypedDuplicates reduces exact-duplicate typed memories (identical
+// Content) to their most recent copy, preserving order. The most recent copy
+// is the one with the latest CreatedAt (ties: latest UpdatedAt, then first
+// in slice). Entries with empty content are never collapsed.
+func collapseTypedDuplicates(in []domain.Memory) ([]domain.Memory, int) {
+	if len(in) == 0 {
+		return nil, 0
+	}
+	best := map[string]int{} // content -> index of the most recent copy
+	for i, m := range in {
+		if m.Content == "" {
+			continue
+		}
+		prev, ok := best[m.Content]
+		if !ok || m.CreatedAt.After(in[prev].CreatedAt) ||
+			(m.CreatedAt.Equal(in[prev].CreatedAt) && m.UpdatedAt.After(in[prev].UpdatedAt)) {
+			best[m.Content] = i
+		}
+	}
+	keep := map[int]bool{}
+	for _, i := range best {
+		keep[i] = true
+	}
+	collapsed := 0
+	out := make([]domain.Memory, 0, len(in))
+	for i, m := range in {
+		if m.Content == "" || keep[i] {
+			out = append(out, m)
+		} else {
+			collapsed++
+		}
+	}
+	return out, collapsed
+}
+
+// collapseEntryDuplicates reduces exact-duplicate v1 entries (identical
+// Text) to their most recent copy (latest Time), preserving order. Entries
+// with empty text are never collapsed.
+func collapseEntryDuplicates(in []Entry) ([]Entry, int) {
+	if len(in) == 0 {
+		return nil, 0
+	}
+	best := map[string]int{} // text -> index of the most recent copy
+	for i, e := range in {
+		if e.Text == "" {
+			continue
+		}
+		prev, ok := best[e.Text]
+		if !ok || e.Time.After(in[prev].Time) {
+			best[e.Text] = i
+		}
+	}
+	keep := map[int]bool{}
+	for _, i := range best {
+		keep[i] = true
+	}
+	collapsed := 0
+	out := make([]Entry, 0, len(in))
+	for i, e := range in {
+		if e.Text == "" || keep[i] {
+			out = append(out, e)
+		} else {
+			collapsed++
+		}
+	}
+	return out, collapsed
 }
 
 // stopwords are dropped from recall queries so generic lessons about "code",

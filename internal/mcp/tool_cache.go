@@ -124,10 +124,19 @@ func toolCacheable(name string) bool {
 // ones, so the cache gates, file fingerprints, and keys all see the call
 // that actually runs (F-1 fingerprint parity with the direct call; R3
 // semantic detection through the passthrough). Any other tool maps to
-// itself. Pure and deterministic: lookup and store paths agree.
-func resolveCacheCall(name string, args map[string]any) (string, map[string]any) {
+// itself. Pure and deterministic: lookup and store paths agree. For
+// kern_meta, the per-call scope memo (runTool resolves the routed call ONCE
+// and stashes it) is consulted first, so the classifier runs once per call
+// instead of once per gate/key/fingerprint consumer; the memo is valid only
+// for the (name, args) that stashed it, which is exactly the (name, args)
+// every consumer passes. A ctx without a scope (direct runTool callers,
+// tests) falls through to the plain computation — byte-identical output.
+func resolveCacheCall(ctx context.Context, name string, args map[string]any) (string, map[string]any) {
 	if name != "kern_meta" {
 		return name, args
+	}
+	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok && scope.routed.routedSet {
+		return scope.routed.name, scope.routed.args
 	}
 	routed, rargs := classifyMetaRequest(argString(args, "request"))
 	if sub, ok := args["args"].(map[string]any); ok {
@@ -138,7 +147,7 @@ func resolveCacheCall(name string, args map[string]any) (string, map[string]any)
 	return routed, rargs
 }
 
-func cacheableForCall(name string, args map[string]any) bool {
+func cacheableForCall(ctx context.Context, name string, args map[string]any) bool {
 	if !toolCacheable(name) {
 		return false
 	}
@@ -146,7 +155,7 @@ func cacheableForCall(name string, args map[string]any) bool {
 		return false // R3: embedding-model-dependent output is never cached
 	}
 	if name == "kern_meta" {
-		routed, rargs := resolveCacheCall(name, args)
+		routed, rargs := resolveCacheCall(ctx, name, args)
 		if argBool(rargs, "semantic") {
 			return false // R3: embedding-model-dependent output is never cached (passthrough included)
 		}
@@ -177,9 +186,10 @@ var fileFingerprintArgs = map[string][]string{
 // A file that cannot be resolved or stat'd contributes "missing" so lookup
 // and store still agree on a stable key. Returns "" for tools not in
 // fileFingerprintArgs — a byte-identical key for the index-backed trio and
-// pure-arg tools (zero behavior change).
-func fileFingerprint(name string, args map[string]any, root string) string {
-	name, args = resolveCacheCall(name, args) // kern_meta: fingerprint the ROUTED file-backed tool (F-1)
+// pure-arg tools (zero behavior change). ctx carries the kern_meta routed-call
+// memo (see resolveCacheCall).
+func fileFingerprint(ctx context.Context, name string, args map[string]any, root string) string {
+	name, args = resolveCacheCall(ctx, name, args) // kern_meta: fingerprint the ROUTED file-backed tool (F-1)
 	argNames, ok := fileFingerprintArgs[name]
 	if !ok {
 		return ""
@@ -217,10 +227,10 @@ func fileFingerprint(name string, args map[string]any, root string) string {
 // only). json.Marshal sorts map keys, so the JSON form is canonical for
 // free. The identity is passed in because lookup and store must agree on the
 // same string.
-func cacheKeyFor(name string, args map[string]any, root, identity string) string {
+func cacheKeyFor(ctx context.Context, name string, args map[string]any, root, identity string) string {
 	// kern_meta keys key the ROUTED call, so the fingerprint and schema
 	// version match what a direct call to the same tool would use (F-1/R3).
-	name, args = resolveCacheCall(name, args)
+	name, args = resolveCacheCall(ctx, name, args)
 	// Serve-time and identity-only conditional-fetch concerns (etag, no_cache,
 	// agent_id, task) are stripped by the ONE shared helper
 	// (etag.StripServeTimeArgs — the same F8 set the working-set registry key
@@ -236,7 +246,7 @@ func cacheKeyFor(name string, args map[string]any, root, identity string) string
 	// replays the stale cached summary and answers "unchanged" for changed
 	// content. Index-backed tools never reach the fingerprint (empty string →
 	// byte-identical key).
-	if fp := fileFingerprint(name, args, root); fp != "" {
+	if fp := fileFingerprint(ctx, name, args, root); fp != "" {
 		_, _ = fmt.Fprintf(h, "\x00%s", fp)
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -257,12 +267,21 @@ func indexIdentityString(id *index.IndexIdentity) string {
 // proofs (ContentRoot + tree OID + git commit; BuiltAt excluded, see
 // indexIdentityString — R4). An index whose content changed produces a
 // different identity → a different cache key → stale entries can never be
-// served (F2/F6). It peeks the session without triggering a build: pure-arg
-// tools (kern_mask_pii, ...) must never force an index build just to compute
-// a cache key. "noindex" when no index is cached for this root.
+// served (F2/F6). The identity is validated with the session's rate-limited
+// staleness probe before it is trusted (C2/F1, ADR-0012): on a watcher-less
+// host nothing else breaks the D1 replay cycle, so a hit keyed to a stale
+// index would replay a response that no longer matches the tree. A stale
+// probe invalidates the session's cached index (never builds), the identity
+// reports "noindex", the lookup misses, and the handler rebuilds. It still
+// never triggers a build itself: pure-arg tools (kern_mask_pii, ...) pay at
+// most one probe per cooldown window, not a build. "noindex" when no index
+// is cached for this root.
 func (s *Server) cacheIndexIdentity(root string) string {
 	sess, ok := s.sessCache.Peek(root)
 	if !ok {
+		return "noindex"
+	}
+	if !sess.ProbeFresh() {
 		return "noindex"
 	}
 	ix, ok := sess.CachedIndex()
@@ -281,7 +300,7 @@ func (s *Server) cacheIndexIdentity(root string) string {
 func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]any) (string, bool) {
 	root := resolveRoot(argString(args, "root"))
 	identity := s.cacheIndexIdentity(root)
-	key := toolCacheKeyPrefix + cacheKeyFor(name, args, root, identity)
+	key := toolCacheKeyPrefix + cacheKeyFor(ctx, name, args, root, identity)
 	// In-process LRU first, then the disk store (source of truth).
 	var e toolCacheEntry
 	if got, ok := lruGet(key); ok {
@@ -377,7 +396,7 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 			e.Prov = s.rawProvenance(scope.ix, nil)
 		}
 	}
-	key := toolCacheKeyPrefix + cacheKeyFor(name, args, root, identity)
+	key := toolCacheKeyPrefix + cacheKeyFor(ctx, name, args, root, identity)
 	lruPut(key, e)
 	_ = cache.Store(key, e)
 }

@@ -175,6 +175,43 @@ func TestSymbolRegexCacheBehavior(t *testing.T) {
 	}
 }
 
+// TestSearchPatternKindAndHint pins 6.4: SearchPatternKind recognizes the
+// documented kind prefixes ("func" for "func handle*") and KindGlobHint
+// fires only for no-kind-prefix patterns — a bare `handle*` misses methods
+// (kind "method"), so the no-match hint teaches the kind-glob syntax.
+func TestSearchPatternKindAndHint(t *testing.T) {
+	cases := []struct {
+		pattern string
+		kind    string
+		hint    bool
+	}{
+		{"func handle*", "func", false},
+		{"method handle*", "method", false},
+		{"struct User", "struct", false},
+		{"interface Reader", "interface", false},
+		{"const Max", "const", false},
+		{"var x", "var", false},
+		{"class Foo", "class", false},
+		{"handle*", "", true},
+		{"handle", "", true},
+		{"zzzznope", "", true},
+		{"", "", false},
+		{"notakind foo", "", true}, // unknown prefix: not a kind prefix, hint fires with the valid kinds
+	}
+	for _, tc := range cases {
+		if got := SearchPatternKind(tc.pattern); got != tc.kind {
+			t.Errorf("SearchPatternKind(%q) = %q, want %q", tc.pattern, got, tc.kind)
+		}
+		hint := KindGlobHint(tc.pattern)
+		if tc.hint && !strings.Contains(hint, "kind prefix") {
+			t.Errorf("KindGlobHint(%q) must fire, got %q", tc.pattern, hint)
+		}
+		if !tc.hint && hint != "" {
+			t.Errorf("KindGlobHint(%q) = %q, want empty", tc.pattern, hint)
+		}
+	}
+}
+
 // TestSearchConcurrent exercises the cache mutex and shared regexes under
 // parallel Search calls (run with -race in CI).
 func TestSearchConcurrent(t *testing.T) {

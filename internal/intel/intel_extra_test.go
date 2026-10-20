@@ -124,25 +124,6 @@ func TestLargeFunctionsThreshold(t *testing.T) {
 	}
 }
 
-func TestArchitectureOverview(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"lib/lib.go":       srcLib,
-		"client/client.go": srcClient,
-	})
-	ix, err := index.Build(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := AnalyzeArchitecture(ix)
-	if len(a.Communities) == 0 {
-		t.Fatal("expected at least one community in the architecture view")
-	}
-	big := a.Communities[0]
-	if big.Size < 3 {
-		t.Errorf("expected the main community to span the call graph, got %+v", big)
-	}
-}
-
 func TestParseLogCountsPerCommit(t *testing.T) {
 	out := "a.go\nb.go\n\nb.go\nc.go\n\na.go\n"
 	counts, commits := parseLog(out)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	graphcli "github.com/JayveerPrajapati/kern/internal/graphcli"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
@@ -25,20 +26,11 @@ func runMetaExit(t *testing.T, rest []string) (code int) {
 	return 0
 }
 
-// runReposExit recovers the fatalUsage sentinel from runRepos.
-func runReposExit(t *testing.T, rest []string) (code int) {
+// runReposExit returns the exit code from graphcli.RunRepos (the
+// entrypoint recovers the fatalUsage sentinel internally).
+func runReposExit(t *testing.T, rest []string) int {
 	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			if e, ok := r.(exitError); ok {
-				code = e.code
-				return
-			}
-			panic(r)
-		}
-	}()
-	runRepos(rest)
-	return 0
+	return graphcli.RunRepos(rest)
 }
 
 // runGuideExit recovers the fatalUsage sentinel from runGuide.

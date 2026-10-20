@@ -106,3 +106,32 @@ func TestNormalizeRelPath(t *testing.T) {
 		}
 	}
 }
+
+// TestLooksLikeCredentialFile pins the F5 secret-file blocklist: the classic
+// credential basenames are refused, ordinary source files are not.
+func TestLooksLikeCredentialFile(t *testing.T) {
+	t.Parallel()
+	yes := []string{
+		".env", ".env.local", "prod.env", "config.env",
+		"id_rsa", "id_rsa.old", "id_ed25519", "id_dsa.bak",
+		"id_rsa_github", "id_ed25519_work", "id_rsa_fake",
+		"server.key", "cert.pem", "bundle.p12", "keystore.pfx",
+		".netrc", ".pgpass", ".htpasswd", ".npmrc", ".pypirc",
+		"/home/user/project/.env", "secrets/../.env",
+	}
+	for _, p := range yes {
+		if !LooksLikeCredentialFile(p) {
+			t.Errorf("LooksLikeCredentialFile(%q) = false, want true", p)
+		}
+	}
+	no := []string{
+		"main.go", "README.md", ".gitignore", "package.json",
+		"environment.go", "envelope.txt", "provider.ts", "",
+		"id_rsax", "grid_rsa.go",
+	}
+	for _, p := range no {
+		if LooksLikeCredentialFile(p) {
+			t.Errorf("LooksLikeCredentialFile(%q) = true, want false", p)
+		}
+	}
+}

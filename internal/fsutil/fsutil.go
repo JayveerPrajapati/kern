@@ -9,6 +9,43 @@ import (
 	"strings"
 )
 
+// LooksLikeCredentialFile reports whether p's basename matches a
+// credential-shaped name — the classic secret files an agent must never have
+// served to it through MCP read tools (kern_compact_file, kern_evidence).
+// The set is deliberately conservative: a false positive (a source file
+// renamed to id_rsa) costs one rename, while a false negative serves a real
+// credential. The .pem extension covers key bundles that carry private
+// material; SSH public .pub keys are blocked too, conservatively.
+func LooksLikeCredentialFile(p string) bool {
+	base := filepath.Base(filepath.Clean(p))
+	if base == "" || base == "." || base == "/" {
+		return false
+	}
+	// Dotenv files: .env, .env.local, prod.env, config.env, ...
+	if base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env") {
+		return true
+	}
+	switch base {
+	case ".netrc", ".pgpass", ".htpasswd", ".npmrc", ".pypirc":
+		return true
+	}
+	// SSH key material (id_rsa, id_ed25519, and suffixed variants — both dot
+	// suffixes like id_rsa.old and underscore suffixes like id_rsa_github are
+	// common key-naming conventions).
+	for _, k := range []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"} {
+		if base == k || strings.HasPrefix(base, k+".") || strings.HasPrefix(base, k+"_") {
+			return true
+		}
+	}
+	// Key and certificate material.
+	for _, ext := range []string{".pem", ".key", ".p12", ".pfx"} {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // WriteFileAtomic writes data to path atomically: write to a temp file in the
 // same directory, set permissions, then rename over the target.
 func WriteFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
@@ -210,4 +247,23 @@ func ConfinePath(root, p, errPrefix string) (string, error) {
 		return "", fmt.Errorf("%s: file %q escapes workspace root", errPrefix, p)
 	}
 	return abs, nil
+}
+
+// MinimalExecEnv builds the minimal environment for a spawned child process
+// (compile steps, per-mutant test runs). The full operator environment
+// (secrets) must never reach the child: pass only PATH (to find the
+// toolchain), HOME (go's default GOCACHE/GOPATH/GOENV locations), TMPDIR (go
+// temp files) and the Go toolchain vars the child genuinely needs when the
+// operator set them (custom GOPATH/GOCACHE/GOMODCACHE/GOPROXY/GOTOOLCHAIN).
+// GOENV itself is deliberately excluded: go reads it from
+// $HOME/.config/go/env via HOME, so `go env -w` settings survive the
+// narrowing.
+func MinimalExecEnv() []string {
+	env := []string{"PATH=" + os.Getenv("PATH")}
+	for _, k := range []string{"HOME", "TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN"} {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }

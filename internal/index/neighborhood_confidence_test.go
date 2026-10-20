@@ -85,7 +85,7 @@ public class App {
 		t.Fatal("Neighborhood(App.run) not found")
 	}
 	for _, e := range g.Edges {
-		if e.To == "FileStore.fetch" {
+		if e.Reference == "FileStore.fetch" {
 			if e.Confidence != confLow || e.ConfidenceLabel != confAmbiguous {
 				t.Errorf("virtual edge = %s/%s; want low/AMBIGUOUS", e.Confidence, e.ConfidenceLabel)
 			}
@@ -96,8 +96,12 @@ public class App {
 }
 
 func findEdge(g GraphResult, from, to string) *GraphEdge {
+	names := map[string]string{}
+	for _, node := range g.Nodes {
+		names[node.ID] = node.Name
+	}
 	for i := range g.Edges {
-		if g.Edges[i].From == from && g.Edges[i].To == to {
+		if names[g.Edges[i].From] == from && (names[g.Edges[i].To] == to || g.Edges[i].Reference == to) {
 			return &g.Edges[i]
 		}
 	}

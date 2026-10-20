@@ -6,14 +6,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// GraphText renders the one-line call-graph neighbourhood (definition,
-// callers, callees) of symbol — the text form `kern graph` prints. The index
-// renders "no symbol found: <symbol>" into the output without an error
-// return; callers detect that sentinel.
-func GraphText(ix *index.Index, symbol string) string {
-	return ix.Graph(symbol)
-}
-
 // Neighborhood returns the structured graph neighbourhood of symbol. It
 // errors when the symbol does not exist in ix.
 func Neighborhood(ix *index.Index, symbol string) (index.GraphResult, error) {

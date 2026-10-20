@@ -43,13 +43,13 @@ func TestGraphCypherDeterministic(t *testing.T) {
 	if got := strings.Count(out, "CREATE (:Symbol"); got != 3 {
 		t.Errorf("expected 3 node CREATE statements, got %d:\n%s", got, out)
 	}
-	full := `CREATE (:Symbol {name: "pkg.FuncA", kind: "func", file: "a.go", line: 3});`
+	full := `CREATE (:Symbol {id: "pkg.FuncA", name: "pkg.FuncA", kind: "func", file: "a.go", line: 3, resolution: "", candidates: []});`
 	if !strings.Contains(out, full) {
 		t.Errorf("node CREATE must emit all four properties:\n%s", out)
 	}
-	fa := strings.Index(out, `CREATE (:Symbol {name: "pkg.FuncA"`)
-	fb := strings.Index(out, `CREATE (:Symbol {name: "pkg.FuncB"`)
-	fq := strings.Index(out, `CREATE (:Symbol {name: "pkg.Quoted\"Name"`)
+	fa := strings.Index(out, `CREATE (:Symbol {id: "pkg.FuncA"`)
+	fb := strings.Index(out, `CREATE (:Symbol {id: "pkg.FuncB"`)
+	fq := strings.Index(out, `CREATE (:Symbol {id: "pkg.Quoted\"Name"`)
 	if fa < 0 || fb < 0 || fq < 0 {
 		t.Fatalf("missing node CREATE statement in:\n%s", out)
 	}
@@ -61,9 +61,9 @@ func TestGraphCypherDeterministic(t *testing.T) {
 	if got := strings.Count(out, "MATCH (a:Symbol"); got != 4 {
 		t.Errorf("expected 4 edge MATCH/CREATE statements, got %d:\n%s", got, out)
 	}
-	ab := strings.Index(out, `MATCH (a:Symbol {name: "pkg.FuncA"}), (b:Symbol {name: "pkg.FuncB"}) CREATE (a)-[:CALLS`)
-	ba := strings.Index(out, `MATCH (a:Symbol {name: "pkg.FuncB"}), (b:Symbol {name: "pkg.FuncA"}) CREATE (a)-[:CALLS`)
-	bq := strings.Index(out, `MATCH (a:Symbol {name: "pkg.FuncB"}), (b:Symbol {name: "pkg.Quoted\"Name"}) CREATE (a)-[:CALLS`)
+	ab := strings.Index(out, `MATCH (a:Symbol {id: "pkg.FuncA"}), (b:Symbol {id: "pkg.FuncB"}) CREATE (a)-[:CALLS`)
+	ba := strings.Index(out, `MATCH (a:Symbol {id: "pkg.FuncB"}), (b:Symbol {id: "pkg.FuncA"}) CREATE (a)-[:CALLS`)
+	bq := strings.Index(out, `MATCH (a:Symbol {id: "pkg.FuncB"}), (b:Symbol {id: "pkg.Quoted\"Name"}) CREATE (a)-[:CALLS`)
 	if ab < 0 || ba < 0 || bq < 0 {
 		t.Fatalf("missing edge MATCH/CREATE statement in:\n%s", out)
 	}

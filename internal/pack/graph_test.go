@@ -69,8 +69,8 @@ func TestBuildGraphSubgraph(t *testing.T) {
 	}
 	// Neighbourhood of Public: definition + caller UsePublic + callee inner.
 	nodeSet := map[string]bool{}
-	for _, n := range gb.Nodes {
-		nodeSet[n] = true
+	for _, node := range gb.Graph.Nodes {
+		nodeSet[node.Name] = true
 	}
 	for _, want := range []string{"Public", "UsePublic", "inner"} {
 		if !nodeSet[want] {
@@ -95,8 +95,12 @@ func TestBuildGraphSubgraph(t *testing.T) {
 			t.Errorf("signature %q does not name node %q", sig, id)
 		}
 	}
-	if sig := gb.Signatures["Public"]; !strings.Contains(sig, "lib/lib.go") {
-		t.Errorf("Public signature %q lacks file:line", sig)
+	for _, node := range gb.Graph.Nodes {
+		if node.Name == "Public" {
+			if sig := gb.Signatures[node.ID]; !strings.Contains(sig, "lib/lib.go") || !strings.Contains(sig, "func Public() string") {
+				t.Errorf("Public signature %q lacks exact signature and file:line", sig)
+			}
+		}
 	}
 	// Fingerprint matches the on-disk tree hashes.
 	if len(gb.Files) != len(graphFixture) {

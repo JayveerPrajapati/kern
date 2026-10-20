@@ -405,20 +405,28 @@ func (e *Engine) symbolSet(byID map[string]domain.Node, roots []domain.Symbol) [
 	seen := map[string]bool{}
 	var out []domain.Symbol
 	add := func(s domain.Symbol) {
-		if s.Qualified == "" || seen[s.Qualified] {
+		identity := s.ID
+		if identity == "" {
+			identity = s.Qualified
+		}
+		if identity == "" || seen[identity] {
 			return
 		}
-		seen[s.Qualified] = true
+		seen[identity] = true
 		out = append(out, s)
 	}
 	for _, r := range roots {
 		add(r)
+		identity := r.ID
+		if identity == "" {
+			identity = r.Qualified
+		}
 		// Direct callees (depth 1): edges out of the root symbol.
-		for _, to := range e.directCallees(r.Qualified) {
+		for _, to := range e.directCallees(identity) {
 			// Cross-package callees are recorded by import-qualified
 			// reference whose simple name can be ambiguous; resolve via the
 			// caller's imports instead of dropping the edge (A3).
-			if rid, ok := e.graph.ResolveEdgeEndpoint(to, r.Qualified); ok {
+			if rid, ok := e.graph.ResolveEdgeEndpoint(to, identity); ok {
 				to = rid
 			}
 			if n, ok := byID[to]; ok && n.Symbol != nil {
@@ -426,7 +434,7 @@ func (e *Engine) symbolSet(byID map[string]domain.Node, roots []domain.Symbol) [
 			}
 		}
 		// Direct callers.
-		for _, c := range e.graph.WhoCalls(r.Qualified) {
+		for _, c := range e.graph.WhoCalls(identity) {
 			if c.Symbol != nil {
 				add(*c.Symbol)
 			}
@@ -439,7 +447,8 @@ func (e *Engine) symbolSet(byID map[string]domain.Node, roots []domain.Symbol) [
 func (e *Engine) directCallees(symbol string) []string {
 	var out []string
 	for _, edge := range e.graph.Edges {
-		if edge.Kind == "calls" && edge.From == symbol {
+		from, _ := e.graph.ResolveEdgeEndpoint(edge.From, edge.From)
+		if edge.Kind == "calls" && (edge.From == symbol || from == symbol) {
 			out = append(out, edge.To)
 		}
 	}
@@ -452,8 +461,12 @@ func (e *Engine) dependencyEdges(scope string, roots []domain.Symbol) []domain.E
 	region := map[string]bool{}
 	var rootIDs []string
 	for _, r := range roots {
-		rootIDs = append(rootIDs, r.Qualified)
-		region[r.Qualified] = true
+		identity := r.ID
+		if identity == "" {
+			identity, _ = e.graph.ResolveNodeID(r.Qualified)
+		}
+		rootIDs = append(rootIDs, identity)
+		region[identity] = true
 	}
 	for _, id := range rootIDs {
 		for _, n := range e.graph.WhatDependsOn(id) {

@@ -1,11 +1,10 @@
 ---
 name: kern-safe-change
-description: >-
-Use for ANY code change in a kern-managed repo - edit, refactor, rename, add a feature, or prep a PR. Runs the governed change lifecycle: pre-edit blast radius check, sandboxed AST mutation, change-firewall gates G0-G39 via kern check, auto-repair via kern fix, then cryptographic CI receipt and deterministic commit message.
+description: Use for ANY code change in a kern-managed repo - edit, refactor, rename, add a feature, or prep a PR. Runs the governed change lifecycle - pre-edit blast radius check, surgical edits guided by the call graph, verification gates via kern verify, auto-repair via kern heal, then a tamper-evident evidence bundle and a deterministic commit message.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-safe-change/SKILL.md; copies must stay identical — run kern setup to sync -->
-<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-6 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
+<!-- note: some tools named in this runbook are full-catalog (KERN_MCP_FULL=1) tools; the 7-role squad reaches them in-process, external agents on the default-29 surface should use kern_meta to route or set KERN_MCP_FULL=1 -->
 
 # Kern Safe Change & Refactor Runbook
 
@@ -16,8 +15,8 @@ Use this skill whenever modifying code, refactoring symbols, adding features, or
 ## The Governed Change Lifecycle
 
 ```
-[Pre-Edit Risk Check] ➔ [Sandboxed Mutation] ➔ [Change-Firewall Gates] ➔ [Auto-Repair] ➔ [Receipt & Commit]
-      (kern_pre_edit)       (ast_transform)         (kern check)          (kern fix)      (kern ci / commitmsg)
+[Pre-Edit Risk] ➔ [Implement] ➔ [Verify Gates] ➔ [Auto-Repair] ➔ [Evidence & Commit]
+  (kern_impact)              (kern_verify)      (kern_heal)     (kern evidence, git commit)
 ```
 
 ---
@@ -28,69 +27,67 @@ Before modifying any file or symbol, assess the blast radius and risk score:
 ```json
 {"request": "pre-edit risk check for modifying internal/index/engine.go"}
 ```
-* Or call `kern_pre_edit(file="path/to/file.go", symbol="TargetSymbol")`.
-* Check if callers are covered by tests. If not, synthesize a test first using `kern_synthesize_test`.
+* Run `kern_impact` on the change to map blast radius before editing.
+* Check if callers are covered by tests. If not, synthesize a test first using `kern_heal` or a targeted `kern_verify` run.
 
 ---
 
 ## Step 2: Implement Changes
 
 Perform the necessary code modifications:
-- For surgical structural changes or renames, prefer `kern_ast_transform` or `kern_rename` over naive regex search/replace.
-- For semantic merges, verify with `kern_semantic` (action=diff).
+- For surgical structural changes or renames, prefer `kern_graph`/`kern_context` analysis over naive regex search/replace.
+- For semantic merges, verify with `kern_verify` (types=build,test) after the change.
 - Build, test and lint through kern, not bash. Pass your own command to `kern_verify` and ask only for what you need: `kern_verify command="go test ./..." output=summary` (output: `summary` counts and failing tests, `failures`, `tail:N`, `lines:A-B`, `full`). The full run is kept, so `kern_verify anchor=<id> output=lines:A-B` re-slices it without rerunning. CLI: `kern verify --command "go test ./..." --output summary`.
 
 ---
 
-## Step 3: Run the Native Change-Firewall (`kern check`)
+## Step 3: Run the Verification Gate (`kern verify`)
 
-Verify staged changes against native change-firewall gates G0–G39 (G3 secret detection, G2 architecture/boundary enforcement, G6 duplication):
+Verify the change against the security and architecture gates (secret detection, boundary enforcement, LOC caps):
 
 ```bash
-kern check
+kern verify security,architecture
+```
+With changes staged (the pre-commit tier):
+```bash
+kern verify --staged security,architecture
 ```
 Or in JSON format for automated parsing:
 ```bash
-kern check --json
+kern verify security,architecture --json
 ```
 
-If any gate fails:
-- Review the specific violated gate (e.g., G3 secret detection, G2 boundary breach, G30 gofmt drift).
+If any check fails:
+- Review the specific failing check in the report (e.g. hardcoded secrets, boundary breach, architecture drift).
 
 ---
 
-## Step 4: Auto-Repair in Sandbox (`kern fix`)
+## Step 4: Auto-Repair in Sandbox (`kern heal`)
 
-If violations are repairable, trigger the sandboxed auto-repair loop:
+If failures are repairable, trigger the sandboxed self-correction loop:
 ```bash
-kern fix
+kern heal --task "<what the code is meant to do>"
 ```
-Re-run `kern check` to verify that all gates pass cleanly.
+Re-run `kern verify security,architecture` to confirm the gates pass cleanly.
 
 ---
 
-## Step 5: Generate Cryptographic Receipt & Commit
+## Step 5: Evidence Bundle & Commit
 
-1. **Generate CI Receipt**:
+1. **Export a Tamper-Evident Evidence Bundle**:
    ```bash
-   kern ci
+   kern evidence export --full-state
    ```
-2. **Verify Receipt Authenticity**:
+2. **Commit with a Deterministic Message**:
    ```bash
-   kern verify-receipt
-   ```
-3. **Generate Conventional Commit Message**:
-   Call `kern_commitmsg` to produce a deterministic, standardized commit message based on the AST diff:
-   ```json
-   {"request": "generate commit message for staged changes"}
+   kern commit
    ```
 
 ---
 
 ## Executable Helper Script
 
-Run pre-edit risk checks and change-firewall validation before and after changes:
+Run pre-edit risk checks and verification gates before and after changes:
 ```bash
 ./scripts/pre_check.sh <optional_file_or_symbol>
 ```
-

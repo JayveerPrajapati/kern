@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/checks/diffgate"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/diffgate"
+	dgate "github.com/JayveerPrajapati/kern/internal/diffgate"
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // repoRoot returns the repository root (the directory containing go.mod),
@@ -54,14 +54,14 @@ func TestG35_CatalogDriftRealRepo(t *testing.T) {
 	}
 	catalog.WithDiffgateTools()
 	chk := diffgate.NewCatalogDriftCheck(root, diffgate.ToolInfos())
-	res, err := chk.Run(context.Background(), domain.ChangeRequest{RepositoryRoot: root})
+	res, err := chk.Run(context.Background(), dgate.ChangeRequest{RepositoryRoot: root})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Status == domain.StatusError {
+	if res.Status == dgate.StatusError {
 		t.Fatalf("status = ERROR: %s (catalog must be wired at construction)", res.Error)
 	}
-	if res.Status != domain.StatusPass {
+	if res.Status != dgate.StatusPass {
 		t.Fatalf("status = %s, want PASS (MCP catalog and plugin must agree); findings: %+v", res.Status, res.Findings)
 	}
 	if len(res.Findings) != 0 {
@@ -78,7 +78,7 @@ func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
 	// -o into a temp dir: without it, a successful build (or one killed
 	// mid-link) writes an artifact into the repo root.
 	outPath := filepath.Join(t.TempDir(), "compilefail_proof")
-	cmd := exec.Command("go", "build", "-tags", "compilefail_proof", "-o", outPath, "./internal/blueprint/checks/diffgate/compilefail_proof/")
+	cmd := exec.Command("go", "build", "-tags", "compilefail_proof", "-o", outPath, "./internal/diffgate/compilefail_proof/")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOPROXY=off") // hermetic: resolve from the warm module cache only
 	out, err := cmd.CombinedOutput()
@@ -101,8 +101,8 @@ func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
 func TestMCPToolCatalogSizeCap(t *testing.T) {
 	t.Parallel()
 	const (
-		capFloor = 110 // guards accidental truncation of the catalog (137→117 deliberate: 8-family consolidation −26 +6, 2026-10-01)
-		capCeil  = 160 // deliberate growth budget (~1.1x of 145, 2026-09-17)
+		capFloor = 28 // guards accidental truncation of the catalog (110→32 deliberate: 2026-10-18 surface slim)
+		capCeil  = 60 // deliberate growth budget (~1.9x of 32, 2026-10-18)
 	)
 	n := len(ToolNames())
 	if n < capFloor {

@@ -40,7 +40,14 @@ func Synthesize(ctx context.Context, h Hooks, args map[string]any) (string, erro
 
 	var ix *index.Index
 	if autoGap && h.LoadIndex != nil {
-		ix, _ = h.LoadIndex(ctx, root)
+		// The index load is not optional for auto-gap: swallowing the error
+		// here used to collapse "index failed to load" into the engine's
+		// generic missing-source error, hiding the actual fix (run kern index).
+		var ierr error
+		ix, ierr = h.LoadIndex(ctx, root)
+		if ierr != nil {
+			return "", fmt.Errorf("synthesize test: auto-gap needs the project index, but it failed to load: %w — run `kern index` and retry", ierr)
+		}
 	}
 
 	req := synthtest.Request{

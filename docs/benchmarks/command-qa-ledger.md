@@ -1,5 +1,9 @@
 # kern_commands.md — one-command-at-a-time QA ledger
 
+**Status:** [historical] — dated one-command QA records; each entry is a
+logged verification of the binary revision it names, not a reproducible live
+protocol.
+
 Per the sweep rule: exactly one kern command per pass, exercised with real
 invocations, findings + views appended before the next command is selected.
 

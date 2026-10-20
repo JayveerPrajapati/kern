@@ -46,6 +46,16 @@ func TestPluginShadowExemptionParity(t *testing.T) {
 		"pwd\nmake", "git status\nrm -rf /tmp/x",
 		"git log --oneline | head -5", "echo $(whoami)", "ls; rm -rf /tmp/x", "grep foo file.go > out.txt",
 		"sed -n '1,5p' file.go", "cat source.go", "make", "go test ./...",
+		// everyday passthrough (item 4): stat-only diff/show, branch/remote
+		// listing, rev-parse, wc, add/commit without the unsafe flags
+		"git diff --stat", "git diff --name-only HEAD~1", "git show --stat HEAD",
+		"git branch --show-current", "git branch -a", "git rev-parse HEAD", "git remote -v",
+		"git remote get-url origin", "wc -l README.md", "git add main.go", "git add -A",
+		"git commit -m fix", "git commit -am wip", "git commit --amend",
+		"git diff --stat -p", "git diff -U5 --stat", "git show --stat HEAD:main.go",
+		"git branch newname", "git branch -D old", "git remote add x url",
+		"git add -f .env", "git add -Af .env", "git commit --no-verify -m x",
+		"git commit -n -m x", "git commit -nm x", "git push",
 	}
 
 	dir := t.TempDir()
@@ -85,9 +95,20 @@ func TestPluginShadowExemptionParity(t *testing.T) {
 		t.Fatal("predicate block end marker '// Raw read:' not found in plugin")
 	}
 	block := src[start:end]
-	// Strip the two TS type annotations so plain node can eval the block.
+	// Strip the TS type annotations so plain node can eval the block.
 	block = strings.Replace(block, "async function isSimpleRead(filePath: string): Promise<boolean>", "async function isSimpleRead(filePath)", 1)
 	block = strings.Replace(block, "function isSimpleCommand(cmd: string): boolean {", "function isSimpleCommand(cmd) {", 1)
+	block = strings.Replace(block, "function isStatOnlyGit(sub: string, args: string[]): boolean {", "function isStatOnlyGit(sub, args) {", 1)
+	// The classifier helpers carry their own annotations; strip those too so the
+	// extraction stays node-evaluable (quote-aware tokenizer, prefix state
+	// machine, newline segmenting — the classifier hardening).
+	block = strings.Replace(block, "function shellTokenize(seg: string): string[] {", "function shellTokenize(seg) {", 1)
+	block = strings.Replace(block, "function stripPrefixTokens(tokens: string[]): string[] {", "function stripPrefixTokens(tokens) {", 1)
+	block = strings.Replace(block, "function splitCommandSegments(cmd: string): string[] {", "function splitCommandSegments(cmd) {", 1)
+	block = strings.Replace(block, "function contentIntentHit(cmd: string, depth = 0): boolean {", "function contentIntentHit(cmd, depth = 0) {", 1)
+	block = strings.Replace(block, "const toks: string[] = []", "const toks = []", 1)
+	block = strings.Replace(block, "const segs: string[] = []", "const segs = []", 1)
+	block = strings.Replace(block, "let quote: string | null = null", "let quote = null", -1)
 
 	probes := struct {
 		Commands []string `json:"commands"`
@@ -131,8 +152,15 @@ process.stdout.write(JSON.stringify(out));
 	}
 
 	// --- Guard side: same probes through the shell hook ---
+	// KERN_GUARD_MODE=deny: this test pins the EXEMPTION classification
+	// (what runs raw vs what is governed), which must match the TS
+	// predicates. The guard's default auto-redirects
+	// governed commands (exit 0 with kern output) — that third state would
+	// read as "exempt" here and falsely diverge from the TS classifier.
+	// The redirect path itself is pinned separately in
+	// TestKernGuardAutoRedirect.
 	guardExempt := func(stdin string) bool {
-		code, _ := runGuard(t, script, stdin, nil)
+		code, _ := runGuard(t, script, stdin, []string{"KERN_GUARD_MODE=deny"})
 		return code == 0
 	}
 	cmdPayload := func(cmd string) string {
@@ -220,13 +248,13 @@ func unescapeQuoted(s string) string {
 	return strings.ReplaceAll(s, `\"`, `"`)
 }
 
-// Contract Y message parity: the plugin's shadow BLOCK messages (read/grep/
+// Message parity: the plugin's shadow BLOCK messages (read/grep/
 // bash) must be byte-identical to the guard's `reason=` strings in
 // kern-guard.sh — the opencode plugin throws exactly what the shell guard
 // prints on stderr, so a redirect the agent sees is the same on every agent.
 // Both assets are read from disk and unescaped the way their runtime would;
 // any drift (edited redirect text on one side only) fails CI. The glob reason
-// is deliberately NOT asserted: the glob shadow is unchanged by Contract Y
+// is deliberately NOT asserted: the glob shadow is unchanged
 // (it still falls back raw and never throws), so it has no plugin message to
 // pin.
 func TestPluginShadowGuardMessageParity(t *testing.T) {
@@ -262,7 +290,9 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 	}
 
 	// Plugin side: every throw new Error("...") inside the shadow built-ins
-	// block (the read/grep/glob/bash handlers), unescaped like JS would.
+	// block (the read/grep/glob/bash handlers), unescaped like JS would. The
+	// bash throw is a TEMPLATE literal (F1: it embeds the denied command at
+	// runtime via ${clippedCmd}), so it is extracted separately below.
 	shadowStart := strings.Index(src, "// --- Shadow built-ins:")
 	if shadowStart < 0 {
 		t.Fatal("shadow built-ins marker '// --- Shadow built-ins:' not found in plugin")
@@ -274,8 +304,7 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 	shadow := src[shadowStart:shadowEnd]
 	pluginThrows := map[string][]string{}
 	throwRe := regexp.MustCompile(`new Error\("((?:[^"\\]|\\.)*)"\)`)
-	for _, m := range throwRe.FindAllStringSubmatch(shadow, -1) {
-		msg := unescapeQuoted(m[1])
+	classify := func(msg string) {
 		switch {
 		case strings.Contains(msg, "kern_compact_file"):
 			pluginThrows["read"] = append(pluginThrows["read"], msg)
@@ -287,8 +316,39 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 			pluginThrows["glob"] = append(pluginThrows["glob"], msg)
 		}
 	}
+	for _, m := range throwRe.FindAllStringSubmatch(shadow, -1) {
+		classify(unescapeQuoted(m[1]))
+	}
+	// The read/grep deny messages are TEMPLATE literals now
+	// — they splice the subject hash at runtime so the operator can mint an
+	// allow-once for the exact denied subject (kern guard allow <hash>).
+	// Extract EVERY template throw, not just the first.
+	throwTplRe := regexp.MustCompile("new Error\\(`([^`]*)`\\)")
+	for _, m := range throwTplRe.FindAllStringSubmatch(shadow, -1) {
+		classify(unescapeQuoted(m[1]))
+	}
+	// Runtime splices are normalized to sentinels so the byte-identity check
+	// pins the TEMPLATE, not the splice: the (former) bash command splice
+	// (guard '$blocked_cmd', plugin '${clippedCmd}'), the subject
+	// hash (guard '$subj_hash', plugin '${subjHash}'), and the
+	// per-command replacement (guard '$repl', plugin '${repl}').
+	cmdSpliceRe := regexp.MustCompile(`'\$(?:blocked_cmd|\{clippedCmd\})'`)
+	hashSpliceRe := regexp.MustCompile(`\$\{subjHash\}|\$subj_hash`)
+	replSpliceRe := regexp.MustCompile(`\$\{repl\}|\$repl`)
+	normalize := func(s string) string {
+		s = cmdSpliceRe.ReplaceAllString(s, "'<cmd>'")
+		s = hashSpliceRe.ReplaceAllString(s, "<hash>")
+		return replSpliceRe.ReplaceAllString(s, "<repl>")
+	}
 
-	// Contract Y pins read/grep/bash parity byte-for-byte.
+	// Parity pins read/grep/bash parity byte-for-byte. The uniform
+	// guard directive (superseding the advisory
+	// posture) restored the bash deny: the plugin's content-intent branch
+	// throws the guard's own reason text, so byte-parity holds again. One
+	// opencode nuance: only content-intent commands hit the deny there —
+	// non-content commands still run through the governed kern build path
+	// (hook hosts have no governed runner, which is why the guard denies
+	// every non-exempt command on those hosts).
 	for _, tool := range []string{"read", "grep", "bash"} {
 		msgs := pluginThrows[tool]
 		if len(msgs) == 0 {
@@ -296,27 +356,88 @@ func TestPluginShadowGuardMessageParity(t *testing.T) {
 			continue
 		}
 		for _, m := range msgs {
-			if m != guardReasons[tool] {
+			if normalize(m) != normalize(guardReasons[tool]) {
 				t.Errorf("plugin %s block message diverges from guard reason:\n plugin: %s\n guard:  %s", tool, m, guardReasons[tool])
 			}
 		}
 	}
-	// The glob shadow is out of Contract Y scope: it keeps its raw fallback
+	// bash parity is pinned by the loop above; the deny's allow-once
+	// consumption and the advisory-free governed path are pinned by
+	// TestPluginBashDenyContract.
+	// The glob shadow is out of scope: it keeps its raw fallback
 	// and must NOT grow a throw (a glob block message would contradict the
 	// metacharacter raw-fallback path that still serves raw).
 	if len(pluginThrows["glob"]) != 0 {
-		t.Errorf("glob shadow unexpectedly throws %d message(s) — Contract Y leaves glob on its raw-fallback path", len(pluginThrows["glob"]))
+		t.Errorf("glob shadow unexpectedly throws %d message(s) — the parity contract leaves glob on its raw-fallback path", len(pluginThrows["glob"]))
 	}
 }
 
-// Contract Y content-intent classifier: the bash shadow's first-token
-// classifier is extracted verbatim from the shipped plugin and executed under
-// node. This pins the exact token list (drift fails CI) and the honest
-// first-token-only signal: a command that STARTS with a content-intent token
-// (grep -rn ...) matches and blocks with the guard's message, while a
-// `cd X && grep ...` compound has first token "cd" — not matched at the
-// classifier — and keeps flowing to the governed kern build path
-// (execution-class routing preserved, exactly the `cd X && npm test` case).
+// TestPluginBashDenyContract pins the uniform fail-closed guard (operator
+// directive, superseding the advisory posture): the bash
+// shadow's content-intent branch DENIES — throws the guard's own reason
+// (byte-parity pinned by TestPluginShadowGuardMessageParity) after
+// consuming an operator allow-once, and the governed kern build path no
+// longer prefixes any advisory banner. A source-level pin: the execute
+// body depends on opencode plugin context (tool registration, the $
+// shell transport) that a node harness cannot faithfully host; the
+// routing predicates themselves stay behaviorally pinned by
+// TestPluginShadowExemptionParity above.
+func TestPluginBashDenyContract(t *testing.T) {
+	pluginSrc, err := pluginFS.ReadFile("assets/plugin/kern.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pluginSrc)
+	start := strings.Index(src, "if (contentIntentHit(cmd)) {")
+	if start < 0 {
+		t.Fatal("bash shadow marker 'if (contentIntentHit(cmd))' not found in plugin")
+	}
+	if !strings.Contains(src, "function contentIntentHit(cmd") {
+		t.Error("contentIntentHit helper not defined in plugin — position-independent classifier missing")
+	}
+	end := strings.Index(src, "// Subagent kern access")
+	if end < 0 || end < start {
+		t.Fatal("bash shadow end marker '// Subagent kern access' not found in plugin")
+	}
+	bash := src[start:end]
+
+	// The deny contract: content-intent throws the guard's reason, after
+	// consuming an operator allow-once for the exact command.
+	for _, want := range []string{
+		"if (await consumeAllowOnce(cmd))",
+		"throw new Error(`kern guard: blocked",
+		"not in the passthrough set",
+		"Operator allow-once: kern guard allow ${subjHash}",
+		// the governed path returns unprefixed — no advisory banner
+		"if (exitCode === 0) return text",
+	} {
+		if !strings.Contains(bash, want) {
+			t.Errorf("bash deny contract missing %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"[kern advisory] direct file read",
+		"let advisory",
+		"advisory + ",
+	} {
+		if strings.Contains(bash, banned) {
+			t.Errorf("bash deny contract still contains advisory remnant %q", banned)
+		}
+	}
+}
+
+// Content-intent classifier (position-independent hardening): the bash shadow's
+// position-independent classifier (stripEnvPrefixes + splitCommandSegments +
+// contentIntentHit) is extracted verbatim from the shipped plugin and
+// executed under node. This pins the exact token list (drift fails CI) and
+// the position-independent semantics: a command where ANY &&/||/;/|-separated
+// segment (after env/sudo/env prefix stripping, one level inside an
+// `sh -c "..."` wrapper) runs a content-reading tool MATCHES — direct
+// (grep -rn ...), env-prefixed (ZZZ=1 grep ...), sudo/env-wrapped, compound
+// (`cd X && grep ...`), piped (`git log | head -5`) and `sh -c "cat ..."`
+// forms all block with the guard's message — while execution-class commands
+// without a content-intent segment (`cd X && npm test`, `go build`, inline
+// python) keep flowing to the governed kern build path.
 func TestPluginShadowContentIntentClassifier(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skipf("node not found: %v — skipping content-intent classifier check", err)
@@ -326,28 +447,56 @@ func TestPluginShadowContentIntentClassifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(pluginSrc)
-	m := regexp.MustCompile(`const contentIntents = new Set\((\[[^\]]*\])\)`)
-	hit := m.FindStringSubmatch(src)
-	if hit == nil {
-		t.Fatal("content-intent classifier 'const contentIntents = new Set([...])' not found in plugin")
+	start := strings.Index(src, "function shellTokenize")
+	if start < 0 {
+		t.Fatal("content-intent classifier 'function shellTokenize' not found in plugin")
 	}
+	end := strings.Index(src, "// Raw read: verbatim file contents")
+	if end < 0 || end < start {
+		t.Fatal("content-intent classifier end marker '// Raw read:' not found in plugin")
+	}
+	block := src[start:end]
+	// Strip the TS type annotations so plain node can eval the helpers.
+	block = strings.Replace(block, "function shellTokenize(seg: string): string[] {", "function shellTokenize(seg) {", 1)
+	block = strings.Replace(block, "function stripPrefixTokens(tokens: string[]): string[] {", "function stripPrefixTokens(tokens) {", 1)
+	block = strings.Replace(block, "function splitCommandSegments(cmd: string): string[] {", "function splitCommandSegments(cmd) {", 1)
+	block = strings.Replace(block, "function contentIntentHit(cmd: string, depth = 0): boolean {", "function contentIntentHit(cmd, depth = 0) {", 1)
+	block = strings.Replace(block, "const toks: string[] = []", "const toks = []", 1)
+	block = strings.Replace(block, "const segs: string[] = []", "const segs = []", 1)
+	block = strings.Replace(block, "let quote: string | null = null", "let quote = null", -1)
 
 	nodeScript := filepath.Join(t.TempDir(), "content-intents.js")
-	nodeSrc := `const contentIntents = new Set(` + hit[1] + `);
-const firstTok = (cmd) => cmd.split(/\s+/)[0];
+	nodeSrc := block + `
 const out = {
-  tokens: [...contentIntents].sort(),
-  hasGrep: contentIntents.has("grep"),
-  hasFind: contentIntents.has("find"),
-  hasCat: contentIntents.has("cat"),
-  // Direct content-intent command: first token IS the content-intent tool.
-  bareGrepFirstTok: firstTok("grep -rn foo ."),
-  bareGrepMatches: contentIntents.has(firstTok("grep -rn foo .")),
-  // Compound forms: first token is "cd" — the honest signal that keeps
-  // execution-class compounds (cd X && npm test) flowing to kern build.
-  cdCompoundFirstTok: firstTok("cd X && grep foo"),
-  cdCompoundMatches: contentIntents.has(firstTok("cd X && grep foo")),
-  cdNpmCompoundMatches: contentIntents.has(firstTok("cd X && npm test")),
+  tokens: [...CONTENT_INTENT_CMDS].sort(),
+  direct: contentIntentHit("grep -rn foo ."),
+  envPrefix: contentIntentHit("ZZZ=1 grep -c x doctor_test.go"),
+  bypassEnvPrefix: contentIntentHit("KERN_BYPASS=1 grep -n x f"),
+  sudoPrefix: contentIntentHit("sudo cat /etc/hosts"),
+  envWrapper: contentIntentHit("env cat /etc/hosts"),
+  cdCompound: contentIntentHit("cd X && grep foo"),
+  cdNpmCompound: contentIntentHit("cd X && npm test"),
+  shWrap: contentIntentHit('sh -c "cat .gitignore"'),
+  pipeSegment: contentIntentHit("git log --oneline | head -5"),
+  goBuild: contentIntentHit("go build ./..."),
+  pythonInline: contentIntentHit("python3 -c \"print('cat')\""),
+  multiline: contentIntentHit("echo hi\ncat /etc/passwd"),
+  sudoFlagValue: contentIntentHit("sudo -u nobody cat /etc/hosts"),
+  envFlag: contentIntentHit("env -i cat /etc/hosts"),
+  niceValueFlag: contentIntentHit("nice -n 5 cat /etc/hosts"),
+  xargsWrap: contentIntentHit("xargs cat < list"),
+  watchWrap: contentIntentHit("watch -n 2 cat /etc/hosts"),
+  timeWrap: contentIntentHit("time cat /etc/hosts"),
+  nohupWrap: contentIntentHit("nohup cat /etc/hosts"),
+  straceOut: contentIntentHit("strace -o /dev/null cat /etc/hosts"),
+  absPath: contentIntentHit("/bin/cat /etc/passwd"),
+  relPath: contentIntentHit("./cat file"),
+  shLcBundle: contentIntentHit("sh -lc 'cat /etc/passwd'"),
+  bashIcBundle: contentIntentHit("bash -ic 'cat /etc/passwd'"),
+  quotedEnvValue: contentIntentHit("A='b c' grep -n x f"),
+  backslashObfuscation: contentIntentHit("ca\\t /etc/passwd"),
+  sudoEnvAssign: contentIntentHit("sudo VAR=1 cat /etc/hosts"),
+  gitCommitQuotedWords: contentIntentHit("git commit -m 'cat and grep as words only'"),
 };
 process.stdout.write(JSON.stringify(out));
 `
@@ -359,15 +508,35 @@ process.stdout.write(JSON.stringify(out));
 		t.Fatalf("node classifier harness failed: %v", err)
 	}
 	var res struct {
-		Tokens             []string `json:"tokens"`
-		HasGrep            bool     `json:"hasGrep"`
-		HasFind            bool     `json:"hasFind"`
-		HasCat             bool     `json:"hasCat"`
-		BareGrepFirstTok   string   `json:"bareGrepFirstTok"`
-		BareGrepMatches    bool     `json:"bareGrepMatches"`
-		CdCompoundFirstTok string   `json:"cdCompoundFirstTok"`
-		CdCompoundMatches  bool     `json:"cdCompoundMatches"`
-		CdNpmCompoundMatch bool     `json:"cdNpmCompoundMatches"`
+		Tokens               []string `json:"tokens"`
+		Direct               bool     `json:"direct"`
+		EnvPrefix            bool     `json:"envPrefix"`
+		BypassEnvPrefix      bool     `json:"bypassEnvPrefix"`
+		SudoPrefix           bool     `json:"sudoPrefix"`
+		EnvWrapper           bool     `json:"envWrapper"`
+		CdCompound           bool     `json:"cdCompound"`
+		CdNpmCompound        bool     `json:"cdNpmCompound"`
+		ShWrap               bool     `json:"shWrap"`
+		PipeSegment          bool     `json:"pipeSegment"`
+		GoBuild              bool     `json:"goBuild"`
+		PythonInline         bool     `json:"pythonInline"`
+		Multiline            bool     `json:"multiline"`
+		SudoFlagValue        bool     `json:"sudoFlagValue"`
+		EnvFlag              bool     `json:"envFlag"`
+		NiceValueFlag        bool     `json:"niceValueFlag"`
+		XargsWrap            bool     `json:"xargsWrap"`
+		WatchWrap            bool     `json:"watchWrap"`
+		TimeWrap             bool     `json:"timeWrap"`
+		NohupWrap            bool     `json:"nohupWrap"`
+		StraceOut            bool     `json:"straceOut"`
+		AbsPath              bool     `json:"absPath"`
+		RelPath              bool     `json:"relPath"`
+		ShLcBundle           bool     `json:"shLcBundle"`
+		BashIcBundle         bool     `json:"bashIcBundle"`
+		QuotedEnvValue       bool     `json:"quotedEnvValue"`
+		BackslashObfuscation bool     `json:"backslashObfuscation"`
+		SudoEnvAssign        bool     `json:"sudoEnvAssign"`
+		GitCommitQuotedWords bool     `json:"gitCommitQuotedWords"`
 	}
 	if err := json.Unmarshal(out, &res); err != nil {
 		t.Fatalf("unmarshal node classifier output %q: %v", out, err)
@@ -377,21 +546,53 @@ process.stdout.write(JSON.stringify(out));
 	if strings.Join(res.Tokens, ",") != strings.Join(wantTokens, ",") {
 		t.Errorf("content-intent tokens = %v, want %v", res.Tokens, wantTokens)
 	}
-	for name, got := range map[string]bool{"grep": res.HasGrep, "find": res.HasFind, "cat": res.HasCat} {
+	if !res.Direct {
+		t.Error("direct content-intent command (grep -rn foo .) no longer classified — classifier must block direct content reads")
+	}
+	// Position-independent semantics: env prefixes, compound segments, sh -c wrappers and
+	// pipe segments must ALL classify as content-intent now (the old
+	// whole-command first-token-only match let them flow to the governed
+	// path and read content).
+	for name, got := range map[string]bool{
+		"env-prefixed (ZZZ=1 grep ...)":          res.EnvPrefix,
+		"env-prefixed (KERN_BYPASS=1 grep ...)":  res.BypassEnvPrefix,
+		"sudo-prefixed (sudo cat ...)":           res.SudoPrefix,
+		"env-wrapped (env cat ...)":              res.EnvWrapper,
+		"compound (cd X && grep foo)":            res.CdCompound,
+		`sh -c wrapper (sh -c "cat .gitignore")`: res.ShWrap,
+		"pipe segment (git log | head -5)":       res.PipeSegment,
+		"multiline (line 2 cat)":                 res.Multiline,
+		"sudo flag+value (sudo -u nobody cat)":   res.SudoFlagValue,
+		"env flag (env -i cat)":                  res.EnvFlag,
+		"nice value flag (nice -n 5 cat)":        res.NiceValueFlag,
+		"xargs (xargs cat < list)":               res.XargsWrap,
+		"watch (watch -n 2 cat)":                 res.WatchWrap,
+		"time (time cat)":                        res.TimeWrap,
+		"nohup (nohup cat)":                      res.NohupWrap,
+		"strace output flag (strace -o f cat)":   res.StraceOut,
+		"absolute path (/bin/cat)":               res.AbsPath,
+		"relative path (./cat)":                  res.RelPath,
+		"sh -lc bundle":                          res.ShLcBundle,
+		"bash -ic bundle":                        res.BashIcBundle,
+		"quoted env value (A='b c' grep)":        res.QuotedEnvValue,
+		"backslash obfuscation (ca\\t)":          res.BackslashObfuscation,
+		"sudo env assignment (sudo VAR=1 cat)":   res.SudoEnvAssign,
+	} {
 		if !got {
-			t.Errorf("contentIntents missing %q — classifier no longer blocks direct content-intent commands", name)
+			t.Errorf("classifier regression: %s no longer classified as content-intent — position-independent matching broken", name)
 		}
 	}
-	if res.BareGrepFirstTok != "grep" || !res.BareGrepMatches {
-		t.Errorf("first-token classification of %q = %q (matches=%v), want first token 'grep' matching the set", "grep -rn foo .", res.BareGrepFirstTok, res.BareGrepMatches)
-	}
-	// The verbatim classifier is first-token-only: `cd X && grep foo` does NOT
-	// match (first token "cd") and continues to the governed kern build path.
-	if res.CdCompoundFirstTok != "cd" || res.CdCompoundMatches {
-		t.Errorf("first-token classification of %q = %q (matches=%v), want first token 'cd' NOT matching (governed build path)", "cd X && grep foo", res.CdCompoundFirstTok, res.CdCompoundMatches)
-	}
-	if res.CdNpmCompoundMatch {
-		t.Error("`cd X && npm test` first token matched the content-intent set — execution-class compounds must keep flowing to kern build")
+	// Execution-class commands WITHOUT a content-intent segment keep flowing
+	// to the governed kern build path.
+	for name, got := range map[string]bool{
+		"cd X && npm test":             res.CdNpmCompound,
+		"go build ./...":               res.GoBuild,
+		"python3 -c inline":            res.PythonInline,
+		"git commit -m 'quoted words'": res.GitCommitQuotedWords,
+	} {
+		if got {
+			t.Errorf("%s classified as content-intent — execution-class commands must keep flowing to kern build", name)
+		}
 	}
 }
 

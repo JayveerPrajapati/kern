@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/clietag"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
@@ -130,8 +131,9 @@ func runRetrieve(rest []string) {
 	rendered := retrieval.Render(res)
 	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
 	// <E>)` and exit 0; otherwise the render plus an `etag: <hash>` footer
-	// on stderr.
-	if cliEtagResponse("kern_retrieve", f.etag, rendered) {
+	// on stderr. The index freshness stamp (3.2-C) precedes it on stderr.
+	clietag.PrintIndexStamp(ix)
+	if clietag.EtagResponse("kern_retrieve", f.etag, rendered) {
 		return
 	}
 	fmt.Println(rendered)

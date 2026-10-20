@@ -461,6 +461,15 @@ func TestFetchAnchorMissing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not found error, got: %v", err)
 	}
+	// QA 2026-10-15 finding 8: a not-found anchor must cross-hint the OTHER
+	// anchor system — sandbox-retained anchors are recovered via the same
+	// tool's slice= argument, never via kern_fetch_raw_anchor.
+	msg := err.Error()
+	for _, want := range []string{"slice=anchor-deadbeef:tail:N", "slice=anchor-deadbeef:lines:A-B", "process-local"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("not-found error missing hint %q:\n%s", want, msg)
+		}
+	}
 }
 
 func TestValidScope(t *testing.T) {

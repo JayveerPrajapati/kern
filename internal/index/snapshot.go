@@ -15,7 +15,7 @@ import (
 // It is monotonic: bumping it invalidates every older snapshot (LoadSnapshot
 // fails loudly on a mismatch instead of silently misreading the file), so
 // consumers can never confuse two incompatible snapshot layouts.
-const SnapshotSchemaVersion = 1
+const SnapshotSchemaVersion = 2
 
 // GraphSnapshot is the canonical, self-contained graph snapshot for
 // multi-agent handoff: the graph itself (whole-repo or per-symbol subgraph),

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/execution"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // Mutant describes a single code mutation applied to an AST node.
@@ -31,24 +32,6 @@ type Mutant struct {
 	Replacement string `json:"replacement"`
 	Status      string `json:"status"` // "killed", "survived", "compile_error", "untested"
 	TestOutput  string `json:"test_output,omitempty"`
-}
-
-// minimalExecEnv builds the environment for the spawned per-mutant test
-// process. The full operator environment (secrets) must never reach the
-// child: pass only PATH (to find the toolchain), HOME (go's default
-// GOCACHE/GOPATH/GOENV locations), TMPDIR (go temp files) and the Go
-// toolchain vars `go test` genuinely needs when the operator set them
-// (custom GOPATH/GOCACHE/GOMODCACHE/GOPROXY/GOTOOLCHAIN). GOENV itself is
-// deliberately excluded: go reads it from $HOME/.config/go/env via HOME, so
-// `go env -w` settings survive the narrowing.
-func minimalExecEnv() []string {
-	env := []string{"PATH=" + os.Getenv("PATH")}
-	for _, k := range []string{"HOME", "TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN"} {
-		if v := os.Getenv(k); v != "" {
-			env = append(env, k+"="+v)
-		}
-	}
-	return env
 }
 
 // Options configures mutation testing execution.
@@ -409,7 +392,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		// code through the MCP surface. Mirror the host-sampler allowlist
 		// (PATH, HOME, TMPDIR) plus the Go toolchain vars `go test` genuinely
 		// needs when the operator set them.
-		cmd.Env = minimalExecEnv()
+		cmd.Env = fsutil.MinimalExecEnv()
 		out, testErr := cmd.CombinedOutput()
 		cancel()
 
