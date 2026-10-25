@@ -26,7 +26,7 @@ func kiroHooksPath() string {
 // overwritten wholesale when it differs and left untouched when byte-identical,
 // so re-running setup is idempotent.
 func wireKiroHooks() Status {
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{Agent: "kiro-hooks", Installed: false, Path: kiroHooksPath(), Note: err.Error()}
 	}
@@ -38,13 +38,13 @@ func wireKiroHooks() Status {
 				"name":    "kern-guard-read",
 				"trigger": "PreToolUse",
 				"matcher": "read",
-				"action":  map[string]any{"type": "command", "command": guardPath},
+				"action":  map[string]any{"type": "command", "command": guardCmd},
 			},
 			map[string]any{
 				"name":    "kern-guard-shell",
 				"trigger": "PreToolUse",
 				"matcher": "shell",
-				"action":  map[string]any{"type": "command", "command": guardPath},
+				"action":  map[string]any{"type": "command", "command": guardCmd},
 			},
 		},
 	}

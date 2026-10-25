@@ -92,7 +92,7 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
 	// One-time memo: confirm whether the store still holds legacy per-key
@@ -382,7 +382,7 @@ func (s *LogStore) Delete(ctx context.Context, key string) error {
 // Callers must serialize concurrent writers (e.g. the audit log's
 // cross-process lock) so the rename does not orphan in-flight appends.
 func (s *LogStore) RewriteAll(ctx context.Context, entries []Entry) error {
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
 	var out []byte

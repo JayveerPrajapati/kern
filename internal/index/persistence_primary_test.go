@@ -48,6 +48,8 @@ func TestSaveIsSQLitePrimaryOnly(t *testing.T) {
 // identical data through the SQLite store, and Stale() must behave on the
 // loaded index (fresh on an unchanged tree, stale after an edit).
 func TestSaveLoadRoundTripSQLitePrimary(t *testing.T) {
+	// Mutate-then-recheck on one instance: memo off.
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Hello() {}\nfunc helper() { Hello() }\n"), 0o644); err != nil {
 		t.Fatal(err)

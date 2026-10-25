@@ -14,7 +14,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
-	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // cli.go implements the `kern setup` command family (wire/check/verify/
@@ -424,14 +423,13 @@ func runSetup(rest []string) {
 }
 
 // mcpSurfaceTip is the ONE discoverability hint printed after a successful
-// wire run and in setup --check (F4): wired agents see the default MCP
-// surface, and the full catalog is opt-in via KERN_MCP_FULL. The counts are
-// derived from the toolsurface registry and the tool catalog — never
-// literals — so the tip tracks the code instead of drifting like the old
-// "22-tool" banner did.
+// wire run and in setup --check (F4): wired agents see the full catalog by
+// default (standing mandate 2026-10-23). The count is derived from the
+// toolsurface registry — never a literal — so the tip tracks the code
+// instead of drifting like the old "22-tool" banner did.
 func mcpSurfaceTip() string {
-	return fmt.Sprintf("tip: wired agents see the %d-tool default MCP surface; set KERN_MCP_FULL=1 to advertise all %d (see docs/mcp/protocol.md)",
-		len(toolsurface.Default), len(catalog.ToolNames()))
+	return fmt.Sprintf("tip: wired agents see the full %d-tool default MCP catalog; KERN_MCP_PHASE filters to the active phase and KERN_MCP_SINGLE_TOOL=1 collapses to kern_meta alone (see docs/mcp/protocol.md)",
+		len(toolsurface.Default))
 }
 
 // verifyMCP spawns the kern-mcp command configured in .mcp.json and checks it

@@ -21,28 +21,43 @@ import (
 //
 // Configuration:
 //   - KERN_MCP_WATCH=0 disables the watch entirely (default: enabled).
-//   - KERN_MCP_WATCH_INTERVAL sets the poll interval in seconds (default 5;
-//     invalid or non-positive values fall back to 5).
+//   - KERN_MCP_WATCH_INTERVAL sets the poll interval in seconds (invalid
+//     or non-positive values fall back to the default).
+//   - KERN_MCP_WATCH_INTERVAL_MS sets the poll interval in milliseconds
+//     (LOW-11; takes precedence over the seconds form so test harnesses
+//     can request tight loops). Invalid or non-positive values fall back
+//     to the default.
+//
+// The default is 30s (LOW-11: at 5s the walk cost ~6% of one core idle —
+// a resident server polled ~0.3s of work every 5s; 30s keeps indexes warm
+// while cutting idle CPU below 2% of one core. Freshness still self-heals:
+// a tool call on a stale root rebuilds through the on-demand path).
 //
 // Shutdown: the loop stops on ctx cancellation (the stdio and HTTP serve
 // paths pass their signal context) or on Server.Close, which closes watchStop
 // and drains an in-flight rebuild for up to watchShutdownTimeout. No rebuild
 // starts after the stop signal, and the watch goroutine never leaks.
 const (
-	// watchDefaultInterval is the poll interval when KERN_MCP_WATCH_INTERVAL
-	// is unset or invalid.
-	watchDefaultInterval = 5 * time.Second
+	// watchDefaultInterval is the poll interval when neither interval env
+	// var is set to a valid positive value.
+	watchDefaultInterval = 30 * time.Second
 	// watchShutdownTimeout bounds how long Close waits for an in-flight
 	// rebuild to drain, matching the server's existing 5s shutdown style.
 	watchShutdownTimeout = 5 * time.Second
 )
 
-// watchIntervalFromEnv returns the background-watch poll interval from
-// KERN_MCP_WATCH_INTERVAL (seconds, parsed with strconv; invalid or unset
-// values fall back to 5s) — or 0 when KERN_MCP_WATCH=0 disables the watch.
+// watchIntervalFromEnv returns the background-watch poll interval:
+// KERN_MCP_WATCH=0 disables (0); KERN_MCP_WATCH_INTERVAL_MS (milliseconds)
+// takes precedence over KERN_MCP_WATCH_INTERVAL (seconds); invalid or unset
+// values fall back to the 30s default.
 func watchIntervalFromEnv() time.Duration {
 	if os.Getenv("KERN_MCP_WATCH") == "0" {
 		return 0
+	}
+	if v := os.Getenv("KERN_MCP_WATCH_INTERVAL_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
 	}
 	if v := os.Getenv("KERN_MCP_WATCH_INTERVAL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -67,6 +82,11 @@ func watchIntervalFromEnv() time.Duration {
 func (s *Server) StartBackgroundWatch(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		return
+	}
+	if readonlyMode() {
+		return // KERN_READONLY=1: no background watcher — its lock-file
+		// refresh and stale-triggered rebuilds are writes a read-only
+		// session must not make.
 	}
 	s.watchStarted.Do(func() {
 		go s.watchLoop(ctx, interval)

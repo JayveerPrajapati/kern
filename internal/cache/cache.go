@@ -83,6 +83,9 @@ func Hash(b []byte) string {
 
 // Store writes v as JSON under key. Keys are namespaced with a subdir.
 func Store(key string, v any) error {
+	if os.Getenv("KERN_READONLY") == "1" {
+		return nil // read-path persistence suppressed for read-only sessions
+	}
 	// opportunistic GC of the data dir this key lives in (rate-limited to
 	// once an hour by the .maintained-at marker); best-effort and async so a
 	// due GC pass (recursive walk + gzip + trim) never blocks the write.

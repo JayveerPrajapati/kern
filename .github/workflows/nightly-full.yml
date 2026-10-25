@@ -22,21 +22,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/go-env
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
       - uses: ./.github/actions/setup-tools
       # ./... covers every remaining package and the architecture parity
       # gate; vet and the governance gate already run on every PR (ci.yml).
       - name: go test ./... (no -short)
         run: go test -count=1 -timeout 60m ./...
 
-  # Repo-wide governance debt report: the FULL two-pass duplication check
-  # (jscpd over the whole tree) and all-repo architecture findings — the checks
+  # Repo-wide governance debt report: the FULL duplication check and
+  # all-repo architecture findings — the checks
   # the pre-commit hook deliberately skips via --fast. Informational:
   # pre-existing debt does not fail the nightly.
   debt-report:
@@ -44,13 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/go-env
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
       - uses: ./.github/actions/setup-tools
       - name: kern verify (full governance scan)
         run: |
@@ -70,11 +62,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/go-env
       - name: Test install-related packages (no -short)
         shell: bash
         run: go test -timeout 40m ./internal/setup/ ./internal/index/ ./internal/project/ ./internal/doctor/ ./internal/gitblocks/ ./cmd/kern/
@@ -99,11 +87,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/go-env
       - name: Build kern for Windows
         shell: pwsh
         run: |

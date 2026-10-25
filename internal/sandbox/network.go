@@ -134,6 +134,20 @@ var sensitivePathDirs = []string{
 	".netrc",
 }
 
+// absoluteSensitivePaths are SYSTEM credential files a sandboxed command
+// must not read regardless of $HOME (re-eval NEW-1: absolute-path reads
+// bypassed the home-relative blocklist — the claim says sensitive-path
+// reads blocked, and /etc/shadow or the sudoers policy are exactly
+// sensitive). Denied on the macOS Seatbelt path alongside the home-relative
+// list; on Linux the Landlock allowlist never grants /etc credential reads
+// in the first place (its allowlist roots are workspace/temp/cache/home).
+var absoluteSensitivePaths = []string{
+	"/etc/shadow",
+	"/etc/master.passwd",
+	"/etc/sudoers",
+	"/etc/sudoers.d",
+}
+
 // fsConfinementEnabled reports whether sandboxed filesystem read confinement
 // is active (KERN_SANDBOX_FS_CONFINEMENT, default ON). Disabling follows the
 // codebase's "0 disables" convention (KERN_MCP_CACHE, KERN_MCP_WATCH);
@@ -199,25 +213,54 @@ func seatbeltProfileFor(home string, fsConfine bool, allowLoopbackBind bool) str
 		b.WriteString("\n(allow network-bind (local ip \"localhost:*\"))\n(allow network-inbound (local ip \"localhost:*\"))")
 		b.WriteString("\n(allow network-bind (local unix-socket))\n(allow network-inbound (local unix-socket))\n(allow network-outbound (remote unix-socket))")
 	}
-	if fsConfine && home != "" {
-		for _, p := range sensitivePathDirs {
-			joined := filepath.Join(home, p)
-			// Deny BOTH spellings (R2 root cause): the darwin kernel
-			// canonicalizes the ACCESSED path but matches profile subpaths as
-			// written, so a symlinked home (e.g. /var -> /private/var on
-			// macOS) can be accessed under either alias depending on
-			// name-cache state — a one-sided deny lets the other side through
-			// intermittently. The as-written join is always emitted; the
-			// canonical form is added when it resolves and differs (fail-safe:
-			// on resolution error the single as-written deny remains). Denies
-			// are purely additive under the blocklist design.
-			fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", joined)
-			if canon, err := filepath.EvalSymlinks(joined); err == nil && canon != joined {
+	if fsConfine {
+		// System credential files are denied regardless of $HOME (NEW-1):
+		// the home-relative list cannot cover /etc. The canonical spelling
+		// is derived via the PARENT directory because the file itself may
+		// not exist on this platform (/etc/shadow on darwin) while the
+		// as-written deny still must carry its alias — the darwin kernel
+		// canonicalizes the accessed path but matches subpaths as written.
+		for _, p := range absoluteSensitivePaths {
+			fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", p)
+			if canon := canonicalSensitivePath(p); canon != p {
 				fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", canon)
+			}
+		}
+		if home != "" {
+			for _, p := range sensitivePathDirs {
+				joined := filepath.Join(home, p)
+				// Deny BOTH spellings (R2 root cause): the darwin kernel
+				// canonicalizes the ACCESSED path but matches profile subpaths as
+				// written, so a symlinked home (e.g. /var -> /private/var on
+				// macOS) can be accessed under either alias depending on
+				// name-cache state — a one-sided deny lets the other side through
+				// intermittently. The as-written join is always emitted; the
+				// canonical form is added when it resolves and differs (fail-safe:
+				// on resolution error the single as-written deny remains). Denies
+				// are purely additive under the blocklist design.
+				fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", joined)
+				if canon, err := filepath.EvalSymlinks(joined); err == nil && canon != joined {
+					fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", canon)
+				}
 			}
 		}
 	}
 	return b.String()
+}
+
+// canonicalSensitivePath resolves the canonical spelling of an absolute
+// blocklist path, preferring the path itself and falling back to its parent
+// directory plus basename (the parent — e.g. /etc — always exists even when
+// the leaf — e.g. /etc/shadow on darwin — does not). Returns the input
+// unchanged when neither resolves (fail-safe: the as-written deny remains).
+func canonicalSensitivePath(p string) string {
+	if canon, err := filepath.EvalSymlinks(p); err == nil {
+		return canon
+	}
+	if canon, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(canon, filepath.Base(p))
+	}
+	return p
 }
 
 // netIsolationPrefix returns the argv prefix that runs a command with

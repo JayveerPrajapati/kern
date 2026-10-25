@@ -39,6 +39,11 @@ func serveMany(t *testing.T, reqs ...string) []map[string]any {
 	// behavior is exercised by the gate's own tests.
 	s.gate = nil
 	s.preTool = nil
+	// Phase 4.2: the pre-initialize gate (-32002) is real protocol behavior;
+	// this harness models an already-initialized session so tests of tool
+	// semantics don't repeat the handshake. The gate itself is pinned by
+	// TestPreInitializeRequestsRejected.
+	s.initialized.Store(true)
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -432,6 +437,7 @@ func serveSequential(t *testing.T, reqs ...string) []map[string]any {
 	// serveMany); the gate's own tests exercise it explicitly.
 	s.gate = nil
 	s.preTool = nil
+	s.initialized.Store(true) // already-initialized session; see serveMany
 	done := make(chan error, 1)
 	go func() { done <- s.Serve() }()
 	var resps []map[string]any
@@ -552,7 +558,7 @@ func TestEmptyToolNameCleanError(t *testing.T) {
 // surface as an isError TOOL RESULT (naming the argument, the tool and the
 // expected type) — never as the JSON-RPC -32602 protocol error, which stays
 // reserved for F1 unknown/empty tool names (TestUnknownToolReturnsError /
-// TestEmptyToolNameCleanError). The pre-dispatch validateStringArgs call
+// TestEmptyToolNameCleanError). The pre-dispatch validateArgTypes call
 // site was removed in the P1 serve-path consolidation; this pins that the
 // runTool choke point is the single, intentional D6 surface.
 func TestStringArgViolationIsToolErrorNotJSONRPC(t *testing.T) {
@@ -598,3 +604,58 @@ func jsonMust(m map[string]any) string {
 
 // TestLockDispatchUnknownAction pins the kern_lock action dispatcher: an
 // unknown action is rejected up front through the full tools/call path.
+
+// TestPreInitializeRequestsRejected pins the Phase 4.2 pre-initialize gate:
+// requests other than initialize arriving before the initialize handshake
+// are rejected with -32002; after a proper initialize the same request
+// succeeds. Raw server, no harness initialized flip — this is the one test
+// that exercises the un-initialized state through the full stdio dispatch.
+func TestPreInitializeRequestsRejected(t *testing.T) {
+	t.Parallel()
+	reqs := []string{
+		writeReq("tools/list", 1, ""),
+		writeReq("initialize", 2, `{"capabilities":{}}`),
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		writeReq("tools/list", 3, ""),
+	}
+	in := strings.NewReader(strings.Join(reqs, "\n") + "\n")
+	buf := &bytes.Buffer{}
+	s := NewServer(in, buf)
+	defer s.Close()
+	// Tests use temp-dir roots outside the process cwd; confine to everything.
+	s.roots = []string{"/"}
+	s.gate = nil
+	s.preTool = nil
+	if err := s.Serve(); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	var resps []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var r map[string]any
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("unmarshal response %q: %v", line, err)
+		}
+		resps = append(resps, r)
+	}
+	// The notification produces no response: exactly one per request above.
+	if len(resps) != 3 {
+		t.Fatalf("expected 3 responses (pre-init rejection, initialize, post-init tools/list), got %d: %+v", len(resps), resps)
+	}
+	e, ok := resps[0]["error"].(map[string]any)
+	if !ok || e["code"] != float64(-32002) {
+		t.Fatalf("pre-init tools/list: expected -32002 error, got %+v", resps[0])
+	}
+	if _, ok := resps[1]["error"]; ok {
+		t.Fatalf("initialize errored: %+v", resps[1])
+	}
+	if _, ok := resps[2]["error"]; ok {
+		t.Fatalf("post-init tools/list errored: %+v", resps[2])
+	}
+	if _, ok := resps[2]["result"].(map[string]any)["tools"]; !ok {
+		t.Fatalf("post-init tools/list has no tools array: %+v", resps[2])
+	}
+}

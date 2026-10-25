@@ -10,13 +10,19 @@
 // agent cannot call it (it is KERN_MCP_FULL=1 / CLI-gated).
 package toolsurface
 
-// Default is the 29-tool list advertised on a default install
+// Default is the full 32-tool catalog advertised on a default install
 // (toolpolicy.go defaultTools). The first seven are the original core surface;
 // the remaining tools are usage-curated additions. Order is deterministic.
+// The full catalog is the default surface (standing mandate 2026-10-23: agents
+// should use ALL available kern tools — kern_graph and kern_arch moved out of
+// KERN_MCP_FULL-only gating because they are low-risk, cacheable, explore-phase
+// tools with no execution surface). KERN_MCP_FULL=1 and KERN_MCP_PHASE remain
+// available to lift the surface further or phase-filter it.
 var Default = []string{
 	"kern_meta",             // NL router → all sub-tools
 	"kern_explore",          // symbol source + callers/callees + blast radius
 	"kern_impact",           // blast radius of a change
+	"kern_apply",            // safe edit path: transactional apply + verify + rollback
 	"kern_search",           // ranked symbol search
 	"kern_verify",           // unified verification
 	"kern_buddy",            // session onboarding digest
@@ -43,6 +49,8 @@ var Default = []string{
 	"kern_mask_pii",         // locally scan text for secrets/PII
 	"kern_fetch_raw_anchor", // re-read truncated anchor output
 	"kern_review",           // token-optimised code-review context
+	"kern_graph",            // one-call graph context (callers/callees/blast radius)
+	"kern_arch",             // architecture overview from call-graph communities
 }
 
 // Set returns the default surface as a membership map (the shape

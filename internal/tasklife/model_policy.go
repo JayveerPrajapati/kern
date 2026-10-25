@@ -321,7 +321,7 @@ func loadModelPolicyLog(root string) []domain.ModelOutcomeRecord {
 // convention).
 func saveModelPolicyLog(root string, records []domain.ModelOutcomeRecord) error {
 	path := modelPolicyLogPath(root)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(records, "", "  ")

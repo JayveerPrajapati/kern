@@ -23,14 +23,15 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 
 | Metric | Value |
 |---|---|
-| Total tools | 31 |
-| Phases | explore (12), plan (5), edit (2), verify (3), meta (1), cross (8) |
-| Risk levels | low (20), medium (8), high (2), critical (1) |
+| Total tools | 32 |
+| Phases | explore (12), plan (5), edit (3), verify (3), meta (1), cross (8) |
+| Risk levels | low (20), medium (8), high (3), critical (1) |
 
 ## Full catalog (summary)
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
+| `kern_apply` | edit | high | Apply edits transactionally, verify, roll back on failure: the safe edit path. Multi-file {path, content} edits go through a sandboxed compile gate, then scoped `go test` on the modified packages; a verify failure restores the live tree. Returns a deterministic receipt hash. |
 | `kern_arch` | explore | low | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings. |
 | `kern_ast_search` | explore | low | AST-level symbol search over the indexed project (all indexed languages — Go extraction is richest; Java, Python, TS/JS, Rust and more carry symbols, calls, inheritance): patterns like 'func greet', 'type *User*'. |
 | `kern_buddy` | explore | low | Session onboarding digest: the project's conventions, layout, entry points and gotchas distilled from the index, docs, history. |
@@ -358,6 +359,22 @@ Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit 
 | `text` | string | no | The context document containing fenced code blocks |
 
 ## Edit — mutate / execute
+
+### `kern_apply`
+
+- **Phase:** edit
+- **Risk level:** high
+- **Required:** none
+
+Apply edits transactionally, verify, roll back on failure: the safe edit path. Multi-file {path, content} edits go through a sandboxed compile gate, then scoped `go test` on the modified packages; a verify failure restores the live tree. Returns a deterministic receipt hash.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `dry_run` | boolean | no | Preview the unified diff without touching the live tree |
+| `edits` | string | no | Array of {path, content} edits (content = the NEW COMPLETE file; same shape as the refactor transaction edits) |
+| `format` | string | no | Render style: text (default) or json (full result incl. receipt) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+| `test` | boolean | no | Run `go test` on the packages of every modified .go file after the build gate (rollback on failure) |
 
 ### `kern_exec`
 

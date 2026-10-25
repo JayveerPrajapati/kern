@@ -6,14 +6,14 @@
 > [`internal/mcp/toolpolicy.go`](../internal/mcp/toolpolicy.go).
 > If this guide and those files disagree, those files win.
 
-kern ships a **31-tool** MCP catalog and advertises **29 tools by default**. Non-default tools are reachable through `kern_meta` and advertised directly with `KERN_MCP_FULL=1`.
+kern ships a **32-tool** MCP catalog and advertises the **full catalog by default** (standing mandate 2026-10-23: agents use all available tools). Every tool is advertised on `tools/list`; `kern_meta` routes natural language to any of them.
 
 ## Surface
 
 | Mode | Tools |
 |---|---:|
-| Default | 29 |
-| Full (`KERN_MCP_FULL=1`) | 31 |
+| Default | 32 |
+| Full (`KERN_MCP_FULL=1`) | 32 |
 | Router-only (`KERN_MCP_SINGLE_TOOL=1`) | 1 |
 | High-level (`KERN_MCP_HIGH_LEVEL_ONLY=1`) | 6 |
 | Phase filter (`KERN_MCP_PHASE`) | Default/full subset plus `meta` and `cross` tools |
@@ -22,7 +22,7 @@ kern ships a **31-tool** MCP catalog and advertises **29 tools by default**. Non
 
 The default surface is:
 
-`kern_meta`, `kern_explore`, `kern_impact`, `kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`, `kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`.
+`kern_meta`, `kern_explore`, `kern_impact`, `kern_apply`, `kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`, `kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`, `kern_graph`, `kern_arch`.
 
 `kern_exec` is advertised for discoverability only. Every execution attempt still fails closed unless explicitly enabled through `KERN_ALLOW_EXEC` or an allowlist policy.
 
@@ -61,8 +61,6 @@ The default surface is:
 
 | Tool | Purpose |
 |---|---|
-| `kern_arch` | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings. |
-| `kern_graph` | One-call graph context. |
 
 ## Risk model
 
@@ -70,7 +68,7 @@ The default surface is:
 |---|---:|---|
 | low | 20 | Read-only or locally contained operations |
 | medium | 8 | Analysis, planning, memory, docs, verification |
-| high | 2 | Orchestration and self-repair |
+| high | 3 | Orchestration and self-repair |
 | critical | 1 | Governed command execution |
 
 ## Principles

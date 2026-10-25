@@ -17,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/guard"
+	"github.com/JayveerPrajapati/kern/internal/guardhook"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/relay"
@@ -35,17 +36,18 @@ const AuthzVerdictSchemaVersion = 1
 
 // guardFlags are the flags `kern guard` consumes — exactly the dispatch
 // commandFlags["guard"] row (agent-id/file/force/json/precision/range/sarif/
-// task/threshold).
+// task/threshold/require-boundaries).
 type guardFlags struct {
-	agentID   string
-	file      string
-	force     bool
-	json      bool
-	precision string
-	range_    string
-	sarif     bool
-	task      string
-	threshold int
+	agentID           string
+	file              string
+	force             bool
+	json              bool
+	precision         string
+	range_            string
+	requireBoundaries bool
+	sarif             bool
+	task              string
+	threshold         int
 }
 
 // parseGuardFlags replicates the unified cmd/kern parser's semantics for the
@@ -72,6 +74,8 @@ func parseGuardFlags(args []string) (guardFlags, []string, error) {
 			p.SetStr(&f.precision, inline, hasInline)
 		case "--range":
 			p.SetStr(&f.range_, inline, hasInline)
+		case "--require-boundaries":
+			p.SetBool(&f.requireBoundaries, "--require-boundaries", inline, hasInline)
 		case "--sarif":
 			p.SetBool(&f.sarif, "--sarif", inline, hasInline)
 		case "--task":
@@ -86,14 +90,44 @@ func parseGuardFlags(args []string) (guardFlags, []string, error) {
 	return f, p.Rest, p.Err()
 }
 
-// RunGuard executes `kern guard <check|init|allow> [root] [...]` and returns
+// RunGuard executes `kern guard <check|init|allow|hook> [root] [...]` and returns
 // the process exit code (0 ok, 1 runtime failure, 2 usage error, 3 policy
-// denial).
+// denial; the hook subcommand returns its own 0/2 decision codes).
 func RunGuard(rest []string) int {
+	if len(rest) > 0 && rest[0] == "hook" {
+		// The PreToolUse hook needs raw stdio and its deny exit code (2),
+		// not the wrapper's 0 — dispatch before the shared run() path.
+		return run(func() int { return guardhook.Run(os.Stdin, os.Stdout, os.Stderr) })
+	}
+	if len(rest) > 0 && rest[0] == "grant" {
+		// The grant subcommand propagates real exit codes (0 granted /
+		// minted, 3 --check not granted, 1 failure) — dispatch it before
+		// the shared runGuardCLI path like the hook subcommand.
+		return run(func() int { return runGuardGrant(rest[1:]) })
+	}
 	return run(func() int { runGuardCLI(rest); return 0 })
 }
 
 func runGuardCLI(rest []string) {
+	// classify takes an ARBITRARY command string that may contain guard
+	// flags (--json, --file, ...): dispatch it BEFORE parseGuardFlags so the
+	// guard parser never eats a flag that belongs to the classified command.
+	if len(rest) > 0 {
+		switch rest[0] {
+		case "classify":
+			runGuardClassify(rest[1:])
+			return
+		case "pause":
+			runGuardPause(rest[1:])
+			return
+		case "paused":
+			runGuardPaused(rest[1:])
+			return
+		case "resume":
+			runGuardResume(rest[1:])
+			return
+		}
+	}
 	f, args, err := parseGuardFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -140,6 +174,22 @@ func runGuardCLI(rest []string) {
 			fatal("Guard: %v", err)
 		}
 		unconfigured := b == nil
+		if unconfigured && f.requireBoundaries {
+			// Strict configuration is an operator policy, not a warning: when
+			// --require-boundaries is supplied, inference is disabled and the
+			// missing file is a policy denial. Keep the default path backward
+			// compatible (infer + warn) for local development.
+			if f.json {
+				printJSON(map[string]any{
+					"schema_version": KernJSONContractVersion,
+					"error":          "strict_configuration",
+					"message":        "no boundary rules configured (.kern/boundaries.json not found); --require-boundaries disables inference",
+				})
+			} else {
+				fmt.Println("guard: strict configuration denied — no boundary rules configured (.kern/boundaries.json not found); --require-boundaries disables inference")
+			}
+			fatalPolicy("guard: strict configuration denied — no boundary rules configured (.kern/boundaries.json not found); --require-boundaries disables inference")
+		}
 		if b == nil {
 			b = guard.InferBoundaries(ix)
 		}
@@ -282,7 +332,7 @@ func runGuardCLI(rest []string) {
 			fatalPolicy("guard allow: no interactive terminal — an allow-once entry can only be minted by a human; run it in your own terminal")
 		}
 		defer tty.Close()
-		fmt.Fprintf(tty, "kern guard allow\n  hash:    %s\n  subject: %s\nAllow this exact subject ONCE (y/N)? ", hash, subject)
+		fmt.Fprintf(tty, "kern guard allow\n  hash:    %s\n  subject: %s\nType the FULL hash above to allow this exact subject ONCE: ", hash, subject)
 		// 15s deadline (the requireInteractiveApproval precedent): a tty
 		// read with no reader or a distracted operator must never hang the
 		// caller — live-probed as a real 2-minute hang through the governed
@@ -295,8 +345,11 @@ func runGuardCLI(rest []string) {
 		}()
 		select {
 		case answer := <-answerCh:
-			if answer != "y" && answer != "Y" && answer != "yes" {
-				fatalPolicy("guard allow: not confirmed — nothing recorded")
+			// Tty presence alone is weak human-presence evidence (an agent
+			// can allocate a pseudo-terminal). Require the full approval hash:
+			// y/yes or a partial hash never records an allowance.
+			if !guardAllowAnswerMatches(answer, hash) {
+				fatalPolicy("guard allow: confirmation did not match the full hash — nothing recorded")
 			}
 		case <-time.After(15 * time.Second):
 			fatalPolicy("guard allow: timed out after 15s — nothing recorded")
@@ -306,7 +359,7 @@ func runGuardCLI(rest []string) {
 		}
 		fmt.Println("recorded — the next identical subject runs once, then the allowance is inert")
 	default:
-		fatalUsage("usage: kern guard <check|init|allow> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]")
+		fatalUsage("usage: kern guard <check|init|allow|classify|pause|paused|resume> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--require-boundaries] [--agent-id ID --task DESC] — pause: [--scope repo] [--duration 30m] --reason TEXT")
 	}
 
 }
@@ -326,6 +379,14 @@ func publishGuardEvents(root string, violations []guard.Violation, warnNotConfig
 // hatch live in internal/governance (DefaultAgentID, PermissiveMode,
 // EnsureDefaultAgent) — shared with the MCP server so both surfaces govern
 // identically.
+
+// guardAllowAnswerMatches implements the typed human confirmation for
+// `kern guard allow`: only the complete exact approval hash is accepted.
+// Tty presence alone is weak human-presence evidence, and short predictable
+// answers (y/yes) are easy for an agent driving a pseudo-terminal to emit.
+func guardAllowAnswerMatches(answer, hash string) bool {
+	return strings.TrimSpace(answer) == hash
+}
 
 // guardAuthzVerdict runs authorization for guard check and returns the verdict.
 func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (map[string]any, bool) {

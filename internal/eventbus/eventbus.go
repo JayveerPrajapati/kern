@@ -710,7 +710,7 @@ func (b *Bus) appendPersist(ev Event) error {
 	if b.persistPath == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(b.persistPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(b.persistPath), 0o700); err != nil {
 		log.Printf("eventbus: persist mkdir error: %v", err)
 		return err
 	}

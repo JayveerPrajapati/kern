@@ -20,6 +20,13 @@ kern mcp                      # stdio mode
 kern-mcp                      # stdio mode (binary)
 ```
 
+- Frames must be valid JSON-RPC 2.0 envelopes: a line that parses but does
+  not carry `"jsonrpc":"2.0"` exactly is answered `-32600` (invalid request).
+- Lines over **16 MiB** are drained and skipped without killing the session —
+  the same cap the HTTP transport enforces with `413`.
+- Unsolicited JSON-RPC *response* frames sent to the server are ignored
+  silently (JSON-RPC defines no server-side error for them).
+
 ### 1.2 Streamable HTTP (opt-in)
 
 `kern-mcp --http ADDR` serves Streamable HTTP: **POST JSON-RPC messages to `/mcp`**
@@ -98,12 +105,18 @@ Response:
   release version (see `versioning.md`).
 - `listChanged: false` — the tool and prompt lists are static per server lifetime;
   clients should not poll for changes.
-- On the first connection the server kicks off background index preloading;
-  index-backed tools may block briefly until the build finishes.
+- Background index preloading starts at serve start (§8.2), so a fresh
+  root's build is underway before the client's first request; index-backed
+  tools on a never-indexed root may still block until that first build
+  finishes.
 
 ### 3.2 `notifications/initialized`
 
 Sent by the client after a successful `initialize`. No response.
+
+The spec's `notifications/cancelled` (params `{"requestId": ..., "reason": ...}`)
+is accepted as an alias of the JSON-RPC `$/cancelRequest` method and cancels
+the in-flight request with that id.
 
 ### 3.3 `ping`
 
@@ -118,6 +131,15 @@ Sent by the client after a successful `initialize`. No response.
 {"jsonrpc":"2.0","id":3,"method":"tools/list"}
 ```
 → `{"jsonrpc":"2.0","id":3,"result":{"tools":[...]}}`
+
+Payload size (accepted, documented floor): the default 32-tool surface
+serializes to roughly 41KB (~10K tokens) because descriptions, enums,
+and per-property contracts are served in full — schema fidelity is the
+product. `listChanged: false` (§3.1) means a client fetches this once
+per session and caches it; the cost is per connection, not per request.
+Hosts that want a smaller transport payload can shrink the surface
+itself (`KERN_MCP_FULL`, `KERN_MCP_PHASE` — see `README.md`); there is
+no schema-lite mode.
 
 Each tool entry has the shape:
 
@@ -153,8 +175,37 @@ Responses are MCP content blocks:
 
 - Tool output is returned as text content; failures set `isError: true`.
 - Output is PII/secret-masked before return where the tool is configured to do so.
+- No-match contract (automated consumers): a text result that begins with
+  `no symbols matched` or `no strong symbol matches` is an authoritative
+  negative — the tool found nothing for that query. These messages echo the
+  raw query for operator context, so do NOT treat the appearance of the
+  searched-for name in the text as a hit: result lines always begin with a
+  symbol kind (`func `, `type `, `method `, ...), never with `no `.
+  A no-match is a normal result (`isError: false`); the CLI equivalent
+  signals the same state with exit code 1.
+- Argument coercion contract (string-typed properties): a JSON number or
+  boolean is coerced to its canonical string form (plugin/JSON callers
+  legitimately pass numeric strings); `null`, object and array values are
+  rejected as an `isError` naming the argument and the expected type. The
+  path-typed `root` argument is stricter — a JSON number is rejected, never
+  coerced (a numeric root is a client bug, not a path).
 - A `max_output` argument (on tools that support it) raises the output sandbox cap;
   `0` disables it.
+- Every successful `tools/call` result carries a `tokenMetadata` ledger:
+
+  ```json
+  "tokenMetadata": {"tokensUsed": 13, "tokensReturned": 112, "estimatedCost": 0.00125}
+  ```
+
+  `tokensUsed` is the token count of the request (tool name + serialized
+  arguments); `tokensReturned` is the count of the final response text — the
+  exact text the client sees, including already-served pointers and etag
+  short-circuit replies. `estimatedCost` is the estimated **US dollars** for
+  the call: `(tokensUsed + tokensReturned) × rate`, where the rate comes
+  from `KERN_COST_PER_TOKEN` / config `cost_per_token`
+  (default `$0.00001`/token). Counts use the active tokenizer (exact BPE
+  when its data file is available, else the chars-per-kind estimator), so
+  cross-checks against a different tokenizer may differ slightly.
 
 ### 3.6 `prompts/list` and `prompts/get`
 
@@ -195,15 +246,16 @@ sub-tool regardless.
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 31-tool catalog (default is the 29-tool `defaultTools` surface) |
+| `KERN_MCP_FULL=1` | Advertise the full 32-tool catalog (default IS the full 32-tool catalog since 2026-10-23) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
-| `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 6-tool `highLevelTools` set (deprecated; prefer the default 29 or `KERN_MCP_FULL=1`) |
+| `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 6-tool `highLevelTools` set (deprecated; prefer the full catalog) |
 | `KERN_MCP_CATEGORY=<family>` | Advertise only one functional family — one of `analyze`, `agent`, `arch`, `ast`, `context`, `doc`, `edit`, `evidence`, `exec`, `framework`, `graph`, `governance`, `incident`, `lock`, `memory`, `meta`, `mcpbridge`, `optimize`, `org`, `project`, `review`, `task`, `verify` (e.g. `kern_search` is `graph`); `kern_meta` always stays |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |
 | `KERN_MCP_WATCH=0` | Disable the background index watcher |
 | `KERN_MCP_WATCH_INTERVAL` | Index watcher poll interval |
 | `KERN_MCP_TLS_CERT` / `KERN_MCP_TLS_KEY` | TLS material for the HTTP transport |
+| `KERN_PRELOAD=0` | Disable the background index preload at serve start (§8.2) |
 
 ## 6. Governance gates
 
@@ -233,7 +285,7 @@ Every tool carries a `riskLevel` so governed clients can gate access:
 | `high` | Security-sensitive or destructive | 18 |
 | `critical` | Arbitrary command execution or deployment | 4 |
 
-Counts sum to the 31-tool catalog (see `docs/tool-catalog.md`).
+Counts sum to the 32-tool catalog (see `docs/tool-catalog.md`).
 
 ## 7. Phase model
 
@@ -252,6 +304,27 @@ kern setup --verify                       # spawn kern-mcp and check the initial
 `kern setup --verify` is the recommended smoke test: it spawns the configured
 `kern-mcp` and asserts it answers the MCP `initialize` handshake correctly.
 
+### 8.2 Fresh roots and cold start
+
+Index-backed tools resolve a root through `index.LoadOrBuild`: a fresh
+persisted `.kern` index is loaded immediately, and only missing/stale indexes
+trigger a rebuild (debounced cross-process via the index-build lock). On a
+**fresh, never-indexed root** the first build is a full scan and can take
+minutes on a large repo; the server starts that build in the background at
+serve start (§3.1), but the first index-backed tool call may still wait for it
+to finish.
+
+For a deploy, warm the index before the first client connects:
+
+- `kern index <root>` / `kern onboard <root>` — build and persist the index
+  ahead of time; the mandatory pre-step for a fresh repo.
+- `kern-mcp --preindex <root>` — warm-then-serve: build and persist each
+  listed root synchronously before the server accepts connections
+  (repeatable; accepts `PATH` or `NAME=PATH`).
+
+`KERN_PRELOAD=0` disables the serve-start preload; `KERN_MCP_WATCH=0` disables
+the background staleness watcher.
+
 ## 9. Accepted deviations and boundaries
 
 Recorded from the 2026-10-17 production-readiness audit. Each row is a
@@ -264,5 +337,5 @@ the spec's correct error code — never a silent degradation.
 | SSE streaming | Not supported: initialize advertises `streamableHttpCapabilities: {sse: false}`, and a request with an `Accept: text/event-stream` header answers `501 Not Implemented`. | Every kern tool response is a single JSON-RPC result; SSE would add streaming complexity with no current consumer. |
 | `2024-11-05` over HTTP | The legacy protocol version is accepted on the HTTP transport (pinned by `TestHandleHTTPSLegacyProtocolVersionAccepted`). | The 2024-11-05 wire format (JSON-RPC POST over the same method set) is shared with the newer versions; rejecting working legacy clients would break them for no security gain. |
 | Notification responses | HTTP notifications answer `202 Accepted` with an empty body. | Spec-mandated (Streamable HTTP): a notification never receives a response body. |
-| Request-body cap | Bodies over 16 MiB are rejected with `413 Content Too Large` before parsing (pinned by `TestHandleHTTPOversizeBodyRejected`). | A silently-truncated body must not be parsed into a misleading `-32700` parse error; the cap also bounds per-request memory. On stdio, an overlong line is drained and skipped without killing the session. |
+| Request-body cap | Bodies over 16 MiB are rejected with `413 Content Too Large` before parsing (pinned by `TestHandleHTTPOversizeBodyRejected`). | A silently-truncated body must not be parsed into a misleading `-32700` parse error; the cap also bounds per-request memory. On stdio, a line over 16 MiB is drained to its newline and skipped without killing the session (the same cap; pinned by `TestStdioOversizeLineSkipped`). |
 | Protocol-version set | Supported set is `{2024-11-05, 2025-03-26, 2025-06-18}`; an unsupported version answers `412 Precondition Failed`. | Honest negotiation: the server echoes only versions it actually implements. |

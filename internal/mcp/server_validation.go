@@ -7,10 +7,13 @@ import (
 	"os"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
@@ -103,7 +106,7 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 	// results; pre-dispatch governance denials (confinement/allowlist) keep
 	// the isError framing above so the agent sees why the call was blocked.
 	// String-argument shape violations (D6) are enforced ONCE at the runTool
-	// choke point (validateStringArgs) so the two pre-dispatch call sites
+	// choke point (validateArgTypes) so the two pre-dispatch call sites
 	// cannot disagree — and they surface as isError tool results naming the
 	// argument, the tool and the expected type, never as the -32602 protocol
 	// error, which stays reserved for F1 unknown/empty tool names above
@@ -171,6 +174,15 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 				anchor := retainOutput(text)
 				text = mcpserve.SandboxOutputRetained(text, budget, p.Name, anchor)
 			}
+		}
+		// The structured provenance must respect the same per-call output
+		// budget that bounds the content text: the whole envelope — not
+		// just the text — is the agent's context cost, and the count-only
+		// maxResponseSymbols cap let a ~19KB symbols listing ship under a
+		// 500-byte budget. The fixed attestation header always stays; only
+		// the Symbols listing shrinks (capProvenanceSymbolsToFit).
+		if err == nil && budget > 0 {
+			capProvenanceSymbolsToFit(scope.prov, budget)
 		}
 	}
 	result := map[string]any{
@@ -348,7 +360,7 @@ func knownTool(name string) bool {
 // (D6): strings verbatim (trimmed), JSON numbers to their canonical string
 // form ("12345" for 12345) and booleans for the boolean-style string flags
 // (semantic/force/apply read via argBool). null/object/array values for
-// string-typed arguments are rejected before dispatch by validateStringArgs,
+// string-typed arguments are rejected before dispatch by validateArgTypes,
 // so a handler never sees "map[]" or "[]" materialize here.
 func argString(args map[string]any, key string) string {
 	return mcpargs.ArgString(args, key)
@@ -375,23 +387,107 @@ func atoiArg(v string, def int) (int, error) {
 	return mcpargs.AtoiArg(v, def)
 }
 
-// validateStringArgs enforces the documented MCP argument-coercion contract
-// (D6) at the dispatch choke point (runTool). For every property the tool's
-// inputSchema declares with type "string", a present argument must be a JSON
-// string, a JSON number (coerced to its canonical string form by argString —
+// validateNonStringScalar enforces the D6 fail-loud contract for
+// schema-declared integer/number/boolean properties. Lenient accepted forms
+// (exactly the forms ArgBool/AtoiArg/ArgString actually honor): JSON numbers
+// and numeric strings for integer/number; JSON booleans, the strings
+// "true"/"false"/"1"/"0" and the numbers 0/1 for boolean. Everything else —
+// null, arrays, objects, non-numeric strings, floats where an integer is
+// declared — returns a clean error naming the argument, the tool and the
+// expected type, instead of a silent default (limit:{} -> 50) or a silent
+// false (semantic:"yes").
+func validateNonStringScalar(name, key, ptype string, v any) error {
+	switch ptype {
+	case "integer":
+		switch t := v.(type) {
+		case float64:
+			if t != float64(int64(t)) {
+				return fmt.Errorf("argument %q for tool %s: expected an integer, got %v", key, name, t)
+			}
+		case int:
+			// Go-API callers
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				if _, err := strconv.Atoi(s); err != nil {
+					return fmt.Errorf("argument %q for tool %s: expected an integer, got %q", key, name, s)
+				}
+			}
+		case nil:
+			return fmt.Errorf("argument %q for tool %s: expected an integer, got null", key, name)
+		case []string, []any:
+			return fmt.Errorf("argument %q for tool %s: expected an integer, got an array", key, name)
+		case map[string]any:
+			return fmt.Errorf("argument %q for tool %s: expected an integer, got an object", key, name)
+		default:
+			return fmt.Errorf("argument %q for tool %s: expected an integer, got %T", key, name, v)
+		}
+	case "number":
+		switch t := v.(type) {
+		case float64, int:
+			// JSON numbers always decode to float64; int covers Go-API callers.
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				if _, err := strconv.ParseFloat(s, 64); err != nil {
+					return fmt.Errorf("argument %q for tool %s: expected a number, got %q", key, name, s)
+				}
+			}
+		case nil:
+			return fmt.Errorf("argument %q for tool %s: expected a number, got null", key, name)
+		case []string, []any:
+			return fmt.Errorf("argument %q for tool %s: expected a number, got an array", key, name)
+		case map[string]any:
+			return fmt.Errorf("argument %q for tool %s: expected a number, got an object", key, name)
+		default:
+			return fmt.Errorf("argument %q for tool %s: expected a number, got %T", key, name, v)
+		}
+	case "boolean":
+		switch t := v.(type) {
+		case bool:
+		case float64:
+			if t != 0 && t != 1 {
+				return fmt.Errorf("argument %q for tool %s: expected a boolean, got a number", key, name)
+			}
+		case int:
+			if t != 0 && t != 1 {
+				return fmt.Errorf("argument %q for tool %s: expected a boolean, got a number", key, name)
+			}
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				switch strings.ToLower(s) {
+				case "true", "false", "1", "0":
+				default:
+					return fmt.Errorf("argument %q for tool %s: expected a boolean, got %q", key, name, s)
+				}
+			}
+		case nil:
+			return fmt.Errorf("argument %q for tool %s: expected a boolean, got null", key, name)
+		case []string, []any:
+			return fmt.Errorf("argument %q for tool %s: expected a boolean, got an array", key, name)
+		case map[string]any:
+			return fmt.Errorf("argument %q for tool %s: expected a boolean, got an object", key, name)
+		default:
+			return fmt.Errorf("argument %q for tool %s: expected a boolean, got %T", key, name, v)
+		}
+	}
+	return nil
+}
+
+// validateArgTypes enforces the documented MCP argument-coercion contract
+// (D6) at the dispatch choke point (runTool), per the tool's schema types.
+// For type "string" properties: a present argument must be a JSON string, a
+// JSON number (coerced to its canonical string form by argString —
 // plugin/JSON callers legitimately pass numeric strings) or a JSON boolean
-// (the strProp boolean flags like semantic/force/apply round-trip through
-// argBool/argString). null, object and array values are rejected with a clear
-// error naming the argument, the tool and the expected type, so query:{} or
-// query:[...] surface as an isError instead of a silent "no symbols matched".
-// Arguments not declared in the schema (max_output, agent_id, ...) and
-// non-string-typed properties (integer, boolean, object, array) pass through
-// untouched — those already fail loud in their handlers (atoiArg's "invalid
-// integer", for example). Numeric-typed arguments keep their lenient parsing
-// and any existing bounds enforcement unchanged. Unknown tool names validate
-// nothing. The tool's schema is resolved through the init-built toolByName
-// map (O(1)) instead of a linear scan of the ~140-tool catalog per call.
-func validateStringArgs(name string, args map[string]any) error {
+// (the stringly-typed boolean flags round-trip through argBool/argString).
+// null, object and array values are rejected with a clear error naming the
+// argument, the tool and the expected type, so query:{} or query:[...]
+// surface as an isError instead of a silent "no symbols matched". For
+// integer/number/boolean properties, validateNonStringScalar enforces the
+// same fail-loud contract. Arguments not declared in the schema (agent_id,
+// ...) and object/array-typed properties pass through untouched. Unknown
+// tool names validate nothing. The tool's schema is resolved through the
+// init-built toolByName map (O(1)) instead of a linear scan of the
+// ~140-tool catalog per call.
+func validateArgTypes(name string, args map[string]any) error {
 	t, ok := toolByName[name]
 	if !ok {
 		return nil // unknown tool: nothing to validate
@@ -399,12 +495,16 @@ func validateStringArgs(name string, args map[string]any) error {
 	props, _ := t.InputSchema["properties"].(map[string]any)
 	for key, raw := range props {
 		prop, _ := raw.(map[string]any)
-		if prop["type"] != "string" {
-			continue
-		}
+		ptype, _ := prop["type"].(string)
 		v, ok := args[key]
 		if !ok {
 			continue // absent optional argument: nothing to coerce
+		}
+		if ptype != "string" {
+			if err := validateNonStringScalar(name, key, ptype, v); err != nil {
+				return err
+			}
+			continue
 		}
 		switch v.(type) {
 		case string, float64, int, bool:
@@ -431,5 +531,87 @@ func validateStringArgs(name string, args map[string]any) error {
 			return fmt.Errorf("argument %q for tool %s: expected a string, got %T", key, name, v)
 		}
 	}
-	return nil
+	// M#18 (Phase 4.3): a root-less call resolves to the server cwd by design
+	// for hosted sessions (the plugin and MCP hosts start the server inside
+	// the project; the served-ledger etag keys on root-less digests), but a
+	// scratch cwd must fail with a correctable error instead of silently
+	// indexing it. Runs after the type walk (type errors take precedence) and
+	// before the D1 cache gate, R7 slices, and dispatch — so no handler, no
+	// index build, and no state writes touch the scratch directory.
+	cwd, werr := os.Getwd()
+	if werr != nil {
+		cwd = ""
+	}
+	return validateRootFallback(name, props, args, cwd)
+}
+
+// validateRootFallback enforces the guarded cwd fallback for tools that
+// declare a "root" argument. The fallback fires only when the caller omitted
+// root or passed an explicit cwd form ("", ".", "./"); an explicit project
+// path is the confinement gate's business. cwd must be a plausible project
+// (git checkout or existing kern index) for the fallback to serve.
+func validateRootFallback(name string, props map[string]any, args map[string]any, cwd string) error {
+	if _, ok := props["root"]; !ok {
+		return nil
+	}
+	if v, ok := args["root"]; ok && v != nil {
+		s, isStr := v.(string)
+		if !isStr {
+			return nil // non-string roots are rejected by the type walk
+		}
+		if t := strings.TrimSpace(s); t != "" && t != "." && t != "./" {
+			return nil // explicit project path: confinement gate handles it
+		}
+	}
+	if root.PlausibleProject(cwd) {
+		return nil
+	}
+	return fmt.Errorf("argument %q for tool %s: root is required — the server working directory %q is not a project (no .git, no kern index); pass the project path", "root", name, cwd)
+}
+
+// capProvenanceSymbolsToFit trims the structured Symbols listing so the serialized
+// provenance stays within budgetBytes — the same per-call output budget
+// (max_output, the per-tool table, KERN_MCP_MAX_OUTPUT) that bounds the
+// content text. maxResponseSymbols caps the symbol COUNT, never bytes, so
+// without this a small text budget still ships a listing that dwarfs the
+// content it attests (measured: 500-byte budget, ~19KB symbols). The fixed
+// header — schema, mode, authorizing rule, index identity — is the minimum
+// viable attestation and always remains; only Symbols shrinks. A non-positive
+// budget (sandbox disabled) is a no-op. SymbolsTruncated is set whenever any
+// entry is dropped, mirroring the count cap above.
+func capProvenanceSymbolsToFit(p *provenance.Provenance, budgetBytes int) {
+	if p == nil || budgetBytes <= 0 || len(p.Symbols) == 0 {
+		return
+	}
+	// The header is the payload with the listing dropped; SymbolsTruncated
+	// forced true so its encoding is accounted for when entries survive.
+	header := *p
+	header.Symbols = nil
+	header.SymbolsTruncated = true
+	hb, err := json.Marshal(header)
+	if err != nil {
+		return
+	}
+	// Each entry is charged one byte beyond its own encoding for the comma
+	// separator, and two bytes are reserved for the array wrapper, so the
+	// final marshal cannot overshoot the budget.
+	remaining := budgetBytes - len(hb) - 2
+	if remaining < 0 {
+		p.Symbols = nil
+		p.SymbolsTruncated = true
+		return
+	}
+	kept, used := 0, 0
+	for _, s := range p.Symbols {
+		b, err := json.Marshal(s)
+		if err != nil || used+len(b)+1 > remaining {
+			break
+		}
+		used += len(b) + 1
+		kept++
+	}
+	if kept < len(p.Symbols) {
+		p.Symbols = p.Symbols[:kept]
+		p.SymbolsTruncated = true
+	}
 }

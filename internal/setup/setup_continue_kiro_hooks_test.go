@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -119,8 +120,8 @@ func TestWireContinueHooks(t *testing.T) {
 	if h["type"] != "command" {
 		t.Errorf("hook type = %v, want command", h["type"])
 	}
-	if h["command"] != guard {
-		t.Errorf("command = %v, want %s", h["command"], guard)
+	if cmd, _ := h["command"].(string); !strings.HasSuffix(cmd, " guard hook") {
+		t.Errorf("command = %v, want a `guard hook` command", h["command"])
 	}
 
 	// Idempotent: a second run must not duplicate the kern group.
@@ -203,8 +204,8 @@ func TestWireKiroHooks(t *testing.T) {
 		if h.Action.Type != "command" {
 			t.Errorf("hooks[%d].action.type = %q, want command", i, h.Action.Type)
 		}
-		if h.Action.Command != guard {
-			t.Errorf("hooks[%d].action.command = %q, want %q", i, h.Action.Command, guard)
+		if !strings.HasSuffix(h.Action.Command, " guard hook") {
+			t.Errorf("hooks[%d].action.command = %q, want a `guard hook` command", i, h.Action.Command)
 		}
 	}
 

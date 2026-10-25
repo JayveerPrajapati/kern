@@ -126,6 +126,7 @@ func TestTokenMetadataOnPreToolDenial(t *testing.T) {
 	t.Parallel()
 	s := newTestServer()
 	s.roots = []string{"/"}
+	s.initialized.Store(true) // already-initialized session (Phase 4.2)
 	s.gate = nil
 	s.preTool = func(name string, args map[string]any) error {
 		return errors.New("policy says no")
@@ -153,6 +154,10 @@ func TestTokenMetadataOnPreToolDenial(t *testing.T) {
 func TestTokenMetadataOnGateDenial(t *testing.T) {
 	t.Parallel()
 	s := newTestServer()
+	// LOW-10: tools/call before initialize now returns -32002 before any
+	// gate or tool body runs, so the gate-denial path is only reachable
+	// post-init — model the initialized client.
+	s.initialized.Store(true)
 	s.roots = []string{"/"}
 	s.gate = mcpgate.NewGateForRoots([]string{"/definitely-not-a-real-root-xyz"})
 	req := rpcRequest{

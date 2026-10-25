@@ -68,20 +68,6 @@ func CostPerMillion(model string) float64 {
 	return kernctx.CostPerMillionFor(model)
 }
 
-// ModelSavings returns estimated dollar savings across major frontier LLM pricing tiers.
-func ModelSavings(savedTokens int) map[string]float64 {
-	out := make(map[string]float64)
-	if savedTokens <= 0 {
-		return out
-	}
-	for m, price := range kernctx.ModelRates() {
-		if price > 0 {
-			out[m] = float64(savedTokens) / 1e6 * price
-		}
-	}
-	return out
-}
-
 const DefaultModel = "gpt-4o-mini"
 
 // Recorder appends entries to the per-day JSONL log.
@@ -104,6 +90,9 @@ func (r *Recorder) dayPath(t time.Time) string {
 
 // Record writes one entry.
 func (r *Recorder) Record(e Entry) error {
+	if os.Getenv("KERN_READONLY") == "1" {
+		return nil // read-path telemetry suppressed for read-only sessions
+	}
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}

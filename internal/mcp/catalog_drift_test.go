@@ -93,11 +93,10 @@ func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
 }
 
 // TestMCPToolCatalogSizeCap is the catalog freeze gate: the MCP tool catalog
-// must stay within a deliberate size budget. 145 tools ≈ 11-15 tool schemas
-// per agent context window; every addition taxes every agent session that
-// connects to the server. Growing the catalog past the cap requires a stated
-// reason in the diff that bumps the cap — no silent growth (mirrors the
-// ARCHITECTURE.md LOC-cap drift gate).
+// must stay within a deliberate size budget. Every tool schema taxes every
+// agent session that connects to the server; growing the catalog past the
+// cap requires a stated reason in the diff that bumps the cap — no silent
+// growth (mirrors the ARCHITECTURE.md LOC-cap drift gate).
 func TestMCPToolCatalogSizeCap(t *testing.T) {
 	t.Parallel()
 	const (

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -54,6 +55,59 @@ func TestLoadOrCreateKeysCorruptFailsClosed(t *testing.T) {
 	// Mismatched pub/priv also fails.
 	if _, err := LoadOrCreateKeys(root); err == nil || !strings.Contains(err.Error(), "refusing to regenerate") {
 		t.Fatalf("corrupt-key error = %v, want refusal message", err)
+	}
+}
+
+// TestLoadOrCreateKeysConcurrentFirstUse pins the M8 fix: N parallel
+// first-use creations must converge on ONE consistent keypair (identical
+// fingerprints, matching on-disk pair). Before the fix the unlocked
+// generate+write race let two processes write different keys and interleave
+// the pub/priv files, bricking the store with a mismatched pair.
+func TestLoadOrCreateKeysConcurrentFirstUse(t *testing.T) {
+	root := t.TempDir()
+
+	const workers = 12
+	var wg sync.WaitGroup
+	fps := make([]string, workers)
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			kp, err := LoadOrCreateKeys(root)
+			if err != nil {
+				errs[idx] = err
+				return
+			}
+			fps[idx] = kp.Fingerprint
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: LoadOrCreateKeys: %v", i, err)
+		}
+	}
+	for i := 1; i < workers; i++ {
+		if fps[i] != fps[0] {
+			t.Fatalf("concurrent workers got different fingerprints: %q vs %q — the pair raced", fps[i], fps[0])
+		}
+	}
+
+	// The on-disk pair must be a consistent, self-matching keypair.
+	privPath := filepath.Join(root, ".kern", "keys", "ed25519")
+	pubPath := filepath.Join(root, ".kern", "keys", "ed25519.pub")
+	priv, err := os.ReadFile(privPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyPairFrom(priv, pub); err != nil {
+		t.Fatalf("on-disk pair after the race is mismatched/corrupt: %v", err)
 	}
 }
 

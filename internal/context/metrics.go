@@ -282,8 +282,8 @@ func CostPerMillionFor(model string) float64 {
 
 // ModelRates returns the merged per-model rate table in $/1M tokens
 // (built-in prefixes overlaid by KERN_MODEL_COSTS entries, custom winning
-// per-prefix), for surfaces that enumerate rates rather than resolve one
-// (e.g. stats.ModelSavings). The map is a fresh copy on every call.
+// per-prefix), for surfaces that enumerate rates rather than resolve one.
+// The map is a fresh copy on every call.
 func ModelRates() map[string]float64 {
 	return mergedModelRates()
 }

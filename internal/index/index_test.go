@@ -540,6 +540,8 @@ func TestStaleTouchIsFresh(t *testing.T) {
 }
 
 func TestStaleLegacyIndex(t *testing.T) {
+	// Mutate-then-recheck on one instance: memo off.
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	dir := writeTree(t, map[string]string{"main.go": srcMain})
 	ix, err := Build(dir)
 	if err != nil {

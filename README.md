@@ -35,7 +35,7 @@
 
 <br>
 
-**18 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (29 tools advertised by default, 31 in full mode) · 100% Local**<br>
+**18 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (32 tools advertised by default, 32 in full mode) · 100% Local**<br>
 **License:** MIT (see [LICENSE](LICENSE)) — all Go dependencies are permissively licensed (no copyleft exceptions; the former `golang-lru/v2` MPL-2.0 exception was removed with that dependency)
 
 </div>
@@ -61,7 +61,7 @@ flowchart TD
     subgraph Kern_Agent["Agent Powered by kern (Deterministic Intelligence)"]
         A2["Task: 'Fix Server dispatch'"] --> B2["kern_meta / kern explore"]
         B2 --> C2["Surgical AST context + callers/callees<br/>(1,198 tokens [illustrative])"]
-        C2 --> D2["Sub-millisecond query [illustrative], verified blast radius, zero leaks"]
+        C2 --> D2["0.64 ms symbol query [measured], verified blast radius, zero leaks"]
     end
 ```
 
@@ -71,19 +71,22 @@ flowchart TD
 
 | Dimension | Traditional Agent (`grep` / `read` / `glob`) | Agent Powered by `kern` |
 |---|---|---|
-| **Token Consumption** | 50,000 – 150,000+ tokens per deep task | **500 – 2,500 tokens [illustrative]** (minimal surgical symbol slices) |
-| **Search Latency** | 2 – 15 seconds walking disk trees | **< 10ms [illustrative]** pre-indexed AST & symbol cache |
+| **Token Consumption** | 50,000 – 150,000+ tokens per deep task | **~20% fewer tokens across real mixed sessions [self-reported]** (500–2,500 on deep tasks [illustrative]; per-query savings on the synthetic fixture: [measured] TS-001) |
+| **Search Latency** | 2 – 15 seconds walking disk trees | **0.64 ms symbol search · 6.1 ms transitive blast radius [measured]** (16.5k symbols, warm index — see [Benchmarks](#benchmark-results); warm index load 178 ms) |
 | **Code Understanding** | Flat string/regex pattern matching | **Precise AST call graphs, callers, callees & inheritance** |
 | **Blast Radius & Risk** | Agent guesses dependencies | **Deterministic change impact & test coverage gaps** |
-| **Security & Privacy** | Prompts send raw secrets to LLM | **100% local, automatic PII/secret masking, sandboxed execution** |
+| **Security & Privacy** | Prompts send raw secrets to LLM | **100% local, automatic PII/secret masking, snapshot rollback execution** |
 | **Governance & Audit** | Zero auditability | **Tamper-evident SHA-256 hash chain & cryptographic proofs** |
 
-> **Illustrative vs measured.** Headline numbers in this README carry explicit labels:
+> **Measured first.** Headline numbers in this README lead with what `kern bench`
+> measured on this repo; best-case figures stay labeled `[illustrative]`:
 > `[measured]` = reproducible protocol in docs/benchmarks/, `[synthetic]` = fixed
-> deterministic fixture, `[illustrative]` = anecdotal or best-case. The token and
-> latency figures above are best-case per-task numbers on well-indexed Go code. Across
-> real mixed sessions, `kern stats` reports roughly **20% fewer tokens overall** (see
-> the `kern doctor` example below); your own number is whatever `kern stats` prints.
+> deterministic fixture, `[self-reported]` = kern's own ledger (no external
+> baseline), `[illustrative]` = anecdotal or best-case. The hero table's
+> latency figures are the warm-index medians from the [Benchmarks](#benchmark-results)
+> table below (0.64 ms search, 6.07 ms blast radius at 16,531 symbols, warm load 178 ms).
+> Across real mixed sessions, `kern stats` reports roughly **20% fewer tokens overall**
+> (see the `kern doctor` example below); your own number is whatever `kern stats` prints.
 > The reproducible benchmark tables further down use synthetic fixtures and say so.
 
 ---
@@ -370,7 +373,7 @@ flowchart LR
 
 1. **Extraction & Indexing** — `go/ast` parses Go precisely; the default build compiles deep tree-sitter grammars for 13 languages (requires CGO); `-tags notreesitter` opts out to a zero-dependency regex-heuristic extractor that covers 16 languages. (18 languages are indexed in total; Dart is tree-sitter-only.)
 2. **Deterministic Storage** — Content-hash-verified index cached under `~/.cache/kern/`, with SQLite WAL + FTS5 full-text search compiled in by default.
-3. **Deep Graph Intelligence** — 60+ CLI commands and 31 MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
+3. **Deep Graph Intelligence** — 60+ CLI commands and 32 MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
 4. **Autonomous Auto-Sync** — File-event watchers (inotifywait/fswatch + polling fallback) update the index on save, backed by staleness checks on every read.
 
 ---
@@ -410,7 +413,7 @@ Run `kern setup` or check [`docs/mcp-client.md`](docs/mcp-client.md) for custom 
 
 ## MCP Tools & Routing
 
-By default, `kern` advertises a **focused 29-tool default surface** routed through the smart **`kern_meta`** natural-language dispatcher: the original seven (`kern_meta`, `kern_search`, `kern_explore`, `kern_impact`, `kern_verify`, `kern_buddy`, and `kern_exec` — governed: execution fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry) plus 22 usage-curated additions (`kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`). The other tools below are reached through `kern_meta`'s internal router on a default install — they are advertised directly only with `KERN_MCP_FULL=1`.
+By default, `kern` advertises the **full 32-tool catalog** routed through the smart **`kern_meta`** natural-language dispatcher: the original seven (`kern_meta`, `kern_search`, `kern_explore`, `kern_impact`, `kern_apply`, `kern_verify`, `kern_buddy`, and `kern_exec` — governed: execution fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry) plus 24 usage-curated additions (`kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`, `kern_graph`, `kern_arch`). The full 32-tool catalog is advertised by default, 32 in full mode — every tool is available to agents directly (standing mandate 2026-10-23: agents use all available tools); `kern_meta`'s internal router still reaches every catalog tool with structured argument passthrough.
 
 | Core Tool | Purpose | What it Replaces |
 |---|---|---|
@@ -419,13 +422,14 @@ By default, `kern` advertises a **focused 29-tool default surface** routed throu
 | **`kern_context`** *(default)* | Minimal relevant source slice for a symbol (definition + callers + callees) | `cat` / `read` |
 | **`kern_explore`** *(default)* | Full symbol call hierarchy, callers, callees, and blast radius | Manual file crawls |
 | **`kern_impact`** *(default)* | Predicts blast radius, risk rating, and test gaps before changing code | Guesswork refactoring |
+| **`kern_apply`** *(default)* | Applies edits transactionally, verifies, and rolls back on failure — with a receipt hash | Unsafe multi-file agent edits |
 | **`kern_plan`** *(default)* | Deterministic multi-file implementation plan for a proposed change | Ad-hoc edits |
 | **`kern_run`** *(default)* | Orchestrates complete multi-step tasks across the explore-plan-edit-verify loop | Manual tool chains |
 | **`kern_verify`** *(default)* | Unified verification engine across build, test, security, and architecture | Fragmented check scripts |
 | **`kern_review`** *(default)* | Token-optimized code review context for diffs and pull requests | Whole-file diff reviews |
 | **`kern_optimize`** *(default)* | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
 | **`kern_buddy`** *(default)* | Session onboarding digest: conventions, layout, entry points, gotchas | Fresh-repo spelunking |
-| **`kern_exec`** *(default)* | Governed script runner — sandbox-isolated, PII-masked output; fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry | Ungated shell access |
+| **`kern_exec`** *(default)* | Governed script runner — snapshot rollback with governance, PII-masked output; fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry | Ungated shell access |
 | **`kern_compact_file`** *(default)* | Compact symbolic file summary instead of reading the whole file (tier=full verbatim) | Whole-file reads |
 | **`kern_memory`** *(default)* | Project brain memory: add / list / recall / remove lessons | Lost cross-session lessons |
 | **`kern_evidence`** *(default)* | Signed-evidence toolkit: verify / explain / export / anchor | Unverifiable claims |
@@ -443,11 +447,14 @@ By default, `kern` advertises a **focused 29-tool default surface** routed throu
 | **`kern_swap`** *(default)* | Swap fenced code blocks ↔ per-file symbolic signatures | Raw code dumps |
 | **`kern_mask_pii`** *(default)* | Local secret/PII scan (API keys, tokens, URLs, emails) | Prompt leaks |
 | **`kern_fetch_raw_anchor`** *(default)* | Re-read truncated anchor output (full logs/code slices on demand) | Lost truncated output |
+| **`kern_graph`** *(default)* | One-call graph context: callers, callees, blast radius | Manual call-graph walks |
+| **`kern_arch`** *(default)* | Architecture overview from call-graph communities + coupling warnings | Guesswork architecture |
 
-*The 29 ***(default)*** tools are what a wired agent sees on `tools/list`. The
-rest are advertised only when `KERN_MCP_FULL=1` is set — the full 31-tool catalog.
-On a default install an agent still reaches them through
-`kern_meta`'s natural-language router, which dispatches internally to every
+*The 32 ***(default)*** tools are the full catalog — what a wired agent sees on
+`tools/list`. The full 32-tool catalog is the default surface (standing mandate
+2026-10-23: agents use all available tools).
+On a default install an agent still reaches every tool directly, and
+`kern_meta`'s natural-language router dispatches internally to each
 catalog tool with structured argument passthrough. `KERN_MCP_PHASE=explore|plan|edit|verify`
 filters either surface to the active agent phase, and `KERN_MCP_SINGLE_TOOL=1`
 collapses the advertised surface to `kern_meta` alone.*
@@ -537,7 +544,7 @@ graph-backed:
 kern verify security,architecture
 kern verify --staged security,architecture   # what the pre-commit hook runs
 ```
-The [`test` workflow](.github/workflows/test.yml) uses it as this repository's governance gate (checkout → build kern → `kern verify --staged security,architecture` → fail on FAIL).
+The [`ci` workflow](.github/workflows/ci.yml) runs this repository's governance gate: the `kern-gate` job builds kern from the checkout and runs `kern verify --types security,architecture`, which emits a typed PASS/FAIL/WARN verdict per check and fails the job when the checked-out state fails the governance pipeline (security + architecture findings). The [`test` workflow](.github/workflows/test.yml) is the reusable unit/parity/race test suite (`on: workflow_call`), not the governance gate.
 
 ---
 
@@ -554,7 +561,7 @@ Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# �
 <details>
 <summary><b>Recognized Frameworks (74)</b></summary>
 
-Spring Boot, Django, FastAPI, Flask, Express, NestJS, Rails, Laravel, Gin, Echo, Fiber, Next.js, Nuxt, and 61 more. Run `kern fw --catalog` for the complete catalog.
+Spring Boot, Django, FastAPI, Flask, Express, NestJS, Rails, Laravel, Gin, Echo, Fiber, Next.js, Vue, and 61 more. Run `kern fw --catalog` for the complete catalog.
 </details>
 
 <details>
@@ -602,7 +609,7 @@ verdict: all systems operational
 - [`docs/index.md`](docs/index.md) — docs site index: TOC of the full docs tree (ADRs, architecture ledger, recipes, benchmarks, tooling, security).
 - [`docs/recipes.md`](docs/recipes.md) — Task-oriented recipes: "Is this refactor safe?", "Triage a crash", and 9 more.
 - [`docs/cli-reference.md`](docs/cli-reference.md) — Complete CLI command reference.
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (31 tools).
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (32 tools).
 - [`docs/tool-selection.md`](docs/tool-selection.md) — Generated tool-selection guide, routing matrix, and risk levels.
 - [`docs/configuration.md`](docs/configuration.md) — Configuration, `.kern/config.json` + `.kern/kern.yaml` profiles, and environment variables.
 - [`docs/duplication-benchmark.md`](docs/duplication-benchmark.md) — Duplication-detector benchmark record ([historical] — suite deleted in `a05c91c7`; scoring core survives in `internal/duplication`).

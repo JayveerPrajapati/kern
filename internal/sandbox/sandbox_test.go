@@ -676,3 +676,34 @@ func TestSanitizedEnvPropagatesGovernanceVars(t *testing.T) {
 		t.Fatal("sanitizedEnv() must still strip secret vars")
 	}
 }
+
+// TestGuardedChildEnvStripsBypass pins the L-batch fix: the user-facing
+// arbitrary-command sandbox (RunGuarded — `kern sandbox <cmd>`, MCP
+// kern_sandbox) must NOT hand the untrusted host code the operator's
+// break-glass vars (KERN_BYPASS/KERN_ENFORCE) — that would let it spawn an
+// unguarded `kern`. The trusted internal consumers (kern verify /
+// execution worktrees) keep inheriting the policy verbatim (pinned by
+// TestSanitizedEnvPropagatesGovernanceVars above).
+func TestGuardedChildEnvStripsBypass(t *testing.T) {
+	t.Setenv("KERN_BYPASS", "1")
+	t.Setenv("KERN_ENFORCE", "0")
+	t.Setenv("KERN_ALLOW_EXEC", "1") // policy vars still propagate
+	env := sandboxChildEnv(true)
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "KERN_BYPASS=") {
+		t.Fatalf("RunGuarded child env must strip KERN_BYPASS, got: %s", joined)
+	}
+	if strings.Contains(joined, "KERN_ENFORCE=") {
+		t.Fatalf("RunGuarded child env must strip KERN_ENFORCE, got: %s", joined)
+	}
+	if !strings.Contains(joined, "KERN_ALLOW_EXEC=1") {
+		t.Fatal("RunGuarded child env must keep the policy vars (KERN_ALLOW_EXEC)")
+	}
+	// The zero RunOptions value (Run / RunWithOptions — the trusted
+	// internal path) must keep the full policy including the bypass vars.
+	envTrusted := sandboxChildEnv(false)
+	joinedTrusted := strings.Join(envTrusted, "\n")
+	if !strings.Contains(joinedTrusted, "KERN_BYPASS=1") || !strings.Contains(joinedTrusted, "KERN_ENFORCE=0") {
+		t.Fatal("trusted child env (Run) must keep the governance policy verbatim")
+	}
+}

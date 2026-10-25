@@ -308,13 +308,32 @@ func valueCannotTraverse(p string) bool {
 // path is not trustworthy. The first root that contains the real location
 // admits the value.
 func (g *Gate) gatePath(key, p string) error {
+	// A "~"-prefixed value is rejected outright: filepath.Abs performs no
+	// tilde expansion, so "~/.ssh/id_rsa" would silently resolve to a
+	// non-existent literal under the cwd and be admitted as a benign
+	// in-root path — guard intent (valueCannotTraverse flags "~") and guard
+	// effect would diverge. Fail loud instead of admitting a path the caller
+	// never meant to name.
+	if strings.HasPrefix(p, "~") {
+		return fmt.Errorf("path %q for key %q: '~' expansion is not supported; use an absolute path or a path relative to an allowed root", p, key)
+	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return fmt.Errorf("invalid path %q for %q", p, key)
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		resolved = abs
+		// The path does not fully exist yet (a new file the tool wants to
+		// write, or a BROKEN symlink whose target is missing). Failing
+		// closed here would deny legitimate write-new-file calls inside a
+		// root; instead resolve the deepest resolvable prefix and judge the
+		// leaf against the real location. resolvePartialPath walks the
+		// components with Lstat/Readlink — NOT EvalSymlinks — so a broken
+		// symlink (whose target does not exist yet) still contributes its
+		// real target directory: root/link -> outside/missing followed by
+		// new.go resolves to outside/missing/new.go and is denied, instead
+		// of being admitted on its lexical inside-root location.
+		resolved = resolvePartialPath(abs)
 	}
 	for _, root := range g.roots {
 		if RootContains(root, resolved) {
@@ -331,6 +350,64 @@ func (g *Gate) gatePath(key, p string) error {
 	// fixed when the process launches, so the hint addresses the human who
 	// owns the terminal, not the calling agent (which cannot change them).
 	return fmt.Errorf("path outside allowed roots for key %q (allowed roots: %s; to widen, an operator sets KERN_MCP_ROOTS at server start, or relaxes governance with KERN_MCP_PERMISSIVE=1 / KERN_MCP_NO_CONFINE=1 — the server environment is fixed at process start, a tool call cannot change it)", key, strings.Join(g.roots, ", "))
+}
+
+// resolvePartialPath resolves a (possibly not-yet-existing) absolute path to
+// its real location, following symlinks via Lstat/Readlink so a BROKEN symlink
+// (target missing) still contributes its target directory. It walks the path
+// components top-down: real directories pass through, symlinks are read via
+// Readlink (which works even when the target does not exist) and their target
+// is spliced in, and the first component that does not exist marks the
+// remaining suffix as literal (appended untouched). The result is a
+// conservative real-location estimate: real components are exact, the
+// non-existent suffix is lexical. A symlink loop or an absolute/relative
+// target chain is followed up to a bounded depth, then the current estimate is
+// returned (best-effort — gatePath's containment check still decides).
+func resolvePartialPath(p string) string {
+	const maxDepth = 64
+	return resolvePartialDepth(p, maxDepth)
+}
+
+func resolvePartialDepth(p string, depth int) string {
+	if depth <= 0 {
+		return p
+	}
+	// Split into components, resolve top-down, stop at the first missing one.
+	// cur is the ABSOLUTE prefix of the components resolved so far — it
+	// starts at the filesystem root including the leading separator, so a
+	// reconstruction through cur never produces a relative path (a relative
+	// result would be compared against absolute roots and wrongly denied).
+	cur := filepath.VolumeName(p) + string(filepath.Separator)
+	rest := strings.TrimPrefix(p, cur)
+	parts := strings.Split(rest, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		candidate := filepath.Join(cur, part)
+		fi, err := os.Lstat(candidate)
+		if err != nil {
+			// First non-existent component: the remainder is a literal
+			// suffix (a new file/dir to be created). Append it untouched.
+			return filepath.Join(cur, filepath.Join(parts[i:]...))
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			dest, rerr := os.Readlink(candidate)
+			if rerr != nil {
+				// Unreadable symlink: treat as literal from here.
+				return filepath.Join(cur, filepath.Join(parts[i:]...))
+			}
+			// Splice the target (possibly relative to cur) and continue
+			// resolving the REMAINING suffix against it.
+			suffix := filepath.Join(parts[i+1:]...)
+			if filepath.IsAbs(dest) {
+				return resolvePartialDepth(filepath.Join(dest, suffix), depth-1)
+			}
+			return resolvePartialDepth(filepath.Join(cur, dest, suffix), depth-1)
+		}
+		cur = candidate
+	}
+	return cur
 }
 
 // RootContains reports whether the symlink-resolved path resolved lies inside

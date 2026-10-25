@@ -1,4 +1,4 @@
-package intel
+package tokenize
 
 import (
 	"reflect"
@@ -27,9 +27,9 @@ func TestSplitIdentifierSegments(t *testing.T) {
 		{"myVeryLongFunctionNameThatExceedsNormalSegmentBounds", []string{"my", "very", "long", "function", "name", "that", "exceeds", "normal", "segment", "bounds"}},
 	}
 	for _, c := range cases {
-		got := splitIdentifierSegments(c.name)
+		got := SplitIdentifierSegments(c.name)
 		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("splitIdentifierSegments(%q) = %v, want %v", c.name, got, c.want)
+			t.Errorf("SplitIdentifierSegments(%q) = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -37,7 +37,7 @@ func TestSplitIdentifierSegments(t *testing.T) {
 func TestSplitIdentifierSegmentsAcronymRun(t *testing.T) {
 	// Acronym runs stay glued until the last Upper before a lowercase (matches
 	// codegraph: "HTMLParser" -> html/parser), then each hump splits.
-	got := splitIdentifierSegments("XMLHTTPParserClient")
+	got := SplitIdentifierSegments("XMLHTTPParserClient")
 	want := []string{"xmlhttp", "parser", "client"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -55,8 +55,8 @@ func TestNormalizeProseWord(t *testing.T) {
 		"simple":     "simple",
 	}
 	for in, want := range cases {
-		if got := normalizeProseWord(in); got != want {
-			t.Errorf("normalizeProseWord(%q) = %q, want %q", in, got, want)
+		if got := NormalizeProseWord(in); got != want {
+			t.Errorf("NormalizeProseWord(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -77,24 +77,16 @@ func TestSegmentLookupVariants(t *testing.T) {
 		{"caches", []string{"caches", "cach", "cache"}}, // ambiguous -ches emits both
 	}
 	for _, c := range cases {
-		got := segmentLookupVariants(c.word)
+		got := SegmentLookupVariants(c.word)
 		if len(got) != len(c.want) {
-			t.Errorf("segmentLookupVariants(%q) = %v, want %v", c.word, got, c.want)
+			t.Errorf("SegmentLookupVariants(%q) = %v, want %v", c.word, got, c.want)
 			continue
 		}
 		for i := range got {
 			if got[i] != c.want[i] {
-				t.Errorf("segmentLookupVariants(%q) = %v, want %v", c.word, got, c.want)
+				t.Errorf("SegmentLookupVariants(%q) = %v, want %v", c.word, got, c.want)
 				break
 			}
 		}
-	}
-}
-
-func TestQueryWords(t *testing.T) {
-	got := queryWords(" state-machine  LOAD index ")
-	want := []string{"state", "machine", "load", "index"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("queryWords = %v, want %v", got, want)
 	}
 }

@@ -18,6 +18,10 @@ type flags struct {
 	timeout    int
 	timeoutSet bool
 	timeoutDur string // --timeout duration-string form (30m, 500ms); integer-seconds values stay in .timeout
+	scope      string // --scope once|prefix (approve/ask): the Ask-Protocol answer shape
+	prefix     string // --prefix P (approve --scope prefix): override the suggested two-token prefix
+	limit      int    // --limit N / --tail N (audit): show the N most recent entries; 0 = all
+	limitSet   bool
 }
 
 // parseFlags parses the family's flags via the shared cliflags.Parser,
@@ -63,6 +67,19 @@ func parseFlags(args []string) (flags, []string, error) {
 			// string (30m, 500ms) is captured verbatim for commands that need
 			// sub-second or minute-scale bounds (kern approval wait).
 			p.SetTimeout(&f.timeout, &f.timeoutDur, &f.timeoutSet, "--timeout", inline, hasInline)
+		case "--scope":
+			p.SetStr(&f.scope, inline, hasInline)
+		case "--prefix":
+			p.SetStr(&f.prefix, inline, hasInline)
+		case "--limit":
+			p.SetInt(&f.limit, "--limit", inline, hasInline)
+			f.limitSet = true
+		case "--tail":
+			// --tail N is an alias for --limit N (both select the N most
+			// recent audit entries; audit-log intuition maps tail to the
+			// newest slice, which is exactly what --limit shows).
+			p.SetInt(&f.limit, "--tail", inline, hasInline)
+			f.limitSet = true
 		default:
 			p.Unknown(name)
 		}

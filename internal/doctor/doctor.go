@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/guardpause"
+	"github.com/JayveerPrajapati/kern/internal/guardstats"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
@@ -49,6 +51,10 @@ func Run(root string) []Finding {
 	out = append(out, checkExec(setup.Bin()))
 	out = append(out, checkNetworkIsolation())
 	out = append(out, checkEnv())
+	for _, d := range guardpause.DoctorFindings(root) {
+		out = append(out, Finding{Check: d.Check, Level: d.Level, Detail: d.Detail})
+	}
+	out = append(out, checkGuardTelemetry())
 	out = append(out, checkConfig(root))
 	out = append(out, checkCache())
 	out = append(out, checkSandboxes(root))
@@ -304,7 +310,6 @@ func checkEnv() Finding {
 		}
 	}
 	sort.Strings(kernVars)
-
 	var warns []string
 	for _, kv := range kernVars {
 		k, v, _ := strings.Cut(kv, "=")
@@ -317,7 +322,7 @@ func checkEnv() Finding {
 			if v != "0" && v != "1" {
 				warns = append(warns, k+"="+v+" (want 0|1)")
 			}
-		case k == "KERN_MCP_WATCH_INTERVAL":
+		case k == "KERN_MCP_WATCH_INTERVAL", k == "KERN_MCP_WATCH_INTERVAL_MS":
 			if n, err := strconv.Atoi(v); err != nil || n <= 0 {
 				warns = append(warns, k+"="+v+" (want a positive integer)")
 			}
@@ -343,6 +348,11 @@ func checkEnv() Finding {
 	if detail == "" {
 		detail = "no KERN_* variables set"
 	}
+	// LOW-14: KERN_READONLY is docs-only — surface it even when unset (it
+	// suppresses read-path persistence); when set, the echo above shows it.
+	if _, ok := os.LookupEnv("KERN_READONLY"); !ok {
+		detail += " · KERN_READONLY unset (read-path persistence enabled)"
+	}
 	if extra != "" {
 		detail += " · " + extra
 	}
@@ -352,6 +362,13 @@ func checkEnv() Finding {
 		detail += " | " + strings.Join(warns, " | ")
 	}
 	return Finding{Check: "env", Level: lvl, Detail: detail}
+}
+
+// checkGuardTelemetry surfaces the guard's measured burden (P3 of the
+// guard-consent campaign) — rendered by the owning package (guardstats).
+func checkGuardTelemetry() Finding {
+	d := guardstats.Check()
+	return Finding{Check: d.Check, Level: d.Level, Detail: d.Detail}
 }
 
 // checkVersion reports the binary version stamp and runtime. An unstamped

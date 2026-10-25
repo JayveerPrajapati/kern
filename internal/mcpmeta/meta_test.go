@@ -355,10 +355,14 @@ func TestHandleMeasuredLatencyNotStaticEst(t *testing.T) {
 // does NOT dispatch. The request below clears the two-token overlap bar
 // against kern_optimize/kern_buddy descriptions but stays below the
 // semantic routing threshold, so it reaches the fallback marker.
+// (Recalibrated 2026-10-25 for the math.Sqrt fix in metaCosSim: the old
+// request's top score was depressed below 0.16 only by the buggy sqrtF
+// denominator; with correct math it routes, so this fixture now genuinely
+// sits in the low-confidence band — top score 0.152 vs the 0.16 bar.)
 func TestHandleLowConfidenceCandidates(t *testing.T) {
 	r := &routeRecorder{}
 	out, err := meta.Handle(context.Background(), metaTestHooks(r), map[string]any{
-		"request": "please carefully consider the full overall context of this session and the current project state before answering any question about the dispatch module directly",
+		"request": "please carefully consider the session context and the overall state of the whole conversation so far before answering anything about the dispatch module wiring",
 	})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

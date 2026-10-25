@@ -7,11 +7,36 @@ import (
 	"testing"
 )
 
-// TestGateErrorNamesAllowedRootsAndEscapes pins F1: a denied path's error
-// must be ACTIONABLE — it names the denied key, the allowed roots and the
-// escape hatches (KERN_MCP_ROOTS to widen, KERN_MCP_PERMISSIVE=1 /
-// KERN_MCP_NO_CONFINE=1 to relax) so the caller can resolve the denial
-// instead of guessing.
+// TestGateBrokenSymlinkEscapeDenied pins the L-batch fix: a BROKEN symlink
+// lexically inside an allowed root whose target directory is outside must be
+// denied. Before the fix, gatePath's EvalSymlinks failure fell back to the
+// raw absolute path (the symlink's lexical location, inside the root) and
+// admitted it — a write through the symlink would create files outside the
+// root. The ancestor walk now resolves the symlink itself (it exists) to its
+// real target before the missing leaf is appended, so the real location is
+// judged.
+func TestGateBrokenSymlinkEscapeDenied(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// A broken symlink inside root pointing at a missing path under outside:
+	// root/link -> outside/not-there-yet. A write of root/link/new.go would
+	// create outside/not-there-yet/new.go if admitted.
+	if err := os.Symlink(filepath.Join(outside, "not-there-yet"), filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	g := NewGateForRoots([]string{root})
+	if err := g.gatePath("root", filepath.Join(root, "link", "new.go")); err == nil {
+		t.Fatal("a broken symlink into an outside directory must be denied (escape)")
+	}
+
+	// The legit case must still pass: a NEW file under the root itself
+	// (not via a symlink) is a normal write-new-file request.
+	if err := g.gatePath("root", filepath.Join(root, "fresh", "new.go")); err != nil {
+		t.Fatalf("a new file inside the root must be admitted, got: %v", err)
+	}
+}
 func TestGateErrorNamesAllowedRootsAndEscapes(t *testing.T) {
 	t.Parallel()
 	secretRoot := t.TempDir()
@@ -33,6 +58,34 @@ func TestGateErrorNamesAllowedRootsAndEscapes(t *testing.T) {
 		if !strings.Contains(err.Error(), escape) {
 			t.Fatalf("denial should document the %s escape, got: %v", escape, err)
 		}
+	}
+}
+
+// TestGateTildeExpansionDenied pins the 2026-10-25 audit finding R1: gatePath
+// must reject "~"-prefixed values outright instead of silently admitting them
+// as a non-existent in-root literal (filepath.Abs performs no tilde expansion,
+// so the guard's intent — valueCannotTraverse flags "~" — and its effect
+// diverged). valueCannotTraverse itself keeps flagging "~" so the fast-path
+// still routes the value into validation.
+func TestGateTildeExpansionDenied(t *testing.T) {
+	t.Parallel()
+	ws := t.TempDir()
+	g := &Gate{roots: []string{ws}, enabled: true}
+
+	for _, v := range []string{"~/.ssh/id_rsa", "~user/x", "~/x"} {
+		err := g.gatePath("path", v)
+		if err == nil {
+			t.Fatalf("path %q must be denied (tilde expansion is not supported), got nil", v)
+		}
+		if !strings.Contains(err.Error(), "'~' expansion is not supported") {
+			t.Fatalf("path %q: expected the tilde-specific denial, got: %v", v, err)
+		}
+	}
+
+	// The value-shape classifier still treats "~" as a traverse marker so
+	// every "~"-prefixed value is routed into full validation.
+	if valueCannotTraverse("~x") {
+		t.Fatal("valueCannotTraverse must keep flagging '~'-prefixed values")
 	}
 }
 

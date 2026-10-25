@@ -15,11 +15,7 @@
 package governance
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -30,13 +26,14 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/execapproval"
 )
 
-// execApprovalStampPrefix marks an approval record created by the exec
-// approval path as integrity-stamped: ArtifactID = "exec-approval:<hex
-// HMAC>". Other features sharing the approval file carry no stamp and are
-// untouched by the exec verification layer.
-const execApprovalStampPrefix = "exec-approval:"
+// Exec-approval stamps use the "exec-approval:" ArtifactID marker prefix
+// (execapproval.StampPrefix). Other features sharing the approval file carry
+// no stamp and are untouched by the exec verification layer; the pure
+// integrity primitives (MAC framing, stamping, consumed ledger) live in
+// internal/execapproval.
 
 // execApprovalSecretPath returns the path of the exec-approval HMAC secret.
 // It is a package-level func so tests can redirect it away from the real
@@ -140,72 +137,28 @@ func execApprovalSecret() ([]byte, error) {
 // length-prefixed framing (v1 was NUL-separated). Stamping it into the MAC
 // input makes a future framing change distinguishable from tampering by
 // construction (gate-7 nit).
-const execMACFormatVersion = 2
-
 func execApprovalMAC(a domain.Approval) ([]byte, error) {
 	key, err := execApprovalSecret()
 	if err != nil {
 		return nil, err
 	}
-	h := hmac.New(sha256.New, key)
-	// The format version is the first MAC input so framing changes and
-	// tampering are distinguishable by construction.
-	_, _ = h.Write([]byte{execMACFormatVersion})
-	// prefixed writes one length-prefixed value: the 4-byte big-endian byte
-	// length followed by the raw bytes. The length prefix (not the separator)
-	// is what makes field boundaries unambiguous.
-	prefixed := func(s string) {
-		var lenBuf [4]byte
-		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
-		_, _ = h.Write(lenBuf[:])
-		_, _ = h.Write([]byte(s))
-	}
-	field := func(s string) {
-		prefixed(s)
-		_, _ = h.Write([]byte{0})
-	}
-	list := func(xs []string) {
-		for _, x := range xs {
-			prefixed(x)
-			_, _ = h.Write([]byte{1})
-		}
-		_, _ = h.Write([]byte{0})
-	}
-	field(a.ID)
-	field(a.TaskID)
-	field(a.Requester)
-	field(a.Approver)
-	field(a.Status)
-	field(a.Reason)
-	field(a.RequestedAt.UTC().Format(time.RFC3339Nano))
-	if a.DecidedAt != nil {
-		field(a.DecidedAt.UTC().Format(time.RFC3339Nano))
-	} else {
-		field("")
-	}
-	field(string(a.RiskLevel))
-	list(a.PolicyIDs)
-	list(a.EvidenceRefs)
-	return h.Sum(nil), nil
+	return execapproval.MAC(a, key)
 }
 
 // execApprovalStamp builds the integrity stamp for a record: the marker
 // prefix plus the hex HMAC over its exact (TaskID, Status, ID).
 func execApprovalStamp(a domain.Approval) (string, error) {
-	mac, err := execApprovalMAC(a)
+	key, err := execApprovalSecret()
 	if err != nil {
 		return "", err
 	}
-	return execApprovalStampPrefix + hex.EncodeToString(mac), nil
+	return execapproval.Stamp(a, key)
 }
 
 // execApprovalStampFrom returns the stored hex HMAC of an exec-stamped
 // record, or "" when the record carries no exec stamp.
 func execApprovalStampFrom(a domain.Approval) string {
-	if strings.HasPrefix(a.ArtifactID, execApprovalStampPrefix) {
-		return strings.TrimPrefix(a.ArtifactID, execApprovalStampPrefix)
-	}
-	return ""
+	return execapproval.StampFrom(a)
 }
 
 // execApprovalMACValid verifies an exec-stamped record's HMAC over its exact
@@ -213,19 +166,11 @@ func execApprovalStampFrom(a domain.Approval) string {
 // unavailable secret, or mismatch all deny (fail closed) — forged and legacy
 // records can never grant execution.
 func execApprovalMACValid(a domain.Approval) bool {
-	storedHex := execApprovalStampFrom(a)
-	if storedHex == "" {
-		return false
-	}
-	stored, err := hex.DecodeString(storedHex)
-	if err != nil || len(stored) != sha256.Size {
-		return false
-	}
-	want, err := execApprovalMAC(a)
+	key, err := execApprovalSecret()
 	if err != nil {
 		return false
 	}
-	return hmac.Equal(stored, want)
+	return execapproval.MACValid(a, key)
 }
 
 // stampExecApproval binds a freshly created approval to the exec secret: it
@@ -271,7 +216,13 @@ func execApprovedFor(root, key string) *domain.Approval {
 	}
 	for i := range approvals {
 		a := approvals[i]
-		if a.TaskID == key && a.Status == "approved" && !consumed[a.ID] && execApprovalMACValid(a) {
+		// Ask Protocol (P1): a prefix-scoped grant is NOT a single-use
+		// approval — treating it as one let claimExecApproval consume (and
+		// DELETE) the grant record on the first covered command, silently
+		// revoking the "rest of session" answer a human gave. Prefix grants
+		// are claimed only by consumePrefixGrantUse, which counts uses
+		// instead of removing the record.
+		if a.TaskID == key && a.Status == "approved" && a.Scope != "prefix" && !consumed[a.ID] && execApprovalMACValid(a) {
 			return &a
 		}
 	}
@@ -376,18 +327,7 @@ func appendConsumedID(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(id))
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	_, err = fmt.Fprintf(f, "%s %s\n", id, hex.EncodeToString(mac.Sum(nil)))
-	return err
+	return execapproval.AppendConsumedID(p, key, id)
 }
 
 // execConsumedIDs returns the set of approval IDs already consumed, verifying
@@ -404,39 +344,11 @@ func execConsumedIDs() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return map[string]bool{}, nil
-		}
-		return nil, err
-	}
 	key, err := execApprovalSecret()
 	if err != nil {
 		return nil, err
 	}
-	consumed := make(map[string]bool)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("exec consumed ledger %s: corrupt line %q", p, line)
-		}
-		stored, derr := hex.DecodeString(parts[1])
-		if derr != nil || len(stored) != sha256.Size {
-			return nil, fmt.Errorf("exec consumed ledger %s: corrupt entry", p)
-		}
-		mac := hmac.New(sha256.New, key)
-		_, _ = mac.Write([]byte(parts[0]))
-		if !hmac.Equal(stored, mac.Sum(nil)) {
-			return nil, fmt.Errorf("exec consumed ledger %s: entry fails integrity check", p)
-		}
-		consumed[parts[0]] = true
-	}
-	return consumed, nil
+	return execapproval.ConsumedIDs(p, key)
 }
 
 // claimExecApproval consumes a granted approval atomically (R2): the record

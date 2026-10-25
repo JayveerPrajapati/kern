@@ -54,10 +54,12 @@ func TestApproveDecision(t *testing.T) {
 }
 
 // TestApproveReject locks the --reject --reason --approver flags on a
-// task-less approval.
+// task-less approval. The reject is human-gated like approve (M3): the test
+// scripts the terminal with the id so the confirmation gate passes.
 func TestApproveReject(t *testing.T) {
 	root := newRoot(t)
 	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withScriptedTerminal(t, id)
 	out := captureStdout(t, func() {
 		RunApprove([]string{"--root", root, "--reject", "--reason", "not now", "--approver", "senior", id})
 	})
@@ -65,6 +67,27 @@ func TestApproveReject(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("reject output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRejectRequiresTerminal locks the M3 fail-closed gate: rejecting a
+// pending approval without an interactive terminal (piped stdin, agent
+// context) must NOT decide anything — a governed agent with CLI access
+// cannot reject without a human typing the id, exactly as it cannot approve.
+// The abort is recorded in the governance chain as "no-terminal".
+func TestRejectRequiresTerminal(t *testing.T) {
+	root := newRoot(t)
+	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withNoTerminal(t)
+	expectCode(t, 1, func() int { return RunReject([]string{"--root", root, id}) })
+
+	if e := auditEntryFor(t, root, "approval:"+id); e == nil || e.Result != "no-terminal" {
+		t.Fatalf("expected no-terminal audit entry for %s, got %+v", id, e)
+	}
+	store := governance.NewFileStore(root)
+	rec, err := store.Get(id)
+	if err != nil || rec.DecidedAt != nil {
+		t.Fatalf("approval must remain undecided after refusal: %+v err=%v", rec, err)
 	}
 }
 

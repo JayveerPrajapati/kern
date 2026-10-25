@@ -298,8 +298,14 @@ func TestConditionalFetchWorkingSetAndMetaRoute(t *testing.T) {
 		t.Fatal("the workingset route must never be D1-cacheable")
 	}
 
-	// Full dispatch: kern_meta "my working set" renders the registry.
-	resp2 := serveOne(t, writeReq("tools/call", 2, `{"name":"kern_meta","arguments":{"request":"my working set"}}`))
+	// Full dispatch: kern_meta "my working set" renders the registry. The
+	// call carries the same agent_id as the recording call above — the
+	// workingset route renders the caller's OWN bucket (meta.Handle derives
+	// it from the meta args); without it the test would read the agentless
+	// bucket and only pass on leakage from other tests' recordings
+	// (verified: failed in isolation at every prior commit).
+	args2, _ := json.Marshal(map[string]any{"request": "my working set", "agent_id": agent})
+	resp2 := serveOne(t, writeReq("tools/call", 2, `{"name":"kern_meta","arguments":`+string(args2)+`}`))
 	out2, isErr2 := toolResultText(t, resp2)
 	if isErr2 {
 		t.Fatalf("unexpected error on workingset route: %s", out2)

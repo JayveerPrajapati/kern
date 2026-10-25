@@ -17,6 +17,7 @@ import (
 // on whether kern resolves in the test env. The redirect path itself is
 // pinned in TestKernGuardAutoRedirect.
 func TestKernGuardEverydayPassthrough(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq required for bash payload extraction")
 	}
@@ -68,20 +69,28 @@ func TestKernGuardEverydayPassthrough(t *testing.T) {
 		{"git -C /tmp commit --no-verify -m x", false},
 		{"git -C /tmp push", false},
 
-		// Read-only kern admin surface: usage/help printers and the catalog
-		// listing expose no state; mutating/starting forms stay governed.
-		{"kern guard", true},
-		{"kern guard --help", true},
+		// ANY kern CLI invocation runs raw — the CLI carries its own
+		// governance (approvals, tty-gated allow-once, sandboxed exec).
+		// Pipes and wrapper-hidden kern stay governed.
 		{"kern guard -h", true},
+		{"kern guard --help", true},
 		{"kern guard --help && git status", true},
-		{"kern guard allow abc123", false},
+		{"kern guard allow abc123", true},
 		{"kern mcp tools", true},
 		{"kern mcp tools list", true},
 		{"kern mcp tools --json", true},
-		{"kern mcp tools graph", false},
-		{"kern mcp tools server --addr :0", false},
-		{"kern mcp", false},
-		{"kern mcp server", false},
+		{"kern mcp tools graph", true},
+		{"kern mcp tools server --addr :0", true},
+		{"kern mcp", true},
+		{"kern mcp server", true},
+		{"kern mcp --help", true},
+		{"kern update", true},
+		{"kern setup", true},
+		{"kern version --json", true},
+		{"kern exec --readonly --lang sh x", true},
+		{"kern --version && kern mcp --help", true},
+		{"kern ast Foo | head -5", false},
+		{"sudo kern update", false},
 
 		{"git diff", false},
 		{"git diff -p", false},
@@ -136,9 +145,9 @@ func TestPluginSimpleCommandMirrorsGuard(t *testing.T) {
 	src := string(b)
 	for _, want := range []string{
 		"isStatOnlyGit", "GIT_BRANCH_LIST_FLAGS", `"rev-parse"`, `"--no-verify"`, `"wc"`,
-		// git -C <dir> and the read-only kern admin surface travel in the
-		// plugin mirror too (parity with the shell guard).
-		`"-C"`, `"kern guard"`, `"kern guard --help"`, `"kern mcp tools list"`,
+		// git -C <dir> and the any-kern-invocation rule (first-token) travel
+		// in the plugin mirror too (parity with the shell guard).
+		`"-C"`, `parts[0] === "kern"`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("plugin missing %s", want)

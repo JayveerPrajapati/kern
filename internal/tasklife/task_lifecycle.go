@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/flight"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
@@ -272,6 +273,13 @@ func (s *TaskService) runLoop(ctx context.Context, intent string, level loop.Aut
 		Level:    level,
 		Mem:      memStore,
 		Recorder: flight.New(root),
+		// The protect stage (invoked before any deploy) requests a HUMAN
+		// approval from the project's approval store before a write/deploy
+		// proceeds — fail-closed, mirroring `kern approve`. (L9: Appr was
+		// never wired, so the protect stage printed "governance not
+		// configured" and PASSED without any approval — a deploy at
+		// L4/L5 + KERN_ALLOW_DEPLOY=1 silently bypassed the human gate.)
+		Appr: governance.NewPersistedApprovalWorkflow(root),
 		// Continuous learning is default-on whenever a memory store exists:
 		// the learn stage extracts recurring patterns over the store and
 		// surfaces them as constraints. This single wiring point covers the
@@ -318,6 +326,24 @@ func (s *TaskService) runLoop(ctx context.Context, intent string, level loop.Aut
 	if err != nil {
 		s.fail(t, err.Error())
 		return t, res, err
+	}
+
+	// A PAUSED loop (budget exceeded, high-risk escalation, approval-required,
+	// or a custom PauseTrigger) returns (res, nil) — the run stopped before
+	// completing, so the task must NOT be recorded COMPLETED. Mark it BLOCKED
+	// (Task.Pause records PriorState so Resume returns to it, and carries the
+	// pause reason in Output) and publish task.blocked so `kern task`/the
+	// eventbus reflect reality. (M5: this used to fall through to
+	// t.Complete, recording a PAUSED run as COMPLETED.)
+	if res.Paused {
+		if terr := t.Pause(res.PauseReason); terr != nil {
+			s.fail(t, terr.Error())
+			return t, res, terr
+		}
+		s.auditTransition(t, domain.TaskAnalyzing, domain.TaskBlocked)
+		s.persist(t)
+		s.publish(eventbus.TaskBlocked, t.ID, map[string]string{"state": "BLOCKED", "reason": res.PauseReason})
+		return t, res, nil
 	}
 
 	if err := t.Complete(t.Output); err != nil {

@@ -1,10 +1,14 @@
 package mcp
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 )
 
 // resolveRoot / withinRoot / validateRoot are the root-confinement primitives
@@ -209,7 +213,9 @@ func TestArgBool(t *testing.T) {
 // nothing.
 func TestValidateStringArgs(t *testing.T) {
 	t.Parallel()
-	// kern_search declares query/root/limit/semantic as strings.
+	// kern_search declares query/root as strings, limit as integer and
+	// semantic as boolean (the non-string branches are pinned separately in
+	// TestValidateArgTypesNonStringScalars).
 	rejectCases := []struct {
 		name string
 		args map[string]any
@@ -224,8 +230,8 @@ func TestValidateStringArgs(t *testing.T) {
 		{name: "int root rejected", args: map[string]any{"query": "Greet", "root": 12345}, want: `argument "root" for tool kern_search: expected a path string, got a number`},
 	}
 	for _, tc := range rejectCases {
-		if err := validateStringArgs("kern_search", tc.args); err == nil {
-			t.Errorf("%s: validateStringArgs(kern_search, %v) = nil, want error containing %q", tc.name, tc.args, tc.want)
+		if err := validateArgTypes("kern_search", tc.args); err == nil {
+			t.Errorf("%s: validateArgTypes(kern_search, %v) = nil, want error containing %q", tc.name, tc.args, tc.want)
 		} else if !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error %q does not contain %q", tc.name, err, tc.want)
 		}
@@ -244,24 +250,222 @@ func TestValidateStringArgs(t *testing.T) {
 		{name: "undeclared key untouched", args: map[string]any{"query": "Greet", "max_output": 100}},
 	}
 	for _, tc := range acceptCases {
-		if err := validateStringArgs("kern_search", tc.args); err != nil {
-			t.Errorf("%s: validateStringArgs(kern_search, %v) = %v, want nil", tc.name, tc.args, err)
+		if err := validateArgTypes("kern_search", tc.args); err != nil {
+			t.Errorf("%s: validateArgTypes(kern_search, %v) = %v, want nil", tc.name, tc.args, err)
 		}
 	}
 
 	// Arguments not declared in the schema pass through untouched (their
-	// handlers fail loud via atoiArg instead); the 2026-10-18 surface slim
-	// removed the tools that carried non-string-typed schema props, so the
-	// pass-through vehicle is an undeclared arg.
-	if err := validateStringArgs("kern_search", map[string]any{"zzz_undeclared": map[string]any{}}); err != nil {
+	// handlers fail loud via atoiArg instead); object/array-typed schema
+	// props also pass through, so the vehicle here is an undeclared arg.
+	if err := validateArgTypes("kern_search", map[string]any{"zzz_undeclared": map[string]any{}}); err != nil {
 		t.Errorf("undeclared prop with object value should pass through, got %v", err)
 	}
-	if err := validateStringArgs("kern_search", map[string]any{"zzz_undeclared2": []any{"x"}}); err != nil {
+	if err := validateArgTypes("kern_search", map[string]any{"zzz_undeclared2": []any{"x"}}); err != nil {
 		t.Errorf("undeclared prop with array value should pass through, got %v", err)
 	}
 
 	// Unknown tool names validate nothing.
-	if err := validateStringArgs("kern_no_such_tool", map[string]any{"query": map[string]any{}}); err != nil {
+	if err := validateArgTypes("kern_no_such_tool", map[string]any{"query": map[string]any{}}); err != nil {
 		t.Errorf("unknown tool should validate nothing, got %v", err)
+	}
+}
+
+// TestValidateArgTypesNonStringScalars pins the D6 fail-loud contract for
+// schema-declared integer/number/boolean properties (validateNonStringScalar
+// via validateArgTypes): lenient forms (numbers, numeric strings, boolean
+// strings, 0/1) pass; null, objects, arrays, non-numeric strings, floats
+// where an integer is declared and non-0/1 numbers where a boolean is
+// declared are rejected with errors naming the argument, the tool and the
+// expected type — no silent defaults, no silent falses.
+func TestValidateArgTypesNonStringScalars(t *testing.T) {
+	t.Parallel()
+	reject := []struct {
+		tool string
+		name string
+		args map[string]any
+		want string
+	}{
+		{tool: "kern_search", name: "integer object", args: map[string]any{"query": "Greet", "limit": map[string]any{}}, want: `argument "limit" for tool kern_search: expected an integer, got an object`},
+		{tool: "kern_search", name: "integer null", args: map[string]any{"query": "Greet", "limit": nil}, want: `argument "limit" for tool kern_search: expected an integer, got null`},
+		{tool: "kern_search", name: "integer array", args: map[string]any{"query": "Greet", "limit": []any{"3"}}, want: `argument "limit" for tool kern_search: expected an integer, got an array`},
+		{tool: "kern_search", name: "integer non-numeric string", args: map[string]any{"query": "Greet", "limit": "abc"}, want: `argument "limit" for tool kern_search: expected an integer, got "abc"`},
+		{tool: "kern_search", name: "integer float", args: map[string]any{"query": "Greet", "limit": 3.5}, want: `argument "limit" for tool kern_search: expected an integer, got 3.5`},
+		{tool: "kern_search", name: "integer bool", args: map[string]any{"query": "Greet", "limit": true}, want: `argument "limit" for tool kern_search: expected an integer, got bool`},
+		{tool: "kern_search", name: "boolean junk string", args: map[string]any{"query": "Greet", "semantic": "yes"}, want: `argument "semantic" for tool kern_search: expected a boolean, got "yes"`},
+		{tool: "kern_search", name: "boolean number", args: map[string]any{"query": "Greet", "semantic": 42.0}, want: `argument "semantic" for tool kern_search: expected a boolean, got a number`},
+		{tool: "kern_search", name: "boolean object", args: map[string]any{"query": "Greet", "semantic": map[string]any{}}, want: `argument "semantic" for tool kern_search: expected a boolean, got an object`},
+		{tool: "kern_search", name: "boolean null", args: map[string]any{"query": "Greet", "semantic": nil}, want: `argument "semantic" for tool kern_search: expected a boolean, got null`},
+		{tool: "kern_memory", name: "number junk string", args: map[string]any{"action": "ranked", "half_life_days": "fast"}, want: `argument "half_life_days" for tool kern_memory: expected a number, got "fast"`},
+	}
+	for _, tc := range reject {
+		if err := validateArgTypes(tc.tool, tc.args); err == nil {
+			t.Errorf("%s: validateArgTypes(%s, %v) = nil, want error containing %q", tc.name, tc.tool, tc.args, tc.want)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q does not contain %q", tc.name, err, tc.want)
+		}
+	}
+
+	accept := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "integer JSON number", args: map[string]any{"query": "Greet", "limit": 3.0}},
+		{name: "integer Go int", args: map[string]any{"query": "Greet", "limit": 3}},
+		{name: "integer numeric string", args: map[string]any{"query": "Greet", "limit": "3"}},
+		{name: "integer empty string is absent-equivalent", args: map[string]any{"query": "Greet", "limit": ""}},
+		{name: "boolean false", args: map[string]any{"query": "Greet", "semantic": false}},
+		{name: "boolean string false", args: map[string]any{"query": "Greet", "semantic": "false"}},
+		{name: "boolean 0/1 numbers", args: map[string]any{"query": "Greet", "semantic": 1.0}},
+		{name: "boolean empty string is absent-equivalent", args: map[string]any{"query": "Greet", "semantic": ""}},
+	}
+	for _, tc := range accept {
+		if err := validateArgTypes("kern_search", tc.args); err != nil {
+			t.Errorf("%s: validateArgTypes(kern_search, %v) = %v, want nil", tc.name, tc.args, err)
+		}
+	}
+	// number-typed props (kern_memory half_life_days): floats and numeric
+	// strings both pass.
+	if err := validateArgTypes("kern_memory", map[string]any{"action": "ranked", "half_life_days": 7.5}); err != nil {
+		t.Errorf("number float: validateArgTypes = %v, want nil", err)
+	}
+	if err := validateArgTypes("kern_memory", map[string]any{"action": "ranked", "half_life_days": "7.5"}); err != nil {
+		t.Errorf("number numeric string: validateArgTypes = %v, want nil", err)
+	}
+}
+
+// TestCapProvenanceSymbolsToFit pins the budget-fit trimmer. It lived in
+// internal/mcp/provenance until that leaf crossed its LOC cap; the
+// function operates only on exported provenance fields, so it moved to
+// internal/mcp next to its single caller (the server budget machinery).
+func TestCapProvenanceSymbolsToFit(t *testing.T) {
+	syms := make([]provenance.SymbolProvenance, 128)
+	for i := range syms {
+		syms[i] = provenance.SymbolProvenance{
+			Name:      fmt.Sprintf("Sym%03d", i),
+			Qualified: fmt.Sprintf("pkg.Sym%03d", i),
+			File:      "internal/pkg/file.go",
+			Line:      i + 1,
+		}
+	}
+
+	// A budget comfortably above the serialized payload leaves it untouched.
+	p := &provenance.Provenance{SchemaVersion: provenance.SchemaVersion, Mode: provenance.ProvenanceModeRaw, Symbols: syms}
+	full, _ := json.Marshal(p)
+	capProvenanceSymbolsToFit(p, len(full)+1024)
+	if len(p.Symbols) != 128 || p.SymbolsTruncated {
+		t.Fatalf("large budget must not trim: %d symbols, truncated=%v", len(p.Symbols), p.SymbolsTruncated)
+	}
+
+	// A budget that cannot fit even one entry drops the listing entirely —
+	// the fixed attestation header survives — and flags truncation. The
+	// threshold is derived from the actual header encoding, so the assertion
+	// holds for any future header shape.
+	headerOnly := *p
+	headerOnly.Symbols = nil
+	headerOnly.SymbolsTruncated = true
+	hb, _ := json.Marshal(headerOnly)
+	tiny := len(hb) + 3 // header + array wrapper + one stray byte
+	capProvenanceSymbolsToFit(p, tiny)
+	if len(p.Symbols) != 0 || !p.SymbolsTruncated {
+		t.Fatalf("tiny budget must empty the listing: %d symbols, truncated=%v", len(p.Symbols), p.SymbolsTruncated)
+	}
+	if b, _ := json.Marshal(p); len(b) > tiny {
+		t.Fatalf("serialized provenance %d bytes exceeds tiny budget %d", len(b), tiny)
+	}
+
+	// A mid budget keeps a prefix, stays within budget after serialization,
+	// and preserves entry order.
+	p2 := &provenance.Provenance{SchemaVersion: provenance.SchemaVersion, Mode: provenance.ProvenanceModeRaw, Symbols: syms}
+	capProvenanceSymbolsToFit(p2, 2000)
+	b, _ := json.Marshal(p2)
+	if len(b) > 2000 {
+		t.Fatalf("serialized provenance %d bytes exceeds budget 2000", len(b))
+	}
+	if len(p2.Symbols) == 0 || !p2.SymbolsTruncated {
+		t.Fatalf("mid budget should keep a prefix: %d symbols, truncated=%v", len(p2.Symbols), p2.SymbolsTruncated)
+	}
+	for i, s := range p2.Symbols {
+		if s.Name != syms[i].Name {
+			t.Fatalf("symbol %d reordered: %s", i, s.Name)
+		}
+	}
+
+	// Nil-safety and the disabled budget (max_output=0) are no-ops.
+	capProvenanceSymbolsToFit(nil, 100)
+	capProvenanceSymbolsToFit(p2, 0)
+}
+
+// TestRootFallbackGuard pins the M#18 guarded cwd fallback (Phase 4.3):
+// tools declaring a "root" argument serve root-less calls (or explicit cwd
+// forms "", ".", "./") only when the fallback target is a plausible
+// project; a scratch cwd fails with a correctable error naming the tool
+// and the missing project. validateRootFallback is factored to take the
+// cwd so the guard is testable without chdir (parallel tests resolve
+// against the real process cwd).
+func TestRootFallbackGuard(t *testing.T) {
+	t.Parallel()
+	props := map[string]any{"root": map[string]any{"type": "string"}}
+	scratch := t.TempDir() // no .git, no .kern index
+
+	// Omitted root in a scratch cwd: correctable error.
+	if err := validateRootFallback("kern_search", props, nil, scratch); err == nil {
+		t.Fatal("expected root-required error for omitted root in scratch cwd")
+	}
+	// Explicit cwd forms are the same fallback and must be guarded too.
+	for _, v := range []string{"", ".", "./", "  .  "} {
+		if err := validateRootFallback("kern_search", props, map[string]any{"root": v}, scratch); err == nil {
+			t.Fatalf("expected error for root %q in scratch cwd", v)
+		}
+	}
+	// An explicit project path never hits the guard (confinement gate's job).
+	if err := validateRootFallback("kern_search", props, map[string]any{"root": "/some/project"}, scratch); err != nil {
+		t.Fatalf("explicit root must not hit the guard: %v", err)
+	}
+	// A git checkout cwd serves the fallback (.git must be a real repo —
+	// directory + HEAD file, LOW-7).
+	git := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(git, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(git, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRootFallback("kern_search", props, nil, git); err != nil {
+		t.Fatalf("git cwd must serve: %v", err)
+	}
+	// An already-indexed kern workspace serves the fallback.
+	idx := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(idx, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(idx, ".kern", "index.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRootFallback("kern_search", props, nil, idx); err != nil {
+		t.Fatalf("indexed cwd must serve: %v", err)
+	}
+	// A server-created cache artifact alone (audit/D1 store init writes
+	// .kern/index.sqlite into whatever cwd the server starts in) must NOT
+	// make the dir plausible — otherwise one rejected call bootstraps the
+	// fallback for the next (the Phase 4.3 live probe caught exactly this).
+	sql := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sql, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sql, ".kern", "index.sqlite"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRootFallback("kern_search", props, nil, sql); err == nil {
+		t.Fatal("index.sqlite alone must not make a scratch cwd plausible")
+	}
+	// A tool that does not declare root is never guarded.
+	if err := validateRootFallback("kern_mask_pii", map[string]any{"text": map[string]any{"type": "string"}}, nil, scratch); err != nil {
+		t.Fatalf("tool without root prop must not be guarded: %v", err)
+	}
+	// The error is correctable: names the argument, the tool, and the fix.
+	err := validateRootFallback("kern_search", props, nil, scratch)
+	if err == nil || !strings.Contains(err.Error(), "root is required") || !strings.Contains(err.Error(), "kern_search") {
+		t.Fatalf("error should name root, tool, and fix: %v", err)
 	}
 }

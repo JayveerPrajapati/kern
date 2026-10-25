@@ -8,10 +8,12 @@ package brief
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/code"
@@ -53,15 +55,45 @@ func BuildWithOptions(root string, opts Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var head strings.Builder
-	fmt.Fprintf(&head, "# kern buddy briefing — %s\n", abs)
-	fmt.Fprintf(&head, "Generated %s. This digest gives you the best starting context.\n\n",
+	// NEW-4 (Q3=A): the default digest body is memoized per root — the warm
+	// repeat call was ~1.5s (index decode + graph sections + project-map
+	// walk) on every kern_buddy. The memo is invalidated by cheap stat probes
+	// of every store the body reads (index.json, index.sqlite, both memory
+	// stores) and bounded by a short TTL; the header (timestamp) is
+	// re-rendered per call so it never lies. The --map variant is rare and
+	// unbounded in size, so it bypasses the memo.
+	var memoHit string
+	memoized := !opts.Map
+	if memoized {
+		if body, ok := buddyMemoGet(abs, opts.NoMemory); ok {
+			memoHit = body
+		}
+	}
+	var body string
+	if memoHit != "" {
+		body = memoHit
+	} else {
+		body, err = buildDigestBody(root, abs, opts)
+		if err != nil {
+			return "", err
+		}
+		if memoized {
+			buddyMemoPut(abs, opts.NoMemory, body)
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# kern buddy briefing — %s\n", abs)
+	fmt.Fprintf(&b, "Generated %s. This digest gives you the best starting context.\n\n",
 		time.Now().Format("2006-01-02 15:04 MST"))
+	b.WriteString(body)
+	return b.String(), nil
+}
 
-	// The useful digest sections (index, architecture, surprising
-	// connections, savings, memory, how-to-use) render FIRST so a huge
-	// project map can never push them out of the MCP output sandbox
-	// (24KB default). The project map is the optional trailing section.
+// buildDigestBody renders everything below the two-line header: the index,
+// architecture and surprising-connections sections, savings, memory
+// sections, cheatsheet and the project map. Split from the header so the
+// memo never freezes the "Generated" timestamp.
+func buildDigestBody(root, abs string, opts Options) (string, error) {
 	var digest strings.Builder
 	ix, err := index.Load(root)
 	if err != nil {
@@ -80,7 +112,6 @@ func BuildWithOptions(root string, opts Options) (string, error) {
 	digest.WriteString(cheatsheet)
 
 	var b strings.Builder
-	b.WriteString(head.String())
 	b.WriteString(digest.String())
 	// The project map is the trailing section: a compact overview by
 	// default, the full per-file map on request (--map).
@@ -94,6 +125,79 @@ func BuildWithOptions(root string, opts Options) (string, error) {
 		b.WriteString("\n")
 	}
 	return b.String(), nil
+}
+
+// buddyMemoTTL bounds how long a memoized digest body may be served even
+// when its inputs look unchanged (the project-map section walks the live
+// tree, which the store stats do not cover; stats files are likewise not
+// probed). 60s: warm sessions get sub-100ms digests, and any section that
+// reads the live tree is at most one TTL behind.
+const buddyMemoTTL = 60 * time.Second
+
+type buddyMemoEntry struct {
+	body    string
+	probe   string
+	expires time.Time
+}
+
+var (
+	buddyMemoMu sync.Mutex
+	buddyMemo   = map[string]buddyMemoEntry{}
+)
+
+// buddyMemoKey namespaces the memo by root and the NoMemory flag (the only
+// option that changes the default digest body).
+func buddyMemoKey(abs string, noMemory bool) string {
+	if noMemory {
+		return abs + "\x00nomem"
+	}
+	return abs + "\x00mem"
+}
+
+// buddyProbe cheaply fingerprints every persisted input the digest body
+// reads: the index stores (JSON legacy + SQLite primary; a rebuild rewrites
+// the SQLite store) and both memory stores (the v1 lesson store and the
+// typed ememory store that feeds the "Project memory" section). Four stat
+// calls, no decoding — an add or index rebuild flips the probe and the
+// next call rebuilds.
+func buddyProbe(abs string) string {
+	var sb strings.Builder
+	for _, p := range []string{
+		index.StorePath(abs),
+		index.SQLitePath(abs),
+		memory.Path(abs),
+		memory.TypedStorePath(abs),
+	} {
+		if fi, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&sb, "%d:%d;", fi.Size(), fi.ModTime().UnixNano())
+		} else {
+			sb.WriteString("-;")
+		}
+	}
+	return sb.String()
+}
+
+// buddyMemoGet serves a memoized body when its inputs are unchanged and the
+// TTL has not expired.
+func buddyMemoGet(abs string, noMemory bool) (string, bool) {
+	buddyMemoMu.Lock()
+	defer buddyMemoMu.Unlock()
+	e, ok := buddyMemo[buddyMemoKey(abs, noMemory)]
+	if !ok || time.Now().After(e.expires) || e.probe != buddyProbe(abs) {
+		return "", false
+	}
+	return e.body, true
+}
+
+// buddyMemoPut stores a freshly rendered body with its input probe.
+func buddyMemoPut(abs string, noMemory bool, body string) {
+	buddyMemoMu.Lock()
+	defer buddyMemoMu.Unlock()
+	buddyMemo[buddyMemoKey(abs, noMemory)] = buddyMemoEntry{
+		body:    body,
+		probe:   buddyProbe(abs),
+		expires: time.Now().Add(buddyMemoTTL),
+	}
 }
 
 // ProjectMap renders the full per-file project map for root — the same
@@ -210,10 +314,11 @@ const fullMapBudget = 1 << 20
 
 // renderProjectMap renders the project map, dropping whole file summaries
 // past the byte budget (never cutting mid-file) with a pointer to the full
-// map tool.
+// map tool. The header reflects the root CLIPPED (LOW-8: an adversarial root
+// cannot push control runes or unbounded bytes into the digest).
 func renderProjectMap(p *code.Project, budget int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s (%d files", p.Root, len(p.Files))
+	fmt.Fprintf(&b, "Project: %s (%d files", index.ClipReflect(p.Root, 160), len(p.Files))
 	if p.CacheHit > 0 {
 		fmt.Fprintf(&b, ", %d from cache", p.CacheHit)
 	}
@@ -243,7 +348,7 @@ func renderProjectMap(p *code.Project, budget int) string {
 // full map is one `kern buddy --map` (or `kern project_map`) away.
 func renderProjectOverview(p *code.Project) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s (%d files", p.Root, len(p.Files))
+	fmt.Fprintf(&b, "Project: %s (%d files", index.ClipReflect(p.Root, 160), len(p.Files))
 	if p.CacheHit > 0 {
 		fmt.Fprintf(&b, ", %d from cache", p.CacheHit)
 	}

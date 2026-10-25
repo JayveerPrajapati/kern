@@ -20,6 +20,7 @@ package metaroute
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -111,21 +112,14 @@ func metaCosSim(q, t []string) float64 {
 	if overlap == 0 {
 		return 0
 	}
-	return float64(overlap) / sqrtF(float64(len(q))*float64(len(t)))
-}
-
-// sqrtF is a dependency-free square root (math.Sqrt is stdlib; keep imports
-// minimal by inlining a 3-iteration Newton step — precise enough for cosine
-// thresholds).
-func sqrtF(x float64) float64 {
-	if x <= 0 {
-		return 0
-	}
-	g := x
-	for i := 0; i < 3; i++ {
-		g = (g + x/g) / 2
-	}
-	return g
+	// math.Sqrt, not a hand-rolled Newton step: the previous 3-iteration
+	// seed-at-x approximation under-converges for large |q|·|t| products
+	// (sqrtF(92) ≈ 14.02 vs the true 9.59), which silently under-scored
+	// every long description — a fattened catalog description dropped the
+	// semantic route below threshold even with the same token overlap
+	// (found 2026-10-25 when the Phase-1 description rewrites broke the
+	// imperative-verify acceptance route).
+	return float64(overlap) / math.Sqrt(float64(len(q))*float64(len(t)))
 }
 
 // SemanticMetaRoute scores the request against every tool's name +

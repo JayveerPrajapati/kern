@@ -87,8 +87,8 @@ func TestHookWriters(t *testing.T) {
 				t.Fatalf("config not written at %s: %v", cfgPath, err)
 			}
 			content := string(b)
-			if !strings.Contains(content, "kern-guard.sh") {
-				t.Fatalf("config does not reference kern-guard.sh:\n%s", content)
+			if !strings.Contains(content, " guard hook") {
+				t.Fatalf("config does not reference the kern guard hook command:\n%s", content)
 			}
 			var m map[string]any
 			if err := json.Unmarshal(b, &m); err != nil {
@@ -103,8 +103,8 @@ func TestHookWriters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("config not written on re-run at %s: %v", cfgPath, err)
 			}
-			if got := strings.Count(string(b2), "kern-guard.sh"); got != 1 {
-				t.Fatalf("hook entry duplicated on re-run: %d kern-guard.sh refs\n%s", got, b2)
+			if got := strings.Count(string(b2), " guard hook"); got != 1 {
+				t.Fatalf("hook entry duplicated on re-run: %d guard hook refs\n%s", got, b2)
 			}
 		})
 	}
@@ -159,8 +159,8 @@ func TestGlobalHooksReferenceHomeGuardScript(t *testing.T) {
 				t.Fatalf("config not written at %s: %v", cfgPath, err)
 			}
 			content := string(b)
-			if !strings.Contains(content, homeGuard) {
-				t.Fatalf("config does not reference HOME guard %q:\n%s", homeGuard, content)
+			if !strings.Contains(content, " guard hook") {
+				t.Fatalf("config does not reference the HOME-installed guard hook:\n%s", content)
 			}
 			if strings.Contains(content, root) {
 				t.Fatalf("config must not reference project root %q:\n%s", root, content)

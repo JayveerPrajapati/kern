@@ -324,30 +324,19 @@ if (sub === "show" && arg.includes(":")) return false
 }
 return stat
 }
-// Read-only kern diagnostics exempt from governed routing: EXACT invocation
-// only — "kern update" (or any subcommand/flag beyond these four bare forms)
-// stays governed. The four are content-free, so the governed wrapper adds
-// latency without value.
-const READONLY_KERN = new Set([
-  "kern version",
-  "kern --version",
-  "kern doctor",
-  "kern health",
-  "kern guard",
-  "kern guard --help",
-  "kern guard -h",
-  "kern mcp tools",
-  "kern mcp tools list",
-  "kern mcp tools --json",
-])
 // Flags that make `git log` emit file content (patch bodies / raw diffs).
 const GIT_LOG_PATCH_FLAGS = ["-p", "--patch", "-u", "--raw"]
 function isSimpleCommand(cmd: string): boolean {
 if (/[;&|<>`$\n\r]/.test(cmd)) return false
 const trimmed = cmd.trim()
-if (READONLY_KERN.has(trimmed)) return true
 const parts = trimmed.split(/\s+/)
 if (parts.length === 0) return false
+// ANY invocation of the kern CLI runs raw. The CLI carries its own
+// governance (approval workflow for installer-class commands, tty-gated
+// allow-once minting, sandboxed exec, update provenance guard), and the
+// guard's deny messages steer agents TO kern commands — blocking them
+// would be self-defeating.
+if (parts[0] === "kern") return true
 if (parts[0] === "git") {
 // `git -C <dir> <sub>` operates on another working tree: skip the -C
 // <dir> pair (dir must be a real non-flag token) and classify the
@@ -522,34 +511,221 @@ function splitCommandSegments(cmd: string): string[] {
   return segs
 }
 
-const CONTENT_INTENT_CMDS = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
+// P2 — risk-axis reclassification. The single content-intent deny-list is
+// split into two lists with opposite enforcement:
+//   READ_CMDS — content-READING commands that are SERVED, never denied: a pure
+//   read has no write/network/destructive surface, so the guard's job is to
+//   answer it via kern's fast paths (Tier 1/2) or the readonly sandbox (Tier
+//   3), not to police it.
+//   GATE_CMDS — writes/destructive/network/installers (the risky axis): a
+//   command containing ANY gate segment is hard-denied (the guard's exit-3
+//   blocked contract) unless an operator allow-once unlocks it. Mirrors the
+//   Go-side dangerous-class classifier (internal/governance/exec_classify.go)
+//   so the plugin and the firewall agree on what is risky.
+const READ_CMDS = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
 const SHELL_WRAPPER_CMDS = new Set(["sh", "bash", "zsh", "dash", "ksh"])
+// Flat gate names: ANY invocation is write/destructive/network.
+const GATE_CMDS = new Set(["rm", "mv", "cp", "dd", "mkfs", "wipefs", "diskutil", "shred", "truncate", "chmod", "chown", "curl", "wget", "fetch"])
+// Installer names: gated only when the subcommand actually installs
+// (go test / make / npm test stay governed, not gated — a build is not a gate).
+const INSTALLER_CMDS = new Set(["npm", "pnpm", "yarn", "pip", "pip3", "go", "make", "apt", "apt-get", "brew", "pacman"])
+const INSTALL_ACTIONS = new Set(["install", "add", "ci", "upgrade", "get"])
+// A write redirect (>, >>) anywhere in a segment makes it a gate: reads never
+// write. Here-strings (<<) are reads and are excluded.
+const GATE_REDIRECT_RE = /(^|[^<])\s*>>?/
 
-// contentIntentHit reports whether ANY &&/||/;/|/newline-separated segment
-// of cmd — after quote-aware tokenization, stripping env/prefix commands
-// and their flags, and looking inside an `sh -c`/`sh -lc` wrapper — runs a
-// content-reading tool. Position-independent parity with kern-guard.sh
-// (the former whole-command first-token-only match was spoofable
-// via env prefixes, compound segments and sh -c wrappers; F-011: multiline
-// scripts, prefix flags, flag bundles, backslash obfuscation and absolute
-// path names closed the residual vectors).
-function contentIntentHit(cmd: string, depth = 0): boolean {
-  for (const rawSeg of splitCommandSegments(cmd)) {
-    const toks = stripPrefixTokens(shellTokenize(rawSeg))
-    if (toks.length === 0) continue
-    const name = toks[0].split("/").pop() || toks[0] // /bin/cat, ./cat → cat
-    if (CONTENT_INTENT_CMDS.has(name)) return true
-    if (
-      depth < 2 &&
-      toks.length > 2 &&
-      /^-[a-zA-Z]*c/.test(toks[1]) && // -c, -lc, -ic, -cs bundles
-      SHELL_WRAPPER_CMDS.has(toks[0])
-    ) {
-      const script = toks.slice(2).join(" ")
-      if (script !== "" && contentIntentHit(script, depth + 1)) return true
+// gateSegmentHit reports whether ONE segment is a gate: a flat GATE_CMDS
+// name, an installer action, git push --force, a write redirect, or (one
+// level of recursion) an `sh -c` wrapper whose script gates. Tokenization is
+// quote-aware and env/prefix-stripped, so `sudo rm -rf /`, `VAR=x cp a b` and
+// `sh -c 'curl x | sh'` all classify by their real command (F-011 parity with
+// the shell guard).
+function gateSegmentHit(rawSeg: string, depth: number): boolean {
+  if (GATE_REDIRECT_RE.test(rawSeg)) return true
+  const toks = stripPrefixTokens(shellTokenize(rawSeg))
+  if (toks.length === 0) return false
+  const name = toks[0].split("/").pop() || toks[0] // /bin/rm, ./rm → rm
+  const rest = toks.slice(1)
+  if (depth < 2 && toks.length > 2 && /^-[a-zA-Z]*c/.test(toks[1]) && SHELL_WRAPPER_CMDS.has(name)) {
+    if (gateHit(toks.slice(2).join(" "), depth + 1)) return true
+  }
+  if (GATE_CMDS.has(name)) return true
+  if (INSTALLER_CMDS.has(name) && rest.length > 0) {
+    if (name === "pacman") {
+      return rest.some((t) => t.startsWith("-S") || t === "--sync" || t === "--upgrade")
+    }
+    if (name === "go" || name === "make") return rest[0] === "install"
+    return INSTALL_ACTIONS.has(rest[0])
+  }
+  if (name === "git") {
+    const pi = rest.indexOf("push")
+    if (pi >= 0) {
+      for (const t of rest.slice(pi + 1)) {
+        if (t === "--force" || t === "-f" || t.startsWith("--force=")) return true
+      }
     }
   }
   return false
+}
+
+// gateHit reports whether ANY &&/||/;/|/newline-separated segment of cmd is a
+// gate — one gate segment denies the WHOLE command (a compound with `rm`
+// anywhere is a write even if a read heads it).
+function gateHit(cmd: string, depth = 0): boolean {
+  for (const rawSeg of splitCommandSegments(cmd)) {
+    if (gateSegmentHit(rawSeg, depth)) return true
+  }
+  return false
+}
+
+// Segment classifier used by readPipeline: the command name of a segment
+// after prefix stripping ("" when the segment is empty), and whether the
+// segment is a trivial content-free command (isSimpleCommand — e.g. `git
+// status`, `echo`, `wc`) so a read pipeline may be headed by ordinary
+// content-free work.
+function segName(rawSeg: string): string {
+  const toks = stripPrefixTokens(shellTokenize(rawSeg))
+  if (toks.length === 0) return ""
+  return (toks[0].split("/").pop() || toks[0])
+}
+
+// A read head is symbol-shaped when its pattern is a plausible symbol (no
+// regex metacharacters): those translate to kern's AST index. Regex-only,
+// comments/TODO and punctuation patterns are NOT symbol-shaped and fall to
+// Tier 3 (kern exec --readonly).
+const SYMBOL_SHAPED_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/
+
+// isReadOnlyCompanion reports whether a segment may legally co-head a
+// pure-read pipeline: a trivial content-free command (echo/ls/wc/...) or a
+// READ-ONLY git form (status/log w/o patch/rev-parse/diff|show --stat/
+// branch -a/remote) — NEVER a write. isSimpleCommand alone is NOT enough
+// here: it deliberately treats `git add`/`git commit` as content-free (they
+// run raw through the simple exemption), but a git add/commit must never
+// ride along into a Tier-3 `kern exec --readonly` script (it would mutate
+// the real worktree from inside the "read").
+function isReadOnlyCompanion(seg: string): boolean {
+  if (!isSimpleCommand(seg)) return false
+  const parts = seg.trim().split(/\s+/)
+  // A kern CLI command runs raw as a simple command but must never ride
+  // into a Tier-3 readonly-sandbox serve — pipes containing kern stay
+  // governed (split them instead).
+  if (parts[0] === "kern") return false
+  if (parts[0] !== "git") return true
+  let i = 1
+  if (parts[i] === "-C") i += 2
+  const sub = parts[i] ?? ""
+  return sub !== "add" && sub !== "commit"
+}
+
+// grepPatternAndTarget splits grep-family args into the pattern (first
+// non-flag argument) and whether an explicit TARGET (file or directory)
+// follows it — parity with the Go classifier's grepPatternAndTarget.
+function grepPatternAndTarget(args: string[]): { pattern: string; hasTarget: boolean } {
+  let pattern = ""
+  let hasTarget = false
+  for (const a of args) {
+    if (a.startsWith("-") && a !== "-") continue
+    if (pattern === "") {
+      pattern = a
+      continue
+    }
+    hasTarget = true
+    break
+  }
+  return { pattern, hasTarget }
+}
+
+// readPipeline classifies a command that contains at least one READ segment
+// and no GATE segment. Returns the serve plan (tier + the pieces needed to
+// serve) or null when the command is NOT a pure-read pipeline (a non-read,
+// non-trivial segment such as `go test` or `git log -p` is present — that
+// command is governed below, not served).
+//   tier 1: single translatable read — symbol grep → kern ast; file read →
+//     kern compact; find → kern buddy. Served from the index in grep shape.
+//     A grep naming an explicit target (file/dir) is NOT tier 1: the symbol
+//     search is repo-wide and ignores the scope.
+//   tier 2: read head + bounded simple tail (| wc -l, | head N, | tail N,
+//     | grep -v P, | grep P) — serve the head from the index, apply the tail
+//     in-process, return the COMPUTED answer.
+//   tier 3: everything else pure-read (regex greps, scoped greps, awk/sed
+//     transforms, compounds of reads) → kern exec --readonly (sandboxed,
+//     masked).
+function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; file?: string; tails?: string[] } | null {
+  // One level of sh -c "..." / bash -c "..." wrapper unwrapping (mirrors
+  // gateSegmentHit's recursion): a wrapper segment classifies as its inner
+  // script — `sh -c "cat .gitignore"` is a read, not an unknown command.
+  // Declared as a plain function (not an annotated arrow) so the node parity
+  // harness can eval the extracted block.
+  const unwrap = (raw) => {
+    const toks = stripPrefixTokens(shellTokenize(raw))
+    if (toks.length >= 3 && /^-[a-zA-Z]*c/.test(toks[1]) && SHELL_WRAPPER_CMDS.has(toks[0])) {
+      return toks.slice(2).join(" ")
+    }
+    return raw
+  }
+  const segs = splitCommandSegments(cmd).map((s) => s.trim()).filter((s) => s !== "").map(unwrap)
+  if (segs.length === 0) return null
+  const names = segs.map(segName)
+  if (!names.some((n) => READ_CMDS.has(n))) return null
+  // Pure-read check: every segment is a READ command or a read-only
+  // companion (trivial shell / read-only git). Anything else (a write like
+  // git add/commit, a build/test/install, git -p) means the command is
+  // governed, not served — a write must never ride into a Tier-3 read.
+  const companion = segs.map((s) => isReadOnlyCompanion(s))
+  for (let i = 0; i < segs.length; i++) {
+    if (!(READ_CMDS.has(names[i]) || companion[i])) return null
+  }
+  // tier 1: a single read segment (optionally with &&/;-joined content-free
+  // companions). A PIPE is never a tier-1 shape: `grep foo | wc -l` is a
+  // read-head + tail (tier 2), not a single read with a companion — the tail
+  // consumes and transforms the read's output, so the COMPUTED answer (the
+  // count, not the lines) is the serve.
+  const readIdx = names.findIndex((n) => READ_CMDS.has(n))
+  const nonReadTrivial = segs.every((s, i) => i === readIdx || isReadOnlyCompanion(s))
+  if (nonReadTrivial && !cmd.includes("|")) {
+    const name = names[readIdx]
+    const toks = stripPrefixTokens(shellTokenize(segs[readIdx]))
+    const args = toks.slice(1)
+    if (name === "find") return { tier: 1, head: "find" }
+    if (name === "grep" || name === "egrep" || name === "rg" || name === "ag") {
+      const { pattern, hasTarget } = grepPatternAndTarget(args)
+      // A scoped grep (explicit file/dir target) is tier 3: the tier-1
+      // symbol search is repo-wide and ignores the caller's scope — a
+      // named file must never be answered with symbols from other files.
+      if (SYMBOL_SHAPED_RE.test(pattern) && !hasTarget) return { tier: 1, head: name, pattern }
+      return { tier: 3 } // regex/punctuation/scoped pattern → sandboxed read
+    }
+    if (name === "cat" || name === "head" || name === "tail" || name === "less" || name === "more") {
+      const file = args.filter((a) => !a.startsWith("-")).pop() || ""
+      if (file !== "") return { tier: 1, head: name, file }
+      return { tier: 3 }
+    }
+    // sed/awk transform a stream — never a plain file read → Tier 3.
+    return { tier: 3 }
+  }
+  // tier 2: read head + bounded simple tails (| wc -l, | head N, | tail N,
+  // | grep -v P, | grep P). The head must be a symbol-shaped grep-family read.
+  const headToks = stripPrefixTokens(shellTokenize(segs[0]))
+  const headName = segName(segs[0])
+  if ((headName === "grep" || headName === "egrep" || headName === "rg" || headName === "ag") && READ_CMDS.has(headName)) {
+    const headArgs = headToks.slice(1)
+    const { pattern, hasTarget } = grepPatternAndTarget(headArgs)
+    if (SYMBOL_SHAPED_RE.test(pattern) && !hasTarget) {
+      const tails: string[] = []
+      let ok = true
+      for (let i = 1; i < segs.length; i++) {
+        const t = segs[i].trim()
+        if (/^wc(\s+.*)?$/i.test(t) && /\s-l(\s|$)/.test(t)) { tails.push(t); continue }
+        if (/^head(\s+.*)?$/i.test(t) || /^tail(\s+.*)?$/i.test(t)) { tails.push(t); continue }
+        if (/^grep(\s+.*)?$/i.test(t) && /-v\b/.test(t)) { tails.push(t); continue }
+        if (/^grep(\s+.*)?$/i.test(t)) { tails.push(t); continue }
+        ok = false
+        break
+      }
+      if (ok && tails.length > 0) return { tier: 2, head: headName, pattern, tails }
+    }
+  }
+  return { tier: 3 }
 }
 
 // Raw read: verbatim file contents (or a directory listing), mirroring the
@@ -585,6 +761,7 @@ kern_arch: "explore",
   kern_fetch_raw_anchor: "cross",
   kern_fit_context: "plan",
   kern_graph: "explore",
+  kern_apply: "edit",
   kern_heal: "edit",
   kern_impact: "plan",
   kern_mask_pii: "cross",
@@ -605,7 +782,8 @@ kern_arch: "explore",
   kern_verify: "verify",
   kern_why: "explore",
 }
-// defaultTools mirrors internal/mcp/toolpolicy.go's 29-tool default surface so the
+// defaultTools mirrors internal/mcp/toolpolicy.go's 32-tool default surface (the
+// full catalog since 2026-10-23) so the
 // plugin advertises the same tools the MCP server does when no env vars are
 // set. KERN_MCP_FULL=1, KERN_MCP_PHASE, and KERN_TOOLS all lift the default
 // (matching the server's behavior).
@@ -613,6 +791,7 @@ const DEFAULT_TOOLS = new Set([
   "kern_meta", // NL router → all sub-tools
   "kern_explore", // symbol source + callers/callees + blast radius
   "kern_impact", // blast radius of a change
+  "kern_apply", // safe edit path: transactional apply + verify + rollback
   "kern_search", // ranked symbol search
   "kern_verify", // unified verification
   "kern_buddy", // session onboarding digest
@@ -639,6 +818,8 @@ const DEFAULT_TOOLS = new Set([
   "kern_mask_pii", // locally scan text for secrets/PII
   "kern_fetch_raw_anchor", // re-read truncated anchor output
   "kern_review", // token-optimised code-review context
+  "kern_graph", // one-call graph context (callers/callees/blast radius)
+  "kern_arch", // architecture overview from call-graph communities
 ])
 
 // filterToolSurface applies the same advertisement rules as the MCP server's
@@ -660,8 +841,9 @@ function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial
     const p = TOOL_PHASES[name] ?? ""
     if (active && p !== "meta" && p !== "cross" && p !== active) continue
     if (allowlist.length > 0 && !allowlist.includes(name)) continue
-// No env override → default to the same 29-tool surface as the MCP
-// server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
+// No env override → default to the full 32-tool catalog (same as the MCP
+// server, standing mandate 2026-10-23). Shadow built-ins (read/glob/grep/bash)
+// are not kern_* tools
 // and must always stay advertised to keep precedence over the
 // built-ins they replace.
 	if (name.startsWith("kern_") && !full && !active && allowlist.length === 0 && !DEFAULT_TOOLS.has(name)) continue
@@ -975,6 +1157,28 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       return { text, exitCode: Number.isNaN(code) ? 0 : code }
     } finally {
       await rm(outFile, { force: true })
+    }
+  }
+
+  // P3: classify a command into the risk-axis verdict via the Go binary
+  // (`kern guard classify --json`) — the single source of truth for
+  // tokenization/prefix-strip/segment-split and the gate/read decisions,
+  // replacing the former TS duplicate. The result's verdict is one of
+  // allow|gate|serve|governed; a serve verdict carries tier + the
+  // head/pattern/file/tails pieces the bash arm needs to serve.
+  const classifyCmd = async (cmd: string): Promise<Record<string, any>> => {
+    const empty = { verdict: "governed", tier: 0, hint: "", hash: "" }
+    try {
+      const { text, exitCode } = await runWithExit(["guard", "classify", "--json", cmd], 10_000)
+      if (exitCode !== 0) return empty
+      const parsed = JSON.parse(text)
+      if (!parsed || typeof parsed.verdict !== "string") return empty
+      return parsed
+    } catch {
+      // kern unavailable or classify unsupported — fall back to governed
+      // (the safe default: runs through kern build, which then fails
+      // closed if kern is genuinely absent).
+      return empty
     }
   }
 
@@ -1633,7 +1837,12 @@ kern_probe: tool({
           if (args.output) flags.push("--output", args.output)
           if (args.anchor) flags.push("--anchor", args.anchor)
           if (args.timeout) flags.push("--timeout", String(Math.round(args.timeout)))
-          return runPayload(flags)
+          // Forward the requested deadline (seconds → ms) to the subprocess
+          // ceiling too: without it runPayload clamps to the 2-minute default
+          // and kills `kern verify` mid-run before the CLI's own --timeout
+          // machinery can return a PARTIAL result — observed live as
+          // "kern timed out after 120000ms" on a 400s request.
+          return runPayload(flags, args.timeout ? args.timeout * 1000 : undefined)
         },
       }),
       kern_impact: tool({
@@ -1654,6 +1863,31 @@ risk: tool.schema.string().optional(),
           if (args.kind) flags.push(args.kind)
           if (args.new_target) flags.push(args.new_target)
           return run(flags)
+        },
+      }),
+      kern_apply: tool({
+        description:
+          "Apply edits transactionally, verify, roll back on failure: the safe edit path. Multi-file {path, content} edits go through a sandboxed compile gate, then scoped `go test` on the modified packages; a verify failure restores the live tree. Returns a deterministic receipt hash.",
+        args: {
+          root: tool.schema.string().optional(),
+          edits: tool.schema.string(),
+          test: tool.schema.boolean().optional(),
+          dry_run: tool.schema.boolean().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          // The edits JSON travels through a temp file (arg-length limits),
+          // and apply's exit-1-with-report contract (failure findings)
+          // needs preserveExit so the rolled-back report survives as the
+          // tool result.
+          return withTempFile("apply.edits", args.edits, (file) => {
+            const flags: string[] = ["apply", file]
+            if (args.root) flags.push("--root", args.root)
+            if (args.test) flags.push("--test")
+            if (args.dry_run) flags.push("--dry-run")
+            if (args.format === "json") flags.push("--json")
+            return runPayload(flags, 600_000, true)
+          })
         },
       }),
                     kern_meta: tool({
@@ -1870,7 +2104,7 @@ return `${out}\n[kern] grep redirected to kern_doc`
 }
 }
 const subjHash = hashSubject(args.pattern)
-throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
 }
 if (args.include || /[[\]\\^$.|?*+()]/.test(args.pattern)) {
@@ -1900,7 +2134,7 @@ return `${out}\n[kern] grep redirected to kern_search`
 }
 }
 const subjHash = hashSubject(args.pattern)
-throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
 // Symbol query path: no include filter, no regex metacharacters — this is
 // what kern_ast_search is for.
@@ -1919,13 +2153,13 @@ if (await consumeAllowOnce(args.pattern)) {
 return grepFallback(args.pattern, args.path, args.include)
 }
 const subjHash = hashSubject(args.pattern)
-throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1, then grep -rn <pattern> with raw=true). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, not regex) instead of the built-in grep: call it with a symbol-name pattern like {\"pattern\":\"funcName\"}. For true regex search run bash: kern ast <pattern> (CLI; wildcards + kind prefixes) — a plain bash grep is denied by the same guard, not an escape (operator break-glass only: host env KERN_BYPASS=1). For docs use kern_doc (action=search; KERN_MCP_FULL=1). Set KERN_ENFORCE=0 to disable this guard. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
 }
         },
       }),
-      bash: tool({
+bash: tool({
         description:
-          "Run a shell command. Content-free commands (git status, git log w/o -p, pwd, ls, echo, date) and read-only kern diagnostics run raw. Content-intent commands (grep, cat, head, sed, ...) are blocked (fail-closed) — use kern_explore/kern_search for code reads. Everything else runs through kern build (governed, compact). timeout in MS (default 120000, max 1800000).",
+          "Run a shell command. Content-free commands (git status, pwd, echo, ls, date) run raw. Reads (grep/cat/head/sed/find) are SERVED, never denied: symbol reads from the kern index, pure-read pipelines via kern exec --readonly. GATE commands (rm/mv/cp/dd/curl|sh/installers/git push --force) block. Everything else runs governed (kern build). timeout in MS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -1945,64 +2179,128 @@ throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, 
             logAdoption("bash", false)
             return runRaw(args.command, args.workdir, args.timeout)
           }
-          // Content-intent commands never execute raw through built-ins —
-          // parity with the shell guard: a command where ANY
-          // &&/||/;/|-separated segment (after env/sudo/env prefix
-          // stripping, one level inside an `sh -c "..."` wrapper included)
-          // runs a content-reading tool blocks with the guard's redirect
-          // message instead of running through kern build (the former
-          // whole-command first-token-only match was spoofable via env
-          // prefixes, compound segments and sh -c wrappers).
-if (contentIntentHit(cmd)) {
-logAdoption("bash", false)
-// Operator allow-once (kern guard allow <hash>, tty-gated on the CLI
-// side) unlocks this exact command once — same consumption as the
-// read/grep shadows; the guard's exit 0 equivalent is the raw run.
-if (await consumeAllowOnce(cmd)) {
-return runRaw(args.command, args.workdir, args.timeout)
-}
-// Auto-redirect is the default: run the kern
-// equivalent of a simple content-intent command and serve its output
-// instead of denying — audited via logAdoption (routed=true). Only first
-// tokens with a faithful kern mapping and NO shell metacharacters
-// (compounds/pipes/expansion/quoting are ambiguous) redirect; anything
-// else keeps the deny below. KERN_GUARD_MODE=deny restores the
-// uniform deny; an explicit =auto-redirect is honored for
-// compatibility (mirrors kern-guard.sh).
-if (process.env.KERN_GUARD_MODE !== "deny" && !/[\n|&;<>$`"']/.test(cmd)) {
-const firstToken = cmd.split(/\s+/)[0] ?? ""
-const nonFlagToks = cmd.split(/\s+/).filter((t) => t !== "" && !t.startsWith("-"))
-const pattern = nonFlagToks[0] ?? ""
-const filePath = nonFlagToks.length > 0 ? nonFlagToks[nonFlagToks.length - 1] : ""
-const redirectFlags: string[] = /^(grep|rg|ag)$/.test(firstToken) && pattern !== "" ? ["ast", pattern]
-  : /^(cat|head|tail|sed|awk|less|more)$/.test(firstToken) && filePath !== "" ? ["compact", filePath]
-  : firstToken === "find" ? ["buddy"]
-  : /^(go|make)$/.test(firstToken) ? ["verify", "--command", cmd, "--output", "summary"]
-  : []
-if (redirectFlags.length > 0) {
-try {
-const out = await run(redirectFlags)
-logAdoption("bash", true)
-return `${out}\n[kern] bash redirected to ${redirectFlags[0]}`
-} catch {
-// kern unavailable or the mapping failed — fall through to the deny below
-}
-}
-}
-const clippedCmd = cmd.length > 80 ? cmd.slice(0, 80) + "…" : cmd
-    const subjHash = hashSubject(cmd)
-    // Per-command replacement map (byte-parity with kern-guard.sh):
-    // first token -> exact default-surface tool. Env-prefixed / sudo-wrapped
-    // / compound commands resolve to their first token; the kern_meta
-    // default routes anything else.
-    const firstToken = cmd.split(/\s+/)[0] ?? ""
-    const repl = /^(grep|rg|ag)$/.test(firstToken) ? "kern_search (query=<symbol>)"
-      : /^(cat|head|tail|sed|awk|less|more)$/.test(firstToken) ? "kern_explore (symbol=<file path>, tier=full, start_line/end_line)"
-      : firstToken === "find" ? "kern_buddy"
-      : /^(go|make)$/.test(firstToken) ? "kern_verify (command=<cmd>, output=summary)"
-      : "kern_meta (request=<what you need>)"
-     throw new Error(`kern guard: blocked '${clippedCmd}' — not in the passthrough set; use ${repl} instead (build/test: kern_verify, unsure: kern_meta). Compounds/pipes: split into single commands — each segment is classified separately. Escapes: KERN_BYPASS=1 / KERN_ENFORCE=0. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
-}
+          // GATE commands (P2) are hard-denied: a command where ANY segment is
+          // write/destructive/network/installer never runs through the guard —
+          // the enforcement budget lives on the risky axis. The deny throws the
+          // guard's own reason (byte-parity pinned by
+          // TestPluginShadowGuardMessageParity) after consuming an operator
+          // allow-once for the exact command. KERN_GUARD_MODE=deny restores the
+          // uniform deny (reads included) for operators who want strictness.
+          //
+          // P3: the classification is a single shell-out to
+          // `kern guard classify --json` — the Go source of truth (one
+          // implementation of tokenization/prefix-strip/segment-split instead
+          // of the former TS duplicate). The result carries verdict
+          // (allow|gate|serve|governed), tier, head/pattern/file/tails (for
+          // the serve), hint and hash.
+          const classify = await classifyCmd(cmd)
+          if (classify.verdict === "gate") {
+            logAdoption("bash", false)
+            if (await consumeAllowOnce(cmd)) {
+              return runRaw(args.command, args.workdir, args.timeout)
+            }
+            // Ask Protocol (P1): an active grant (single-use approved record
+            // or live prefix grant) covering this command lets it through —
+            // same one-question store the exec gate uses, consulted via the
+            // Go source of truth (`kern guard grant --check`). The grant is
+            // consumed by the check exactly like an execution would.
+            const root = process.env.KERN_ROOT ?? process.cwd()
+            try {
+              const grantCheck = await runWithExit(["guard", "grant", "--check", "--root", root, cmd], 10_000)
+              if (grantCheck.exitCode === 0) {
+                return runRaw(args.command, args.workdir, args.timeout)
+              }
+            } catch {
+              // kern unavailable — the deny below stands (fail closed).
+            }
+            const clippedCmd = cmd.length > 80 ? cmd.slice(0, 80) + "…" : cmd
+            const subjHash = classify.hash || hashSubject(cmd)
+            throw new Error(`kern guard: blocked '${clippedCmd}' — GATE command (write/destructive/network/installer). Ask the operator, then retry byte-identical: run \`kern guard grant '<the exact blocked command>'\` (mints approval appr-<id>), the operator answers \`kern approval ask appr-<id> --root ${root}\` with [1] accept once / [2] accept prefix this session / [3] reject, await the decision with \`kern approval wait appr-<id> --timeout 30m\`, then retry the exact command. Escapes: KERN_BYPASS=1 / KERN_ENFORCE=0. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
+          }
+          // READ commands (P1) are SERVED, never denied: a pure-read pipeline
+          // has no write/network/destructive surface, so the guard answers it
+          // from kern's index (Tier 1/2) or the readonly sandbox (Tier 3).
+          // KERN_GUARD_MODE=deny skips the serve and falls to the deny below.
+          // An "allow" verdict (simple content-free) also falls through raw.
+          const plan = process.env.KERN_GUARD_MODE === "deny" || classify.verdict !== "serve" ? null : classify
+          if (plan) {
+            // Tier 1: single translatable read — symbol grep → kern ast
+            // (grep-shaped answer), file read → kern compact, find → kern buddy.
+            if (plan.tier === 1) {
+              try {
+                let out = ""
+                if (plan.head === "find") {
+                  out = await run(["buddy"])
+                } else if (plan.pattern !== undefined) {
+                  out = await run(["ast", plan.pattern])
+                } else if (plan.file !== undefined) {
+                  out = await run(["compact", plan.file])
+                }
+                logAdoption("bash", true)
+                return `${out}\n[kern] bash served from kern index (Tier 1: ${plan.head})`
+              } catch {
+                // kern unavailable or the mapping failed — fall through to Tier 3
+              }
+            }
+            // Tier 2: read head + simple tail → serve the head from the index,
+            // apply the tail in-process, return the COMPUTED answer (wc -l
+            // yields the count, not a line list).
+            if (plan.tier === 2 && plan.pattern !== undefined && plan.tails) {
+              try {
+                const head = await run(["ast", plan.pattern])
+                let lines = head.split("\n").filter((l) => l.trim() !== "")
+                for (const tail of plan.tails) {
+                  const t = tail.trim()
+                  if (/^wc\b/.test(t) && /\s-l(\s|$)/.test(t)) {
+                    lines = [String(lines.length)]
+                  } else if (/^head\b/.test(t)) {
+                    const m = /^head\s+(-n\s*)?(\d+)/.exec(t)
+                    lines = lines.slice(0, m ? parseInt(m[2], 10) : 10)
+                  } else if (/^tail\b/.test(t)) {
+                    const m = /^tail\s+(-n\s*)?(\d+)/.exec(t)
+                    lines = lines.slice(-(m ? parseInt(m[2], 10) : 10))
+                  } else if (/^grep\b/.test(t) && /-v\b/.test(t)) {
+                    const m = /grep\s+.*-v\s+['"]?([^'"]+)['"]?/.exec(t)
+                    if (m) lines = lines.filter((l) => !l.includes(m[1]))
+                  } else if (/^grep\b/.test(t)) {
+                    const m = /grep\s+['"]?([^'"]+)['"]?/.exec(t)
+                    if (m) lines = lines.filter((l) => l.includes(m[1]))
+                  }
+                }
+                logAdoption("bash", true)
+                return `${lines.join("\n")}\n[kern] bash served from kern index (Tier 2: computed)`
+              } catch {
+                // kern unavailable or the mapping failed — fall through to Tier 3
+              }
+            }
+            // Tier 3: untranslatable pure read → kern exec --readonly (P3b):
+            // sandboxed (network isolated), PII-masked, output-shaped, kept and
+            // re-sliceable. The readonly exec runs scripts in a temp cwd, so
+            // cd into the project/workdir first.
+            try {
+              const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+              const wd = args.workdir || directory
+              const { text, exitCode } = await runWithExit(["exec", "--readonly", "--lang", "sh", `cd ${q(wd)} && ${cmd}`], args.timeout)
+              logAdoption("bash", true)
+              const body = exitCode === 0 ? text : `[exit ${exitCode}]\n${text}`
+              return `${body}\n[kern] bash read served sandboxed (kern exec --readonly, Tier 3)`
+            } catch (err) {
+              const e = err as { message?: string; stdout?: Buffer | Uint8Array; stderr?: Buffer | Uint8Array }
+              const text = [e.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n")
+              if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused/i.test(text)) {
+                // The readonly firewall refused the read (e.g. a read disguised
+                // as a write) — surface the denial, never fall back raw.
+                logAdoption("bash", true)
+                return text
+              }
+              // kern is entirely unavailable: a pure-read has no risky surface,
+              // so serving it raw with a one-line note is the fail-open read
+              // posture (writes/exec stay fail-closed).
+              logAdoption("bash", false)
+              const raw = await runRaw(args.command, args.workdir, args.timeout)
+              return `${raw}\n[kern] kern unavailable — raw read served (pure-read pipeline)`
+            }
+          }
           // kern build runs any command (sh -c) in the project dir, gated by
           // the governance firewall, and returns compact output. kern exec is
           // NOT used for this: it executes code in an isolated temp sandbox
@@ -2158,15 +2456,17 @@ return text || (err instanceof Error ? err.message : String(err))
       }
       // A bash command that IS a kern read-only view (buddy digest, search,
       // explore, impact, graph, ast, stats, mcp tools, version, doctor,
-      // health) returns kern-shaped structured text, not log noise — running
-      // the log-stripper over it interleaves its sections into garbage
-      // (deep-verify L3 F3-8: a long `kern buddy` digest came back mangled
-      // while the raw output was clean). Verify/build outputs stay
-      // compressible: they wrap real command logs.
+      // health, plus the etag-eligible structured views context/compact/
+      // retrieve/why/inherits — the full family now reachable raw since the
+      // guard's all-kern passthrough) returns kern-shaped structured text,
+      // not log noise — running the log-stripper over it interleaves its
+      // sections into garbage (deep-verify L3 F3-8: a long `kern buddy`
+      // digest came back mangled while the raw output was clean).
+      // Verify/build outputs stay compressible: they wrap real command logs.
       if (input.tool === "bash") {
         const bashArgs = input.args as { command?: string } | undefined
         const bashCmd = typeof bashArgs?.command === "string" ? bashArgs.command : ""
-        if (/^\s*kern\s+(--version|version|doctor|health|buddy|search|explore|impact|graph|ast|stats|mcp tools)\b/.test(bashCmd)) {
+        if (/^\s*kern\s+(--version|version|doctor|health|buddy|search|explore|impact|graph|ast|stats|context|compact|retrieve|why|inherits|mcp tools)\b/.test(bashCmd)) {
           return
         }
       }

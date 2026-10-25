@@ -155,8 +155,8 @@ func TestImpactExploreParityDispatch(t *testing.T) {
 //     class — names shared by a handful of packages are where bare-bucket
 //     mis-attribution most often hides), capped at 100;
 //   - the pinned internal/app.New case, the live 74-vs-78 divergence: explore
-//     over-attributed four learning.New callers (RecordArchitectureDrift,
-//     RecordDogfood, RecordPolicySignals, RecordSurfaceDrift) to app.New via
+//     over-attributed three learning.New callers (RecordArchitectureDrift,
+//     RecordDogfood, RecordPolicySignals) to app.New via
 //     the shared bare "New" bucket until computeCallers stopped merging
 //     cross-package qualified callee callers into it.
 //

@@ -32,11 +32,14 @@ known limitations, and how to report vulnerabilities.
 
 - **PII masking** — output is scrubbed before it reaches callers
   (`internal/pii/pii.go`); exposed to agents as the `kern_mask_pii` MCP tool.
-- **Sandboxed execution** — host commands run against a filesystem snapshot
-  with exact rollback on non-zero exit (`internal/sandbox/sandbox.go`).
-  Per-file snapshot cap is 100 MiB (`KERN_SANDBOX_MAX_SNAPSHOT_BYTES`); files
-  over the cap are not snapshotted and rollback reports data-loss risk
-  instead of silently restoring.
+- **Snapshot rollback sandbox** — host commands run against a filesystem
+  snapshot with rollback on non-zero exit (`internal/sandbox/sandbox.go`).
+  This is not OS-level privilege isolation: commands still run with the
+  user’s privileges, and out-of-root writes are not guaranteed to be rolled
+  back. Per-file snapshot cap is 100 MiB
+  (`KERN_SANDBOX_MAX_SNAPSHOT_BYTES`); files over the cap are not
+  snapshotted and rollback reports data-loss risk instead of silently
+  restoring.
 - **Governance firewall** — agent/task scoping with approval workflows; risky
   actions require explicit approval gates before execution
   (`internal/governance/firewall.go`, `internal/governance/approval.go`).

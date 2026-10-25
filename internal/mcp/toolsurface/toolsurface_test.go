@@ -8,7 +8,7 @@ func TestIsDefault(t *testing.T) {
 			t.Errorf("IsDefault(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"kern_graph", "kern_validate", "kern_sandbox", "kern_arch", "not_a_tool"} {
+	for _, name := range []string{"kern_validate", "kern_sandbox", "not_a_tool"} {
 		if IsDefault(name) {
 			t.Errorf("IsDefault(%q) = true, want false", name)
 		}
@@ -16,7 +16,7 @@ func TestIsDefault(t *testing.T) {
 }
 func TestAnnotate(t *testing.T) {
 	got := Annotate([]string{"kern_explore", "kern_graph", "kern_verify", "kern_exec"})
-	want := "kern_explore, kern_graph (KERN_MCP_FULL), kern_verify, kern_exec"
+	want := "kern_explore, kern_graph, kern_verify, kern_exec"
 	if got != want {
 		t.Fatalf("Annotate = %q, want %q", got, want)
 	}

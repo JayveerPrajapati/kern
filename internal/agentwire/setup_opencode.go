@@ -41,6 +41,15 @@ func WireOpencode(root string) Status {
 		"type":    "local",
 		"command": []string{cmd},
 		"enabled": true,
+		// Per-call tool timeout (ms). opencode's MCP client applies a ~2min
+		// default ceiling to local-server tool calls, which silently kills
+		// long kern_verify/verify-family runs (observed live: a full
+		// go test -short ./... command-mode run was client-killed at 120s
+		// while the server completed it and kept the anchor). 30 minutes
+		// matches the server's own per-call ceiling (mcp toolCallResponseDecoded)
+		// and the plugin's MAX_CEILING_MS — the host ceiling must never be the
+		// effective cap below the server's.
+		"timeout": 1_800_000,
 		// No KERN_ALLOW_EXEC default (C1): exec is opt-in per host, matching
 		// WireMCPJSON's contract — `kern setup` must not silently enable
 		// arbitrary command execution for every agent session in the repo.
@@ -68,6 +77,9 @@ func WireGlobal(bin string) Status {
 		"type":    "local",
 		"command": []string{bin},
 		"enabled": true,
+		// Per-call tool timeout (ms): same 30-minute ceiling as the project
+		// opencode.json entry — see the WireOpencode note for the rationale.
+		"timeout": 1_800_000,
 		// No KERN_ALLOW_EXEC default (C1): same opt-in contract as the
 		// project-level wiring — the global config is machine-wide, so
 		// silently enabling exec there would be even broader.

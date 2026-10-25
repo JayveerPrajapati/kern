@@ -93,9 +93,9 @@ func runMCP(rest []string) {
 }
 
 // runMCPToolsList prints the full MCP tool catalog, grouped by category.
-// It is the discoverability front door for the 31-tool surface: the
-// default MCP advertisement exposes only the minimal toolsurface.Set() set
-// and hides the rest behind the kern_meta router, so a user (or agent)
+// It is the discoverability front door for the 32-tool surface: the
+// default MCP advertisement exposes the full catalog (standing mandate
+// 2026-10-23) and `kern_meta` routes to every tool, so a user (or agent)
 // otherwise has no way to enumerate every capability, its phase and its
 // risk level.
 func runMCPToolsList(rest []string) {

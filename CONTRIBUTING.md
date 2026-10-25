@@ -10,7 +10,7 @@ contributor front door; the [README](README.md) covers the user story.
 git clone https://github.com/JayveerPrajapati/kern
 cd kern
 go build ./...          # Go 1.27+
-go test ./...           # full suite (~2-4 min); iteration loop: make test-touched
+go test ./...           # full suite (~5 min cold, 8 cores — measured 2026-10-21: 316s wall, 181 pkgs); iteration loop: make test-touched
 go vet ./...
 ```
 

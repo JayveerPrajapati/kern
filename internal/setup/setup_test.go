@@ -440,7 +440,9 @@ func TestDocToolCountsDerived(t *testing.T) {
 	}
 	def := len(toolsurface.Default)
 	hl := mcp.HighLevelToolsCount()
-	if full < 25 || def < 5 || hl < 3 || full == def || def == hl {
+	// full >= def (default surface is the full catalog since 2026-10-23) and
+	// def > hl always.
+	if full < 25 || def < 5 || hl < 3 || def > full || full == hl || def == hl {
 		t.Fatalf("implausible derived counts — full=%d default=%d highLevel=%d (broken derivation would silently pass)", full, def, hl)
 	}
 
@@ -547,8 +549,8 @@ func TestDocToolCountsDerived(t *testing.T) {
 // default surface, from the "focused N-tool default surface" claim to
 // the "full N-tool catalog" sentence that follows it.
 func readmeDefaultSection(readme string) string {
-	begin := regexp.MustCompile(`focused \d+-tool default surface`)
-	end := regexp.MustCompile(`full \d+-tool catalog`)
+	begin := regexp.MustCompile(`advertises the \*\*full \d+-tool catalog\*\*`)
+	end := regexp.MustCompile(`\*The \d+ \*\*\(default\)\*\* tools are`)
 	b := begin.FindStringIndex(readme)
 	if b == nil {
 		return ""
@@ -1245,8 +1247,8 @@ func TestWireQoderWritesMCPSettings(t *testing.T) {
 	if len(pre) == 0 {
 		t.Fatalf("qoder PreToolUse hook missing from settings.json:\n%s", b)
 	}
-	if !strings.Contains(string(b), "kern-guard.sh") {
-		t.Fatalf("qoder settings.json does not reference kern-guard.sh:\n%s", b)
+	if !strings.Contains(string(b), " guard hook") {
+		t.Fatalf("qoder settings.json does not reference the guard hook command:\n%s", b)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".qoder", "mcp.json")); err == nil {
 		t.Error("qoder mcpServers must live in settings.json, not a separate mcp.json")

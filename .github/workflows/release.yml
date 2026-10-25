@@ -13,6 +13,13 @@ on:
 # Least privilege: only the publish job needs to write.
 permissions:
   contents: read
+# The single pinned Go toolchain every job runs under (same value as ci.yml —
+# the patched stdlib the release binaries must carry). go.mod's `go` directive
+# stays the language-version floor (1.27.0); GOTOOLCHAIN is auto-downloaded
+# and used for the matrix builds. Declared once here so bumping the toolchain
+# touches one place.
+env:
+  GOTOOLCHAIN: go1.27.2
 
 # Never cancel a release that is mid-publish: a second tag push would leave a
 # half-uploaded release behind.
@@ -25,10 +32,8 @@ jobs:
     name: changelog entry exists for tag
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Release binaries must carry the patched stdlib (see lint-and-vuln in
-    # ci.yml): GOTOOLCHAIN is auto-downloaded and used for the matrix builds.
-    env:
-      GOTOOLCHAIN: go1.27.2
+    # GOTOOLCHAIN comes from the workflow-level env (the patched stdlib
+    # release binaries must carry — see the top of this file).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Changelog entry exists for tag
@@ -57,15 +62,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Full history: the review action diffs the release tag against
+      # origin/main. No module cache: the tree was just built by the test
+      # workflow's jobs.
+      - uses: ./.github/actions/go-env
         with:
-          # The action diffs the release tag against origin/main, so full
-          # history is required.
           fetch-depth: 0
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
           cache: false
 
       - name: Build kern from checkout
@@ -99,95 +101,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: ./.github/actions/go-env
+      - uses: ./.github/actions/release-assets
         with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Set target variables
-        id: vars
-        shell: bash
-        run: |
-          MATRIX_TARGET="${{ matrix.target }}"
-          os="${MATRIX_TARGET%/*}"
-          arch="${MATRIX_TARGET#*/}"
-          tag="${GITHUB_REF#refs/tags/}"
-          {
-            echo "os=$os"
-            echo "arch=$arch"
-            echo "tag=$tag"
-            echo "dir=kern-$os-$arch"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build
-        shell: bash
-        run: |
-          os="${{ steps.vars.outputs.os }}"
-          arch="${{ steps.vars.outputs.arch }}"
-          dir="${{ steps.vars.outputs.dir }}"
-          mkdir -p "$dir"
-          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite,notreesitter -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
-            -o "$dir/kern" ./cmd/kern
-          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite,notreesitter -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
-            -o "$dir/kern-mcp" ./cmd/kern-mcp
-
-      # Shrink the binaries with UPX (best compression). Significant savings:
-      # the Go runtime + the two cmd binaries land ~50% smaller once packed.
-      # UPX runs only for linux targets: windows .exe cross-compression from
-      # the linux runner is fragile, and UPX refuses macOS/Mach-O binaries
-      # without --force-macos (and even then the packed binary can be broken).
-      # Both binaries expose a non-interactive `version` subcommand
-      # (positional `version`, plus -v/--version) that prints and exits, so
-      # each is smoke-tested with it where the built binary can execute on this
-      # runner and structurally verified with `file` elsewhere. `kern` remains
-      # the primary smoke; a broken compression still fails the job before
-      # SHA256SUMS is generated.
-      - name: Compress binaries with UPX (linux only)
-        if: steps.vars.outputs.os == 'linux'
-        shell: bash
-        run: |
-          sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
-          dir="${{ steps.vars.outputs.dir }}"
-          upx --best --no-lzma "$dir/kern"
-          upx --best --no-lzma "$dir/kern-mcp"
-          # Only smoke-test by executing when the built binary can run on this
-          # runner (GOOS/GOARCH == host). Cross-compiled binaries (e.g. an
-          # arm64 build on the amd64 ubuntu runner) execute fine at build time
-          # but fail with "Exec format error" at runtime; UPX must not try to
-          # run those, only structurally verify them with `file`.
-          if [ "${{ steps.vars.outputs.os }}" = "linux" ] && \
-             [ "${{ steps.vars.outputs.arch }}" = "$(uname -m | sed 's/x86_64/amd64/')" ]; then
-            "$dir/kern" version >/dev/null
-            "$dir/kern-mcp" version >/dev/null
-          else
-            file "$dir/kern" | grep -qi "ELF" && file "$dir/kern-mcp" | grep -qi "ELF"
-          fi
-          echo "compressed sizes:"
-          du -h "$dir/kern" "$dir/kern-mcp"
-
-      - name: Package (tar.gz, or zip for windows)
-        shell: bash
-        run: |
-          os="${{ steps.vars.outputs.os }}"
-          dir="${{ steps.vars.outputs.dir }}"
-          if [ "$os" = "windows" ]; then
-            mv "$dir/kern" "$dir/kern.exe"
-            mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
-            python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[1])" "$dir"
-          else
-            tar -czf "${dir}.tar.gz" -C "$dir" .
-          fi
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}"
-          path: |
-            kern-*.tar.gz
-            kern-*.zip
+          target: ${{ matrix.target }}
 
   # Native, CGO-enabled build matrix producing the tree-sitter-enabled
   # `-full` assets. Tree-sitter grammars are hard-CGO, so they can only be
@@ -224,99 +141,14 @@ jobs:
     env:
       GOTOOLCHAIN: go1.27.2
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: ./.github/actions/go-env
+      - uses: ./.github/actions/release-assets
         with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Set target variables
-        id: vars
-        shell: bash
-        run: |
-          MATRIX_TARGET="${{ matrix.target }}"
-          os="${MATRIX_TARGET%/*}"
-          arch="${MATRIX_TARGET#*/}"
-          tag="${GITHUB_REF#refs/tags/}"
-          {
-            echo "os=$os"
-            echo "arch=$arch"
-            echo "tag=$tag"
-            echo "dir=kern-$os-$arch-full"
-          } >> "$GITHUB_OUTPUT"
-
-      # CGO_ENABLED=1 and NO build tags: the default build compiles the
-      # tree-sitter grammars in (the `sqlite` tag is a no-op — modernc.org/
-      # sqlite is pure-Go, gated by `!nosqlite` — so it is dropped here).
-      # GOOS/GOARCH are set to the matrix target even though they match the
-      # host, keeping the naming logic uniform with the `build` job.
-      - name: Build (tree-sitter, CGO)
-        shell: bash
-        run: |
-          os="${{ steps.vars.outputs.os }}"
-          arch="${{ steps.vars.outputs.arch }}"
-          dir="${{ steps.vars.outputs.dir }}"
-          mkdir -p "$dir"
-          GOOS="$os" GOARCH="$arch" CGO_ENABLED=1 \
-            go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
-            -o "$dir/kern" ./cmd/kern
-          GOOS="$os" GOARCH="$arch" CGO_ENABLED=1 \
-            go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
-            -o "$dir/kern-mcp" ./cmd/kern-mcp
-
-      # Smoke-test the tree-sitter build with each binary's `version`
-      # subcommand. The `build` job can only run this where the
-      # cross-compiled binary executes (linux, host == target); here every
-      # runner is native, so all five targets are exercised for real — a
-      # broken CGO/tree-sitter link fails the job before the asset ships.
-      - name: Smoke test binary versions (native)
-        shell: bash
-        run: |
-          dir="${{ steps.vars.outputs.dir }}"
-          "$dir/kern" version >/dev/null
-          "$dir/kern-mcp" version >/dev/null
-          file "$dir/kern"
-
-      # UPX: linux only — same policy as the `build` job (windows .exe
-      # compression from a foreign runner is fragile; UPX refuses Mach-O
-      # without --force-macos, which can produce broken binaries). The linux
-      # runners here are native, so the compressed binary is re-smoke-tested
-      # with `kern version` exactly like the `build` job does.
-      - name: Compress binaries with UPX (linux only)
-        if: steps.vars.outputs.os == 'linux'
-        shell: bash
-        run: |
-          sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
-          dir="${{ steps.vars.outputs.dir }}"
-          upx --best --no-lzma "$dir/kern"
-          upx --best --no-lzma "$dir/kern-mcp"
-          "$dir/kern" version >/dev/null
-          "$dir/kern-mcp" version >/dev/null
-          file "$dir/kern" | grep -qi "ELF"
-          file "$dir/kern-mcp" | grep -qi "ELF"
-          echo "compressed sizes:"
-          du -h "$dir/kern" "$dir/kern-mcp"
-
-      - name: Package (tar.gz, or zip for windows)
-        shell: bash
-        run: |
-          os="${{ steps.vars.outputs.os }}"
-          dir="${{ steps.vars.outputs.dir }}"
-          if [ "$os" = "windows" ]; then
-            mv "$dir/kern" "$dir/kern.exe"
-            mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
-            python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[1])" "$dir"
-          else
-            tar -czf "${dir}.tar.gz" -C "$dir" .
-          fi
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}-full"
-          path: |
-            kern-*-full.tar.gz
-            kern-*-full.zip
+          target: ${{ matrix.target }}
+          suffix: "-full"
+          cgo: "1"
+          tags: ""
+          native: "true"
 
   release:
     name: publish release

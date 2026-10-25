@@ -1,4 +1,4 @@
-package governance
+package execclassify
 
 // exec_classify.go — command-class classification for the exec firewall
 // (audit-table-2 A). Dangerous command classes — destructive, network-pipe
@@ -148,8 +148,8 @@ func splitStages(command string) []stage {
 // classifySegment classifies one stage's text. Returns destructive or
 // installer (never pipe-install — that needs the whole pipeline).
 func classifySegment(seg string) (DangerClass, string) {
-	tokens := shellTokens(seg)
-	tokens = stripPrefixes(tokens)
+	tokens := ShellTokens(seg)
+	tokens = StripPrefixes(tokens)
 	if len(tokens) == 0 {
 		return DangerNone, ""
 	}
@@ -216,9 +216,9 @@ func loopbackOnlySegment(seg string) bool {
 	return found
 }
 
-// stripPrefixes removes leading sudo/doas and VAR=VALUE environment prefixes
+// StripPrefixes removes leading sudo/doas and VAR=VALUE environment prefixes
 // so the first token is the actual command name.
-func stripPrefixes(tokens []string) []string {
+func StripPrefixes(tokens []string) []string {
 	i := 0
 	for i < len(tokens) {
 		t := tokens[i]
@@ -406,17 +406,17 @@ func classifyInstaller(name string, tokens []string) (DangerClass, string) {
 // firstShellToken returns the first token of a stage after stripping
 // sudo/env prefixes (quote-aware).
 func firstShellToken(seg string) string {
-	tokens := stripPrefixes(shellTokens(seg))
+	tokens := StripPrefixes(ShellTokens(seg))
 	if len(tokens) == 0 {
 		return ""
 	}
 	return tokens[0]
 }
 
-// shellTokens tokenizes a command segment on whitespace with quote awareness
+// ShellTokens tokenizes a command segment on whitespace with quote awareness
 // (single, double, and backslash escapes), dequoting each token — so
 // `rm -rf 'my dir'` classifies the same as `rm -rf "my dir"`.
-func shellTokens(s string) []string {
+func ShellTokens(s string) []string {
 	var tokens []string
 	var cur strings.Builder
 	var quote byte

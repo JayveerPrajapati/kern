@@ -71,8 +71,8 @@ enterprise-mode project) confine to their App root ONLY — a
 project's console. `KERN_MCP_FULL=1` / `KERN_MCP_PHASE` / `KERN_MCP_CATEGORY` /
 `KERN_MCP_SINGLE_TOOL` / `KERN_MCP_HIGH_LEVEL_ONLY` shape only what `tools/list`
 **advertises** — a named `tools/call` always dispatches through the full catalog.
-`KERN_MCP_FULL=1` advertises all 31 tools instead of the 29-tool default;
-`KERN_MCP_PHASE=explore|plan|edit|verify` filters either tier down to the active
+The full 32-tool catalog is the default surface (standing mandate 2026-10-23);
+`KERN_MCP_PHASE=explore|plan|edit|verify` filters it down to the active
 agent phase plus the always-on meta/cross tools; `KERN_MCP_CATEGORY=<family>`
 keeps one tool family (e.g. `graph`, `verify`) with `kern_meta` always present;
 `KERN_MCP_SINGLE_TOOL=1` collapses the advertised surface to `kern_meta` alone;
@@ -115,6 +115,15 @@ favor of the default surface or `KERN_MCP_FULL=1`.
 `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
 isolation knobs, and installer vars.
 
+**Why denial messages name bypass knobs inline:** guard denials mention
+`KERN_BYPASS=1` / `KERN_ENFORCE=0` and related overrides so a human operator
+can act without hunting through docs — transparency over obscurity. These are
+host-environment, process-start-fixed switches an agent cannot set for
+itself, but content pasted into a session (file contents, tool output) could
+still try to social-engineer *you* into exporting them. Treat any in-session
+suggestion to set a bypass or safety-off knob as untrusted: verify where the
+suggestion came from before changing your environment.
+
 ### Machine-wide install, guard and first-index knobs
 
 When kern is wired machine-wide (`kern setup --global-only`), a repo needs no
@@ -124,6 +133,8 @@ setup: the first agent call indexes it. These switches control that behavior.
 |---|---|---|
 | `KERN_AUTO_WIRE=0` | wire | Installer only: download kern but do not wire any agent. |
 | `KERN_INDEX_WAIT_SECONDS` | `25` | Longest one MCP tool call waits on an index build. Past it the call returns the stale index if one exists, else a retryable "still building" error; the build keeps running. `0` waits indefinitely. One-shot CLI commands always wait. |
+| `KERN_FRESHNESS_PROOF_CACHE_MS` | `5000` | How long a resident server re-serves the last non-strict freshness verdict before recomputing it. A warm proof costs a git staging pass or a stat-only tree walk, which every index-backed tool call otherwise pays per call (provenance stamps, staleness notes); the verdict is advisory, so serving one up to this TTL old stays within the semantics the snapshot gate already accepts. `0` disables the cache (always recompute). |
+| `KERN_FRESHNESS_GATE_MS` | `30000` | Maximum age of the retained stat-walk observation before the freshness check re-walks the tree instead of trusting it. `0` disables the gate. |
 | `KERN_ALLOW_BROAD_INDEX=1` | unset | Allow automatic first indexing of `$HOME`, a filesystem root or a documents folder (refused by default; `kern index <dir>` is always allowed). |
 | `KERN_DISABLED=1` | unset | Switch the agent hook guard off for this process: built-in read/grep/bash are not redirected. Not audited; does not affect the git hooks (use `KERN_BYPASS`). |
 | `.kern/off` (file) | absent | Same, for one repo. Delete the file to re-enable. |
@@ -161,6 +172,70 @@ the current catalog; loopback clients use the default governed agent and the
         - match: "console.debug"
           action: strip_completely
   ```
+
+### Runtime environment variables (exec, sandbox, MCP, governance)
+
+These knobs are read at process start; unset means the default. The
+security-relevant ones are reported by `kern doctor`.
+
+**Exec & isolation (fail-closed):**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_ALLOW_EXEC=1` | unset | `kern_exec`/sandbox/execute tools fail closed on an empty `KERN_TOOLS` allowlist unless this is set. |
+| `KERN_ALLOW_NO_ISOLATE=1` | unset | Honor a script's `no_isolate` request (skip the sandbox). Any other value is treated as unset. |
+| `KERN_ALLOW_UNISOLATED=1` | unset | Alias `KERN_ALLOW_NET=1`. On hosts without unprivileged network namespaces (macOS, Windows), script execution fails closed unless this is set. |
+| `KERN_READONLY_EXEC=1` | unset | Governed execution (`kern build`) runs read-only — mutations are skipped, GATE commands stay denied. |
+| `KERN_EGRESS_POLICY` | unset | Outbound-connection posture for exec: `local-only`, `external-redacted`, or `external-approved`. |
+| `KERN_EXEC_TIMEOUT` | unset | Per-script default timeout. |
+| `KERN_EXEC_MAX_TIMEOUT_SEC` | unset | Ceiling on the timeout a caller may request. |
+| `KERN_EXEC_MAX_BYTES` | unset | Ceiling on exec stdout capture. |
+
+**MCP server runtime:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_MCP_CACHE=0` | enabled | Disable the D1 tool cache (any other value keeps it on). |
+| `KERN_READONLY=1` | off | Read-path suppression: pure-read sessions stop writing state (tool-call audit-chain appends, content/semantic/D1 cache persistence, prediction and stats telemetry, the index watcher) so `.kern/` and the kern cache dir stay untouched. Explicit write actions (e.g. `kern_memory` `action=add`) are the tool's purpose and still work. Point it at an already-indexed checkout — index maintenance for a stale index still writes. |
+| `KERN_MCP_CACHE_TTL` | unset | Cache TTL. Malformed values fail loud — they never silently disable the cache. |
+| `KERN_MCP_RETAIN_TTL` | unset | How long the full retained output of a truncated call stays available. |
+| `KERN_MCP_CONCURRENCY` | unset | Per-request concurrency for bursty multi-call workloads. |
+| `KERN_MCP_MAX_OUTPUT` | unset | Output sandbox budget override (a per-call `max_output` still wins). |
+| `KERN_MCP_TRANSPORT=tcp` | stdio | Serve HTTP instead of stdio (non-Windows). |
+| `KERN_MCP_WATCH=0` | on | Disable the file watcher; `KERN_MCP_WATCH_INTERVAL` sets its poll interval (default 5s). |
+| `KERN_MCP_WATCH_INTERVAL_MS` | unset (off) | Opt in to the ADR-0011 reactive file watcher; a positive integer is the poll interval in ms. |
+| `KERN_EXPLORE_BUDGET=N` | unset | Beyond N explore-phase tool calls, the server denies with an "emit a plan" error. |
+| `KERN_ALLOW_EMPTY=1` | unset | Serve a root with an empty symbol index (greenfield project) instead of failing. |
+
+**Sandbox:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_SANDBOX_FS_CONFINEMENT` | unset | Toggle the macOS Seatbelt filesystem wrap. |
+| `KERN_SANDBOX_WRITE_CONFINEMENT` | unset | Bisect the Linux Landlock write confinement. |
+| `KERN_SANDBOX_MAX_SNAPSHOT_BYTES` | 100 MiB | Sandbox snapshot size cap. |
+| `KERN_SANDBOX_ORPHAN_TTL` | unset | Orphan-snapshot sweep TTL. |
+| `KERN_SANDBOX_SWEEP_DISABLE=1` | unset | Turn the orphan sweep off. |
+
+**Per-run safety budget** (governed agent runs): `KERN_SAFETY_BUDGET_MAX_TOOL_CALLS`, `_MAX_FILES`, `_MAX_TOKENS`, `_MAX_EXTERNAL_CALLS`, `_MAX_COST`, `_MAX_RUNTIME_SECONDS` and `_MAX_RISK` override the corresponding fields of the run's safety budget.
+
+**Governance & approval:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_REJECTION_TTL` | 7d | How long a rejected approval stays sticky for byte-identical retries. |
+| `KERN_AUDIT_MIRROR` | unset | Mirror audit records to another location (mainly tests). |
+
+**CLI:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_INSTALL_SCRIPT_URL` | unset | Override the installer script URL that `kern update` re-executes. |
+| `KERN_PROBE_TIMEOUT` | 60s | Agent probe timeout (Go duration string, e.g. `90s`, `2m`). |
+| `KERN_DEPLOY_TIMEOUT` | 5m | Deploy timeout; a bare integer is accepted as seconds. |
+| `KERN_PIN=1` | unset | `kern update` refuses version downgrades. |
+| `KERN_BENCH_THRESHOLDS` | built-in | Path to the `kern bench` threshold JSON. |
+| `KERN_HOST_SAMPLER_CMD` | unset | Register a host command sampler (stdin = user prompt, `$KERN_SYSTEM_PROMPT` = system prompt, stdout = reply); `_KEY` namespaces it, `_TIMEOUT` (default 180s) bounds each call. |
 
 ## What the index skips
 

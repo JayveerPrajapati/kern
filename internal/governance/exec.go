@@ -13,6 +13,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/execclassify"
 )
 
 // Execution surfaces (kern_exec, kern_sandbox, kern_execute) run arbitrary
@@ -74,6 +75,23 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 	if err := execAllowlistGate(tool); err != nil {
 		return err
 	}
+	return checkExecCommandCore(command, root)
+}
+
+// CheckExecCommandReadonly is the read-only variant of CheckExecCommand:
+// it skips the KERN_TOOLS / KERN_ALLOW_EXEC allowlist gate — a pure-read
+// pipeline has no write/network/destructive surface, so the operator-level
+// exec opt-in is not required — but KEEPS the risk firewall, rejection
+// stickiness, dangerous-class escalation, masking, and isolation. GATE
+// commands (rm -rf, curl|sh, installers...) still escalate to HIGH/CRITICAL
+// and are denied by the firewall exactly as in the full path; only the
+// allowlist gate is narrowed. This is the boundary used by `kern exec
+// --readonly` (KERN_READONLY_EXEC=1) for read-only bash fallbacks.
+func CheckExecCommandReadonly(command, root string) error {
+	return checkExecCommandCore(command, root)
+}
+
+func checkExecCommandCore(command, root string) error {
 	key := TaskKey(execAgentID, "command", "execute")
 	if command != "" {
 		key = execCommandKey(command)
@@ -89,6 +107,21 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 	// instead of sending the operator to edit approvals.json by hand.
 	if rejected := execRejectedFor(root, key); rejected != nil {
 		return fmt.Errorf("governance: command execution denied: this exact command was previously rejected by a human (approval %s; the rejection is bound to the command's SHA-256, so a byte-identical retry cannot re-request); rejections stop blocking %s after the decision — clear it now with: kern approval clear %s --root %s, or modify the command", rejected.ID, execRejectionTTLText(), rejected.ID, root)
+	}
+	// Ask Protocol (P1): a live prefix grant covers this command — a human
+	// already answered "accept prefix" for it. Consume one use (counted,
+	// re-stamped, audit-logged) and let the execution proceed without
+	// re-asking. Checked AFTER the single-use grant below in precedence but
+	// placed here for one reason: the single-use grant needs the firewall's
+	// key machinery, and a prefix grant answers outright. errNoPrefixGrant
+	// falls through to the single-use/mint path; any other error fails
+	// closed.
+	if command != "" && execApprovedFor(root, key) == nil {
+		if err := consumePrefixGrantUse(root, command); err == nil {
+			return nil
+		} else if !errors.Is(err, errNoPrefixGrant) {
+			return fmt.Errorf("governance: prefix-grant check failed (failing closed): %w", err)
+		}
 	}
 	fw := newExecFirewall(root, command)
 	granted := execApprovedFor(root, key)
@@ -125,7 +158,7 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 		// Surface WHY the command was gated: a dangerous-class match
 		// (audit-table-2 A) is the reason when the classifier fired.
 		classNote := ""
-		if class, why := ClassifyDangerousCommand(command); class != DangerNone {
+		if class, why := execclassify.ClassifyDangerousCommand(command); class != execclassify.DangerNone {
 			classNote = fmt.Sprintf(" (dangerous class %s: %s)", class, why)
 		}
 		if root == "" {
@@ -134,21 +167,29 @@ func CheckExecCommand(command, root string, toolName ...string) error {
 			// guidance instead.
 			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; no persistent approval store for this call — an operator can allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score, classNote)
 		}
+		// Ask Protocol (P1): bind the exact command text on the record before
+		// the integrity stamp persists it — "accept prefix" suggests from the
+		// structured Command field, and the v3 MAC covers it, so a governed
+		// client cannot swap it to widen a grant.
+		if ap.Kind == ApprovalKindExecCommand {
+			ap.Command = command
+		}
 		if serr := stampExecApproval(root, ap); serr != nil {
 			return fmt.Errorf("governance: command execution requires human approval, but the approval could not be integrity-protected: %w", serr)
 		}
 		// The firewall already requested (and persisted) the command-bound
 		// approval. Surface it with the resolution hint so the caller can
-		// route it to a human (`kern approve <id>`): the grant is bound to
-		// the exact command's SHA-256, so a retry MUST send the byte-
-		// identical command text (any change mints a new approval), and the
-		// calling agent can await the human decision with `kern approval
-		// wait <id>` instead of manual relay. The retry clause echoes the
-		// exact command so the caller never has to reconstruct it — live
-		// evidence (twice, this agent): agents naturally append output-
-		// shaping (| tail, && version-checks) to retries and mint fresh
-		// approvals instead of consuming the granted one.
-		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; approval %s pending (allowed for: %s) — resolve with: kern approve %s; the grant is bound to this command's SHA-256, so the retry MUST be byte-identical (appending pipes, redirects, or extra && segments mints a NEW approval) — retry exactly: %s; the calling agent can await the decision with `kern approval wait %s`%s", risk.Level, risk.Score, classNote, ap.ID, command, ap.ID, command, ap.ID, compoundPreExecNote(command))
+		// route it to a human (`kern approve <id>` / `kern approval ask
+		// <id>`): the grant is bound to the exact command's SHA-256, so a
+		// retry MUST send the byte-identical command text (any change mints
+		// a new approval), and the calling agent can await the human
+		// decision with `kern approval wait <id>` instead of manual relay.
+		// The retry clause echoes the exact command so the caller never has
+		// to reconstruct it — live evidence (twice, this agent): agents
+		// naturally append output-shaping (| tail, && version-checks) to
+		// retries and mint fresh approvals instead of consuming the granted
+		// one.
+		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f)%s; approval %s pending (allowed for: %s) — resolve with: kern approval ask %s --root %s ([1] accept once / [2] accept prefix this session / [3] reject; non-interactive once-approval: kern approve %s); the grant is bound to this command's SHA-256, so the retry MUST be byte-identical (appending pipes, redirects, or extra && segments mints a NEW approval) — retry exactly: %s; the calling agent can await the decision with `kern approval wait %s`%s", risk.Level, risk.Score, classNote, ap.ID, command, ap.ID, root, ap.ID, command, ap.ID, compoundPreExecNote(command))
 	}
 	if RequiresApproval(risk.Level) {
 		// Approval-required but no approval could be surfaced: fail closed.
@@ -300,6 +341,14 @@ func RequestExecApproval(wf *ApprovalWorkflow, command string, toolName ...strin
 	if err != nil {
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval, but the approval could not be persisted: %w", err)
 	}
+	// Ask Protocol (P1): remember the exact command text on the record so a
+	// later "accept prefix" answer can suggest its first two tokens without
+	// re-deriving it (Command is HMAC-covered, so it cannot be swapped to
+	// widen a grant). The R1 stamping below re-stamps + persists the record
+	// with the field set.
+	if command != "" && ap.Kind == ApprovalKindExecCommand {
+		ap.Command = command
+	}
 	// R1: a persistence-backed workflow must carry the exec integrity stamp
 	// so a forged/legacy record in the shared approval file can never be
 	// resumed. In-memory workflows (no store) skip the stamp — there is
@@ -363,7 +412,7 @@ func execPolicies(command string) []domain.Policy {
 	level := configuredExecLevel()
 	classNote := ""
 	if level != "LOW" {
-		if class, why := ClassifyDangerousCommand(command); class != DangerNone {
+		if class, why := execclassify.ClassifyDangerousCommand(command); class != execclassify.DangerNone {
 			level = "HIGH"
 			classNote = fmt.Sprintf(" matched dangerous class %s: %s — approval required regardless of KERN_TOOLS/KERN_ALLOW_EXEC; KERN_EXEC_RISK=LOW disables class escalation", class, why)
 		}

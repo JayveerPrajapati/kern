@@ -11,7 +11,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/draft"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
@@ -418,54 +417,6 @@ func runVerify(rest []string) int {
 		panic(exitError{code: code})
 	}
 	return 0
-}
-
-// runCheckDraft implements `kern check-draft <file|-> [root] [--lang LANG]`:
-// validate a draft code snippet against the project index. The MCP tool
-// kern_check_draft is the primary surface (this thin CLI form exists so the
-// opencode plugin, which shells out to the CLI, can reach the same check).
-func runCheckDraft(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := projectRoot(f)
-	in := "-"
-	if f.file != "" {
-		in = f.file
-	}
-	if len(args) > 0 && args[0] != "" {
-		in = args[0]
-		args = args[1:]
-	}
-	if len(args) > 0 {
-		root = args[0]
-	}
-	var b []byte
-	if in == "-" {
-		b, err = cliflags.ReadStdin()
-	} else {
-		b, err = os.ReadFile(in)
-	}
-	if err != nil {
-		fatal("CheckDraft: %v", err)
-	}
-	ix, ierr := loadOrBuild(root)
-	if ierr != nil {
-		ix = nil
-	}
-	findings := draft.CheckDraft(ix, root, b, f.lang)
-	if len(findings) == 0 {
-		fmt.Println("OK: draft validates cleanly — no issues found")
-		return 0
-	}
-	for _, fd := range findings {
-		fmt.Printf("draft.go:%d [%s] %s\n", fd.Line, fd.Kind, fd.Message)
-	}
-	fmt.Printf("%d issue(s) found\n", len(findings))
-	// Issues found is a failure for CI-style consumers; previously the
-	// command exited 0 despite reporting issues.
-	return 1
 }
 
 func runChanges(cmd string, rest []string) {

@@ -351,6 +351,72 @@ func runGit(root string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// proofMemo caches one non-strict FreshnessProof per index instance:
+// single-flight (concurrent callers share one in-flight computation — a
+// 100-request burst pays one tree walk or git staging pass, not 100) and
+// TTL-bounded (warm calls re-serve the last verdict instead of re-walking
+// the tree). It is never serialized.
+type proofMemo struct {
+	mu       sync.Mutex
+	proof    FreshnessProof
+	until    time.Time
+	inFlight bool
+	done     chan struct{}
+}
+
+// serve returns the cached proof when one exists and is not expired.
+func (m *proofMemo) serve() (FreshnessProof, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.inFlight && time.Now().Before(m.until) {
+		return m.proof, true
+	}
+	return FreshnessProof{}, false
+}
+
+// claim installs the caller as the computation leader (returns its done
+// channel, true) or hands back the running leader's done channel (false).
+func (m *proofMemo) claim() (chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inFlight {
+		return m.done, false
+	}
+	m.inFlight = true
+	m.done = make(chan struct{})
+	return m.done, true
+}
+
+// store publishes the leader's result, starts the TTL window, and wakes
+// every waiter on the leader's done channel.
+func (m *proofMemo) store(p FreshnessProof, ttl time.Duration) {
+	m.mu.Lock()
+	m.proof = p
+	m.until = time.Now().Add(ttl)
+	m.inFlight = false
+	ch := m.done
+	m.done = nil
+	m.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// proofCacheTTL bounds how long a memoized non-strict freshness verdict is
+// re-served before the next call recomputes it.
+// KERN_FRESHNESS_PROOF_CACHE_MS overrides (0 disables memoization).
+func proofCacheTTL() time.Duration {
+	if v := os.Getenv("KERN_FRESHNESS_PROOF_CACHE_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			if ms <= 0 {
+				return 0
+			}
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return 5 * time.Second
+}
+
 // FreshnessProof verifies that the on-disk tree at root still matches the
 // identity recorded when the index was built. Non-strict mode takes the cheap
 // git fast path (working-tree tree OID compare) and only falls back to a full
@@ -361,7 +427,40 @@ func runGit(root string, args ...string) (string, error) {
 //   - stale:   the re-hashed content root no longer matches.
 //
 // See FreshnessProofStrict for the mode that always re-hashes.
+//
+// M#10/M#13 (2026-10-24): the non-strict proof is memoized per index
+// instance — the last verdict is re-served for proofCacheTTL() and
+// concurrent callers share one in-flight computation. A warm proof costs
+// a git staging pass or a stat-only tree walk (hundreds of ms to seconds
+// on large repos), which every index-backed tool call previously paid per
+// call; the verdict is advisory metadata (provenance stamps, staleness
+// notes), so serving one up to proofCacheTTL() old stays within the
+// semantics the snapshot gate already accepts (gateTTL, 30s). Set
+// KERN_FRESHNESS_PROOF_CACHE_MS=0 to disable. FreshnessProofStrict is
+// never memoized.
 func (ix *Index) FreshnessProof(root string) FreshnessProof {
+	ttl := proofCacheTTL()
+	if ttl <= 0 || root != ix.Root {
+		return ix.computeFreshnessProof(root)
+	}
+	if p, ok := ix.freshnessMemo.serve(); ok {
+		return p
+	}
+	if ch, leader := ix.freshnessMemo.claim(); !leader {
+		<-ch
+		if p, ok := ix.freshnessMemo.serve(); ok {
+			return p
+		}
+		// The flight finished without a stored result; compute directly.
+		return ix.computeFreshnessProof(root)
+	}
+	p := ix.computeFreshnessProof(root)
+	ix.freshnessMemo.store(p, ttl)
+	return p
+}
+
+// computeFreshnessProof is the uncached non-strict proof computation.
+func (ix *Index) computeFreshnessProof(root string) FreshnessProof {
 	proof, ok := ix.freshnessBaseline(root)
 	if !ok {
 		// No baseline: no content walk ran, so no observation is retained.

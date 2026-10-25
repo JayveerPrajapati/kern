@@ -167,10 +167,7 @@ func TestParseSwallowBadFlagFails(t *testing.T) {
 	// Handlers still living in cmd/kern panic with the exitError sentinel;
 	// assertExitCode recovers it and checks the code.
 	panicking := map[string]func([]string){
-		"stream":             runStream,
-		"agent-fingerprint":  runAgentFingerprint,
-		"memory-ranked":      runMemoryRanked,
-		"agent-coordination": runAgentCoordination,
+		"memory-ranked": runMemoryRanked,
 	}
 	for name, fn := range panicking {
 		t.Run(name, func(t *testing.T) { assertExitCode(t, 2, func() { fn(bad) }) })
@@ -180,9 +177,6 @@ func TestParseSwallowBadFlagFails(t *testing.T) {
 	returning := map[string]func([]string) int{
 		"evidence-anchor": runEvidenceAnchor,
 		"compose":         runComposeCore,
-		"prompt-fill":     runPromptFill,
-		"context-watch":   runContextWatch,
-		"semantic-merge":  runSemanticMerge,
 	}
 	for name, fn := range returning {
 		t.Run(name, func(t *testing.T) {
@@ -348,12 +342,13 @@ func TestRunVerifyBuildNoProjectTypeSkipsAndReportsSkipped(t *testing.T) {
 // form and fail with a bare "open bogus: no such file" — no hint that a
 // check-TYPES value was intended. A positional that is not an existing file
 // must point at the types form explicitly ("did you mean a check type") and
-// exit 1 (fatal runtime error), not the usage-error 2 — the hint fires on a
-// read failure, not bad flags.
+// exit 2 (usage error — unified with the --types form by the blind-critique
+// Phase 3 remediation; a mistyped type value exits 2 through either form.
+// Path-shaped positionals that fail to read still exit 1 below).
 func TestRunVerifyUnknownPositionalHintsCheckType(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	errOut := captureStderr(t, func() {
-		assertExitCode(t, 1, func() {
+		assertExitCode(t, 2, func() {
 			runVerify([]string{"bogus"})
 		})
 	})

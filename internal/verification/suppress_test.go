@@ -189,13 +189,62 @@ func TestUserSuppressionFileFileWide(t *testing.T) {
 	}
 }
 
-// TestMalformedSuppressionFileIgnored: a broken .kern/verify-suppressions.json
-// must be treated as absent (with a warning), never crash or fail the run.
-func TestMalformedSuppressionFileIgnored(t *testing.T) {
+// R8: the user suppression ledger is operator triage policy, so malformed
+// JSON and incomplete entries fail closed instead of being silently ignored.
+// A missing file remains the normal built-ins-only path.
+func TestLoadSuppressionRegistryFailClosed(t *testing.T) {
+	root := t.TempDir()
+
+	reg, err := LoadSuppressionRegistry(root)
+	if err != nil {
+		t.Fatalf("missing file: %v", err)
+	}
+	if len(reg.Suppressions) != len(defaultSuppressions) {
+		t.Fatalf("missing file changed built-in count: got %d, want %d", len(reg.Suppressions), len(defaultSuppressions))
+	}
+
+	for name, content := range map[string]string{
+		"malformed":      `{not valid json`,
+		"missing-file":   `{"suppressions":[{"line":3,"rule":"sql-injection","reason":"missing file"}]}`,
+		"missing-rule":   `{"suppressions":[{"file":"sql.go","line":3,"reason":"missing rule"}]}`,
+		"missing-reason": `{"suppressions":[{"file":"sql.go","line":3,"rule":"sql-injection"}]}`,
+		"blank-reason":   `{"suppressions":[{"file":"sql.go","line":3,"rule":"sql-injection","reason":"   "}]}`,
+	} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".kern"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".kern", "verify-suppressions.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadSuppressionRegistry(dir); err == nil {
+			t.Errorf("%s suppression ledger was accepted: %s", name, content)
+		}
+	}
+
+	dir := t.TempDir()
+	valid := `{"suppressions":[{"file":"sql.go","line":3,"rule":"sql-injection","reason":"test fixture: constant SQL shape, not user input."}]}`
+	if err := os.MkdirAll(filepath.Join(dir, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".kern", "verify-suppressions.json"), []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg, err = LoadSuppressionRegistry(dir)
+	if err != nil {
+		t.Fatalf("valid user suppression rejected: %v", err)
+	}
+	if len(reg.Suppressions) != len(defaultSuppressions)+1 {
+		t.Fatalf("valid user suppression not merged: got %d entries, want %d", len(reg.Suppressions), len(defaultSuppressions)+1)
+	}
+}
+
+// R8: VerifySecurity propagates loader failures instead of silently treating
+// malformed operator triage as absent.
+func TestVerifySecurityFailsClosedOnMalformedSuppressions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-execution verification in -short mode")
 	}
-	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"sql.go":                         "package app\nimport \"fmt\"\nfunc f(q string) { db.Query(fmt.Sprintf(\"SELECT * FROM t WHERE id=%s\", q)) }\n",
@@ -203,17 +252,17 @@ func TestMalformedSuppressionFileIgnored(t *testing.T) {
 	})
 	sr := NewEngine(dir).VerifySecurity()
 	if sr == nil {
-		t.Fatal("nil security result (must not crash on malformed suppressions file)")
+		t.Fatal("nil security result")
 	}
 	if sr.OK {
-		t.Error("malformed suppressions file must be ignored — the unsuppressed critical finding still fails")
+		t.Error("malformed suppression ledger must fail closed")
 	}
-	if sr.Suppressed != 0 {
-		t.Errorf("Suppressed = %d, want 0 (malformed file contributes nothing)", sr.Suppressed)
+	if !strings.Contains(sr.Error, "malformed") {
+		t.Errorf("error must identify malformed suppression ledger, got %q", sr.Error)
 	}
 }
 
-// TestBuiltinSuppressionsMatchCurrentScan pins the exact 16 built-in defaults
+// TestBuiltinSuppressionsMatchCurrentScan pins the exact built-in defaults
 // against the CURRENT scanner output on kern's own repository, so the
 // defaults cannot silently drift: every built-in entry must still match a
 // real finding at its file:line:rule (line-specific) or at least one finding
@@ -231,10 +280,13 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 		t.Skip("kern repository not present here; skipping built-in drift pin")
 	}
 
-	reg := &SuppressionRegistry{Suppressions: defaultSuppressions}
+	reg := &SuppressionRegistry{Suppressions: defaultSuppressions, resolver: newFuncResolver(root)}
 	seen := map[string]bool{}
 	for _, s := range defaultSuppressions {
 		key := fmt.Sprintf("%s:%d:%s", s.File, s.Line, s.Rule)
+		if s.Func != "" {
+			key = fmt.Sprintf("%s:func:%s:%s", s.File, s.Func, s.Rule)
+		}
 		if seen[key] {
 			t.Fatalf("duplicate built-in suppression %s", key)
 		}
@@ -264,9 +316,14 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 		matchedFinding := false
 		for _, f := range findings {
 			grounding := false
-			if s.Line == 0 {
-				// file-wide key: any finding of Rule in File grounds the entry.
-				grounding = f.Rule == s.Rule
+			if s.Func != "" {
+				// func-scoped key: any finding of Rule inside the named function
+				// grounds the entry — survives line drift within the function.
+				grounding = f.Rule == s.Rule && (s.Label == "" || s.Label == f.Label) && reg.resolver.funcFor(f.File, f.Line) == s.Func
+			} else if s.Line == 0 {
+				// file-wide key: any finding of Rule in File grounds the entry
+				// (narrowed to the entry's label when it sets one).
+				grounding = f.Rule == s.Rule && (s.Label == "" || s.Label == f.Label)
 			} else {
 				grounding = f.Line == s.Line && f.Rule == s.Rule
 			}
@@ -306,9 +363,17 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 // class (fixed-argv git plumbing, scanner probes, operator-configured
 // LLM/SDK/webhook endpoints, the governed sandbox/exec machinery). After
 // this, an UNSUPPRESSED security finding on kern's own tree is a real
-// signal again, not noise.
+// signal again, not noise. 83 -> 84 on 2026-10-23: the apply campaign's
+// runGo (internal/apply/apply.go:233) — `go test` with internally derived
+// package paths, same class as the refactor/mutation compile steps; the
+// MCP boundary carries the documented engine-default carve-out. 84 -> 83 on
+// 2026-10-24: the orphaned internal/app/surface_drift.go suppression was
+// removed when commit 2f5cfeae deleted the file — the stale entry could
+// never match, so deleting it restores the drift pin to the verified set.
+// 83 -> 82 on 2026-10-24: the two worktree.go line pins (Diff's two fixed-argv
+// git diff forms at :121/:162) merged into one Func-scoped entry.
 func TestBuiltinCountIsSixteen(t *testing.T) {
-	if len(defaultSuppressions) != 83 {
-		t.Errorf("len(defaultSuppressions) = %d, want 83 (the verified finding set on kern's repo)", len(defaultSuppressions))
+	if len(defaultSuppressions) != 82 {
+		t.Errorf("len(defaultSuppressions) = %d, want 82 (the verified finding set on kern's repo)", len(defaultSuppressions))
 	}
 }

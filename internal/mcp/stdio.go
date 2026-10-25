@@ -18,5 +18,10 @@ var ErrDrainTimeout = transport.ErrDrainTimeout
 // (KERN_MCP_WATCH / KERN_MCP_WATCH_INTERVAL) and adapts *Server to the
 // transport.StdioServer contract structurally.
 func ServeStdio(srv *Server) error {
+	// Start the background index preload at serve start (R6 P2): a fresh
+	// root's build is underway before the client's first request, giving the
+	// first index-backed tool call a warm index instead of a multi-minute
+	// cold build. indexOnce makes dispatch's lazy trigger a no-op.
+	srv.startPreload()
 	return transport.ServeStdio(srv, watchIntervalFromEnv())
 }

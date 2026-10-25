@@ -281,7 +281,7 @@ func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []stri
 // The returned map records each symbol's distance from the nearest root.
 // Default precision: all edges are trusted.
 func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
-	reach, _, dist, _ := blastRadiusWalk(ix, roots, false)
+	reach, _, dist, _ := blastRadiusWalk(ix, roots, false, 0)
 	return reach, dist
 }
 
@@ -291,7 +291,7 @@ func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
 // rather than guessed into the blast radius. The third return value is the
 // number of heuristic edges skipped.
 func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string, map[string]int, int) {
-	reach, _, dist, skipped := blastRadiusWalk(ix, roots, strict)
+	reach, _, dist, skipped := blastRadiusWalk(ix, roots, strict, 0)
 	return reach, dist, skipped
 }
 
@@ -312,7 +312,10 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 // behind each radius name (same order) so file attribution can use the exact
 // symbol instead of a first-match name map ("Generate" is shared by three
 // packages; only evidence's calls the governance core).
-func blastRadiusWalk(ix *index.Index, roots []string, strict bool, selected ...index.Symbol) ([]string, []index.Symbol, map[string]int, int) {
+//
+// maxNodes bounds the BFS in-walk: expansion stops once maxNodes entries
+// are collected (BFS order ⇒ the nearest). 0 = uncapped (pre-M9).
+func blastRadiusWalk(ix *index.Index, roots []string, strict bool, maxNodes int, selected ...index.Symbol) ([]string, []index.Symbol, map[string]int, int) {
 	visited := map[string]int{}
 	type entry struct {
 		name string
@@ -328,6 +331,11 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool, selected ...i
 			key = sym.DeclarationID()
 		}
 		if _, seen := visited[key]; seen {
+			return
+		}
+		// In-walk cap (M9): stop at maxNodes distinct symbols (BFS order ⇒ nearest).
+		if maxNodes > 0 && len(visited) >= maxNodes {
+			skipped++
 			return
 		}
 		visited[key] = depth
@@ -401,6 +409,10 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool, selected ...i
 				} else {
 					key := "raw:" + c
 					if _, seen := visited[key]; !seen {
+						if maxNodes > 0 && len(visited) >= maxNodes {
+							skipped++
+							continue
+						}
 						visited[key] = visited[cur.key] + 1
 						entries[key] = entry{name: c, key: key}
 					}

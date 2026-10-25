@@ -107,7 +107,7 @@ func TestRemoveGlobalRestoresSeededUserContent(t *testing.T) {
 	root := t.TempDir()
 	wireMachineWide(t, root)
 
-	if !strings.Contains(readAt(t, home, ".claude/settings.json"), "kern-guard.sh") {
+	if !strings.Contains(readAt(t, home, ".claude/settings.json"), " guard hook") {
 		t.Fatal("sanity: wiring did not install the claude hook")
 	}
 	if !strings.Contains(readAt(t, home, ".claude/CLAUDE.md"), "kern") {
@@ -246,7 +246,7 @@ func TestRemoveGlobalAgentFilterLeavesOthers(t *testing.T) {
 	}
 	assertJSONEqual(t, home, ".cursor/mcp.json", `{"mcpServers":{"other":{"command":"x"}}}`)
 	// Other agents and the shared pieces stay wired.
-	if !strings.Contains(readAt(t, home, ".claude/settings.json"), "kern-guard.sh") {
+	if !strings.Contains(readAt(t, home, ".claude/settings.json"), " guard hook") {
 		t.Error("claude hook must survive a cursor-only removal")
 	}
 	if !existsAt(home, ".kern/hooks/kern-guard.sh") {

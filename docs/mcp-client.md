@@ -1,6 +1,6 @@
 # External MCP Servers
 
-Kern is a full MCP citizen: it serves 31 `kern_*` tools over
+Kern is a full MCP citizen: it serves 32 `kern_*` tools over
 `kern mcp` / `cmd/kern-mcp`, and it can call tools from external MCP
 servers through the MCP tool surface.
 

@@ -534,6 +534,11 @@ func runAst(rest []string) {
 		fatalUsage("usage: kern ast <pattern> [root] [--all]")
 	}
 	pattern := args[0]
+	// Same empty-arg alignment as runSearch: the MCP surface rejects
+	// pattern:"" with "pattern is required".
+	if strings.TrimSpace(pattern) == "" {
+		fatalUsage("pattern is required (an AST pattern like 'func greet' or 'type *User*')")
+	}
 	// Determine root: --root flag > positional arg > "" (CWD).
 	root := f.root
 	if root == "" && len(args) > 1 {
@@ -754,6 +759,12 @@ func runRepos(rest []string) {
 		}
 		// All positional words form ONE query (joined with spaces).
 		query := strings.Join(args, " ")
+		// Empty/whitespace queries are usage errors, not no-match results —
+		// the MCP surface rejects an empty query the same way (blind-critique
+		// Phase 3.3 CLI/MCP alignment).
+		if strings.TrimSpace(query) == "" {
+			fatalUsage("query is required (e.g. kern repos search dispatch)")
+		}
 		limit := f.limit
 		if limit <= 0 {
 			limit = 20
@@ -792,6 +803,13 @@ func runSearch(rest []string) {
 			root = args[len(args)-1]
 			query = strings.Join(args[:len(args)-1], " ")
 		}
+	}
+	// Empty/whitespace queries are usage errors, not no-match results —
+	// the MCP surface rejects query:"" with "query is required" at the
+	// boundary; the CLI used to burn a full search round and print
+	// "no symbols matched:" (blind-critique Phase 3.3 alignment).
+	if strings.TrimSpace(query) == "" {
+		fatalUsage("query is required (a symbol name, path fragment, or partial name; e.g. kern search dispatch)")
 	}
 	limit := f.limit
 	if limit <= 0 {

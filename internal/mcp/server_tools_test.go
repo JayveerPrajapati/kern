@@ -444,7 +444,7 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 		t.Fatalf("expected no-match hint for unrelated prompt, got %q", miss)
 	}
 	badK := mcpToolError(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "limit": "bogus"})
-	if !strings.Contains(badK, "invalid integer") {
+	if !strings.Contains(badK, "expected an integer") {
 		t.Fatalf("expected parse error for malformed limit, got %q", badK)
 	}
 	zeroK := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "limit": "0"})

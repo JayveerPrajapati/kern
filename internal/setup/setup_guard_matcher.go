@@ -139,11 +139,11 @@ func coveredFamilies(covered map[string]bool) []string {
 // kern-guard.<event>[] nesting.
 func collectGuardMatchers(v any) []string {
 	var out []string
-	var walk func(any) bool // true when the subtree references kern-guard.sh
+	var walk func(any) bool // true when the subtree references a kern guard hook
 	walk = func(n any) bool {
 		switch t := n.(type) {
 		case string:
-			return strings.Contains(t, "kern-guard.sh")
+			return strings.Contains(t, "kern-guard.sh") || strings.Contains(t, "guard hook")
 		case []any:
 			ref := false
 			for _, child := range t {

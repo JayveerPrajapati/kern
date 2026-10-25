@@ -488,8 +488,16 @@ go_install() {
     ts_tags=""
   fi
   warn "falling back to 'go install github.com/${REPO}/cmd/kern@${tag}'"
-  go install $ts_tags "github.com/${REPO}/cmd/kern@${tag}" &&
-    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${tag}" || return 1
+  # Stamp the version like the release builds do: without the ldflags the
+  # binary reports "dev" (internal/version.Version's default) even though it
+  # is built from a release tag — `kern version`, installed_version and
+  # upgrade's version comparison all misread it. The two stamps mirror
+  # release.yml exactly (-X main.version=<tag> and
+  # -X .../internal/version.Version=<tag>), so the go-install fallback and a
+  # downloaded release binary report the same version string.
+  stamp_flags="-X main.version=${tag} -X github.com/${REPO}/internal/version.Version=${tag}"
+  go install $ts_tags -ldflags "$stamp_flags" "github.com/${REPO}/cmd/kern@${tag}" &&
+    go install $ts_tags -ldflags "$stamp_flags" "github.com/${REPO}/cmd/kern-mcp@${tag}" || return 1
   gobin="$(go env GOPATH)/bin"
   if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ]; then
     mkdir -p "$PREFIX"

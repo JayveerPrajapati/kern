@@ -63,7 +63,7 @@ func generateToolSelectionDoc(tools []diffgate.ToolInfo) ([]byte, error) {
 	b.WriteString("> [`internal/mcp/toolsurface/toolsurface.go`](../internal/mcp/toolsurface/toolsurface.go), and\n")
 	b.WriteString("> [`internal/mcp/toolpolicy.go`](../internal/mcp/toolpolicy.go).\n")
 	b.WriteString("> If this guide and those files disagree, those files win.\n\n")
-	fmt.Fprintf(&b, "kern ships a **%d-tool** MCP catalog and advertises **%d tools by default**. Non-default tools are reachable through `kern_meta` and advertised directly with `KERN_MCP_FULL=1`.\n\n", len(sorted), len(defaultNames))
+	fmt.Fprintf(&b, "kern ships a **%d-tool** MCP catalog and advertises the **full catalog by default** (standing mandate 2026-10-23: agents use all available tools). Every tool is advertised on `tools/list`; `kern_meta` routes natural language to any of them.\n\n", len(sorted))
 
 	b.WriteString("## Surface\n\n")
 	b.WriteString("| Mode | Tools |\n|---|---:|\n")

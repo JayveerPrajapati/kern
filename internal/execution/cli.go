@@ -139,6 +139,7 @@ type execFlags struct {
 	timeoutDur string
 	timeoutSet bool
 	json       bool
+	readonly   bool   // --readonly: skip the KERN_TOOLS/KERN_ALLOW_EXEC allowlist gate (read-only bash fallbacks)
 	execOutput string // --output (exec: summary|tail:N|lines:A-B|full)
 	execAnchor string // --anchor (exec: re-slice a kept run without re-executing)
 }
@@ -171,6 +172,8 @@ func parseExecFlags(args []string) (execFlags, []string, error) {
 			p.SetTimeout(&f.timeout, &f.timeoutDur, &f.timeoutSet, "--timeout", inline, hasInline)
 		case "--json":
 			p.SetBool(&f.json, "--json", inline, hasInline)
+		case "--readonly":
+			p.SetBool(&f.readonly, "--readonly", inline, hasInline)
 		case "--output":
 			p.SetStr(&f.execOutput, inline, hasInline)
 		case "--anchor":
@@ -650,7 +653,7 @@ func runExec(rest []string) {
 		}
 	}
 	if strings.TrimSpace(code) == "" && path == "" {
-		fatalUsage("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-] [--output full|summary|tail:N|lines:A-B]\n       kern exec --anchor <id> [--output ...] re-slices a kept run without re-executing\n       kern exec script.py | kern exec - | kern exec --list\n       isolation: Seatbelt (macOS) / netns (Linux) / fail-closed elsewhere; override: KERN_ALLOW_UNISOLATED=1")
+		fatalUsage("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-] [--readonly] [--output full|summary|tail:N|lines:A-B]\n       kern exec --anchor <id> [--output ...] re-slices a kept run without re-executing\n       kern exec script.py | kern exec - | kern exec --list\n       --readonly: skip the KERN_TOOLS/KERN_ALLOW_EXEC allowlist gate (read-only bash fallbacks; firewall + masking still enforced)\n       isolation: Seatbelt (macOS) / netns (Linux) / fail-closed elsewhere; override: KERN_ALLOW_UNISOLATED=1")
 	}
 	// Executing a script runs arbitrary code; it must pass the governance
 	// firewall, fail closed (same gate as the MCP kern_exec tool). The script
@@ -672,7 +675,16 @@ func runExec(rest []string) {
 		}
 	}
 	root := cliProjectRoot(f.root)
-	if err := governance.CheckExecCommand(binding, root); err != nil {
+	// --readonly (or KERN_READONLY_EXEC=1) routes read-only bash fallbacks
+	// through CheckExecCommandReadonly: the KERN_TOOLS/KERN_ALLOW_EXEC
+	// allowlist gate is skipped (a pure-read pipeline has no write/network/
+	// destructive surface), but the risk firewall, rejection stickiness and
+	// dangerous-class escalation still hold — GATE commands remain denied.
+	if f.readonly || os.Getenv("KERN_READONLY_EXEC") == "1" {
+		if err := governance.CheckExecCommandReadonly(binding, root); err != nil {
+			fatalPolicy("exec: execution denied by governance: %v", err)
+		}
+	} else if err := governance.CheckExecCommand(binding, root); err != nil {
 		fatalPolicy("exec: execution denied by governance: %v", err)
 	}
 

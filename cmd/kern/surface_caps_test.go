@@ -18,7 +18,7 @@ func TestCommandCountCap(t *testing.T) {
 	t.Parallel()
 	const (
 		capFloor = 40 // guards accidental truncation of the command table (pivot cut 2026-10-18 P5b: 194→48 core commands; floor follows each deliberate cut)
-		capCeil  = 62 // deliberate growth budget (48 kept + room for the 32-tool mirrors + ops; 2026-10-21 +2: restored `log` and `terse` thin wrappers — the opencode plugin's compression path invokes both spellings and they were dead after P5b)
+		capCeil  = 72 // deliberate growth budget (2026-10-21 +10: restored `log`/`terse` thin wrappers and re-wired the 5 live plugin-invoked commands — remember, orchestrate, memory-ranked, evidence-anchor, health — that the pivot CLI slim dropped while the opencode plugin kept calling them)
 	)
 	n := commandCount()
 	if n < capFloor {

@@ -1,0 +1,136 @@
+name: Release assets
+description: >-
+  Everything between checkout and upload for release.yml's two build matrix
+  jobs: deriving os/arch/tag/dir from the matrix target, building both
+  binaries, the native version smoke test, linux-only UPX compression,
+  tar.gz/zip packaging, and the artifact upload. The `build` (cross-compiled
+  pure-Go) and `build-native` (CGO/tree-sitter) jobs differ ONLY in their
+  parameters to this action — cgo/tags for the toolchain and the -full asset
+  suffix — which is why they share it instead of duplicating ~90 lines of
+  steps per job.
+inputs:
+  target:
+    description: 'Matrix target, e.g. linux/amd64'
+    required: true
+  suffix:
+    description: Asset name suffix ('' for the cross job, '-full' for native)
+    default: ""
+  cgo:
+    description: CGO_ENABLED value for the build (0 cross, 1 native)
+    default: "0"
+  tags:
+    description: Go build tags (sqlite,notreesitter cross; empty native)
+    default: "sqlite,notreesitter"
+  native:
+    description: Whether the runner is native to the target (smoke-test gates)
+    default: "false"
+outputs:
+  os:
+    description: Target OS
+    value: ${{ steps.vars.outputs.os }}
+  arch:
+    description: Target architecture
+    value: ${{ steps.vars.outputs.arch }}
+  tag:
+    description: Release tag (from GITHUB_REF)
+    value: ${{ steps.vars.outputs.tag }}
+  dir:
+    description: Asset directory name (kern-OS-ARCH[-suffix])
+    value: ${{ steps.vars.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - name: Set target variables
+      id: vars
+      shell: bash
+      run: |
+        MATRIX_TARGET="${{ inputs.target }}"
+        os="${MATRIX_TARGET%/*}"
+        arch="${MATRIX_TARGET#*/}"
+        tag="${GITHUB_REF#refs/tags/}"
+        {
+          echo "os=$os"
+          echo "arch=$arch"
+          echo "tag=$tag"
+          echo "dir=kern-$os-$arch${{ inputs.suffix }}"
+        } >> "$GITHUB_OUTPUT"
+
+    # The pure-Go leg passes cgo=0 + tags=sqlite,notreesitter; the native
+    # leg passes cgo=1 + no tags (the default build compiles the tree-sitter
+    # grammars in; the `sqlite` tag is a no-op there — modernc.org/sqlite is
+    # pure-Go, gated by `!nosqlite`). GOOS/GOARCH are set to the matrix
+    # target even on native runners, keeping the naming logic uniform.
+    - name: Build
+      shell: bash
+      run: |
+        os="${{ steps.vars.outputs.os }}"
+        arch="${{ steps.vars.outputs.arch }}"
+        dir="${{ steps.vars.outputs.dir }}"
+        mkdir -p "$dir"
+        GOOS="$os" GOARCH="$arch" CGO_ENABLED=${{ inputs.cgo }} \
+          go build -buildvcs=false -trimpath ${{ inputs.tags != '' && format('-tags {0}', inputs.tags) || '' }} -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
+          -o "$dir/kern" ./cmd/kern
+        GOOS="$os" GOARCH="$arch" CGO_ENABLED=${{ inputs.cgo }} \
+          go build -buildvcs=false -trimpath ${{ inputs.tags != '' && format('-tags {0}', inputs.tags) || '' }} -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
+          -o "$dir/kern-mcp" ./cmd/kern-mcp
+
+    # Smoke-test the tree-sitter build with each binary's `version`
+    # subcommand (positional `version`, plus -v/--version). The cross job
+    # can only run this where the built binary executes (linux, host ==
+    # target, handled in the UPX step); on the native leg every runner is
+    # native, so all five targets are exercised for real — a broken
+    # CGO/tree-sitter link fails the job before the asset ships.
+    - name: Smoke test binary versions (native)
+      if: inputs.native == 'true'
+      shell: bash
+      run: |
+        dir="${{ steps.vars.outputs.dir }}"
+        "$dir/kern" version >/dev/null
+        "$dir/kern-mcp" version >/dev/null
+        file "$dir/kern"
+
+    # Shrink the binaries with UPX (best compression). Significant savings:
+    # the Go runtime + the two cmd binaries land ~50% smaller once packed.
+    # UPX runs only for linux targets: windows .exe cross-compression from
+    # the linux runner is fragile, and UPX refuses macOS/Mach-O binaries
+    # without --force-macos (and even then the packed binary can be broken).
+    # Smoke-by-execution happens where the built binary can run on this
+    # runner (GOOS/GOARCH == host — always true on the native linux runners);
+    # structurally verify with `file` everywhere else.
+    - name: Compress binaries with UPX (linux only)
+      if: steps.vars.outputs.os == 'linux'
+      shell: bash
+      run: |
+        sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
+        dir="${{ steps.vars.outputs.dir }}"
+        upx --best --no-lzma "$dir/kern"
+        upx --best --no-lzma "$dir/kern-mcp"
+        if [ "${{ steps.vars.outputs.os }}" = "linux" ] && \
+           [ "${{ steps.vars.outputs.arch }}" = "$(uname -m | sed 's/x86_64/amd64/')" ]; then
+          "$dir/kern" version >/dev/null
+          "$dir/kern-mcp" version >/dev/null
+        fi
+        file "$dir/kern" | grep -qi "ELF" && file "$dir/kern-mcp" | grep -qi "ELF"
+        echo "compressed sizes:"
+        du -h "$dir/kern" "$dir/kern-mcp"
+
+    - name: Package (tar.gz, or zip for windows)
+      shell: bash
+      run: |
+        os="${{ steps.vars.outputs.os }}"
+        dir="${{ steps.vars.outputs.dir }}"
+        if [ "$os" = "windows" ]; then
+          mv "$dir/kern" "$dir/kern.exe"
+          mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
+          python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[1])" "$dir"
+        else
+          tar -czf "${dir}.tar.gz" -C "$dir" .
+        fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}${{ inputs.suffix }}"
+        path: |
+          kern-*${{ inputs.suffix }}.tar.gz
+          kern-*${{ inputs.suffix }}.zip

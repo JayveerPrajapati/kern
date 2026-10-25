@@ -46,9 +46,9 @@ func Heal(ctx context.Context, args map[string]any) (string, error) {
 	}
 	timeout := 120 * time.Second
 	if s := mcpargs.ArgString(args, "timeout"); s != "" {
-		sec, err := strconv.Atoi(s)
+		sec, err := parseTimeoutSecs(s)
 		if err != nil {
-			return "", fmt.Errorf("timeout: invalid integer %q", s)
+			return "", err
 		}
 		if sec > 0 {
 			timeout = time.Duration(sec) * time.Second

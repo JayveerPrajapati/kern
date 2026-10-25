@@ -39,6 +39,14 @@ func IsShipped(b []byte) bool {
 // MAINTENANCE: when the plugin changes, TestShippedPluginHashRegistryCurrent
 // fails until the new asset's hash is appended here (the test prints it).
 var shipped = map[string]bool{
+	"b0eaf50d348cab18122f91df6663af756de7c34b541ece3b5a0960c4173a9cd2": true,
+	"da4c32e6760b133fc48042bdcbbdd9ee96986814a7527d8da702c8c1a59a46aa": true,
+	"9b1359de178434aefd253fb8121a09c0ccdd6630cd1335eef4a0fe78b506e696": true,
+	"e1ec747ba70593d4db8aac8ae157995c04bf0db00d816ab60ab939475f8e6846": true,
+	"c6046a419cc3e6db4cd897ae56710c1d5c3f2840e3e35b73fc2906d63bea93a5": true,
+	"612a520ec6b06c0185ecd903d30c179581b75d67e85792acac543660dcb8a6d0": true,
+	"cad56f613ea552c7d65b9fe40ce12373f6a822f5b47e5c6171348fe88cee33a7": true,
+	"f967da0ae9d0bc2b2bfc8a6a2ec6543f5a4c85f0d45a56d03f5ae8ed506d0012": true,
 	"7e3f3535b292d8de2f71d6dc8398b6815287696414d63c00fbcc7f19e5b208f2": true,
 	"e09e540b3a9a951f15fc763f47450e93af8a7024786d887b27a5e7d8203ccd83": true,
 	"038adf6b9f95302a2ea1b0ab6c6b240042cb2bfcc5e252f50de2e274a6926217": true,
@@ -141,4 +149,8 @@ var shipped = map[string]bool{
 	"6f032853f93ae954f944dcf4b33a241ff48e7ba196fdc9d727481835e1c85992": true,
 	"eee25e43622f99f3ad1bd40f3c7af527a41cf11c4b1ca85aac1dfa76d3a9c8df": true,
 	"53d3ceb48e90b6560bca8df3ce76eedc55a0fb31ae217d908eaf64e898de2dde": true,
+	"9310f76b2d086b77bae4c96f1b283edda7a8c7b7c6c502ca4b21c8574aa3ac9b": true,
+	"5c0e65ec3ef02ec9d4eda5f21a41f201f811fcfd9d65377d184b99c8feb7c2b3": true, // P0.3: host-neutral grep-arm reason (raw=true advice removed)
+	"45f38c4bd1df954c5a63fdf793c2aad254ed55df8d14a35f159a37b680053a8b": true, // P0.6: scoped grep (named file/dir target) serves tier 3, never the repo-wide symbol search
+	"343998d9f51c0e229d40027e19a67fc0bf6d6bbe241c773b629b6818dfa88374": true, // P1.4: Ask Protocol — GATE arm consults guard grant, deny teaches ask-wait-retry
 }

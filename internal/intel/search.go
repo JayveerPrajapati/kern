@@ -6,8 +6,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // SymbolEmbedder produces dense embeddings for code symbol descriptors.
@@ -376,7 +378,7 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 		file := lm.files[i]
 		segs, ok := segCache[s.Name]
 		if !ok {
-			segs = splitIdentifierSegments(s.Name)
+			segs = tokenize.SplitIdentifierSegments(s.Name)
 			segCache[s.Name] = segs
 		}
 		var score, matched int
@@ -409,6 +411,13 @@ func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []R
 		// (joined is hoisted above the loop: identical every iteration).
 		if joined != "" {
 			if joined == name || joined == full {
+				score += 200
+			} else if alnumForm(s.Name) == joined || alnumForm(s.FullName()) == joined {
+				// queryWords treats "_" as a word separator, so the
+				// joined form of "Fn0_5" is "fn05" — it can never equal
+				// the real name "fn0_5". Compare separator-stripped
+				// forms so the definitional exact-name boost still lands
+				// on digit-suffixed identifiers.
 				score += 200
 			}
 		}
@@ -493,6 +502,12 @@ func hasStrongIdentifierMatch(hits []RepoHit, joined string) bool {
 		if name == joined || strings.HasPrefix(name, joined) {
 			return true
 		}
+		// The joined query drops separators ("Fn0_5" -> "fn05"), so it
+		// never equals the raw name. The separator-stripped name must
+		// count as naming the identifier.
+		if an := alnumForm(h.Symbol.Name); an == joined || strings.HasPrefix(an, joined) {
+			return true
+		}
 	}
 	return false
 }
@@ -505,9 +520,9 @@ func hasStrongIdentifierMatch(hits []RepoHit, joined string) bool {
 func queryWords(query string) []string {
 	seen := map[string]bool{}
 	var words []string
-	for _, run := range wordRuns(query) {
-		for _, part := range splitCamel(run) {
-			w := normalizeProseWord(part)
+	for _, run := range tokenize.WordRuns(query) {
+		for _, part := range tokenize.SplitCamel(run) {
+			w := tokenize.NormalizeProseWord(part)
 			if w == "" {
 				continue
 			}
@@ -574,6 +589,8 @@ func matchWord(w, name, full, file string, segs []string) int {
 		return 95
 	case segmentExact(w, segs):
 		return 90
+	case tokenize.IsAllDigits(w) && containsDigitRun(name, w):
+		return 85
 	case strings.HasPrefix(full, w):
 		return 80
 	case strings.HasPrefix(name, w):
@@ -590,6 +607,48 @@ func matchWord(w, name, full, file string, segs []string) int {
 	return 0
 }
 
+// containsDigitRun reports whether any maximal digit run in name equals the
+// all-digit query word w ("79" hits "Fn59_79"; "9" does not).
+// splitIdentifierSegments drops all-digit segments, so a 1–2 digit word after
+// a separator could never match — matchWord returned 0, the query never
+// reached MatchedAll, and the P0-1 gate zeroed the whole result even though
+// the identifier named a real symbol. This tier restores it without touching
+// ranking semantics for non-digit words. Identifiers use ASCII digits, so a
+// byte scan is safe: multi-byte runes never pass IsDigit.
+func containsDigitRun(name, w string) bool {
+	i := 0
+	for i < len(name) {
+		if !unicode.IsDigit(rune(name[i])) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(name) && unicode.IsDigit(rune(name[j])) {
+			j++
+		}
+		if name[i:j] == w {
+			return true
+		}
+		i = j
+	}
+	return false
+}
+
+// alnumForm lowercases s and strips every non-alphanumeric rune: the
+// separator-insensitive identifier form ("Fn0_5" and "fn05" compare equal).
+// Used by the exact-name boost and the P0-1 gate so a separator dropped by
+// queryWords' word-splitting cannot make a real identifier read as garbage.
+func alnumForm(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func segmentExact(w string, segs []string) bool {
 	for _, seg := range segs {
 		if seg == w {
@@ -603,7 +662,7 @@ func segmentExact(w string, segs []string) bool {
 // segment ("services" hitting the segment "service"). The query word itself is
 // already diacritic-normalized upstream.
 func segmentFolded(w string, segs []string) bool {
-	for _, v := range segmentLookupVariants(w) {
+	for _, v := range tokenize.SegmentLookupVariants(w) {
 		if v == w {
 			continue
 		}

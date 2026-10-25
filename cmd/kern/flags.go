@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 )
@@ -299,111 +297,65 @@ type flags struct {
 //	flight tasks:                     --root "." "project root holding .kern/flight"; --json false "emit JSON"
 //	flight gc:                        --root "." "project root holding .kern/flight"; --keep-tasks 20 "retain the N most recently active task trails (0 disables)"; --older-than "" "retain tasks active within this duration (e.g. 30d, 720h)"
 //	register-host-sampler:            --key "" "registration key (default: this connection's slot)"; --timeout "" "per-call timeout in seconds (default 180)"; --model "" "optional model label"
+//
+// parseFlags is the SINGLE CLI flag parser. Every subcommand — including the
+// 29 migrated stdlib flag.FlagSet parsers — routes through here. It returns
+// the parsed flags, the positional arguments (rest), and the first parse
+// error (sticky: only the first error is reported).
+//
+// Documented semantics (behavioral contract, review-pinned):
+//
+//  1. TRAILING VALUE-LESS FLAGS ARE ACCEPT-AND-DEFAULT. A value flag at the
+//     end of the line with no value (e.g. `kern pack --out`) is accepted and
+//     left at its default — it is NOT an error and NOT silently swallowed as
+//     a positional. This is the deliberate unified semantic (chosen over
+//     reject-with-usage because the stdlib flag.FlagSet contract it replaces
+//     varies per command and the pinned tests assert accept-and-default);
+//     pinned by TestParseFlagsTrailingValueLessFlag and
+//     TestParseFlagsHelpAndMissingValue.
+//
+//  2. --flag=value AND --flag value FORMS ARE BOTH ACCEPTED for value flags;
+//     bool flags accept --flag, --flag=true and --flag=false.
+//
+//  3. Unknown flags (any `--x`/`-x` token not in the switch) are rejected
+//     with "unknown flag: X" (fail loud, usage error, exit 2 via the
+//     handler's fatalUsage). Negative numbers and a bare "-" (stdin) are
+//     positionals, not flags.
+//
+//  4. Invalid integer values fail loud: "FLAG: invalid integer \"V\"".
+//     First error wins; later values are not evaluated.
+//
+//  5. Positionals keep their order in rest; the parser does NOT stop at the
+//     first positional (unlike stdlib flag), so flags may appear before or
+//     after positionals.
+//
+// The case tables moved to flags_parse.go: parseCoreFlag owns every flag
+// before the migrated FlagSet marker in the old single switch, and
+// parseMigratedFlag owns the 29 migrated FlagSet flags. The loop machinery
+// (setInt/take/setStr/setIntFlag/setTimeout/setBool) lives on flagParser in
+// flags_parse.go as well.
 func parseFlags(args []string) (flags, []string, error) {
-	var f flags
-	f.days = 7
-	f.timeout = 120
-	f.depth = -1
-	f.commits = 60
-	f.thresholds = "2.0,4.0,6.0,8.0"
+	p := &flagParser{}
+	p.f.days = 7
+	p.f.timeout = 120
+	p.f.depth = -1
+	p.f.commits = 60
+	p.f.thresholds = "2.0,4.0,6.0,8.0"
 	// --cache defaults ON for optimize/preview, aligning with the MCP
 	// kern_optimize tool (cacheOn=true): results compound in the
 	// local exact + semantic caches unless the operator opts out with
 	// --cache=false.
-	f.cache = true
+	p.f.cache = true
 	// Migrated FlagSet defaults that are not zero-valued (per-command flags
 	// whose default is only read by the owning command, so a shared default
 	// cannot leak across commands).
-	f.keepTasks = 20
-	f.k = "5"
-	f.halfLife = "7.0"
-	f.format = "text"
-	f.chunkSize = "1000"
-	f.ttl = "300"
-	f.injectMemory = "true"
-	var rest []string
-	var parseErr error
-	setInt := func(dst *int, val, flag string) {
-		if parseErr != nil {
-			return
-		}
-		n, err := strconv.Atoi(val)
-		if err != nil {
-			parseErr = fmt.Errorf("%s: invalid integer %q", flag, val)
-			return
-		}
-		*dst = n
-	}
-
-	// take advances the parser past the current token and returns the next
-	// one; ok=false at end of args (the documented accept-and-default
-	// semantic: a trailing value-less flag is left at its default).
-	take := func(i *int) (string, bool) {
-		*i++
-		if *i < len(args) {
-			return args[*i], true
-		}
-		return "", false
-	}
-	// setStr consumes the value of a string flag: the inline --flag=value
-	// form when present, else the next argument (accept-and-default when
-	// none).
-	setStr := func(i *int, dst *string, inline string, hasInline bool) {
-		if hasInline {
-			*dst = inline
-			return
-		}
-		if v, ok := take(i); ok {
-			*dst = v
-		}
-	}
-	// setIntFlag consumes the value of an int flag through setInt (error
-	// sticky via parseErr).
-	setIntFlag := func(i *int, dst *int, name, inline string, hasInline bool) {
-		if hasInline {
-			setInt(dst, inline, name)
-			return
-		}
-		if v, ok := take(i); ok {
-			setInt(dst, v, name)
-		}
-	}
-	// setTimeout consumes the --timeout value in its dual form: an integer is
-	// seconds (the historical contract read by toolTimeout), a Go duration
-	// string (30m, 500ms) is kept verbatim in timeoutDur for commands that
-	// need sub-second or minute-scale bounds (kern approval wait). Either
-	// form sets timeoutSet so commands can distinguish "given" from default;
-	// a value that is neither is a sticky parse error.
-	setTimeout := func(i *int, val, name string) {
-		if parseErr != nil {
-			return
-		}
-		if _, derr := time.ParseDuration(val); derr == nil {
-			f.timeoutDur = val
-			f.timeoutSet = true
-			return
-		}
-		if _, ierr := strconv.Atoi(val); ierr == nil {
-			setInt(&f.timeout, val, name)
-			f.timeoutSet = true
-			return
-		}
-		parseErr = fmt.Errorf("%s: invalid timeout %q (want integer seconds or a duration like 30m)", name, val)
-	}
-	// setBool sets a bool flag: --flag, --flag=true or --flag=false (the
-	// stdlib flag package's bool forms, migrated verbatim).
-	setBool := func(dst *bool, name, inline string, hasInline bool) {
-		if hasInline {
-			b, err := strconv.ParseBool(inline)
-			if err != nil {
-				parseErr = fmt.Errorf("%s: invalid boolean value %q", name, inline)
-				return
-			}
-			*dst = b
-		} else {
-			*dst = true
-		}
-	}
+	p.f.keepTasks = 20
+	p.f.k = "5"
+	p.f.halfLife = "7.0"
+	p.f.format = "text"
+	p.f.chunkSize = "1000"
+	p.f.ttl = "300"
+	p.f.injectMemory = "true"
 	for i := 0; i < len(args); i++ {
 		name, inline, hasInline := cliflags.SplitFlag(args[i])
 		// Single-dash long flags (`-json`, `-root`, `-addr`) are accepted
@@ -416,470 +368,15 @@ func parseFlags(args []string) (flags, []string, error) {
 		if len(name) > 1 && name[0] == '-' && name[1] != '-' && cliflags.IsAlpha(name[1]) && name != "-h" {
 			name = "--" + name[1:]
 		}
+		if p.parseCoreFlag(name, inline, hasInline, &i, args) {
+			continue
+		}
+		if p.parseMigratedFlag(name, inline, hasInline, &i, args) {
+			continue
+		}
 		switch name {
-		case "--attach":
-			setStr(&i, &f.attach, inline, hasInline)
-		case "--session":
-			setStr(&i, &f.session, inline, hasInline)
-		case "--model":
-			setStr(&i, &f.model, inline, hasInline)
-		case "--days":
-			setIntFlag(&i, &f.days, "--days", inline, hasInline)
-		case "--dir":
-			setStr(&i, &f.dir, inline, hasInline)
-		case "--llm":
-			setStr(&i, &f.llm, inline, hasInline)
-		case "--json":
-			setBool(&f.json, "--json", inline, hasInline)
-			f.jsonSet = true
-		case "--status":
-			// Dual-form flag: bool (index: `kern index --status`) AND string
-			// (flight list: `kern flight list --status ok|--status=ok`). The
-			// next token is never consumed, so `kern index --status <root>`
-			// keeps its positional root; flight list falls back to the first
-			// positional when no inline value was given.
-			// Quirk (documented, gate-8): an inline bool form like
-			// `--status=false` sets the bool AND records "false" as the
-			// string filter; the old parser rejected inline forms
-			// entirely, so this is a new accepted form, not a regression.
-			f.status = true
-			if hasInline {
-				f.statusFilter = inline
-			}
-		case "--strict":
-			setBool(&f.strict, "--strict", inline, hasInline)
-		case "--update":
-			setBool(&f.update, "--update", inline, hasInline)
-		case "--force":
-			setBool(&f.force, "--force", inline, hasInline)
-		case "--pin":
-			setStr(&i, &f.pin, inline, hasInline)
-		case "--preflight":
-			setStr(&i, &f.preflight, inline, hasInline)
-			f.preflightSet = true
-		case "--yes":
-			setBool(&f.yes, "--yes", inline, hasInline)
-		case "--terse-code", "-terse-code":
-			setBool(&f.terseCode, "--terse-code", inline, hasInline)
-		case "--reset":
-			setBool(&f.reset, "--reset", inline, hasInline)
-		case "--net":
-			setBool(&f.net, "--net", inline, hasInline)
-		case "--sarif":
-			setBool(&f.sarif, "--sarif", inline, hasInline)
-		case "--threshold":
-			setIntFlag(&i, &f.threshold, "--threshold", inline, hasInline)
-		case "--commits":
-			setIntFlag(&i, &f.commits, "--commits", inline, hasInline)
-		case "--thresholds":
-			setStr(&i, &f.thresholds, inline, hasInline)
-		case "--csv":
-			setBool(&f.csv, "--csv", inline, hasInline)
-		case "--by-tool":
-			setBool(&f.byTool, "--by-tool", inline, hasInline)
-		case "--by-agent":
-			setBool(&f.byAgent, "--by-agent", inline, hasInline)
-		case "--by-root":
-			setBool(&f.byRoot, "--by-root", inline, hasInline)
-		case "--bpe":
-			setBool(&f.bpe, "--bpe", inline, hasInline)
-		case "--root":
-			setStr(&i, &f.root, inline, hasInline)
-		case "--addr":
-			setStr(&i, &f.addr, inline, hasInline)
-		case "--enterprise":
-			setBool(&f.enterprise, "--enterprise", inline, hasInline)
-		case "--project":
-			if hasInline {
-				f.projects = append(f.projects, inline)
-			} else if v, ok := take(&i); ok {
-				f.projects = append(f.projects, v)
-			}
-		case "--pattern":
-			setStr(&i, &f.pattern, inline, hasInline)
-		case "--query":
-			setStr(&i, &f.query, inline, hasInline)
-		case "--symbol":
-			setStr(&i, &f.symbol, inline, hasInline)
-		case "--change":
-			setStr(&i, &f.change, inline, hasInline)
-		case "--fresh":
-			setBool(&f.fresh, "--fresh", inline, hasInline)
-		case "--level":
-			setStr(&i, &f.level, inline, hasInline)
-		case "--task-type":
-			setStr(&i, &f.taskType, inline, hasInline)
-		case "--lens":
-			setStr(&i, &f.lens, inline, hasInline)
-		case "--profile":
-			setStr(&i, &f.profile, inline, hasInline)
-		case "--eval":
-			setStr(&i, &f.evalDir, inline, hasInline)
-		case "--skill":
-			setStr(&i, &f.skillDir, inline, hasInline)
-		case "--check":
-			setBool(&f.check, "--check", inline, hasInline)
-		case "--ci":
-			setBool(&f.ci, "--ci", inline, hasInline)
-		case "--arch-drift":
-			setBool(&f.archDrift, "--arch-drift", inline, hasInline)
-		case "--calibration":
-			setBool(&f.calibration, "--calibration", inline, hasInline)
-		case "--correlate":
-			setBool(&f.correlate, "--correlate", inline, hasInline)
-		case "--runbook":
-			setStr(&i, &f.runbook, inline, hasInline)
-		case "--list-playbooks":
-			setBool(&f.listPlaybooks, "--list-playbooks", inline, hasInline)
-		case "--code":
-			setBool(&f.code, "--code", inline, hasInline)
-		case "--verify":
-			setBool(&f.verify, "--verify", inline, hasInline)
-		case "--verify-pipeline":
-			setBool(&f.verifyPipeline, "--verify-pipeline", inline, hasInline)
-		case "--verify-silent":
-			setBool(&f.verifySilent, "--verify-silent", inline, hasInline)
-		case "--verify-token-reduction":
-			setBool(&f.verifyTokenReduction, "--verify-token-reduction", inline, hasInline)
-		case "--scan":
-			setStr(&i, &f.scanPath, inline, hasInline)
-		case "--types":
-			setStr(&i, &f.types, inline, hasInline)
-		case "--short":
-			setBool(&f.short, "--short", inline, hasInline)
-		case "--changed":
-			setBool(&f.changed, "--changed", inline, hasInline)
-		case "--changed-since":
-			setStr(&i, &f.changedSince, inline, hasInline)
-		case "--fast":
-			setBool(&f.fast, "--fast", inline, hasInline)
-		case "--cve":
-			setBool(&f.cve, "--cve", inline, hasInline)
-		case "--license":
-			setBool(&f.license, "--license", inline, hasInline)
-		case "--secrets":
-			setBool(&f.secrets, "--secrets", inline, hasInline)
-		case "--detect":
-			setBool(&f.detect, "--detect", inline, hasInline)
-		case "--all-agents":
-			setBool(&f.allAgents, "--all-agents", inline, hasInline)
-		case "--plain":
-			setBool(&f.plain, "--plain", inline, hasInline)
-		case "--global-only":
-			setBool(&f.globalOnly, "--global-only", inline, hasInline)
-		case "--remove":
-			setBool(&f.remove, "--remove", inline, hasInline)
-		case "--global":
-			setBool(&f.global, "--global", inline, hasInline)
-		case "--index-only":
-			setBool(&f.indexOnly, "--index-only", inline, hasInline)
-		case "--global-rules":
-			setBool(&f.globalRules, "--global-rules", inline, hasInline)
-		case "--agents-md":
-			setStr(&i, &f.agentsMD, inline, hasInline)
-		case "--apply":
-			setBool(&f.apply, "--apply", inline, hasInline)
-		case "--runtime":
-			setBool(&f.runtime, "--runtime", inline, hasInline)
-		case "--agents":
-			setStr(&i, &f.agents, inline, hasInline)
-		case "--file":
-			// Single-value readers use .file (last value); policy-dsl's
-			// repeatable form accumulates every value in .files.
-			if hasInline {
-				f.file = inline
-				f.files = append(f.files, inline)
-			} else if v, ok := take(&i); ok {
-				f.file = v
-				f.files = append(f.files, v)
-			}
-		case "--task":
-			setStr(&i, &f.task, inline, hasInline)
-		case "--budget":
-			if hasInline {
-				setInt(&f.budget, inline, "--budget")
-				f.budgetSet = true
-			} else if v, ok := take(&i); ok {
-				setInt(&f.budget, v, "--budget")
-				f.budgetSet = true
-			}
-		case "--uninstall":
-			setBool(&f.hostUninstall, "--uninstall", inline, hasInline)
-		case "--agent-id":
-			setStr(&i, &f.agentID, inline, hasInline)
-		case "--mermaid":
-			setBool(&f.mermaid, "--mermaid", inline, hasInline)
-		case "--repos":
-			setBool(&f.repos, "--repos", inline, hasInline)
-		case "--mask":
-			setBool(&f.mask, "--mask", inline, hasInline)
-		case "--names":
-			setStr(&i, &f.names, inline, hasInline)
-		case "--schema":
-			setStr(&i, &f.schema, inline, hasInline)
-		case "--cmd":
-			setStr(&i, &f.cmd, inline, hasInline)
-		case "--timeout":
-			// Dual-form: an integer is seconds (historical), a Go duration
-			// string (30m, 500ms) is captured verbatim for commands that need
-			// sub-second or minute-scale bounds (kern approval wait).
-			if hasInline {
-				setTimeout(&i, inline, "--timeout")
-			} else if v, ok := take(&i); ok {
-				setTimeout(&i, v, "--timeout")
-			}
-		case "--wait":
-			if hasInline {
-				setInt(&f.wait, inline, "--wait")
-			} else if v, ok := take(&i); ok {
-				setInt(&f.wait, v, "--wait")
-			}
-		case "--cache":
-			setBool(&f.cache, "--cache", inline, hasInline)
-		case "--fewshot":
-			setBool(&f.fewshot, "--fewshot", inline, hasInline)
-		case "--mode":
-			setStr(&i, &f.mode, inline, hasInline)
-		case "--merge":
-			setBool(&f.merge, "--merge", inline, hasInline)
-		case "--schedule":
-			setStr(&i, &f.schedule, inline, hasInline)
-		case "--with-skill":
-			setStr(&i, &f.withSkill, inline, hasInline)
-		case "--kind":
-			setStr(&i, &f.kind, inline, hasInline)
-		case "--etag":
-			setStr(&i, &f.etag, inline, hasInline)
-		case "--one-line":
-			setBool(&f.oneLine, "--one-line", inline, hasInline)
-		case "--entities":
-			setBool(&f.entities, "--entities", inline, hasInline)
-		case "--risk":
-			setBool(&f.risk, "--risk", inline, hasInline)
-		case "--sinks":
-			setStr(&i, &f.sinks, inline, hasInline)
-		case "--once":
-			setBool(&f.once, "--once", inline, hasInline)
-		case "--semantic":
-			setBool(&f.semantic, "--semantic", inline, hasInline)
-		case "--bridges-only":
-			setBool(&f.bridgesOnly, "--bridges-only", inline, hasInline)
-		case "--interval":
-			setIntFlag(&i, &f.interval, "--interval", inline, hasInline)
-		case "--http":
-			setStr(&i, &f.http, inline, hasInline)
-		case "--tls-cert":
-			setStr(&i, &f.tlsCert, inline, hasInline)
-		case "--tls-key":
-			setStr(&i, &f.tlsKey, inline, hasInline)
-		case "--hold":
-			setBool(&f.hold, "--hold", inline, hasInline)
-		case "--graphml":
-			setBool(&f.graphml, "--graphml", inline, hasInline)
-		case "--cypher":
-			setBool(&f.cypher, "--cypher", inline, hasInline)
-		case "--html":
-			setBool(&f.html, "--html", inline, hasInline)
-		case "--out":
-			setStr(&i, &f.out, inline, hasInline)
-		case "--compact":
-			setBool(&f.compact, "--compact", inline, hasInline)
-		case "--all":
-			setBool(&f.all, "--all", inline, hasInline)
-		case "--clear":
-			setBool(&f.clear, "--clear", inline, hasInline)
-		case "--max":
-			setIntFlag(&i, &f.max, "--max", inline, hasInline)
-		case "--limit":
-			setIntFlag(&i, &f.limit, "--limit", inline, hasInline)
-		case "--range":
-			setStr(&i, &f.range_, inline, hasInline)
-		case "--lines", "--line":
-			// --line is the documented singular form (lsp-bridge help); the
-			// parser previously rejected it because only --lines existed.
-			// evidence-anchor reads the same flag as a STRING (line number):
-			// the raw value is captured in .lineRaw while .lines stays the
-			// int form the lsp/context commands consume.
-			if hasInline {
-				setInt(&f.lines, inline, "--line")
-				f.lineRaw = inline
-			} else if v, ok := take(&i); ok {
-				setInt(&f.lines, v, "--line")
-				f.lineRaw = v
-			}
-		case "--depth":
-			setIntFlag(&i, &f.depth, "--depth", inline, hasInline)
-		case "--full":
-			setBool(&f.full, "--full", inline, hasInline)
-		case "--from":
-			setStr(&i, &f.from, inline, hasInline)
-		case "--to":
-			setStr(&i, &f.to, inline, hasInline)
-		case "--severity":
-			setStr(&i, &f.severity, inline, hasInline)
-		case "--engine":
-			setStr(&i, &f.engine, inline, hasInline)
-		case "--lang":
-			setStr(&i, &f.lang, inline, hasInline)
-		case "--stdin":
-			setStr(&i, &f.stdin, inline, hasInline)
-		case "--output":
-			setStr(&i, &f.execOutput, inline, hasInline)
-		case "--anchor":
-			setStr(&i, &f.execAnchor, inline, hasInline)
-		case "--no-instructions":
-			setBool(&f.noinstructions, "--no-instructions", inline, hasInline)
-		case "--max-tokens":
-			setIntFlag(&i, &f.maxTokens, "--max-tokens", inline, hasInline)
-		case "--max-files":
-			setIntFlag(&i, &f.maxFiles, "--max-files", inline, hasInline)
-		case "--context-before":
-			setIntFlag(&i, &f.contextBefore, "--context-before", inline, hasInline)
-		case "--context-after":
-			setIntFlag(&i, &f.contextAfter, "--context-after", inline, hasInline)
-		case "--tier":
-			setStr(&i, &f.tier, inline, hasInline)
-		case "--precision":
-			setStr(&i, &f.precision, inline, hasInline)
-		case "--min-confidence":
-			setStr(&i, &f.minConfidence, inline, hasInline)
-		case "--fold":
-			setBool(&f.fold, "--fold", inline, hasInline)
-		case "--explain":
-			setBool(&f.explain, "--explain", inline, hasInline)
-		case "--graph":
-			setBool(&f.graph, "--graph", inline, hasInline)
-		case "--generate":
-			setBool(&f.generate, "--generate", inline, hasInline)
-		case "--staged":
-			setBool(&f.staged, "--staged", inline, hasInline)
-		case "--subject":
-			setBool(&f.subject, "--subject", inline, hasInline)
-		case "--message":
-			setStr(&i, &f.message, inline, hasInline)
-		case "--name":
-			setStr(&i, &f.name, inline, hasInline)
-		case "--dry-run":
-			setBool(&f.dryRun, "--dry-run", inline, hasInline)
-		case "--approver":
-			setStr(&i, &f.approver, inline, hasInline)
-		case "--version":
-			setStr(&i, &f.version, inline, hasInline)
-		case "--reject":
-			setBool(&f.reject, "--reject", inline, hasInline)
-		case "--reason":
-			setStr(&i, &f.reason, inline, hasInline)
-		case "--action":
-			setStr(&i, &f.action, inline, hasInline)
-		case "--column", "--col":
-			setIntFlag(&i, &f.column, "--column", inline, hasInline)
-		case "--compiler-output":
-			setStr(&i, &f.compilerOutput, inline, hasInline)
-		case "--edits":
-			setStr(&i, &f.edits, inline, hasInline)
-		case "--server-cmd":
-			setStr(&i, &f.serverCmd, inline, hasInline)
-		case "--target":
-			setStr(&i, &f.target, inline, hasInline)
-		case "--min-fixes":
-			setIntFlag(&i, &f.minFixes, "--min-fixes", inline, hasInline)
-		// ---- Migrated FlagSet flags (unified parser) ----
-		case "--agent":
-			setStr(&i, &f.agent, inline, hasInline)
-		case "--auto":
-			setBool(&f.auto, "--auto", inline, hasInline)
-		case "--auto-gap":
-			setBool(&f.autoGap, "--auto-gap", inline, hasInline)
-		case "--base":
-			setStr(&i, &f.base, inline, hasInline)
-		case "--body":
-			setStr(&i, &f.body, inline, hasInline)
-		case "--channel":
-			setStr(&i, &f.channel, inline, hasInline)
-		case "--chunk-size":
-			setStr(&i, &f.chunkSize, inline, hasInline)
-		case "--claim":
-			setStr(&i, &f.claim, inline, hasInline)
-		case "--deny-path":
-			if hasInline {
-				f.denyPaths = append(f.denyPaths, inline)
-			} else if v, ok := take(&i); ok {
-				f.denyPaths = append(f.denyPaths, v)
-			}
-		case "--diff":
-			setStr(&i, &f.diff, inline, hasInline)
-		case "--expect-fingerprint":
-			setStr(&i, &f.expectFingerprint, inline, hasInline)
-		case "--field":
-			setStr(&i, &f.field, inline, hasInline)
-		case "--field-type":
-			setStr(&i, &f.fieldType, inline, hasInline)
-		case "--format":
-			setStr(&i, &f.format, inline, hasInline)
-		case "--half-life":
-			setStr(&i, &f.halfLife, inline, hasInline)
-		case "--interface":
-			setStr(&i, &f.iface, inline, hasInline)
-		case "--inject-memory":
-			setStr(&i, &f.injectMemory, inline, hasInline)
-		case "--k", "-k":
-			setStr(&i, &f.k, inline, hasInline)
-		case "--keep-tasks":
-			setIntFlag(&i, &f.keepTasks, "--keep-tasks", inline, hasInline)
-		case "--key":
-			setStr(&i, &f.key, inline, hasInline)
-		case "--local":
-			setStr(&i, &f.local, inline, hasInline)
-		case "--notes":
-			setStr(&i, &f.notes, inline, hasInline)
-		case "--older-than":
-			setStr(&i, &f.olderThan, inline, hasInline)
-		case "--payload":
-			setStr(&i, &f.payload, inline, hasInline)
-		case "--percent":
-			setStr(&i, &f.percent, inline, hasInline)
-		case "--pipeline":
-			setStr(&i, &f.pipeline, inline, hasInline)
-		case "--policy":
-			setStr(&i, &f.policy, inline, hasInline)
-		case "--progress-token":
-			setStr(&i, &f.progressToken, inline, hasInline)
-		case "--prompt":
-			setStr(&i, &f.prompt, inline, hasInline)
-		case "--remote":
-			setStr(&i, &f.remote, inline, hasInline)
-		case "--repo":
-			if hasInline {
-				f.repoPaths = append(f.repoPaths, inline)
-			} else if v, ok := take(&i); ok {
-				f.repoPaths = append(f.repoPaths, v)
-			}
-		case "--resource":
-			setStr(&i, &f.resource, inline, hasInline)
-		case "--role":
-			setStr(&i, &f.role, inline, hasInline)
-		case "--sign":
-			setBool(&f.sign, "--sign", inline, hasInline)
-		case "--full-state":
-			setBool(&f.fullState, "--full-state", inline, hasInline)
-		case "--restore":
-			setStr(&i, &f.restore, inline, hasInline)
-		case "--sig":
-			setStr(&i, &f.sig, inline, hasInline)
-		case "--tag":
-			setStr(&i, &f.tag, inline, hasInline)
-		case "--template":
-			setStr(&i, &f.template, inline, hasInline)
-		case "--text":
-			setStr(&i, &f.text, inline, hasInline)
-		case "--tool":
-			setStr(&i, &f.tool, inline, hasInline)
-		case "--ttl":
-			setStr(&i, &f.ttl, inline, hasInline)
-		case "--url":
-			setStr(&i, &f.url, inline, hasInline)
 		case "--help", "-h":
-			f.help = true
+			p.f.help = true
 		default:
 			arg := args[i]
 			// A token is treated as a flag if it is `--` followed by more
@@ -887,11 +384,11 @@ func parseFlags(args []string) (flags, []string, error) {
 			// (e.g. `-x`). Negative numbers (`-1`), a bare `-` (stdin), and
 			// plain positionals are NOT flags and still go to rest.
 			if cliflags.IsFlagToken(arg) {
-				parseErr = fmt.Errorf("unknown flag: %s", name)
+				p.parseErr = fmt.Errorf("unknown flag: %s", name)
 			} else {
-				rest = append(rest, arg)
+				p.rest = append(p.rest, arg)
 			}
 		}
 	}
-	return f, rest, parseErr
+	return p.f, p.rest, p.parseErr
 }

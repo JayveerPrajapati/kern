@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/clietag"
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
@@ -91,6 +92,12 @@ func runContextCLI(rest []string) {
 		fatalUsage("usage: kern context <symbol> [root] [--lines N] [--etag H]")
 	}
 	symbol := args[0]
+	// Empty/whitespace symbols are usage errors, not no-match results —
+	// MCP rejects symbol:"" with "symbol is required" (blind-critique
+	// Phase 3.3 CLI/MCP alignment).
+	if strings.TrimSpace(symbol) == "" {
+		fatalUsage("symbol is required (e.g. kern context RunServer)")
+	}
 	root := rootOf(f.root)
 	if f.root == "" && len(args) > 1 {
 		root = args[1]

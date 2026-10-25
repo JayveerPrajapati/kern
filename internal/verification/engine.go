@@ -75,6 +75,14 @@ type Engine struct {
 	// Tradeoff (documented): scoped runs do not catch regressions in
 	// dependent packages — CI's full tier owns that guarantee.
 	testPackages []string
+	// ctx bounds the subprocess checks (build/test/vet/bench/e2e); nil =
+	// context.Background(). Set via WithContext so a caller cancellation
+	// (MCP client disconnect) kills in-flight subprocesses instead of
+	// orphaning them, and a caller deadline makes Verify return a PARTIAL
+	// result: checks completed before the truncation keep their verdicts,
+	// the summary records the cut (a truncated run never reads as a clean
+	// pass). The index-based checks are in-process and simply finish.
+	ctx context.Context
 }
 
 // Option configures an Engine before a Verify run. Options are applied to a
@@ -118,6 +126,30 @@ func (e *Engine) WithTestPackages(pkgs []string) *Engine {
 	}
 	e.testPackages = pkgs
 	return e
+}
+
+// WithContext (Option form) bounds the subprocess verifications with the
+// given context: cancellation kills in-flight build/test/vet/bench
+// subprocesses (no orphans on client disconnect) and a deadline produces a
+// PARTIAL result instead of an opaque host-side tool-call timeout.
+func WithContext(ctx context.Context) Option {
+	return func(e *Engine) { e.ctx = ctx }
+}
+
+// WithContext (method form) sets the engine's subprocess context directly
+// for engine-constructing callers (mirrors WithFullTests/WithTestPackages).
+func (e *Engine) WithContext(ctx context.Context) *Engine {
+	e.ctx = ctx
+	return e
+}
+
+// context returns the engine's subprocess context, defaulting to
+// context.Background when no WithContext was applied.
+func (e *Engine) context() context.Context {
+	if e.ctx == nil {
+		return context.Background()
+	}
+	return e.ctx
 }
 
 // NewEngine creates a verification engine for the given project root.
@@ -348,6 +380,18 @@ func (e *Engine) Verify(types []string) verdict.VerificationResult {
 		res.Verdict = verdict.VerdictFail
 	}
 	res.Summary = summarizeChecks(&res)
+	// Caller deadline/cancellation truncation: a partial run must never
+	// read as a clean pass. Checks completed before the cut keep their
+	// verdicts; subprocesses still running were killed by the context
+	// (validate.Run/sandbox kill the whole process group) and report as
+	// failed/cancelled. Record the truncation in the summary and clamp a
+	// passing verdict to WARN.
+	if cerr := e.context().Err(); cerr != nil {
+		res.Summary = "PARTIAL — run truncated: " + cerr.Error() + ". " + res.Summary
+		if res.Verdict == verdict.VerdictPass || res.Verdict == verdict.VerdictPassWithWarning {
+			res.Verdict = verdict.VerdictWarn
+		}
+	}
 	if res.Verdict == verdict.VerdictFail {
 		e.publish(eventbus.VerificationFailed, &res)
 	} else {
@@ -579,7 +623,7 @@ func (e *Engine) VerifyBuild() *verdict.BuildResult {
 		}
 		cmd = detected
 	}
-	vr := validate.Run(context.Background(), e.root, cmd, buildTimeout)
+	vr := validate.Run(e.context(), e.root, cmd, buildTimeout)
 	// F4: clip the embedded output to the PASS/FAIL caps and persist the
 	// full log under .kern/audit/<run-id>/verify-build.log (path on LogPath).
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "build", vr.Output, vr.OK)
@@ -681,7 +725,7 @@ func (e *Engine) VerifyTests() *verdict.TestResult {
 		res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 		return res
 	}
-	sr := sandbox.RunWithOptions(context.Background(), e.root, cmd, args, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
+	sr := sandbox.RunWithOptions(e.context(), e.root, cmd, args, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	// F4: clip the embedded output and persist the full log under
 	// .kern/audit/<run-id>/verify-test.log (path on LogPath).
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "test", sr.Output, sr.OK)
@@ -794,7 +838,7 @@ func (e *Engine) VerifyE2ETests() *verdict.E2ETestResult {
 		return nil
 	}
 	res := &verdict.E2ETestResult{}
-	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
+	sr := sandbox.RunWithOptions(e.context(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	// F4: clip the embedded output and persist the full log under
 	// .kern/audit/<run-id>/verify-e2e.log (path on LogPath).
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "e2e", sr.Output, sr.OK)
@@ -863,7 +907,7 @@ func (e *Engine) VerifyStaticAnalysis() *verdict.StaticAnalysisResult {
 // exit AND no findings. Output is captured per the F4 caps and the full log
 // is persisted to .kern/audit/<run-id>/verify-static-analysis.log.
 func (e *Engine) runStaticAnalysis(cmd string, args []string, res *verdict.StaticAnalysisResult) {
-	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
+	sr := sandbox.Run(e.context(), e.root, cmd, args, testTimeout)
 	res.Duration = sr.Duration
 	reason := foldStaticAnalysisOutcome(res, sr)
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "static-analysis", sr.Output, res.OK)
@@ -944,7 +988,7 @@ func (e *Engine) runGofmtBaseline(res *verdict.StaticAnalysisResult) {
 	}
 	var out strings.Builder
 	for _, f := range files {
-		sr := sandbox.Run(context.Background(), e.root, "gofmt", []string{"-e", f}, testTimeout)
+		sr := sandbox.Run(e.context(), e.root, "gofmt", []string{"-e", f}, testTimeout)
 		res.Duration += sr.Duration
 		if !sr.OK {
 			res.OK = false
@@ -968,7 +1012,7 @@ func (e *Engine) VerifyPerformance() *verdict.PerformanceResult {
 	if !hasBenchmarks(e.root) {
 		return nil
 	}
-	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-bench=.", "-benchmem", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
+	sr := sandbox.RunWithOptions(e.context(), e.root, "go", []string{"test", "-bench=.", "-benchmem", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	res := &verdict.PerformanceResult{}
 	for _, line := range strings.Split(sr.Output, "\n") {
 		fields := strings.Fields(line)
@@ -1131,7 +1175,12 @@ func (e *Engine) VerifySecurity() *verdict.SecurityResult {
 	// is excluded from the Critical/High/Low risk ladder, so the counts
 	// reflect only live problems. Count stays the raw total (including
 	// suppressed) so the report shows the full picture.
-	reg := LoadSuppressionRegistry(e.root)
+	reg, err := LoadSuppressionRegistry(e.root)
+	if err != nil {
+		res.OK = false
+		res.Error = err.Error()
+		return res
+	}
 	unsuppressedCritical := 0
 	for _, f := range findings {
 		vf := verdict.Finding{

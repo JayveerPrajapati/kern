@@ -314,7 +314,7 @@ func sanitizedEnv() []string {
 }
 
 // SkipDirs are never copied into a snapshot.
-var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "out": true, ".gradle": true, ".venv": true, "venv": true, "__pypackages__": true, "__pycache__": true, ".next": true, ".turbo": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true}
+var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "out": true, ".gradle": true, ".venv": true, "venv": true, "__pypackages__": true, "__pycache__": true, ".next": true, ".turbo": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true, ".arena": true}
 
 // Snap is a point-in-time copy of a tree used for rollback.
 type Snap struct {
@@ -707,6 +707,17 @@ type RunOptions struct {
 	// only. External egress stays denied. The zero value keeps the profile
 	// byte-identical.
 	AllowLoopbackBind bool
+	// StripGovernanceBypass drops the operator's break-glass vars
+	// (KERN_BYPASS, KERN_ENFORCE) from the sandboxed child's environment.
+	// The trusted internal consumers (kern verify / execution worktrees /
+	// the git pre-commit hook, which shells out to `kern verify --staged`
+	// from inside the child) must inherit the operator's governance policy
+	// verbatim — stripping it would silently change the machine's policy
+	// mid-run (pinned by TestSanitizedEnvPropagatesGovernanceVars). But the
+	// user-facing arbitrary-command sandbox (`kern sandbox <cmd>`, MCP
+	// kern_sandbox) runs UNTRUSTED host code; handing that code the bypass
+	// would let it spawn an unguarded `kern`. RunGuarded sets this.
+	StripGovernanceBypass bool
 }
 
 // RunWithOptions is Run with per-run options (see RunOptions). The zero
@@ -730,7 +741,7 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 // MCP kern_sandbox) use it; internal automation (execution worktrees, the
 // verification engine) keeps the ungated Run.
 func RunGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
-	return runGuarded(parent, root, cmdName, args, timeout, force, RunOptions{})
+	return runGuarded(parent, root, cmdName, args, timeout, force, RunOptions{StripGovernanceBypass: true})
 }
 
 // sandboxChildEnv returns the sanitized environment for a sandboxed command
@@ -740,8 +751,27 @@ func RunGuarded(parent context.Context, root string, cmdName string, args []stri
 // instead of failing. Appended AFTER StripSecrets so the marker can never
 // be scrubbed. Used by both child-env construction sites in runGuarded (the
 // plain wrap path and the Landlock trampoline path).
-func sandboxChildEnv() []string {
-	return append(governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter()), "KERN_SANDBOX_ACTIVE=1")
+//
+// stripGovernanceBypass drops the operator's break-glass vars (KERN_BYPASS,
+// KERN_ENFORCE) from the child environment: the trusted internal consumers
+// (kern verify / execution worktrees) inherit the operator's governance
+// policy verbatim for policy parity (pinned by
+// TestSanitizedEnvPropagatesGovernanceVars), but the user-facing
+// arbitrary-command sandbox runs UNTRUSTED host code and must not receive
+// the bypass — RunGuarded sets the flag.
+func sandboxChildEnv(stripGovernanceBypass bool) []string {
+	env := governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+	if stripGovernanceBypass {
+		out := make([]string, 0, len(env))
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "KERN_BYPASS=") || strings.HasPrefix(kv, "KERN_ENFORCE=") {
+				continue
+			}
+			out = append(out, kv)
+		}
+		env = out
+	}
+	return append(env, "KERN_SANDBOX_ACTIVE=1")
 }
 
 // inheritIsolationNote is prepended to a guarded run's output when the run
@@ -849,7 +879,7 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 			// Landlock is per-thread and cannot be dropped, so it must be
 			// applied in a fresh child, never in this process.
 			if goruntime.GOOS == "linux" && fsConfinementEnabled() && landlock.LandlockAvailable(prefix) {
-				childEnv := sandboxChildEnv()
+				childEnv := sandboxChildEnv(opts.StripGovernanceBypass)
 				if exe, err := os.Executable(); err == nil {
 					absRoot := root
 					if !filepath.IsAbs(absRoot) {
@@ -883,7 +913,7 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	// paths go through sandboxChildEnv, which appends the KERN_SANDBOX_ACTIVE
 	// marker so children know they are inside an active kern sandbox.
 	if !fsConfined {
-		c.Env = sandboxChildEnv()
+		c.Env = sandboxChildEnv(opts.StripGovernanceBypass)
 	}
 	// Run the command in its own process group so that on timeout the whole
 	// group (the command and any grandchildren it spawns) is killed, not just

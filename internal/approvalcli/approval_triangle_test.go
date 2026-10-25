@@ -71,7 +71,7 @@ func TestApprovalTriangleDenyApproveWaitRetry(t *testing.T) {
 	for _, want := range []string{
 		"requires human approval",
 		"approval appr-",
-		"resolve with: kern approve",
+		"resolve with: kern approval ask",
 		"byte-identical",
 		"retry exactly: make install",
 		"kern approval wait ",

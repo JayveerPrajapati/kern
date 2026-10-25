@@ -62,7 +62,7 @@ func AppendAllowOnce(hash, subject string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 	e := AllowOnceEntry{Hash: strings.ToLower(hash), Subject: subject, Created: time.Now().UTC().Format(time.RFC3339)}
@@ -82,12 +82,32 @@ func AppendAllowOnce(hash, subject string) error {
 // ConsumeAllowOnce reports whether subjectHash has an UNUSED entry,
 // marking it used when found. A second identical subject finds only used
 // entries and is denied again — the allowance is single-use.
+//
+// The read→mark→rewrite window is serialized by a blocking flock on the
+// registry (a `.lock` sidecar), so two concurrent consumers of the SAME
+// unused entry cannot both pass (M7: this used to be a lock-free
+// read-modify-rename — both goroutines could read the unused entry, both
+// mark it used, and both succeed, defeating single-use). The lock is
+// blocking because an allowance grant is rare and a grant/consume race
+// should resolve by waiting, not by failing the bypass.
 func ConsumeAllowOnce(subject string) bool {
 	h := HashSubject(subject)
 	p, err := AllowOncePath()
 	if err != nil {
 		return false
 	}
+	// Exclusive lock across read→decide→rename: a concurrent consumer
+	// blocks here until this one finishes, then re-reads and sees the
+	// Used mark. Lock failure fails closed (no consume). The helper is
+	// platform-specific (blocking flock on Unix, exclusive-create with a
+	// bounded timeout on Windows) so the single-use guarantee holds on
+	// every OS kern supports.
+	unlock, err := lockAllowOnceRegistry(p)
+	if err != nil {
+		return false
+	}
+	defer unlock()
+
 	data, err := os.ReadFile(p)
 	if err != nil {
 		return false

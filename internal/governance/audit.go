@@ -28,6 +28,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/flock"
+	"github.com/JayveerPrajapati/kern/internal/merkle"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -114,7 +115,7 @@ type AuditLog struct {
 	hashChain  string        // hash of the previous entry (tamper detection)
 	lockPath   string        // cross-process advisory lock file ("" = legacy, unlocked)
 	mirrorPath string        // out-of-repo JSONL mirror of persisted entries ("" = off)
-	merkleTree *MerkleTree   // incremental Merkle tree for parallel, lock-free audit verification
+	merkleTree *merkle.Tree  // incremental Merkle tree for parallel, lock-free audit verification
 
 	// Retention (B8): the in-memory log is capped at maxAuditEntries so a
 	// long-running process (the web console, the MCP server) cannot grow it
@@ -345,6 +346,37 @@ func auditLockWithWriterMu(path string) (func(), error) {
 	}, nil
 }
 
+// acquireAuditLock takes the cross-process audit flock (in-process writer
+// mutex held) with a bounded, non-blocking retry, failing closed on
+// exhaustion (one-time warning + error naming the lock). Callers hold l.mu
+// and decide how loudly to surface the failure. Nil unlock when no lock path.
+func (l *AuditLog) acquireAuditLock() (func(), error) {
+	if l.lockPath == "" {
+		return nil, nil
+	}
+	// Create the parent so a fresh store self-heals instead of degrading to
+	// an unlocked write (a fork of the chain is indistinguishable from
+	// tampering).
+	if err := os.MkdirAll(filepath.Dir(l.lockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("audit lock %s: create lock directory: %w", l.lockPath, err)
+	}
+	var unlock func()
+	var lockErr error
+	for attempt := 1; attempt <= auditLockRetries; attempt++ {
+		unlock, lockErr = auditLockWithWriterMu(l.lockPath)
+		if lockErr == nil {
+			return unlock, nil
+		}
+		if errors.Is(lockErr, flock.ErrLocked) && attempt < auditLockRetries {
+			time.Sleep(auditLockRetrySleep)
+		}
+	}
+	auditLockWarnOnce.Do(func() {
+		log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); the tamper-evident chain will NOT be written unlocked — chain gaps are repairable via `kern audit repair`", l.lockPath, auditLockRetries, lockErr)
+	})
+	return nil, fmt.Errorf("audit lock %s could not be acquired after %d attempts (last error: %v)", l.lockPath, auditLockRetries, lockErr)
+}
+
 // refreshTailLocked re-reads the TRUE persisted tail under the cross-process
 // lock (when configured) and refreshes the in-memory chain head + sequence so
 // the next write chains from its actual predecessor whoever wrote it. Returns
@@ -365,49 +397,9 @@ func (l *AuditLog) refreshTailLocked() (func(), error) {
 	if l.store == nil {
 		return nil, nil
 	}
-	var unlock func()
-	if l.lockPath != "" {
-		// The lock file's parent directory must exist before the lock can be
-		// opened. Create it up front so a missing directory (a fresh store,
-		// or a lock path whose parent was never created) self-heals instead
-		// of degrading the write to unlocked — an unlocked audit write can
-		// fork the tamper-evident chain, and a fork is indistinguishable
-		// from tampering at verification time.
-		if err := os.MkdirAll(filepath.Dir(l.lockPath), 0o755); err != nil {
-			return nil, fmt.Errorf("audit lock %s: create lock directory: %w", l.lockPath, err)
-		}
-		// The acquisition is non-blocking and bounded: a contended lock must
-		// resolve (fail loudly) within auditLockRetries ×
-		// auditLockRetrySleep instead of blocking a governance write
-		// forever — the approval decision is already durable in
-		// .kern/approvals.json, and a skipped chain link is repairable via
-		// `kern audit repair`. auditLockWithWriterMu serializes in-process
-		// writers on the flock lifecycle so sequential same-process calls
-		// never contend with themselves.
-		var lockErr error
-		for attempt := 1; attempt <= auditLockRetries; attempt++ {
-			unlock, lockErr = auditLockWithWriterMu(l.lockPath)
-			if lockErr == nil {
-				break
-			}
-			if errors.Is(lockErr, flock.ErrLocked) && attempt < auditLockRetries {
-				time.Sleep(auditLockRetrySleep)
-			}
-		}
-		if unlock == nil {
-			// FAIL CLOSED: an unacquirable audit lock — contention exhausted
-			// OR an open failure (permissions, read-only fs, a path whose
-			// parent cannot be created) — must never degrade the tamper-
-			// evident chain to unlocked writes. The caller decides how
-			// loudly to fail: AppendExternal returns the error, and the
-			// Record path drops the entry with the loss counted + marked in
-			// the global sidecar (surfaced by `kern doctor`) instead of
-			// writing it unlocked.
-			auditLockWarnOnce.Do(func() {
-				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts (%v); the tamper-evident chain will NOT be written unlocked — chain gaps are repairable via `kern audit repair`", l.lockPath, auditLockRetries, lockErr)
-			})
-			return nil, fmt.Errorf("audit lock %s could not be acquired after %d attempts (last error: %v)", l.lockPath, auditLockRetries, lockErr)
-		}
+	unlock, lockErr := l.acquireAuditLock()
+	if lockErr != nil {
+		return nil, lockErr
 	}
 	// Fast path: an append-only store reports its tail directly, so a write
 	// does not re-read the whole log. Fall through to the full re-list when
@@ -591,7 +583,7 @@ func (l *AuditLog) persist(entry AuditEntry) {
 // directory on demand. The write is advisory-only: its failure is reported
 // to the caller and never propagates to the audit path.
 func appendMirrorLine(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -715,12 +707,19 @@ func (l *AuditLog) AppendExternal(entry AuditEntry) error {
 	return nil
 }
 
-// RepairChain re-chains persisted entries from the first broken link:
-// each entry's Hash is recomputed against its true predecessor (content is
-// preserved; only the chain-link hashes change). This repairs self-inflicted
-// breaks (e.g. the pre-lock concurrent-writer bug). It cannot distinguish
-// genuine tampering from such breaks, so it must only run on explicit user
-// request (kern audit repair). Returns the number of entries re-chained.
+// RepairChain re-chains persisted entries from the first broken link: each
+// entry's Hash is recomputed against its true predecessor (content preserved;
+// only chain-link hashes change). This repairs self-inflicted breaks (e.g.
+// the pre-lock concurrent-writer bug) but cannot distinguish genuine
+// tampering from such breaks, so it only runs on explicit user request
+// (kern audit repair). Returns the number of entries re-chained.
+//
+// Repair FAILS CLOSED on an unacquirable lock (same contract as every other
+// persisted write: an unlocked repair can fork the chain, indistinguishable
+// from tampering) and is itself audited: when entries are re-chained, an
+// audit.repair entry is appended to the repaired tail under the same lock, so
+// the re-chain is visible in the tamper-evident trail rather than laundering
+// a break into a silently-changed history.
 func (l *AuditLog) RepairChain() (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -730,13 +729,15 @@ func (l *AuditLog) RepairChain() (int, error) {
 	}
 
 	var unlock func()
+	var lockErr error
 	if l.lockPath != "" {
-		// Lock is advisory and failure-tolerant: repair without it is
-		// best-effort rather than a hard failure. auditLockWithWriterMu
-		// keeps repair serialized with concurrent same-process writers; a
-		// contended lock is logged via the lock error and repair proceeds
-		// unlocked (refusing to repair would be worse than racing).
-		unlock, _ = auditLockWithWriterMu(l.lockPath)
+		// Repair is a WRITE path; the fail-closed lock contract applies
+		// identically. The acquisition is non-blocking and bounded (shared
+		// with refreshTailLocked); on exhaustion repair is refused.
+		unlock, lockErr = l.acquireAuditLock()
+		if lockErr != nil {
+			return 0, fmt.Errorf("refusing to repair the chain unlocked: %w", lockErr)
+		}
 	}
 	if unlock != nil {
 		defer unlock()
@@ -801,6 +802,41 @@ func (l *AuditLog) RepairChain() (int, error) {
 	l.hashChain = prev
 	if maxSeq > int(l.seq.Load()) {
 		l.seq.Store(int64(maxSeq))
+	}
+
+	// Audit the repair itself: append an audit.repair entry to the repaired
+	// tail under the same lock, so the re-chain is part of the tamper-evident
+	// record. Appended DIRECTLY (hash + Put), not via AppendExternal, because
+	// RepairChain already holds the auditWriterMu flock — a nested append
+	// would re-lock the same in-process mutex and deadlock.
+	if n > 0 {
+		repair := AuditEntry{
+			Timestamp:  time.Now(),
+			AgentID:    "kern",
+			Action:     "audit.repair",
+			Resource:   "audit-chain",
+			Risk:       domain.Risk{Level: domain.RiskHigh},
+			Approved:   false,
+			Result:     "allowed",
+			Annotation: fmt.Sprintf("re-chained %d entry/entries from the first broken link", n),
+		}
+		repair.ID = fmt.Sprintf("audit-%d", l.nextSeq())
+		repair.Hash = computeAuditHash(repair, l.hashChain)
+		data, err := json.Marshal(repair)
+		if err != nil {
+			return n, fmt.Errorf("repair chain: marshal repair entry: %w", err)
+		}
+		if err := l.store.Put(context.Background(), "audit-"+repair.ID, data); err != nil {
+			return n, fmt.Errorf("repair chain: persist repair entry: %w", err)
+		}
+		l.entries = append(l.entries, repair)
+		l.hashChain = repair.Hash
+		l.noteResultAndTrimLocked(repair)
+		if l.mirrorPath != "" {
+			if err := appendMirrorLine(l.mirrorPath, data); err != nil {
+				log.Printf("kern governance: audit mirror append failed for repair entry %s: %v", repair.ID, err)
+			}
+		}
 	}
 	return n, nil
 }
@@ -1025,7 +1061,8 @@ func (l *AuditLog) Filter(agentID string) []AuditEntry {
 // counts as broken — otherwise anyone able to write the store could append or
 // splice unkeyed entries behind keyed ones, because the plain formulas need
 // no secret. (Entries written while the key was unavailable are also flagged;
-// `kern audit repair` re-chains them once the key is restored.)
+// they stay unkeyed — `kern audit repair` re-chains only genuinely broken
+// links, never re-signs an intact entry of unknown origin.)
 func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1049,6 +1086,20 @@ type ChainTiers struct {
 
 // Unkeyed is the number of verified entries that carry no secret-bound proof.
 func (t ChainTiers) Unkeyed() int { return t.Plain + t.Legacy }
+
+// DowngradeExplainsBreak reports whether every broken entry in the chain is
+// a format downgrade — i.e. it verified, but only under a weaker unkeyed
+// formula than an earlier keyed entry. That is the exact signature of
+// entries appended while the HMAC secret was unavailable (an
+// environment-degraded server: no $HOME, container, cron — NEW-5): the
+// chain still links via stored hashes and ordering holds; only the
+// authenticity of those entries is unproven. Callers use it to report the
+// degradation ACCURATELY instead of framing it as tampering ("FAILED"),
+// while a genuine splice (broken entries beyond the downgrades, or a chain
+// that verifies nowhere) still fails loudly.
+func (t ChainTiers) DowngradeExplainsBreak() bool {
+	return t.Broken > 0 && t.Broken == t.Downgraded && t.Keyed > 0
+}
 
 // ChainTierReport verifies the chain exactly like VerifyChainReport and
 // returns the per-format breakdown. An in-memory-only log reports every entry
@@ -1146,135 +1197,21 @@ func computeAuditHashLegacy(e AuditEntry, prevHash string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// VerifyChain reports whether the audit log's hash chain is intact (no entries
-// have been tampered with). Returns true when the log is in-memory only (no
-// persistence) or when all hashes verify.
-func (l *AuditLog) VerifyChain() bool {
-	firstBroken, _ := l.VerifyChainReport()
-	return firstBroken < 0
-}
-
-// MerkleTree is an incremental Merkle Tree for parallel, tamper-evident audit logging.
-type MerkleTree struct {
-	mu     sync.RWMutex
-	leaves []string
-	levels [][]string // levels[0] is leaves; levels[d] stores pairwise completed nodes
-	root   string
-}
-
-// NewMerkleTree initializes an empty incremental Merkle tree.
-func NewMerkleTree() *MerkleTree {
-	return &MerkleTree{
-		levels: make([][]string, 0),
-	}
-}
-
-// hashLeaf computes the leaf SHA-256 hash for an AuditEntry.
+// hashLeaf computes the leaf SHA-256 hash for an AuditEntry. It is the
+// governance-side serialization of an audit entry into a Merkle leaf; the
+// merkle.Tree itself is generic over string leaves.
 func hashLeaf(e AuditEntry) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "leaf|%s|%s|%s|%s|%v|%v|%v|%s|%s", e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// hashNode computes the parent SHA-256 hash from left and right child hashes.
-func hashNode(left, right string) string {
-	h := sha256.New()
-	h.Write([]byte(left + ":" + right))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// computeMerkleRoot computes the root hash from a slice of leaf hashes.
-func computeMerkleRoot(leaves []string) string {
-	if len(leaves) == 0 {
-		return ""
-	}
-	current := make([]string, len(leaves))
-	copy(current, leaves)
-	for len(current) > 1 {
-		var next []string
-		for i := 0; i < len(current); i += 2 {
-			if i+1 < len(current) {
-				next = append(next, hashNode(current[i], current[i+1]))
-			} else {
-				next = append(next, hashNode(current[i], current[i]))
-			}
-		}
-		current = next
-	}
-	return current[0]
-}
-
-// Append inserts a leaf hash into the incremental Merkle tree in O(log N) time
-// and updates the cached tree root.
-func (m *MerkleTree) Append(leaf string) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.leaves = append(m.leaves, leaf)
-	if len(m.levels) == 0 {
-		m.levels = append(m.levels, nil)
-	}
-
-	level := 0
-	m.levels[level] = append(m.levels[level], leaf)
-
-	// Propagate completed pairs up the levels (amortized O(1))
-	for len(m.levels[level])%2 == 0 {
-		idx := len(m.levels[level])
-		parent := hashNode(m.levels[level][idx-2], m.levels[level][idx-1])
-		level++
-		if level >= len(m.levels) {
-			m.levels = append(m.levels, nil)
-		}
-		m.levels[level] = append(m.levels[level], parent)
-	}
-
-	// Roll up unpaired branch nodes to compute the root in O(log N)
-	m.root = m.computeRootFromLevelsLocked()
-	return m.root
-}
-
-// computeRootFromLevelsLocked folds any trailing odd (unpaired) nodes across tree levels.
-func (m *MerkleTree) computeRootFromLevelsLocked() string {
-	n := len(m.leaves)
-	if n == 0 {
-		return ""
-	}
-	if n == 1 {
-		return m.leaves[0]
-	}
-
-	var folded string
-	hasFolded := false
-	top := len(m.levels) - 1
-
-	for d := 0; d < top; d++ {
-		lvl := m.levels[d]
-		if len(lvl)%2 == 1 {
-			unpaired := lvl[len(lvl)-1]
-			if !hasFolded {
-				folded = hashNode(unpaired, unpaired)
-				hasFolded = true
-			} else {
-				folded = hashNode(unpaired, folded)
-			}
-		} else if hasFolded {
-			folded = hashNode(folded, folded)
-		}
-	}
-
-	topNode := m.levels[top][len(m.levels[top])-1]
-	if !hasFolded {
-		return topNode
-	}
-	return hashNode(topNode, folded)
-}
-
-// Root returns the current Merkle root hash in O(1) time.
-func (m *MerkleTree) Root() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.root
+// VerifyChain reports whether the audit log's hash chain is intact (no entries
+// have been tampered with). Returns true when the log is in-memory only (no
+// persistence) or when all hashes verify.
+func (l *AuditLog) VerifyChain() bool {
+	firstBroken, _ := l.VerifyChainReport()
+	return firstBroken < 0
 }
 
 // MerkleRoot returns the current Merkle tree root hash for the audit log.
@@ -1298,7 +1235,7 @@ func (l *AuditLog) VerifyMerkle() bool {
 	for _, e := range l.entries {
 		leaves = append(leaves, hashLeaf(e))
 	}
-	expected := computeMerkleRoot(leaves)
+	expected := merkle.ComputeRoot(leaves)
 	if l.merkleTree == nil {
 		l.initMerkleTreeLocked()
 	}
@@ -1306,7 +1243,7 @@ func (l *AuditLog) VerifyMerkle() bool {
 }
 
 func (l *AuditLog) initMerkleTreeLocked() {
-	l.merkleTree = NewMerkleTree()
+	l.merkleTree = merkle.NewTree()
 	for _, e := range l.entries {
 		l.merkleTree.Append(hashLeaf(e))
 	}

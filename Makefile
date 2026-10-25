@@ -4,15 +4,19 @@ BIN := bin
 # tag) overrides it. Both the legacy main.version and the shared
 # internal/version.Version are stamped.
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-LDFLAGS := -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
+# -trimpath (a go-build flag, not an ld flag) keeps build-machine paths out
+# of the binaries (LOW-15: 610 embedded /Users/... paths leaked provenance
+# with no runtime dependence); -s -w in the LDFLAGS drop the symbol table
+# and DWARF for the same reason.
+GOFLAGS := -buildvcs=false -trimpath
+LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
 RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
-GOFLAGS := -buildvcs=false
 # Checksum tool for the release manifest: prefer sha256sum (Linux), fall back
 # to shasum -a 256 (macOS). Both emit "<hash>  <filename>" — the two-space
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks release dist release-smoke mcpb clean clean-artifacts help
+.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks plugin-sync release dist release-smoke mcpb clean clean-artifacts help
 
 all: build
 
@@ -183,6 +187,13 @@ release-smoke:
 
 # Build a .mcpb bundle for MCP registry distribution (future releases).
 # Usage: make mcpb VERSION=v0.1.0
+# plugin-sync copies the canonical .opencode/plugins/kern.ts into the
+# embedded asset (go:embed in internal/agentwire/shared.go) so `kern setup`
+# deploys identical bytes everywhere. Run it after editing the plugin, then
+# append the new sha256 to internal/pluginhash's shipped registry (the
+# registry test prints it). --check verifies parity without writing, for CI.
+plugin-sync: build
+	./$(BIN)/kern gen-plugin --root .
 mcpb: build
 	@mkdir -p dist
 	@echo '{"manifest":{"name":"kern","version":"$(VERSION)","transport":{"type":"stdio"},"command":"kern","args":["mcp"]}}' > dist/manifest.json

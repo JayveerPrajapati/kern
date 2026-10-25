@@ -238,6 +238,30 @@ func strProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
 }
 
+// intProp is an integer property with a description. Accepted call forms
+// mirror the D6 lenience: JSON numbers and numeric strings both work
+// (ArgString canonicalizes, atoiArg parses), so stringly-typed clients keep
+// working; the dispatch-boundary validator (validateArgTypes) rejects every
+// other shape with a clean error instead of a silent default.
+func intProp(desc string) map[string]any {
+	return map[string]any{"type": "integer", "description": desc}
+}
+
+// numProp is a floating-point number property (e.g. decay half-lives).
+// Same lenient forms as intProp — numbers or numeric strings; the boundary
+// validator accepts any JSON number.
+func numProp(desc string) map[string]any {
+	return map[string]any{"type": "number", "description": desc}
+}
+
+// boolProp is a boolean property with a description. Native JSON booleans,
+// the string forms "true"/"false"/"1"/"0" and the numbers 0/1 all work
+// (ArgBool/noCacheArg read them all); the boundary validator rejects every
+// other shape — semantic: "yes" is a client bug, not a silent false.
+func boolProp(desc string) map[string]any {
+	return map[string]any{"type": "boolean", "description": desc}
+}
+
 // enumProp is a string property constrained to a closed vocabulary whose
 // values the server validates (or dispatches on) — e.g. kern_meta's phase
 // (explore|plan|edit|verify) and the whatif/impact change kinds. Declaring
@@ -272,7 +296,7 @@ func outputProps(props map[string]any) map[string]any {
 		out["slice"] = strProp("re-read a truncated result: '<anchor>:lines:A-B' or '<anchor>:tail:N'")
 	}
 	if _, ok := out["max_output"]; !ok {
-		out["max_output"] = strProp("output budget in bytes for this call (0 disables)")
+		out["max_output"] = intProp("output budget in bytes for this call (0 disables)")
 	}
 	return out
 }

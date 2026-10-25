@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // safeBuffer is a mutex-guarded bytes.Buffer for capturing child-process
@@ -83,6 +85,76 @@ func TestVersionFlags(t *testing.T) {
 // TestStdioInitializeRoundTrip drives the real stdio transport: one JSON-RPC
 // initialize message in, a serverInfo result out, then a SIGTERM drains
 // cleanly (exit 0 — the graceful-shutdown contract).
+// writeFixtureModule creates a minimal Go module in a fresh temp dir so
+// index.LoadOrBuild has a plausible project to index.
+func writeFixtureModule(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc Greet() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestPreindexWarmsPersistedIndex asserts the R6 P1 flag: kern-mcp --preindex
+// <root> builds and persists the root's symbol index before serving, so a
+// deploy script can warm an unindexed repo and the first tool call after serve
+// starts finds a warm index instead of blocking on a multi-minute build.
+func TestPreindexWarmsPersistedIndex(t *testing.T) {
+	root := writeFixtureModule(t)
+	if index.HasPersistedIndex(root) {
+		t.Fatal("fixture must start unindexed")
+	}
+	cmd := exec.Command(binPath, "--preindex", root)
+	cmd.Env = append(os.Environ(),
+		"KERN_PRELOAD=0",
+		"KERN_MCP_WATCH=0",
+		"XDG_CACHE_HOME="+t.TempDir(),
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr safeBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// A single initialize proves the server is up (the warm completed first).
+	if _, err := io.WriteString(stdin, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(stdout.String(), `"serverInfo"`) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(stdout.String(), `"serverInfo"`) {
+		t.Fatalf("no initialize result within 30s; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !index.HasPersistedIndex(root) {
+		t.Fatalf("--preindex did not persist an index for %s", root)
+	}
+	// SIGTERM must drain cleanly and exit 0.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	select {
+	case err := <-waitCh:
+		if err != nil {
+			t.Errorf("SIGTERM should drain with exit 0, got %v (stderr=%q)", err, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("server did not shut down within 10s of SIGTERM")
+	}
+}
+
 func TestStdioInitializeRoundTrip(t *testing.T) {
 	cmd := exec.Command(binPath)
 	cmd.Env = append(os.Environ(),

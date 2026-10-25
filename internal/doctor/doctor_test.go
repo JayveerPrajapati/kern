@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"sync/atomic"
 	"testing"
 
@@ -447,6 +449,53 @@ func TestCheckEnvEchoesAndValidates(t *testing.T) {
 	f = checkEnv()
 	if f.Level != "ok" {
 		t.Errorf("valid env = %+v, want ok", f)
+	}
+	// LOW-14: KERN_READONLY always has a state row, even when unset.
+	if !strings.Contains(f.Detail, "KERN_READONLY unset") {
+		t.Errorf("unset KERN_READONLY missing its state row: %s", f.Detail)
+	}
+	t.Setenv("KERN_READONLY", "1")
+	f = checkEnv()
+	if !strings.Contains(f.Detail, "KERN_READONLY=1") || strings.Count(f.Detail, "KERN_READONLY") != 1 {
+		t.Errorf("set KERN_READONLY must appear exactly once (state row, no duplicate echo): %s", f.Detail)
+	}
+}
+
+// R2: doctor must surface the hook guard’s un-audited disable switches.
+// A missing marker and KERN_DISABLED unset report ok; each active marker warns
+// without implying that the exec firewall was bypassed.
+func TestCheckGuardSwitches(t *testing.T) {
+	root := t.TempDir()
+	var f Finding
+	for _, d := range guardpause.DoctorFindings(root) {
+		if d.Check == "guard-switches" {
+			f = Finding{Check: d.Check, Level: d.Level, Detail: d.Detail}
+		}
+	}
+	if f.Level != "ok" || !strings.Contains(f.Detail, "no agent hook disable switches") {
+		t.Fatalf("clean = %+v, want ok", f)
+	}
+
+	t.Setenv("KERN_DISABLED", "1")
+	off := filepath.Join(root, ".kern", "off")
+	if err := os.MkdirAll(filepath.Dir(off), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(off, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range guardpause.DoctorFindings(root) {
+		if d.Check == "guard-switches" {
+			f = Finding{Check: d.Check, Level: d.Level, Detail: d.Detail}
+		}
+	}
+	if f.Level != "warn" {
+		t.Fatalf("disabled = %+v, want warn", f)
+	}
+	for _, want := range []string{"KERN_DISABLED=1", ".kern/off", "un-audited switch", "exec firewall still enforces"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail missing %q: %s", want, f.Detail)
+		}
 	}
 }
 

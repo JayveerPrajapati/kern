@@ -168,7 +168,7 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 	// across processes (and so a fresh server sees entries written by a prior
 	// one). The CLI only ever reads these files; the running firewall writes them.
 	auditDir := filepath.Join(root, ".kern", "audit")
-	_ = os.MkdirAll(auditDir, 0o755)
+	_ = os.MkdirAll(auditDir, 0o700)
 	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(governance.MirrorFor(auditDir))
 	// Replay persisted entries into memory, then verify the tamper-evident
 	// chain. A broken chain is evidence to investigate — not a reason to refuse
@@ -181,21 +181,29 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 		fmt.Fprintf(os.Stderr, "WARNING: audit log replay failed: %v\n", err)
 	} else if n > 0 {
 		if brk, verified := fw.AuditLog().VerifyChainReport(); brk >= 0 {
-			if verified == 0 {
+			// NEW-5 tier-aware verification: when every broken entry is a
+			// format downgrade (written while the HMAC secret was
+			// unavailable — e.g. a no-$HOME/containerized server), the
+			// break is explained, not tampering: ordering still verifies
+			// via the stored hashes. Report the degradation accurately and
+			// steer to repair, instead of crying "FAILED" on every start.
+			tiers := fw.AuditLog().ChainTierReport()
+			if tiers.DowngradeExplainsBreak() {
+				fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1], brk+1)
+			} else if verified == 0 {
 				fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit)\n", n)
 			} else {
 				fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit)\n", brk+1, n)
-			}
-			// Discriminate a benign format downgrade (HMAC secret
-			// unavailable when the entries were written, or an unlocked
-			// degraded write) from genuine tampering: a downgraded entry
-			// verifies under a weaker formula, so the chain break is
-			// explainable — not a silent modification. This mirrors the
-			// `kern audit` CLI discrimination and makes the platform
-			// startup warning actionable instead of forensic guesswork.
-			tiers := fw.AuditLog().ChainTierReport()
-			if tiers.Downgraded > 0 {
-				fmt.Fprintf(os.Stderr, "WARNING: %d entr%s verify only under a weaker unkeyed hash format than earlier keyed entries — a format downgrade, which is how a forged entry would look (or the HMAC key was unavailable when they were written). Check the broken entries' Annotation for the write-path cause (kern audit)\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1])
+				// Discriminate a benign format downgrade (HMAC secret
+				// unavailable when the entries were written, or an unlocked
+				// degraded write) from genuine tampering: a downgraded entry
+				// verifies under a weaker formula, so the chain break is
+				// explainable — not a silent modification. This mirrors the
+				// `kern audit` CLI discrimination and makes the platform
+				// startup warning actionable instead of forensic guesswork.
+				if tiers.Downgraded > 0 {
+					fmt.Fprintf(os.Stderr, "WARNING: %d entr%s verify only under a weaker unkeyed hash format than earlier keyed entries — a format downgrade, which is how a forged entry would look (or the HMAC key was unavailable when they were written). Check the broken entries' Annotation for the write-path cause (kern audit)\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1])
+				}
 			}
 		}
 	}

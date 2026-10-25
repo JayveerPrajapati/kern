@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,6 +69,62 @@ func TestRunLoopCLIInvalidLevel(t *testing.T) {
 	root := loopCliFixture(t)
 	if _, err := runLoopCLI(root, "L9", "x"); err == nil {
 		t.Fatal("expected error for invalid level L9")
+	}
+}
+
+// TestRepoChangeFingerprint pins the M6 change-detection fingerprint: it is
+// deterministic for an identical tree, flips on a working-tree edit, and
+// degrades to "" on a non-git root (change detection disabled — the
+// scheduled loop keeps its pre-M6 every-fire behavior there).
+func TestRepoChangeFingerprint(t *testing.T) {
+	root := t.TempDir()
+	if fp := repoChangeFingerprint(root); fp != "" {
+		t.Fatalf("fingerprint on a non-git root = %q, want \"\" (change detection disabled)", fp)
+	}
+
+	// Init a repo so the fingerprint path is live.
+	gitT := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitT("init", "-q")
+	gitT("config", "user.name", "t")
+	gitT("config", "user.email", "t@t")
+
+	p := filepath.Join(root, "a.go")
+	if err := os.WriteFile(p, []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT("add", "-A")
+	gitT("-c", "core.hooksPath=", "commit", "-qm", "init")
+
+	fp1 := repoChangeFingerprint(root)
+	if fp1 == "" {
+		t.Fatal("fingerprint = \"\" in a live git repo")
+	}
+	if fp2 := repoChangeFingerprint(root); fp2 != fp1 {
+		t.Fatalf("fingerprint not deterministic: %q != %q", fp1, fp2)
+	}
+
+	// A working-tree edit flips the fingerprint (uncommitted change).
+	if err := os.WriteFile(p, []byte("package a\n\nfunc B() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fp3 := repoChangeFingerprint(root)
+	if fp3 == fp1 {
+		t.Fatal("fingerprint must change after a working-tree edit")
+	}
+
+	// Committing the edit advances HEAD, so the fingerprint changes again
+	// (a new commit is a repo change — the next scheduled fire re-runs).
+	gitT("add", "-A")
+	gitT("-c", "core.hooksPath=", "commit", "-qm", "edit")
+	fp4 := repoChangeFingerprint(root)
+	if fp4 == fp3 {
+		t.Fatal("fingerprint must change after a new commit (HEAD advanced)")
 	}
 }
 

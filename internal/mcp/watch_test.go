@@ -173,28 +173,38 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	}
 }
 
-// TestWatchIntervalFromEnv covers the KERN_MCP_WATCH / KERN_MCP_WATCH_INTERVAL
-// configuration: disable flag, valid interval, and invalid/unset fallback.
+// TestWatchIntervalFromEnv covers the KERN_MCP_WATCH /
+// KERN_MCP_WATCH_INTERVAL(_MS) configuration: disable flag, valid interval
+// (both forms), precedence of the ms form, and invalid/unset fallback
+// (LOW-11: the default is now 30s).
 func TestWatchIntervalFromEnv(t *testing.T) {
 	t.Setenv("KERN_MCP_WATCH", "")
 	t.Setenv("KERN_MCP_WATCH_INTERVAL", "")
-	if got := watchIntervalFromEnv(); got != 5*time.Second {
-		t.Fatalf("unset env: expected 5s, got %v", got)
+	t.Setenv("KERN_MCP_WATCH_INTERVAL_MS", "")
+	if got := watchIntervalFromEnv(); got != 30*time.Second {
+		t.Fatalf("unset env: expected 30s, got %v", got)
 	}
 	t.Setenv("KERN_MCP_WATCH_INTERVAL", "2")
 	if got := watchIntervalFromEnv(); got != 2*time.Second {
 		t.Fatalf("KERN_MCP_WATCH_INTERVAL=2: expected 2s, got %v", got)
 	}
+	t.Setenv("KERN_MCP_WATCH_INTERVAL_MS", "1500")
+	if got := watchIntervalFromEnv(); got != 1500*time.Millisecond {
+		t.Fatalf("KERN_MCP_WATCH_INTERVAL_MS=1500 (seconds form also set): expected ms precedence (1.5s), got %v", got)
+	}
+	t.Setenv("KERN_MCP_WATCH_INTERVAL_MS", "not-a-number")
 	t.Setenv("KERN_MCP_WATCH_INTERVAL", "not-a-number")
-	if got := watchIntervalFromEnv(); got != 5*time.Second {
-		t.Fatalf("invalid interval: expected 5s fallback, got %v", got)
+	if got := watchIntervalFromEnv(); got != 30*time.Second {
+		t.Fatalf("invalid interval: expected 30s fallback, got %v", got)
 	}
 	t.Setenv("KERN_MCP_WATCH_INTERVAL", "0")
-	if got := watchIntervalFromEnv(); got != 5*time.Second {
-		t.Fatalf("KERN_MCP_WATCH_INTERVAL=0: expected 5s fallback, got %v", got)
+	t.Setenv("KERN_MCP_WATCH_INTERVAL_MS", "0")
+	if got := watchIntervalFromEnv(); got != 30*time.Second {
+		t.Fatalf("KERN_MCP_WATCH_INTERVAL=0: expected 30s fallback, got %v", got)
 	}
 	t.Setenv("KERN_MCP_WATCH", "0")
 	t.Setenv("KERN_MCP_WATCH_INTERVAL", "2")
+	t.Setenv("KERN_MCP_WATCH_INTERVAL_MS", "1500")
 	if got := watchIntervalFromEnv(); got != 0 {
 		t.Fatalf("KERN_MCP_WATCH=0: expected disabled (0), got %v", got)
 	}
