@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // writeGuardScriptFile writes the embedded kern-guard.sh to a temp file with
@@ -99,7 +101,12 @@ func TestKernGuardAllowOnceConsume(t *testing.T) {
 func buildCurrentKern(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "kern")
-	cmd := exec.Command("go", "build", "-o", bin, "github.com/JayveerPrajapati/kern/cmd/kern")
+	buildArgs := []string{"build"}
+	if !index.TreesitterEnabled() {
+		buildArgs = append(buildArgs, "-tags", "notreesitter")
+	}
+	buildArgs = append(buildArgs, "-o", bin, "github.com/JayveerPrajapati/kern/cmd/kern")
+	cmd := exec.Command("go", buildArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build current kern: %v\n%s", err, out)
 	}

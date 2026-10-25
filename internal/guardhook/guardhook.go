@@ -102,6 +102,7 @@ type payload struct {
 	toolInput   map[string]any
 	toolCall    map[string]any
 	input       map[string]any
+	rawMap      map[string]any
 }
 
 // pick returns the first PRESENT key's string value (jq `//` semantics:
@@ -125,7 +126,13 @@ func (p *payload) readPath() string {
 		return f
 	}
 	args, _ := p.toolCall["args"].(map[string]any)
-	return pick(args, "filePath", "path", "AbsolutePath")
+	if f := pick(args, "filePath", "path", "AbsolutePath"); f != "" {
+		return f
+	}
+	if f := pick(p.input, "file_path", "path"); f != "" {
+		return f
+	}
+	return pick(p.rawMap, "file_path", "path", "filePath", "AbsolutePath")
 }
 
 // grepPattern resolves the grep arm's pattern subject.
@@ -137,7 +144,10 @@ func (p *payload) grepPattern() string {
 	if g := pick(args, "pattern", "Pattern"); g != "" {
 		return g
 	}
-	return pick(p.input, "pattern")
+	if g := pick(p.input, "pattern"); g != "" {
+		return g
+	}
+	return pick(p.rawMap, "pattern", "Pattern")
 }
 
 // bashCommand resolves the bash arm's command subject.
@@ -149,7 +159,10 @@ func (p *payload) bashCommand() string {
 		return c
 	}
 	args, _ := p.toolCall["args"].(map[string]any)
-	return pick(args, "command", "CommandLine")
+	if c := pick(args, "command", "CommandLine"); c != "" {
+		return c
+	}
+	return pick(p.rawMap, "command", "CommandLine")
 }
 
 func parsePayload(r io.Reader) *payload {
@@ -165,6 +178,7 @@ func parsePayload(r io.Reader) *payload {
 		p.hasToolCall = strings.Contains(p.raw, "toolCall")
 		return p
 	}
+	p.rawMap = m
 	p.toolInput, _ = m["tool_input"].(map[string]any)
 	p.toolCall, _ = m["toolCall"].(map[string]any)
 	p.input, _ = m["input"].(map[string]any)

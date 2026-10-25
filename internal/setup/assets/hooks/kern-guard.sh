@@ -174,7 +174,9 @@ fi
 # Extract the file path. Prefer jq if available; fall back to sed so the
 # non-code read exemption also works on jq-less hosts.
 if command -v jq >/dev/null 2>&1; then
-fpath=$(printf '%s' "$payload" | jq -r '.tool_input.file_path // .tool_input.path // .toolCall.args.filePath // .toolCall.args.path // .toolCall.args.AbsolutePath // empty' 2>/dev/null)
+fpath=$(printf '%s' "$payload" | jq -r '.tool_input.file_path // .tool_input.path // .toolCall.args.filePath // .toolCall.args.path // .toolCall.args.AbsolutePath // .path // empty' 2>/dev/null)
+elif command -v python3 >/dev/null 2>&1; then
+fpath=$(printf '%s' "$payload" | python3 -c 'import json, sys; m=json.load(sys.stdin); ti=m.get("tool_input") or {}; tc=(m.get("toolCall") or {}).get("args") or {}; inp=m.get("input") or {}; print(ti.get("file_path") or ti.get("path") or tc.get("filePath") or tc.get("path") or tc.get("AbsolutePath") or inp.get("file_path") or inp.get("path") or m.get("path") or "")' 2>/dev/null)
 else
 fpath=$(printf '%s' "$payload" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 if [ -z "$fpath" ]; then
@@ -217,7 +219,9 @@ fi
 # Subject = the pattern string. A consumed operator allowance for
 # this exact pattern unlocks the grep once; the deny names the hash.
 if command -v jq >/dev/null 2>&1; then
-gpat=$(printf '%s' "$payload" | jq -r '.tool_input.pattern // .toolCall.args.pattern // .toolCall.args.Pattern // .input.pattern // empty' 2>/dev/null)
+gpat=$(printf '%s' "$payload" | jq -r '.tool_input.pattern // .toolCall.args.pattern // .toolCall.args.Pattern // .input.pattern // .pattern // empty' 2>/dev/null)
+elif command -v python3 >/dev/null 2>&1; then
+gpat=$(printf '%s' "$payload" | python3 -c 'import json, sys; m=json.load(sys.stdin); ti=m.get("tool_input") or {}; tc=(m.get("toolCall") or {}).get("args") or {}; inp=m.get("input") or {}; print(ti.get("pattern") or tc.get("pattern") or tc.get("Pattern") or inp.get("pattern") or m.get("pattern") or "")' 2>/dev/null)
 else
 gpat=$(printf '%s' "$payload" | sed -n 's/.*"Pattern"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 if [ -z "$gpat" ]; then
@@ -243,7 +247,16 @@ reason="Use kern_search (code symbols — patterns are SYMBOL queries, not regex
     reason="Use kern_buddy (repo layout + entry points digest; on the default MCP surface) instead of the built-in glob, or kern_project_map (compressed symbol map) when KERN_MCP_FULL=1. To locate a file by name ask kern_meta (request=find file <name>). Escapes: KERN_BYPASS=1 / KERN_ENFORCE=0."
     ;;
 bash|run_shell_command|shell|execute_bash|run_command)
-cmd=$(printf '%s' "$payload" | jq -r '.tool_input.command // .toolCall.args.command // .toolCall.args.CommandLine // .input.command // empty' 2>/dev/null)
+if command -v jq >/dev/null 2>&1; then
+cmd=$(printf '%s' "$payload" | jq -r '.tool_input.command // .toolCall.args.command // .toolCall.args.CommandLine // .input.command // .command // empty' 2>/dev/null)
+elif command -v python3 >/dev/null 2>&1; then
+cmd=$(printf '%s' "$payload" | python3 -c 'import json, sys; m=json.load(sys.stdin); ti=m.get("tool_input") or {}; tc=(m.get("toolCall") or {}).get("args") or {}; inp=m.get("input") or {}; print(ti.get("command") or tc.get("command") or tc.get("CommandLine") or inp.get("command") or m.get("command") or "")' 2>/dev/null)
+else
+cmd=$(printf '%s' "$payload" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+if [ -z "$cmd" ]; then
+  cmd=$(printf '%s' "$payload" | sed -n 's/.*"CommandLine"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+fi
+fi
 if [ -n "$cmd" ]; then
 # Literal newline: $(printf '\n') would strip it via command substitution.
 # git_stat_only <diff|show> <args...>: 0 iff the invocation prints only
@@ -748,13 +761,17 @@ class_hash=""
 if [ -n "$cmd" ]; then
   class_json=$("$kbin" guard classify --json "$cmd" 2>/dev/null) || class_json=""
 fi
-if [ -n "$class_json" ] && command -v jq >/dev/null 2>&1; then
-  class_verdict=$(printf '%s' "$class_json" | jq -r '.verdict // "governed"' 2>/dev/null)
-  class_tier=$(printf '%s' "$class_json" | jq -r '.tier // 0' 2>/dev/null)
-  class_head=$(printf '%s' "$class_json" | jq -r '.head // ""' 2>/dev/null)
-  class_pattern=$(printf '%s' "$class_json" | jq -r '.pattern // ""' 2>/dev/null)
-  class_file=$(printf '%s' "$class_json" | jq -r '.file // ""' 2>/dev/null)
-  class_hash=$(printf '%s' "$class_json" | jq -r '.hash // ""' 2>/dev/null)
+if [ -n "$class_json" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    class_verdict=$(printf '%s' "$class_json" | jq -r '.verdict // "governed"' 2>/dev/null)
+    class_tier=$(printf '%s' "$class_json" | jq -r '.tier // 0' 2>/dev/null)
+    class_head=$(printf '%s' "$class_json" | jq -r '.head // ""' 2>/dev/null)
+    class_pattern=$(printf '%s' "$class_json" | jq -r '.pattern // ""' 2>/dev/null)
+    class_file=$(printf '%s' "$class_json" | jq -r '.file // ""' 2>/dev/null)
+    class_hash=$(printf '%s' "$class_json" | jq -r '.hash // ""' 2>/dev/null)
+  elif command -v python3 >/dev/null 2>&1; then
+    eval "$(printf '%s' "$class_json" | python3 -c 'import json, sys; m=json.load(sys.stdin); print("class_verdict=%s\nclass_tier=%s\nclass_head=%s\nclass_pattern=%s\nclass_file=%s\nclass_hash=%s" % (repr(str(m.get("verdict") or "governed")), repr(str(m.get("tier") or 0)), repr(str(m.get("head") or "")), repr(str(m.get("pattern") or "")), repr(str(m.get("file") or "")), repr(str(m.get("hash") or ""))))' 2>/dev/null)"
+  fi
 fi
 case "$class_verdict" in
 allow|gate|serve|governed) ;;
