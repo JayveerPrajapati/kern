@@ -106,6 +106,7 @@ in-process governed dispatch.
 - [configuration.md](configuration.md)
 - [contributing/architecture-tour.md](contributing/architecture-tour.md)
 - [duplication-benchmark.md](duplication-benchmark.md)
+- [file-caps.md](file-caps.md)
 - [gates.md](gates.md)
 - [governance-troubleshooting.md](governance-troubleshooting.md)
 - [local-llm.md](local-llm.md)

@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 //go:embed assets/hooks/kern-guard.sh
@@ -51,9 +52,13 @@ func guardHookCommand() (string, error) {
 		return "", err
 	}
 	if bin, err := os.Executable(); err == nil && bin != "" {
-		return bin + " guard hook", nil
+		base := filepath.Base(bin)
+		if !strings.HasSuffix(bin, ".test") && !strings.HasSuffix(bin, ".test.exe") &&
+			!strings.Contains(bin, "go-build") && !strings.Contains(base, "setup.test") {
+			return bin + " guard hook", nil
+		}
 	}
-	return writeGuardScriptGlobal()
+	return "kern guard hook", nil
 }
 
 // wireGuardHook registers a single kern-guard PreToolUse hook group at path

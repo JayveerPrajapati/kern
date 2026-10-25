@@ -59,7 +59,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	binPath = filepath.Join(dir, "kern-mcp")
-	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+	buildArgs := []string{"build"}
+	if !index.TreesitterEnabled() {
+		buildArgs = append(buildArgs, "-tags", "notreesitter")
+	}
+	buildArgs = append(buildArgs, "-o", binPath, ".")
+	if out, err := exec.Command("go", buildArgs...).CombinedOutput(); err != nil {
 		panic(fmt.Sprintf("build kern-mcp: %v\n%s", err, out))
 	}
 	code := m.Run()

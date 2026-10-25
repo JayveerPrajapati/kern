@@ -16,7 +16,7 @@ RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapa
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks plugin-sync release dist release-smoke mcpb clean clean-artifacts help
+.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks plugin-sync pre-release release dist release-smoke mcpb clean clean-artifacts help
 
 all: build
 
@@ -177,13 +177,24 @@ dist: release
 
 # release-smoke verifies the PACKAGED artifacts (plan B3), not the dev
 # binary: SHA256SUMS verification, current-platform archive extraction,
-# version stamps, a live MCP stdio handshake (default surface 29 tools,
-# KERN_MCP_FULL=1 31, kern_arch/kern_graph full-only), a real index+search
-# run on this repo, and `kern doctor` with zero [fail] findings. Run it
-# after `make release VERSION=<tag>`; point SMOKE_DIR at a downloaded
-# release directory to smoke a published release the same way.
+# version stamps, a live MCP stdio handshake (32 tools on both default and
+# KERN_MCP_FULL=1 surfaces), a real index+search run on this repo, and
+# `kern doctor` with zero [fail] findings. Run it after `make release VERSION=<tag>`;
+# point SMOKE_DIR at a downloaded release directory to smoke a published release the same way.
 release-smoke:
 	./scripts/release-smoke.sh --dir $(BIN) --repo . $(if $(VERSION),--version $(VERSION),)
+
+# pre-release validates all release gates and generated artifacts before tagging:
+# documentation freshness, plugin sync, catalog/contract parity, diagnostics, and bench gates.
+pre-release: build
+	./$(BIN)/kern gen-catalog --check
+	./$(BIN)/kern gen-contracts --check
+	./$(BIN)/kern gen-docs --doc schemas --check
+	./$(BIN)/kern gen-docs --doc selection --check
+	./$(BIN)/kern gen-docs --doc site --check
+	./$(BIN)/kern gen-plugin --check
+	./$(BIN)/kern doctor
+	./$(BIN)/kern bench --root . --check
 
 # Build a .mcpb bundle for MCP registry distribution (future releases).
 # Usage: make mcpb VERSION=v0.1.0

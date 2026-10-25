@@ -202,7 +202,7 @@ jobs:
 
       # Post-packaging release smoke (B3): verifies what users download —
       # SHA256SUMS round-trip, binary stamps, a live MCP stdio handshake
-      # (29/31 tool surfaces), index+search on this checkout, and doctor
+      # (32 tool surfaces), index+search on this checkout, and doctor
       # with zero [fail] findings — against the real release archives, not
       # the development binary. Runs on every real tag push (the job is
       # gated on push), before the release is published.
