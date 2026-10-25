@@ -375,17 +375,32 @@ func ExtractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 			sym.Kind = "method"
 			sym.Receiver = m[rule.recv]
 		} else if rule.isDef {
-			// Nested defs (a def inside another def's body) belong to the
-			// enclosing FUNCTION, not the class, keeping same-named helpers
-			// in different methods distinct (WD-3). Nearest container wins:
-			// innermost emitted func whose body spans the line, else the type.
-			recv := enclosingType(i, types)
-			for j := len(syms) - 1; j >= 0; j-- {
-				if s := syms[j]; (s.Kind == "func" || s.Kind == "method") &&
-					i >= s.Line && (s.End == 0 || i < s.End) {
-					recv = s.Name
+			// A method or nested def resolves its receiver to the nearest
+			// enclosing container. Innermost container wins: a class enclosing
+			// line i, or an enclosing func/method.
+			var candType string
+			candTypeLine := -1
+			for j := len(types) - 1; j >= 0; j-- {
+				t := types[j]
+				if TypeKinds[t.sym.Kind] && i >= t.sym.Line && (t.bodyEnd == 0 || i < t.bodyEnd) {
+					candType = t.sym.Name
+					candTypeLine = t.sym.Line
 					break
 				}
+			}
+			var candFunc string
+			candFuncLine := -1
+			for j := len(syms) - 1; j >= 0; j-- {
+				s := syms[j]
+				if (s.Kind == "func" || s.Kind == "method") && i >= s.Line && (s.End == 0 || i < s.End) {
+					candFunc = s.Name
+					candFuncLine = s.Line
+					break
+				}
+			}
+			recv := candType
+			if candFuncLine > candTypeLine {
+				recv = candFunc
 			}
 			if recv != "" {
 				sym.Kind = "method"
