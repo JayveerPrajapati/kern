@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
 
+## [0.9.12] — 2026-10-25
+- **Tool Surface Expansion & Unified Change Application**: Added native `kern apply` CLI and `kern_apply` MCP tool, expanding the default advertised surface to 32 tools with full catalog parity across CLI and MCP layers.
+- **Smart Guard Steering & Interactive Ask Protocol**: Transitioned from fail-closed command denials to 3-tier read serving, path-aware in-tree filesystem mutations, and an interactive human Ask Protocol (`kern guard hook`, `kern guard grant/pause`).
+- **MCP Envelope Strictness & Pre-Indexing**: Hardened JSON-RPC protocol compliance (pre-initialize rejection, path normalization, token metadata), introduced `--preindex` cold-start warmup and background index preloading.
+- **Index Engine & Language Precision**: Added exact-name search for digit-suffixed identifiers, fixed nested method/class receiver resolution across Java and Python heuristics, and extracted `internal/tokenize` under architectural LOC constraints.
+- **Governance & Execution Hardening**: Serialized single-use allow-once tokens across processes, sandboxed network and execution boundaries, human-gated rejection workflows, and func-scoped security suppressions.
+- **CI/CD Composite Deduplication**: Consolidated 19 redundant checkout/setup pairs into `.github/actions/go-env` and `.github/actions/release-assets`, trimming over 230 net lines of workflow boilerplate.
+
 ## [0.9.11] — 2026-10-21
 - **Platform Refinement & Architecture Consolidation**: Completed core context-engine focus, retiring auxiliary server planes and consolidating internal packages into modular, focused subsystems (`internal/topology`, `internal/twinindex`, `internal/verifycmd`).
 - **Core Governance & Verification**: Streamlined unified verification engine (`kern verify`) for security and architecture invariants; enhanced AST boundary guards, sandbox isolation, and deterministic verification workflows.
@@ -27,6 +35,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.12] - 2026-10-25
+
+### Added
+- **`kern apply` & `kern_apply`**: Integrated atomic unified diff patch engine across CLI (`kern apply`) and MCP (`kern_apply`) layers, bringing the default advertised surface to 32 tools with full catalog parity.
+- **Pure-Go PreToolUse Hook & Ask Protocol (`internal/guardhook`, `internal/guardrule`)**: Added `kern guard hook` for shell-independent hook execution. Interactive Ask Protocol allows human operators to grant one-time or prefix allowances (`kern guard grant`, `kern guard pause`) without full environment bypass.
+- **Cold-Start Warmup & Index Preloading (`--preindex`)**: Introduced `--preindex` flag to warm and persist project indexes before serving MCP requests, along with automatic background preloading on MCP server start.
+- **Architectural Tokenizer Leaf (`internal/tokenize`)**: Extracted identifier-segmentation and tokenization functions (`SplitIdentifierSegments`, `SplitCamel`, `WordRuns`, `NormalizeProseWord`) into `internal/tokenize`, preserving module size caps under strict architectural ledgers.
+- **CI Composite Actions**: Reusable `.github/actions/go-env` and `.github/actions/release-assets` composites deduplicating Go environment setup and multi-target release packaging across GitHub Actions workflows.
+
+### Changed
+- **Guard Steer & 3-Tier Read Serving**: Content-intent commands (`cat`, `head`, `sed`, `awk`, `less`) are served transparently via the index, read-head stream, or isolated readonly sandbox rather than denied outright. In-tree file operations (`touch`, `mkdir`, `rm`, `mv`, `cp`, `sed -i`) are permitted and audited.
+- **MCP Envelope Strictness & Error Handling**: Rejected pre-initialize requests with standard code `-32002`, rejected invalid path inputs (such as bare `~`), distinguished protocol-version headers, and aligned tools/list payload limits.
+- **Index Engine & Overload Discrimination**: Digit-suffixed symbol search parity improvements, formal parameter tracking for method overloads, and container-aware receiver attribution for nested classes and methods in Java and Python.
+- **Governance & Rejection Lifecycle**: Rejection workflow (`kern reject`) is human-gated with interactive TTY requirements matching approvals; allow-once registry transitions to cross-process file-locked serialization.
+
+### Fixed
+- **Language Detection & Parser Parity**: Addressed duplicate symbol collisions when extracting nested classes and method helpers in Python and Java.
+- **Subprocess & HTTP Timeouts**: Increased MCP HTTP write timeouts past 30 minutes to prevent premature termination of long-running tool runs; threaded cancellation context through execution engines.
+- **Secret Masking & Suppression Pinning**: Masked secrets in security scanning outputs before reporting; updated suppression line anchors and introduced function-scoped suppression matching to prevent fragile scan drift.
 
 ## [0.9.11] - 2026-10-21
 
