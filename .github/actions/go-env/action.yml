@@ -1,0 +1,26 @@
+name: Go environment
+description: >-
+  The standard checkout + setup-go pair every job starts with, as one step.
+  Exists so the actions/checkout and actions/setup-go SHA pins are bumped in
+  exactly ONE place. Inputs cover the two variants in use: fetch-depth 0 for
+  jobs that diff against history (go-version-file always comes from go.mod;
+  cache is on unless a job needs a clean module cache).
+inputs:
+  fetch-depth:
+    description: Checkout fetch depth (0 = full history)
+    default: "1"
+  cache:
+    description: Enable setup-go module cache
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version-file: go.mod
+        cache: ${{ inputs.cache }}

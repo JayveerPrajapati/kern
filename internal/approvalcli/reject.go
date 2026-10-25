@@ -25,6 +25,13 @@ func runReject(rest []string) {
 		approver = "cli-user"
 	}
 
+	// Human-gated exactly like approve: an agent with CLI access must not be
+	// able to reject a pending approval without a human typing the id on the
+	// interactive terminal (M3). The decided-state guard fires before the
+	// gate (already-decided → rc=3 without prompting); a missing terminal
+	// fails closed undecided.
+	requireApprovalConfirmation(root, id, approver, "reject")
+
 	// Shared with runApprove: same store order (governance via the app layer,
 	// then blueprint), same decided-state guard (rc=3), same audit chaining.
 	a, mem := decideApproval(root, "reject", id, approver, false, f.reason)

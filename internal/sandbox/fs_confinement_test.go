@@ -35,7 +35,8 @@ func TestSeatbeltProfileGenerator(t *testing.T) {
 		}
 	}
 	// Nothing outside the blocklist is denied: file denies must reference
-	// exactly the curated paths.
+	// exactly the curated paths (home-relative blocklist + absolute system
+	// credential blocklist, each possibly in its canonical spelling).
 	for _, line := range strings.Split(prof, "\n") {
 		if !strings.Contains(line, "file-read-data") {
 			continue
@@ -48,8 +49,46 @@ func TestSeatbeltProfileGenerator(t *testing.T) {
 			}
 		}
 		if !found {
+			for _, p := range absoluteSensitivePaths {
+				if line == fmt.Sprintf("(deny file-read-data (subpath %q))", p) ||
+					line == fmt.Sprintf("(deny file-read-data (subpath %q))", canonicalSensitivePath(p)) {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
 			t.Errorf("unexpected file deny rule (blocklist-only design): %q", line)
 		}
+	}
+}
+
+// TestSeatbeltProfileDeniesAbsoluteCredentials is the NEW-1 regression:
+// absolute-path reads bypassed the home-relative sensitive-path blocklist —
+// a sandboxed command could read /etc/shadow-class system credentials while
+// the documented claim said sensitive-path reads blocked. The profile must
+// deny every absoluteSensitivePaths entry as-written AND under its canonical
+// alias (/etc -> /private/etc on darwin), regardless of $HOME being set.
+func TestSeatbeltProfileDeniesAbsoluteCredentials(t *testing.T) {
+	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "")
+	// Empty home must not weaken the absolute denies (they are home-independent).
+	prof := seatbeltProfileFor("", true, false)
+	for _, p := range absoluteSensitivePaths {
+		want := fmt.Sprintf("(deny file-read-data (subpath %q))", p)
+		if !strings.Contains(prof, want) {
+			t.Errorf("profile missing absolute deny rule for %q; want %q in:\n%s", p, want, prof)
+		}
+		if canon := canonicalSensitivePath(p); canon != p {
+			wantCanon := fmt.Sprintf("(deny file-read-data (subpath %q))", canon)
+			if !strings.Contains(prof, wantCanon) {
+				t.Errorf("profile missing canonical alias deny for %q; want %q in:\n%s", p, wantCanon, prof)
+			}
+		}
+	}
+	// /etc/passwd is NOT on the blocklist and must stay readable — the
+	// blocklist design denies only curated credential paths.
+	if strings.Contains(prof, "/etc/passwd") {
+		t.Errorf("/etc/passwd must not be denied (blocklist-only design):\n%s", prof)
 	}
 }
 

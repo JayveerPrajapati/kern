@@ -21,6 +21,7 @@ func TestPreToolHook(t *testing.T) {
 		buf := &bytes.Buffer{}
 		s := NewServer(in, buf)
 		s.roots = []string{"/"}
+		s.initialized.Store(true) // already-initialized session (Phase 4.2)
 		if err := s.Serve(); err != nil {
 			t.Fatalf("Serve: %v", err)
 		}
@@ -42,6 +43,7 @@ func TestPreToolHook(t *testing.T) {
 			return &hookError{msg: "tool not allowed by policy"}
 		})
 		s.roots = []string{"/"}
+		s.initialized.Store(true) // already-initialized session (Phase 4.2)
 		if err := s.Serve(); err != nil {
 			t.Fatalf("Serve: %v", err)
 		}
@@ -68,6 +70,7 @@ func TestPreToolHook(t *testing.T) {
 			return nil
 		})
 		s.roots = []string{"/"}
+		s.initialized.Store(true) // already-initialized session (Phase 4.2)
 		if err := s.Serve(); err != nil {
 			t.Fatalf("Serve: %v", err)
 		}
@@ -116,6 +119,9 @@ func TestPreToolHook_GateAttachedByDefault(t *testing.T) {
 		in := strings.NewReader(req + "\n")
 		buf := &bytes.Buffer{}
 		s := NewServer(in, buf)
+		// LOW-10: a pre-init tools/call now returns -32002 before the
+		// gate runs, so the gate denial is only reachable post-init.
+		s.initialized.Store(true)
 		if s.preTool == nil {
 			t.Fatal("gate must be attached as the default pre-tool-use hook")
 		}
@@ -172,6 +178,7 @@ func TestPreToolHook_GateAttachedByDefault(t *testing.T) {
 		if s.gate == nil || !s.gate.Enabled() {
 			t.Fatal("zero-config gate must be enabled and confined to the cwd")
 		}
+		s.initialized.Store(true) // already-initialized session (Phase 4.2); the gate under test is the ROOTS gate
 		if err := s.Serve(); err != nil {
 			t.Fatalf("Serve: %v", err)
 		}
@@ -192,6 +199,7 @@ func TestPreToolHook_GateAttachedByDefault(t *testing.T) {
 		in = strings.NewReader(req + "\n")
 		buf = &bytes.Buffer{}
 		s = NewServer(in, buf)
+		s.initialized.Store(true) // already-initialized session (Phase 4.2)
 		if err := s.Serve(); err != nil {
 			t.Fatalf("Serve: %v", err)
 		}

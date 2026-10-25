@@ -426,8 +426,13 @@ sendAlert(adminEmail);`)
 	findings := ScanFile("alert.go", src)
 	found := false
 	for _, f := range findings {
-		if f.Rule == "hardcoded-secret" && strings.Contains(f.Snippet, "@") {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "EMAIL") {
 			found = true
+			// H4: the snippet must NOT carry the raw credential — masking
+			// applies before storage so every output path is safe.
+			if strings.Contains(f.Snippet, "@") {
+				t.Fatalf("snippet must mask the email, got: %q", f.Snippet)
+			}
 		}
 	}
 	if !found {
@@ -590,23 +595,26 @@ func TestJSONVersionFieldIPSuppressed(t *testing.T) {
 		"  \"version\": \"0.9.9.1\",\n" +
 		"  \"address\": \"203.0.113.7\"\n" +
 		"}\n")
-	var versionFlagged, addressCaught bool
+	versionFlagged, ipFindings := false, 0
 	for _, f := range ScanFile("server.json", src) {
 		if f.Rule != "hardcoded-secret" || !strings.Contains(f.Message, "secret: IP") {
 			continue
 		}
+		ipFindings++
 		if strings.Contains(f.Snippet, "0.9.9.1") {
 			versionFlagged = true
 		}
 		if strings.Contains(f.Snippet, "203.0.113.7") {
-			addressCaught = true
+			t.Fatalf("snippet must mask the flagged IP, got: %q", f.Snippet)
 		}
 	}
 	if versionFlagged {
 		t.Fatal("version-field dotted quad must not be flagged as IP secret")
 	}
-	if !addressCaught {
-		t.Fatal("public IP in an address field must still be flagged")
+	// Exactly one IP finding remains: the address field. The version quad is
+	// suppressed; a second IP finding would mean the version leaked through.
+	if ipFindings != 1 {
+		t.Fatalf("expected exactly the address IP flagged (1 IP finding), got %d", ipFindings)
 	}
 }
 
@@ -695,8 +703,13 @@ sk-proj-abc1234567890abcdef1234567890
 	if len(findings) != 1 {
 		t.Fatalf("expected exactly 1 finding for real secret in doc, got %d: %+v", len(findings), findings)
 	}
-	if findings[0].Rule != "hardcoded-secret" || !strings.Contains(findings[0].Snippet, "sk-proj-") {
+	if findings[0].Rule != "hardcoded-secret" || !strings.Contains(findings[0].Message, "OPENAI") {
 		t.Errorf("expected OpenAI key finding, got %+v", findings[0])
+	}
+	// H4: the finding's snippet must mask the credential — no raw key leaks
+	// into Render/--json/LLM prompts from a doc finding either.
+	if strings.Contains(findings[0].Snippet, "sk-proj-") {
+		t.Errorf("snippet must mask the OpenAI key, got: %q", findings[0].Snippet)
 	}
 }
 
@@ -870,8 +883,12 @@ const apiKey = "9f3c71a4d8e2b605c1a7f9d3e5b2c8046a1f9d7e"
 	}
 	caught := false
 	for _, f := range findings {
-		if f.Rule == "hardcoded-secret" && strings.Contains(f.Snippet, "9f3c71a4") {
+		if f.Rule == "hardcoded-secret" && (strings.Contains(f.Message, "HEX") || strings.Contains(f.Message, "KEY")) {
 			caught = true
+			// H4: the snippet must mask the credential.
+			if strings.Contains(f.Snippet, "9f3c71a4") {
+				t.Fatalf("snippet must mask the hash, got: %q", f.Snippet)
+			}
 		}
 	}
 	if !caught {

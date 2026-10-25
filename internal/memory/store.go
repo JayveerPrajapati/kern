@@ -55,6 +55,17 @@ func NewMemoryStore(root string) *MemoryStore {
 	return &MemoryStore{root: root, path: path}
 }
 
+// TypedStorePath returns the on-disk location of the typed (ememory) store
+// for root, so callers that only need to watch the file — e.g. the buddy
+// digest's memo probe — can stat it without constructing a store.
+func TypedStorePath(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	return cache.Path("ememory", cache.Hash([]byte(abs))+".json")
+}
+
 // Root returns the project root the store was created for. App-layer callers
 // (e.g. outcome-driven learning that persists side logs under
 // <root>/.kern/) use it to derive root-relative paths without holding their
@@ -92,7 +103,7 @@ func (s *MemoryStore) save(ms []domain.Memory) error {
 	if gov := s.govSnapshot(); gov != nil && gov.Retention.Enabled {
 		ms, _ = gov.Retention.Apply(ms, time.Now().UTC())
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(ms, "", "  ")

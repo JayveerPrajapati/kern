@@ -66,6 +66,24 @@ func TestMaskedOutputMasksBeforeTruncate(t *testing.T) {
 // TestExecTimeout pins the KERN_EXEC_TIMEOUT override: valid Go durations are
 // honored, while unset, invalid, and non-positive values fall back to the
 // 5-minute default (invalid values also emit a warning line on stderr).
+// TestParseTimeoutSecsRejectsNegative pins NIT-19b: a negative `timeout`
+// argument is junk input and must fail loudly instead of silently running
+// with the default; zero stays accepted (explicit "keep the default").
+func TestParseTimeoutSecsRejectsNegative(t *testing.T) {
+	if _, err := parseTimeoutSecs("-5"); err == nil || !strings.Contains(err.Error(), "negative integer -5") {
+		t.Fatalf("parseTimeoutSecs(-5) = %v, want negative-integer error", err)
+	}
+	if _, err := parseTimeoutSecs("abc"); err == nil || !strings.Contains(err.Error(), "invalid integer") {
+		t.Fatalf("parseTimeoutSecs(abc) = %v, want invalid-integer error", err)
+	}
+	if sec, err := parseTimeoutSecs("0"); err != nil || sec != 0 {
+		t.Fatalf("parseTimeoutSecs(0) = %d, %v; want 0, nil", sec, err)
+	}
+	if sec, err := parseTimeoutSecs("30"); err != nil || sec != 30 {
+		t.Fatalf("parseTimeoutSecs(30) = %d, %v; want 30, nil", sec, err)
+	}
+}
+
 func TestExecTimeout(t *testing.T) {
 	cases := []struct {
 		name string

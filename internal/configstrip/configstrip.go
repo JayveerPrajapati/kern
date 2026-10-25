@@ -120,7 +120,7 @@ var kernHookCmdRe = regexp.MustCompile(`(?:^|[\s"'/\\])kern(?:\.exe)?["']?\s+hoo
 func isKernHookEntry(h map[string]any) bool {
 	cmd, _ := h["command"].(string)
 	name, _ := h["name"].(string)
-	return strings.Contains(cmd, "kern-guard.sh") || kernHookCmdRe.MatchString(cmd) || strings.HasPrefix(name, "kern-")
+	return strings.Contains(cmd, "kern-guard.sh") || strings.Contains(cmd, " guard hook") || kernHookCmdRe.MatchString(cmd) || strings.HasPrefix(name, "kern-")
 }
 
 // Hooks removes kern-owned hook commands from settings.hooks.<event>[],

@@ -129,12 +129,15 @@ func (l *Ledger) Lookup(sessionKey, tool, canonicalArgs string) (string, bool) {
 
 // Pointer renders the one-line already-served pointer for a recorded serve.
 // The ", etag E" segment and the "re-send with etag E" clause are omitted
-// entirely when no etag was recorded.
+// entirely when no etag was recorded. LOW-13: the etag is rendered exactly
+// ONCE — duplicating the 64-char hex blob doubled the pointer's token cost
+// (the metadata counted ~72% more tokens than a lean line needs), and the
+// pointer exists precisely to keep the agent's context window cheap.
 func Pointer(callSeq int, etag string) string {
 	if etag == "" {
 		return "already served this session (call #" + strconv.Itoa(callSeq) + ") — re-send with the previous etag to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
 	}
-	return "already served this session (call #" + strconv.Itoa(callSeq) + ", etag " + etag + ") — re-send with etag " + etag + " to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
+	return "already served this session (call #" + strconv.Itoa(callSeq) + ", etag " + etag + ") — re-send with that etag to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
 }
 
 // Reset clears every recorded serve for sessionKey.

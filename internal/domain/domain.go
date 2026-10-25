@@ -355,6 +355,20 @@ type Approval struct {
 	PolicyIDs    []string  // policy IDs that evaluated to this risk
 	EvidenceRefs []string  // evidence/claim IDs supporting the risk assessment
 	ArtifactID   string    // the artifact (e.g. ImpactReport) backing the approval
+
+	// Ask-Protocol grant fields (P1, 2026-10-24). Scope "" / "once" keeps the
+	// legacy single-use semantics (approved → exactly one execution, then
+	// consumed). Scope "prefix" is a session-scoped prefix grant: commands
+	// starting with Prefix (token-boundary match) run without re-asking until
+	// ExpiresAt or MaxUses. All five fields are covered by the exec-approval
+	// HMAC (execapproval v3 framing), so a governed client cannot flip a
+	// once-grant into a prefix grant, widen a prefix, or reset a use count.
+	Scope     string    // "once" (default) | "prefix"
+	Prefix    string    // token prefix matched for prefix scope
+	Command   string    // the exact command text the approval was minted for
+	ExpiresAt time.Time // prefix grants lapse; zero = no expiry
+	MaxUses   int       // prefix grants: use cap (0 = engine default)
+	Uses      int       // prefix grants: uses consumed so far
 }
 
 // Agent is an AI agent identity.

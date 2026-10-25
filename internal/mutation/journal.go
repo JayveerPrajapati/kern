@@ -74,7 +74,7 @@ func newMutationJournal(root string) (*mutationJournal, error) {
 		path:      journalPathFor(root),
 		index:     map[string]int{},
 	}
-	if err := os.MkdirAll(j.BackupDir, 0o755); err != nil {
+	if err := os.MkdirAll(j.BackupDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mutation journal: create backup dir: %w", err)
 	}
 	return j, nil

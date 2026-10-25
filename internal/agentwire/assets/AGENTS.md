@@ -10,7 +10,7 @@ ignore this file.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 31 individual `kern_*` tools, call **`kern_meta`**
+Instead of choosing among 32 individual `kern_*` tools, call **`kern_meta`**
 with a natural-language request; it classifies the request (deterministic
 keyword matching — no LLM, no network) and runs the right tool internally.
 Examples:
@@ -18,19 +18,19 @@ Examples:
 - `kern_meta(request="what breaks if I change dispatch?")` → runs `kern_impact`
 - `kern_meta(request="find the NewServer function")` → runs `kern_search`
 
-Set KERN_MCP_FULL=1 for all 31 tools, `KERN_MCP_PHASE=explore|plan|edit|verify`
+Set KERN_MCP_FULL=1 for all 32 tools, `KERN_MCP_PHASE=explore|plan|edit|verify`
 for phase subsets, or `KERN_MCP_SINGLE_TOOL=1` for only `kern_meta`.
-Default surface: 29 tools (`kern_meta`, `kern_explore`, `kern_impact`,
-`kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`, `kern_compact_file`,
+Default surface: 32 tools (`kern_meta`, `kern_explore`, `kern_impact`,
+`kern_apply`, `kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`,
+`kern_compact_file`,
 `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`,
 `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`,
 `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`,
 `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`,
-`kern_fetch_raw_anchor`, `kern_review`) — `kern_exec` is
+`kern_fetch_raw_anchor`, `kern_review`, `kern_graph`, `kern_arch`) — `kern_exec` is
 governance-gated (every call still fails closed behind
-KERN_ALLOW_EXEC/KERN_TOOLS). Every other tool is `KERN_MCP_FULL=1` only
-(`kern_graph`, `kern_arch`).
-That is by design, not a gap: `kern_meta` still routes to every sub-tool
+KERN_ALLOW_EXEC/KERN_TOOLS). Every other tool is advertised by default.
+That is by design: `kern_meta` still routes to every sub-tool
 internally. Hosts that prefix the MCP server name list each tool twice —
 expected dual registration, not a second toolset.
 
@@ -48,8 +48,9 @@ the active phase. More examples:
 **Call a `kern_*` tool before any built-in `read`, `grep`, `glob`, or `bash`
 for the tasks below.** On hosts with pre-tool hooks (Claude Code, Cursor,
 Gemini, Copilot, Qwen, Qoder, Codex) the built-in call is BLOCKED with a
-redirect — opencode too: its plugin shadows deny content-intent commands
-with the same guard message. Operator break-glass:
+redirect — opencode too: its plugin shadows serve content-intent commands
+(reads are answered from the kern index or the readonly sandbox, never
+denied; only GATE commands block). Operator break-glass:
 HOST env KERN_ENFORCE=0/KERN_BYPASS=1, audited (~/.kern/audit/bypass.jsonl).
 
 1. Read a file → `kern_explore` with the file path as symbol (symbolic
@@ -76,11 +77,12 @@ HOST env KERN_ENFORCE=0/KERN_BYPASS=1, audited (~/.kern/audit/bypass.jsonl).
    re-slice it with `kern_verify anchor=<id> output=lines:A-B`, no rerun.
    CLI: `kern verify --command "go test ./..." --output summary`.
 6. Run a command → simple bash (pwd/ls/which/echo/git status…) passes
-   through; content-intent bash (cat/sed/head/grep) is blocked (fail-closed) —
-   use the kern tool for the intent; break-glass: HOST env KERN_ENFORCE=0/
-   KERN_BYPASS=1. `kern_exec` (isolated runner, default surface) is
-   governance-gated: it fails closed without `KERN_ALLOW_EXEC=1` or a
-   `KERN_TOOLS` entry naming it.
+   through; content-intent bash (cat/sed/head/grep) is SERVED (kern index
+   Tier 1/2 or the readonly sandbox Tier 3; GATE commands write/network/
+   installers are blocked) — use the kern tool for the intent; break-glass:
+   HOST env KERN_ENFORCE=0/ KERN_BYPASS=1. `kern_exec` (isolated runner,
+   default surface) is governance-gated: it fails closed without
+   `KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` entry naming it.
 7. Search web/docs → `kern_doc` (action=fetch) then `kern_doc`
    (action=search), NOT `webfetch`/`websearch`.
 8. Unsure which tool → `kern_meta` (NL router) or `kern_buddy`.
@@ -115,12 +117,14 @@ HOST env KERN_ENFORCE=0/KERN_BYPASS=1, audited (~/.kern/audit/bypass.jsonl).
    an anchor, so ask for more with `kern_verify anchor=<id> output=lines:A-B`.
 6. **Do I need to run a command?** → `bash` simple commands
    (pwd/ls/which/echo/git status…) pass through; content-intent bash
-   (cat/sed/head/grep emitting file content) is blocked (fail-closed) — use the
-   kern tool for the intent; break-glass is host env `KERN_ENFORCE=0` /
-   `KERN_BYPASS=1`. `kern_exec` (isolated runner: macOS Seatbelt with network
-   egress blocked, Linux unshare, Windows fail-closed with the override) is
-   on the default surface and governance-gated: it fails closed without
-   `KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` entry naming it.
+   (cat/sed/head/grep emitting file content) is SERVED — symbol reads answer
+   from the kern index, everything else pure-read runs sandboxed via
+   kern exec --readonly, and only GATE commands (writes/network/installers)
+   are blocked — use the kern tool for the intent; break-glass is host env
+   `KERN_ENFORCE=0` / `KERN_BYPASS=1`. `kern_exec` (isolated runner: macOS
+   Seatbelt with network egress blocked, Linux unshare, Windows fail-closed
+   with the override) is on the default surface and governance-gated: it
+   fails closed without `KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` entry naming it.
 7. **Do I need to search the web/docs?** → call `kern_doc` (action=fetch) then
    `kern_doc` (action=search), NOT `webfetch`/`websearch`. Pre-index docs with
    `kern_doc` (action=index) (optional, for semantic search via local Ollama).
@@ -198,8 +202,14 @@ re-requesting the same symbol/context (CLI: `kern explore --etag <E>`).
 - `glob` → `kern_project_map` (`kern_buddy` on the
   default surface)
 - `bash` content-intent (cat/sed/head/grep emitting file content) →
-  blocked (fail-closed); use the kern tool for the intent; break-glass is host env
-  KERN_ENFORCE=0 / KERN_BYPASS=1
+  SERVED, never denied: symbol-shaped reads are answered from the kern index
+  (Tier 1), read-head + simple tail (grep X | wc -l / head / tail / grep -v)
+  is computed in-process (Tier 2), and everything else pure-read runs
+  sandboxed via kern exec --readonly (Tier 3; raw with a one-line note when
+  kern is unavailable). GATE commands (rm/mv/cp/dd/curl|sh/installers/
+  git push --force/write redirects) are blocked (exit 3). Everything else is
+  governed (kern build). Break-glass is host env KERN_ENFORCE=0 / KERN_BYPASS=1.
+  **One-line contract: reads → kern, writes → approval, exec → sandbox.**
 - `bash` simple (pwd/ls/which/echo/git status…) → allowlist passthrough
 
 **Heuristic: if the task involves files, code, logs, builds, or web content,
@@ -253,11 +263,10 @@ When you need to… (the underused tools, ranked from real usage stats — call 
 
 ## Full capability catalog
 
-`kern` ships 31 `kern_*` MCP tools across many domains. 29 are advertised
+`kern` ships 32 `kern_*` MCP tools across many domains. 30 are advertised
 by default (toolpolicy.go defaultTools — the same list as in the kern_meta
 section above); `kern_exec` among them is governance-gated: it fails
-closed without KERN_ALLOW_EXEC/KERN_TOOLS. Tools outside that surface —
-`kern_graph`, `kern_arch` — are `KERN_MCP_FULL=1` only; `kern_meta` reaches them all internally.
+closed without KERN_ALLOW_EXEC/KERN_TOOLS. The full 32-tool catalog IS the default surface — every tool is advertised by default; `kern_meta` reaches them all internally.
 If you are unsure which tool fits, call `kern_meta` or
 `kern_buddy` to
 enumerate options.

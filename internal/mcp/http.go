@@ -100,6 +100,10 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *transport
 		defer cleanup()
 	}
 	srv, mux := newHTTPServerCore(ctx)
+	// Start the background index preload at serve start (R6 P2): a fresh
+	// root's build is underway before the client connects. indexOnce makes
+	// dispatch's lazy trigger a no-op.
+	srv.startPreload()
 	err := transport.ServeListener(ctx, addr, tlsCfg, mux, func() {
 		srv.cancelAll()
 		srv.Close()
@@ -122,6 +126,8 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *transport
 // caller (the listener is left open).
 func ServeHTTPContextWithTLSOn(ctx context.Context, ln net.Listener, tlsCfg *transport.TLSConfig) error {
 	srv, mux := newHTTPServerCore(ctx)
+	// Same serve-start preload as ServeHTTPContextWithTLS (R6 P2).
+	srv.startPreload()
 	err := transport.ServeListenerOn(ctx, ln, tlsCfg, mux, func() {
 		srv.cancelAll()
 		srv.Close()
@@ -213,6 +219,19 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, errorResponse(nil, -32700, "parse error"))
 		return
 	}
+	// JSON-RPC 2.0 envelope: a body that parses but does not carry
+	// "jsonrpc":"2.0" exactly is an invalid request, reported BEFORE the
+	// protocol-version gate — the same precedence class as the parse error
+	// above: the body has no valid envelope to negotiate with (envelope
+	// audit F-1, 2026-10-25).
+	if req.JSONRPC != "2.0" {
+		var envErrID json.RawMessage
+		if len(req.ID) > 0 && string(req.ID) != "null" {
+			envErrID = req.ID
+		}
+		writeHTTPError(w, errorResponse(envErrID, -32600, `invalid request: jsonrpc must be "2.0"`))
+		return
+	}
 	// MCP-Protocol-Version is required on every request AFTER initialization;
 	// a spec-conformant client sends the first request (initialize) with the
 	// version in the body params and no header. A supported header wins and is
@@ -223,6 +242,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ver = negotiateProtocolVersion(body)
 		if ver == "" {
 			w.Header().Set("MCP-Protocol-Version", protocolVersion)
+			if r.Header.Get("MCP-Protocol-Version") == "" {
+				http.Error(w, "missing MCP-Protocol-Version header; send it on every request after initialization (supported: 2024-11-05, 2025-03-26, 2025-06-18)", http.StatusPreconditionFailed)
+				return
+			}
 			http.Error(w, "unsupported MCP protocol version", http.StatusPreconditionFailed)
 			return
 		}

@@ -54,7 +54,7 @@ func Acquire(root, scope string) (*Lock, error) {
 	if scope == "" {
 		return nil, ErrScopeRequired
 	}
-	if err := os.MkdirAll(dir(root), 0o755); err != nil {
+	if err := os.MkdirAll(dir(root), 0o700); err != nil {
 		return nil, err
 	}
 	p := pathFor(root, scope)
@@ -111,7 +111,7 @@ func (l *Lock) Release() error {
 // immediately, and a stale file from a crashed holder is reclaimed.
 func Held(root, scope string) (bool, int, error) {
 	p := pathFor(root, scope)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return false, 0, err
 	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)

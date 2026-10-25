@@ -239,7 +239,7 @@ func loadUsageLog(root string) []domain.ContextUsageRecord {
 // 0600 atomic write, mirroring the calibrate prediction-log convention).
 func saveUsageLog(root string, records []domain.ContextUsageRecord) error {
 	path := usageLogPath(root)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(records, "", "  ")

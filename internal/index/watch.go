@@ -26,11 +26,14 @@ var readFile = func(path string) ([]byte, error) {
 
 // indexableMaxMtime walks root without reading file contents and returns the
 // newest modification time (Unix nanos) among indexable files plus their count.
-// For every extension quickExt admits, detectLang returns a non-empty language,
-// so a stat-only walk is equivalent to the content-checking indexableHashes.
-// A walk error is returned so callers can decide to rebuild instead of serving
-// a stale index. The ignore matcher mirrors Build's file-selection policy so
-// gitignored files never influence the staleness decision.
+// The stat-only selection matches the content walk (walkQuickExt): extension
+// is a proxy for indexability, but extension-less shebang scripts are
+// indexable via content sniffing, so they count here too — a stat walk that
+// dropped them would report a MaxMtime lower than the newest indexed file and
+// let a stale index slip past the mtime gate. A walk error is returned so
+// callers can decide to rebuild instead of serving a stale index. The ignore
+// matcher mirrors Build's file-selection policy so gitignored files never
+// influence the staleness decision.
 func indexableMaxMtime(root string, ign *ignore.Matcher) (int64, int, error) {
 	var maxMtime int64
 	var count int
@@ -50,12 +53,24 @@ func indexableMaxMtime(root string, ign *ignore.Matcher) (int64, int, error) {
 			}
 			return nil
 		}
+		if d.Name() == ".git" || d.Name() == ".kern" {
+			return nil
+		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !langparse.QuickExt(rel) {
+		if rerr != nil {
 			return nil
 		}
 		// Honor .gitignore/.kernignore file patterns, as Build does.
 		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
+			return nil
+		}
+		// Same acceptance rule as the content walk: extension-less files are
+		// indexable via content sniffing, so they count toward the mtime
+		// gate (a stat walk dropping them could mask a stale index).
+		if !langparse.QuickExt(rel) && filepath.Ext(rel) != "" {
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -196,7 +211,7 @@ func indexableHashesObserved(root string, ign *ignore.Matcher) (walkObservation,
 			}
 		}()
 	}
-	err := walkQuickExt(root, ign, func(rel, path string, info fs.FileInfo) error {
+	err := walkQuickExt(root, ign, proofWalkMaxBytes(), func(rel, path string, info fs.FileInfo) error {
 		obs.walkCount++
 		jobs <- job{path: path, rel: rel, mtime: info.ModTime().UnixNano(), size: info.Size()}
 		return nil
@@ -234,7 +249,7 @@ func snapshotStillCurrent(root string, ign *ignore.Matcher, snap *FreshnessSnaps
 		return false
 	}
 	walked, seen := 0, 0
-	err := walkQuickExt(root, ign, func(rel, path string, info fs.FileInfo) error {
+	err := walkQuickExt(root, ign, proofWalkMaxBytes(), func(rel, path string, info fs.FileInfo) error {
 		walked++
 		wantM, ok := snap.Mtimes[rel]
 		if !ok {
@@ -254,7 +269,16 @@ func snapshotStillCurrent(root string, ign *ignore.Matcher, snap *FreshnessSnaps
 // quickExt — and reports each surviving file's FileInfo. Shared by the
 // hashing walk and the stat-gate walk so the two counts are comparable.
 // fn runs on the walk goroutine: it must only enqueue work.
-func walkQuickExt(root string, ign *ignore.Matcher, fn func(rel, path string, info fs.FileInfo) error) error {
+//
+// The per-file selection must be BYTE-FOR-BYTE the build walk's
+// (walkIndexable): both accept extension-less files (shebang scripts) that
+// langparse.QuickExt alone would drop, both skip non-regular files, and both
+// apply the same maxBytes size cap. A divergence makes a file the build
+// recorded invisible to the proof walk (or vice versa) — a permanent
+// false-STALE verdict that sends every freshness check into an
+// ensure-fresh rebuild loop. maxBytes is the adaptive default the build
+// resolves (resolveTunables), so both sides pick the same file set.
+func walkQuickExt(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel, path string, info fs.FileInfo) error) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -271,20 +295,50 @@ func walkQuickExt(root string, ign *ignore.Matcher, fn func(rel, path string, in
 			}
 			return nil
 		}
+		if d.Name() == ".git" || d.Name() == ".kern" {
+			return nil
+		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !langparse.QuickExt(rel) {
+		if rerr != nil {
 			return nil
 		}
 		// Honor .gitignore/.kernignore file patterns, as Build does.
 		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
+		// Same acceptance rule as walkIndexable: an extension-less file
+		// (shebang script) is indexable via content sniffing even though
+		// QuickExt (extension-based) would drop it.
+		if !langparse.QuickExt(rel) && filepath.Ext(rel) != "" {
+			return nil
+		}
+		// Skip non-regular files (FIFOs, sockets, device nodes) — a FIFO
+		// named like a source file would otherwise block the read.
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		info, ierr := d.Info()
 		if ierr != nil {
 			return ierr
 		}
+		// Same size cap as the build walk: a file over maxBytes is skipped at
+		// build time, so the proof walk must skip it too or the aggregate
+		// hash can never match (permanent false-STALE).
+		if info.Size() > maxBytes {
+			return nil
+		}
 		return fn(rel, path, info)
 	})
+}
+
+// proofWalkMaxBytes returns the adaptive per-file size cap the freshness
+// walks apply — the same resolveTunables value the build walks use — so the
+// proof and build walks select the same file set. An explicit
+// WithMaxFileBytes build is a rare operator-option case the persisted index
+// does not record; the adaptive default is the deterministic per-machine
+// baseline both sides share.
+func proofWalkMaxBytes() int64 {
+	return resolveTunables(&buildConfig{}, resolveResources()).maxFileBytes
 }
 
 // ChangeKind describes a file change detected by the watcher.

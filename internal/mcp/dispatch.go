@@ -68,6 +68,7 @@ func init() {
 		"kern_plan":             simple((*Server).handlePlan),
 		"kern_verify":           (*Server).handleVerify,
 		"kern_impact":           simple((*Server).handleImpact),
+		"kern_apply":            simple((*Server).handleApply),
 		"kern_run":              simple((*Server).handleRun),
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,5 +63,44 @@ func TestAllowOnceForeignLinesPreserved(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "{not json") {
 		t.Fatalf("foreign line was dropped by the consume rewrite: %q", string(data))
+	}
+}
+
+// TestAllowOnceConcurrentConsumeExactlyOnce pins the M7 fix: a flock
+// serializes the read→mark→rename window, so N concurrent consumers of the
+// SAME unused entry get EXACTLY ONE success. Before the fix the window was
+// lock-free — multiple goroutines could read the still-unused entry, each
+// mark it, and each win, defeating single-use (a TOCTOU race that let
+// concurrent bypass retries both pass).
+func TestAllowOnceConcurrentConsumeExactlyOnce(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "allow-once.jsonl")
+	t.Setenv("KERN_GUARD_ALLOW_ONCE", p)
+	subject := "grep -rn secret internal/"
+	if err := AppendAllowOnce(HashSubject(subject), ""); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	const consumers = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for i := 0; i < consumers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ConsumeAllowOnce(subject) {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if wins != 1 {
+		t.Fatalf("concurrent consumers: %d succeeded, want exactly 1 (single-use must hold under concurrency)", wins)
+	}
+	if ConsumeAllowOnce(subject) {
+		t.Fatal("allowance must be spent — a post-race consume must be denied")
 	}
 }

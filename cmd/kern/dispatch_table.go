@@ -21,20 +21,8 @@ type commandEntry struct {
 }
 
 const (
-	preEditHelp           = "predictive blast-radius and edit risk"
-	promptFillHelp        = "dynamic prompt template compilation"
-	semanticDiffHelp      = "AST functional symbol diff"
-	evidenceAnchorHelp    = "verify citations and cryptographic proof"
-	contextWatchHelp      = "context token budget bloat audit"
-	agentFingerprintHelp  = "agent loop and drift detection"
-	crossRepoImpactHelp   = "cross-repo blast radius"
-	memoryRankedHelp      = "decay-weighted memory retrieval"
-	policyDSLHelp         = "policy-as-code evaluation"
-	agentCoordinationHelp = "multi-agent handoffs and claims"
-	agentRoleRBACHelp     = "role-based tool access control"
-	astTransformHelp      = "deterministic AST-level transformations and scaffolding"
-	semanticMergeHelp     = "AST-aware 3-way semantic merge and conflict detection"
-	synthesizeTestHelp    = "automatically synthesize table-driven unit tests from AST signatures"
+	evidenceAnchorHelp = "verify citations and cryptographic proof"
+	memoryRankedHelp   = "decay-weighted memory retrieval"
 )
 
 var commandTable = map[string]commandEntry{
@@ -122,7 +110,7 @@ var commandTable = map[string]commandEntry{
 
 	"exec": {category: "exec", run: func(cmd string, rest []string) int {
 		return runExec(rest)
-	}, help: "run code in an isolated sandbox", usage: "usage: kern exec \n  options:\n    --json             emit JSON output\n    --lang             language\n    --list\n    --max              maximum count/threshold\n    --stdin            stdin content\n    --timeout          timeout (seconds or ms per command)"},
+	}, help: "run code in a network-isolated sandbox (filesystem writes not contained on macOS)", usage: "usage: kern exec \n  options:\n    --json             emit JSON output\n    --lang             language\n    --readonly         skip the KERN_TOOLS/KERN_ALLOW_EXEC gate (read-only bash fallbacks)\n    --list\n    --max              maximum count/threshold\n    --stdin            stdin content\n    --timeout          timeout (seconds or ms per command)"},
 	"build": {category: "exec", run: func(cmd string, rest []string) int {
 		return runBuild(rest)
 	}, help: "run a build command in the governed sandbox", usage: "usage: kern build <command> [flags]\n  exits with the CHILD command's exit code when the command itself fails (make/sh -c convention);\n  the wrapper's own failures stay 1 (runtime) / 2 (usage) / 3 (policy denial)\n  options:\n    --dir              working directory\n    --session          session id\n    --root             project root (default: .)\n    --timeout          timeout (seconds or ms per command)"},
@@ -136,7 +124,7 @@ var commandTable = map[string]commandEntry{
 	}, help: "deterministic zero-network latency harness (cold/warm index load + fixed query set; writes .kern/bench.json)", usage: "usage: kern bench [--root ROOT] [--json]\n  measures the two load paths every kern command pays — cold index build vs warm\n  persisted-store load — plus a fixed set of query latencies (symbol search,\n  ranked search, one-hop callers, transitive blast radius, hub ranking),\n  mirroring the cold-vs-warm methodology of docs/benchmarks/graph-latency.md.\n  Output: a human table on stdout AND the canonical JSON document at\n  <root>/.kern/bench.json (the path the web console's /benchmarks page reads).\n  No network, no LLM calls, no external tools.\n  options:\n    --root             project root (default: .)\n    --json             also emit the JSON document on stdout"},
 	"doctor": {category: "wiring", run: func(cmd string, rest []string) int {
 		return runDoctor(rest)
-	}, help: "self-diagnostics", usage: "usage: kern doctor [flags]\n  options:\n    --arch-drift      report ARCHITECTURE.md LOC/deps drift (drift rows are non-fatal warnings; exits 1 only when the parity run itself fails, e.g. missing/broken ARCHITECTURE.md)\n    --calibration     report prediction-vs-reality calibration-health section (non-fatal)\n    --json            emit JSON output\n    --root            project root (default: .)"},
+	}, help: "self-diagnostics", usage: "usage: kern doctor [flags]\n  options:\n    --arch-drift      report ARCHITECTURE.md LOC/deps drift (drift rows are non-fatal warnings; exits 1 only when the parity run itself fails, e.g. missing/broken ARCHITECTURE.md)\n    --calibration     report prediction-vs-reality calibration-health section (non-fatal)\n        --json             emit JSON output\n    --root             project root (default: .)"},
 
 	"mask": {category: "compression", run: func(cmd string, rest []string) int {
 		runMask(rest)
@@ -147,6 +135,10 @@ var commandTable = map[string]commandEntry{
 		runAnalyze(cmd, rest)
 		return 0
 	}, help: "analyze a proposed change", usage: "usage: kern plan <change> [--root ROOT]\n  options:\n    --json             emit the structured plan as JSON\n    --root             project root (default: .)\n    --task"},
+
+	"apply": {category: "verification", run: func(cmd string, rest []string) int {
+		return runApply(rest)
+	}, help: "apply edits transactionally, verify, roll back on failure", usage: "usage: kern apply <edits-file|-> [--root ROOT] [--test] [--dry-run] [--json]\n  the edits file is a JSON array of {path, content} objects (content = the NEW COMPLETE file; same shape as kern_refactor_transaction's edits)\n  pipeline: transactional apply (sandbox compile gate) -> scoped `go test` on the modified packages (--test) -> live-tree rollback when verify fails\n  exit codes: 0 applied+verified (or dry-run preview), 1 apply/verify FAILED (findings), 2 usage, 3 denied\n  options:\n    --root             project root (default: .)\n    --test             run `go test` on the packages of every modified .go file after the build gate (rollback on failure)\n    --dry-run          preview the unified diff without touching the live tree\n    --json             emit the full result (diff, outputs, receipt) as JSON"},
 
 	"run": {category: "autonomy", run: func(cmd string, rest []string) int {
 		runRun(rest)
@@ -160,7 +152,7 @@ var commandTable = map[string]commandEntry{
 
 	"approve": {category: "governance", run: func(cmd string, rest []string) int {
 		return approvalcli.RunApprove(rest)
-	}, help: "resolve an approval gate", usage: "usage: kern approve <id> | kern approve list [flags]\n  the approval gate is interactive by design: the human must TYPE the\n  approval id on the terminal to confirm (30s confirm timeout, then a\n  refusal); there is no non-interactive override. `kern approve list` shows\n  every decidable pending approval (governance store).\n  options:\n    --approver         approver identity\n    --reason           reason text\n    --reject           reject instead of approve (non-interactive)\n    --root             project root (default: .)"},
+	}, help: "resolve an approval gate", usage: "usage: kern approve <id> | kern approve list [flags]\n  the approval gate is interactive by design: the human must TYPE the\n  approval id on the terminal to confirm (30s confirm timeout, then a\n  refusal); there is no non-interactive override. `kern approve list` shows\n  every decidable pending approval (governance store).\n  options:\n    --approver         approver identity\n    --prefix           prefix for the prefix scope (default: the command's first two tokens)\n    --reason           reason text\n    --reject           reject instead of approve (non-interactive)\n    --root             project root (default: .)\n    --scope            once (default) or prefix — prefix widens the decision into a session-scoped grant: commands starting with the prefix run without re-asking (use-capped, expiry-bounded, audit-logged)"},
 	"approval": {category: "governance", run: func(cmd string, rest []string) int {
 		return approvalcli.RunApproval(rest)
 	}, help: "observe a pending approval's decision (wait) or clear a blocking record (clear)", usage: "usage: kern approval <subcommand> [flags]\n  subcommands:\n    wait               block until the approval is decided — prints \"pending: <id>\" once at start, then the decision when it lands\n                       (exit 0 approved / 3 rejected / 1 timed out)\n    clear              remove an approval record by id (operator escape hatch): a stale REJECTED record stops blocking\n                       byte-identical retries of its command; the next attempt mints a fresh approval a human still decides\n  options:\n    --approver         operator identity recorded for the clear (clear)\n    --reason           reason text (clear)\n    --timeout          how long to wait for the decision (duration, e.g. 30m, 90s, 500ms; default 30m; wait)\n    --root             project root (default: .)"},
@@ -171,7 +163,7 @@ var commandTable = map[string]commandEntry{
 
 	"verify": {category: "verification", run: func(cmd string, rest []string) int {
 		return runVerify(rest)
-	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  command mode: kern verify --command `go test ./...` --output summary (run YOUR gate behind the governed allowlist; the full run is kept — re-slice it via the --anchor flag)\n  incremental: kern verify test --changed (scope the test step to packages with uncommitted changes)\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --fast             pre-commit tier: build + tests scoped to uncommitted-changed packages only (build-only when nothing changed; skips security/arch/dependency/e2e)\n    --changed-since   scope the test step to packages changed since a git ref (CI: build+vet+test on the changed surface; a clean diff prints NO-GO-CHANGES and exits 0)\n    --changed         scope the test step to packages with uncommitted changes vs HEAD (falls back to the default scope when none)\n    --staged          scope the test step to staged changes vs HEAD (the pre-commit hook tier)\n    --command CMD     run YOUR build/test/lint command instead of the built-in checks (governed allowlist)\n    --output          command-mode slice: summary|failures|tail:N|lines:A-B|full (default summary)\n    --anchor ID       re-slice a previously saved full run by its anchor id, no rerun\n    --timeout         command-mode timeout in seconds (default 120)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; overrides the short and fast modes)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over both --short and --full runs)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
+	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,reuse,e2e,static-analysis,performance,cve,license,secrets,ci,arch] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  command mode: kern verify --command `go test ./...` --output summary (run YOUR gate behind the governed allowlist; the full run is kept — re-slice it via the --anchor flag)\n  incremental: kern verify test --changed (scope the test step to packages with uncommitted changes)\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --fast             pre-commit tier: build + tests scoped to uncommitted-changed packages only (build-only when nothing changed; skips security/arch/dependency/e2e)\n    --changed-since    scope the test step to packages changed since a git ref (CI: build+vet+test on the changed surface; a clean diff prints NO-GO-CHANGES and exits 0)\n    --changed          scope the test step to packages with uncommitted changes vs HEAD (falls back to the default scope when none)\n    --staged           scope the test step to staged changes vs HEAD (the pre-commit hook tier)\n    --command CMD      run YOUR build/test/lint command instead of the built-in checks (governed allowlist)\n    --output           command-mode slice: summary|failures|tail:N|lines:A-B|full (default summary)\n    --anchor ID        re-slice a previously saved full run by its anchor id, no rerun\n    --timeout          command-mode timeout in seconds (default 120)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; overrides the short and fast modes)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction  token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over both --short and --full runs)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
 
 	"docs": {category: "docs", run: func(cmd string, rest []string) int {
 		runDocs(rest)
@@ -187,7 +179,7 @@ var commandTable = map[string]commandEntry{
 	// surface the pivot inventory named.
 	"guard": {category: "locks", run: func(cmd string, rest []string) int {
 		return runGuard(rest)
-	}, help: "architecture guardrails", usage: "usage: kern guard <check|init|allow> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]\n  options:\n    --agent-id         agent identity\n    --file             file path\n    --force            overwrite an existing boundaries file (init)\n    --json             emit JSON output\n    --precision        precision mode\n    --range            line range a..b\n    --sarif            SARIF 2.1.0 report\n    --task\n    --threshold        score threshold"},
+	}, help: "architecture guardrails", usage: "usage: kern guard <check|init|allow|classify|hook|grant|pause|paused|resume> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]\n  classify <command> [--json]: risk-axis verdict (allow|gate|serve|governed + tier) for one command — the Go source the plugin's bash arm shells out to\n  grant [--check] [--root R] <command>: Ask-Protocol bridge for GATE commands — exit 0 when an active approval covers the command (consume it and retry byte-identical); with --check exit 3 when not granted (nothing minted); without --check mint approval appr-<id> and print the ask-wait-retry instructions (the operator answers kern approval ask appr-<id>)\n  hook: the pure-Go PreToolUse guard hook — reads the host payload on stdin (tool_name/tool_input JSON), emits allow/serve/deny (deny exits 2) with kern steering; the single-process replacement for the kern-guard.sh shell script\n  pause [root] [--scope repo] [--duration 30m] --reason TEXT: audited, typed, duration-bounded repo pause for read/grep/glob steering only (exec governance stays enforced)\n  paused [root]: print active|inactive\n  resume [root]: remove the active repo pause\n  options:\n    --agent-id         agent identity\n    --check            grant: consult without minting (exit 3 when not granted)\n    --duration         pause duration (default 30m, max 2h)\n    --file             file path\n    --force            overwrite an existing boundaries file (init)\n    --json             emit JSON output\n    --precision        precision mode\n    --range            line range a..b\n    --reason           operator reason (pause; required)\n    --require-boundaries\n                       strict mode: fail when .kern/boundaries.json is missing\n    --root             project root (grant; default: cwd)\n    --sarif            SARIF 2.1.0 report\n    --scope            repo (pause; the only supported scope)\n    --task\n    --threshold        score threshold"},
 	"sec": {category: "security", run: func(cmd string, rest []string) int {
 		runSec(rest)
 		return 0
@@ -198,7 +190,7 @@ var commandTable = map[string]commandEntry{
 	}, help: "repo fingerprint", usage: "usage: kern fingerprint [root] [--file f1,f2] [--json]\n  options:\n    --file             file path\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"audit": {category: "governance", run: func(cmd string, rest []string) int {
 		return approvalcli.RunAudit(rest)
-	}, help: "governance audit log", usage: "usage: kern audit [flags] | kern audit append | kern audit repair\n  subcommands:\n    append             append an AuditEntry JSON from stdin or --file into the tamper-evident chain (external writers)\n    repair             re-chain the tamper-evident chain from the first broken link\n  options:\n    --file             entry JSON file (append; default stdin)\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "governance audit log", usage: "usage: kern audit [flags] | kern audit append | kern audit repair\n  subcommands:\n    append             append an AuditEntry JSON from stdin or --file into the tamper-evident chain (external writers)\n    repair             re-chain the tamper-evident chain from the first broken link\n  options:\n    --file             entry JSON file (append; default stdin)\n    --json             emit JSON output\n    --limit N          show the N most recent entries (default 50; 0 = all)\n    --tail N           alias for --limit\n    --root             project root (default: .)"},
 
 	"reject": {category: "governance", run: func(cmd string, rest []string) int {
 		return approvalcli.RunReject(rest)
@@ -224,6 +216,17 @@ var commandTable = map[string]commandEntry{
 		runMCP(rest)
 		return 0
 	}, help: "run the MCP server ('kern mcp tools' lists the catalog)", usage: "usage: kern mcp [tools [category] [--json] [--category X]] [flags]\n  subcommands:\n    tools              list the full MCP tool catalog (grouped by category)\n  options:\n    --http ADDR        serve over HTTP: an address (:8080, unix:/path) or 'auto' for a 0600 unix socket\n    --tls-cert\n    --tls-key"},
+
+	"mcp-client": {category: "servers", run: func(cmd string, rest []string) int {
+		// Thin shell over the external-MCP-server client (cmd_mcp_client.go):
+		// manage and call OUTSIDE MCP servers whose config lives at
+		// .kern/mcp-servers.json. Restored — the pivot CLI slim dropped the
+		// dispatch row while docs/mcp-client.md and the tested client SDK
+		// (internal/mcpclient) remained, so `kern mcp-client` silently
+		// no-oped ("unknown command") despite being a documented feature.
+		runMcpClient(rest)
+		return 0
+	}, help: "manage external MCP servers and call their tools (config: .kern/mcp-servers.json)", usage: "usage: kern mcp-client <add|list|rm|call> [args...]\n  subcommands:\n    add <name> <command...>  register an external stdio MCP server (or --url for a remote HTTP server)\n    list                    list registered external servers\n    rm <name>               unregister an external server\n    call <name> <tool> [args]  call a tool on a registered server\n  options:\n    --url              register a remote streamable-http server (add)\n    --root             project root (default: .)\n  see docs/mcp-client.md for the full feature"},
 
 	"meta": {category: "meta", run: func(cmd string, rest []string) int {
 		runMeta(rest)
@@ -283,6 +286,30 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "explainable deterministic context plan", usage: "usage: kern explain-context --task \"<change or intent>\" [--root ROOT] [--budget N] [--json]\n  options:\n    --budget           token budget\n    --json             emit JSON output\n    --root             project root (default: .)\n    --task"},
 
+	"orchestrate": {category: "context", run: func(cmd string, rest []string) int {
+		runOrchestrate(rest)
+		return 0
+	}, help: "silent context pipeline over an intent (JSON)", usage: "usage: kern orchestrate \"<intent>\" [--root ROOT] [--mode full|envelope|plan|fix|review|architecture|incident|explain]\n  options:\n    --budget           token budget (plan mode)\n    --json             emit JSON output (plan mode)\n    --max-tokens       token budget\n    --mode             pipeline mode\n    --root             project root (default: .)\n    --task             intent (alias of the positional)\n    --with-skill       skill name"},
+
+	"remember": {category: "memory", run: func(cmd string, rest []string) int {
+		runRemember(rest)
+		return 0
+	}, help: "store a lesson ('memory add' alias)", usage: "usage: kern remember <lesson> [--auto]\n  options:\n    --auto             tag the lesson as an automatic capture\n    --root             project root (default: .)"},
+
+	"memory-ranked": {category: "memory", run: func(cmd string, rest []string) int {
+		runMemoryRanked(rest)
+		return 0
+	}, help: "decay-weighted memory retrieval", usage: "usage: kern memory-ranked <prompt> [--k 5] [--half-life 7.0] [--root ROOT]\n  options:\n    --half-life        half-life in days\n    --k                max lessons (alias -k)\n    --root             project root (default: .)"},
+
+	"evidence-anchor": {category: "evidence", run: func(cmd string, rest []string) int {
+		return runEvidenceAnchor(rest)
+	}, help: "verify citations and cryptographic proof", usage: "usage: kern evidence-anchor [--claim TEXT] [--file F] [--line N] [--symbol NAME] [--root ROOT]\n  options:\n    --claim            claim or citation\n    --file             file path\n    --line             line number\n    --root             project root (default: .)\n    --symbol           symbol name"},
+
+	"health": {category: "meta", run: func(cmd string, rest []string) int {
+		runHealth(rest)
+		return 0
+	}, help: "read-only JSON health snapshot (version, index, catalog)", usage: "usage: kern health [--root ROOT] [--json]\n  options:\n    --json             emit JSON output (default; health output is always JSON)\n    --root             project root (default: .)"},
+
 	"authorize-context": {category: "context", run: func(cmd string, rest []string) int {
 		return runAuthorizeContext(rest)
 	}, help: "compute authorized context", usage: "usage: kern authorize-context -agent <id> -task <task> [--deny-path ...] [--symbol SYM] [--root ROOT] [--json]\n  options:\n    --agent            agent ID to authorize (required)\n    --task             task ID the authorization is scoped to (required)\n    --deny-path        path prefix denied by the task scope (repeatable)\n    --symbol           optional substring filter applied to allowed symbols\n    --root             project root (default: .)\n    --json             emit JSON (default: true)"},
@@ -311,6 +338,10 @@ var commandTable = map[string]commandEntry{
 		runGenContracts(rest)
 		return 0
 	}, help: "regenerate docs/mcp/tool-contracts.md from the live MCP catalog", usage: "usage: kern gen-contracts [--root ROOT] [--check]\n  options:\n    --root             project root (default: .)\n    --check            verify the generated contracts doc is fresh without writing it"},
+	"gen-plugin": {category: "docgen", run: func(cmd string, rest []string) int {
+		runGenPlugin(rest)
+		return 0
+	}, help: "sync the opencode plugin's canonical copy into the embedded asset (byte-identical; --check verifies parity)", usage: "usage: kern gen-plugin [--root ROOT] [--check]\n  copies .opencode/plugins/kern.ts (canonical, hand-edited) into the embedded\n  internal/agentwire/assets/plugin/kern.ts so `kern setup` deploys the same\n  bytes everywhere; append the new sha256 to the shipped registry afterwards.\n  options:\n    --root             project root (default: .)\n    --check            verify the asset is byte-identical without writing it"},
 }
 
 var commandFlags = map[string][]string{
@@ -345,10 +376,12 @@ var commandFlags = map[string][]string{
 
 	"memory": {"auto", "clear", "json", "limit", "root"},
 
-	"exec":  {"anchor", "json", "lang", "list", "max", "output", "root", "stdin", "timeout"},
+	"exec":  {"anchor", "json", "lang", "list", "max", "output", "readonly", "root", "stdin", "timeout"},
 	"build": {"dir", "root", "session", "timeout"},
 
 	"plan": {"json", "root", "task"},
+
+	"apply": {"dry-run", "json", "root", "test"},
 
 	"impact": {"json", "lens", "precision", "risk", "root", "runtime"},
 
@@ -377,11 +410,17 @@ var commandFlags = map[string][]string{
 
 	"explain-context": {"budget", "json", "mode", "root", "task"},
 
+	"orchestrate":     {"budget", "json", "max-tokens", "mode", "root", "task", "with-skill"},
+	"remember":        {"auto", "root"},
+	"memory-ranked":   {"half-life", "k", "root"},
+	"evidence-anchor": {"claim", "file", "line", "root", "symbol"},
+	"health":          {"json", "root"},
+
 	"authorize-context": {"agent", "deny-path", "json", "root", "symbol", "task"},
 
 	"run": {"level", "root"},
 
-	"approve":  {"approver", "reason", "reject", "root"},
+	"approve":  {"approver", "prefix", "reason", "reject", "root", "scope"},
 	"approval": {"approver", "reason", "root", "timeout"},
 	"policy":   {"file", "json", "merge", "root"},
 
@@ -391,19 +430,21 @@ var commandFlags = map[string][]string{
 
 	"verify": {"anchor", "changed", "changed-since", "command", "cve", "eval", "fast", "full", "json", "license", "output", "root", "scan", "secrets", "short", "skill", "staged", "timeout", "types", "verify-pipeline", "verify-silent", "verify-token-reduction"},
 
-	"guard":       {"agent-id", "file", "force", "json", "precision", "range", "sarif", "task", "threshold"},
+	"guard":       {"agent-id", "check", "duration", "file", "force", "json", "precision", "range", "reason", "require-boundaries", "root", "sarif", "scope", "task", "threshold"},
 	"sec":         {"engine", "json", "max", "root", "severity"},
 	"fingerprint": {"file", "json", "root"},
-	"audit":       {"file", "json", "root"},
+	"audit":       {"file", "json", "limit", "root", "tail"},
 
 	// docgen
 	"gen-contracts": {"check", "root"},
 	"gen-docs":      {"check", "doc", "root"},
 	"gen-catalog":   {"check", "root"},
+	"gen-plugin":    {"check", "root"},
 
 	"heal": {"force", "llm", "task", "yes"},
 
-	"mcp": {"category", "http", "json", "project", "tls-cert", "tls-key"},
+	"mcp":        {"category", "http", "json", "project", "tls-cert", "tls-key"},
+	"mcp-client": {"root", "url"},
 
 	"meta": {"pipeline", "root"},
 	"ask":  {"pipeline", "root"},

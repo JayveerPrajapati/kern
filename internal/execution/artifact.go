@@ -73,7 +73,7 @@ func CollectArtifacts(dir string) ([]Artifact, error) {
 // It returns the absolute path written.
 func WriteArtifact(root string, a Artifact) (string, error) {
 	artifactDir := filepath.Join(root, ".kern", "artifacts")
-	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return "", err
 	}
 	name := a.Name

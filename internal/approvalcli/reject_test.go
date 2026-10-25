@@ -12,10 +12,12 @@ import (
 // finding: `kern reject <id>` must resolve an approval from
 // .kern/approvals.json — the store `kern approve` lists and resolves FIRST —
 // instead of failing "not found" (the previous bpcli-only reject looked only
-// in the blueprint store).
+// in the blueprint store). The reject is human-gated like approve (M3): the
+// test scripts the terminal with the id so the confirmation gate passes.
 func TestRejectGovernanceApproval(t *testing.T) {
 	root := newRoot(t)
 	id := approvalFixture(t, root, "", "alice", "deploy to prod")
+	withScriptedTerminal(t, id)
 	out := captureStdout(t, func() {
 		RunReject([]string{"--root", root, id, "--reason", "not now", "--approver", "senior"})
 	})
@@ -31,13 +33,14 @@ func TestRejectGovernanceApproval(t *testing.T) {
 	}
 }
 
-// TestRejectBlueprintApproval locks the blueprint half: `kern reject <apr-*>`
-// must still resolve ids created by `kern request-approval`
-// (.blueprint/approvals/requests.jsonl) through the shared core, and the
-// decision must land in the tamper-evident audit chain exactly like
-// runApprove's blueprint path (D8).
+// TestRejectUnknownID locks the error path: an unknown approval ID exits 1
+// (the exported RunReject returns the code; the internal fatal sentinel is
+// recovered at the package boundary), not a silent no-op. The terminal is
+// scripted so the failure is the genuine not-found path, not a no-terminal
+// refusal.
 func TestRejectUnknownID(t *testing.T) {
 	root := newRoot(t)
+	withScriptedTerminal(t, "apr-nonexistent")
 	expectCode(t, 1, func() int { return RunReject([]string{"--root", root, "apr-nonexistent"}) })
 }
 

@@ -464,6 +464,29 @@ func TestMaskCompoundAndProsePasswords(t *testing.T) {
 	}
 }
 
+// TestMaskProseDoesNotMaskInnocentAdjectives pins the QA 2026-10-19
+// over-mask regression: "password is required" (and other prose where the
+// value after "is" is an ordinary word) must NOT be masked. The prose
+// separator branches of the PASSWORD rule require a digit or special
+// character in the value — the shape of an actual secret — so an adjective
+// stays untouched. "password is hunter2safe" (digit) still masks (pinned by
+// TestMaskCompoundAndProsePasswords above).
+func TestMaskProseDoesNotMaskInnocentAdjectives(t *testing.T) {
+	prose := []string{
+		"password is required",
+		"the password is optional",
+		"password was set",
+		"your password must be strong",
+		"password required for this step",
+	}
+	for _, s := range prose {
+		res := Mask(s)
+		if strings.Contains(res.Text, "[MASKED_PASSWORD_") {
+			t.Errorf("innocent prose masked: %q -> %q", s, res.Text)
+		}
+	}
+}
+
 func TestMaskInlinePasswordAndVaultTokens(t *testing.T) {
 	in := "Input with password Sup3rSecret!, hvs.CAESB1234567890abcdef_ghi and user test@corp.example.com"
 	res := Mask(in)

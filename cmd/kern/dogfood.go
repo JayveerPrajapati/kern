@@ -1,12 +1,11 @@
 // Dogfooding meta-loop wiring (Self-Improvement use-cases Tier 4 #10): when a
-// gate fails on kern's own repository — kern check, kern doctor --arch-drift
-// — the failure AND its subsequent resolution become typed-claim INFERENCE
-// memories, so the next self-refactor gets "this class of gate failure
-// recurs; it was fixed before" context automatically.
+// gate fails on kern's own repository — kern doctor --arch-drift — the failure
+// AND its subsequent resolution become typed-claim INFERENCE memories, so the
+// next self-refactor gets "this class of gate failure recurs; it was fixed
+// before" context automatically.
 //
 // The recording rules are honest and deterministic:
-//   - a FAILED run records the failure's deterministic signature (the first
-//     failing check name for check; "arch-drift:<subsystem>:<kind>" per drift
+//   - a FAILED run records the failure's deterministic signature ("arch-drift:<subsystem>:<kind>" per drift
 //     record for doctor);
 //   - a PASSING run records the fix (Failed:false) ONLY for (gate, signature)
 //     pairs that previously failed in the log — never for signatures without

@@ -1,49 +1,18 @@
 name: Setup CI Tools
 description: >-
-  Installs and verifies the shared toolchain used across CI workflows:
-  gitleaks (checksum-verified), jscpd, and kern (which now includes the
-  Blueprint change-governance gates formerly shipped as standalone
-  blueprint / blueprint-mcp binaries).
-
+  Installs and verifies the kern binary used across CI workflows (built from
+  this checkout via `go install ./cmd/kern`). Formerly also installed
+  gitleaks and jscpd; both were removed 2026-10-25 after a live audit found
+  nothing consumes them — the secret scan is kern's own pure-Go secscan
+  (internal/secscan) and the duplication check is pure-Go too
+  (internal/duplication), so no external binaries are needed by any job.
 inputs:
-  gitleaks-version:
-    description: gitleaks release tag (without v prefix)
-    default: "8.30.1"
-  gitleaks-checksum:
-    description: SHA-256 checksum for the gitleaks tarball
-    default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   install-kern:
     description: Whether to build and install the kern binary
     default: "true"
-  node-version:
-    description: Node.js version for jscpd
-    default: "20"
-
 runs:
   using: composite
   steps:
-    - name: Install gitleaks (checksum-verified)
-      shell: bash
-      run: |
-        curl -sSfL -o gitleaks.tgz \
-          "https://github.com/gitleaks/gitleaks/releases/download/v${{ inputs.gitleaks-version }}/gitleaks_${{ inputs.gitleaks-version }}_linux_x64.tar.gz"
-        echo "${{ inputs.gitleaks-checksum }}  gitleaks.tgz" | sha256sum -c -
-        sudo tar -xz -C /usr/local/bin -f gitleaks.tgz gitleaks
-        sudo chmod +x /usr/local/bin/gitleaks
-
-    - name: Set up Node for jscpd
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-      with:
-        node-version: ${{ inputs.node-version }}
-
-    - name: Install jscpd
-      shell: bash
-      run: |
-        sudo npm install -g jscpd
-        if ! command -v jscpd &> /dev/null; then
-          sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
-        fi
-
     - name: Install kern
       if: inputs.install-kern == 'true'
       shell: bash
@@ -51,12 +20,9 @@ runs:
         go install ./cmd/kern
         sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
     - name: Verify tool availability
       shell: bash
       run: |
-        which gitleaks && gitleaks version
-        which jscpd && jscpd --version
         which kern && kern version
         kern verify --help >/dev/null 2>&1 || true
         kern guard --help >/dev/null 2>&1 || true

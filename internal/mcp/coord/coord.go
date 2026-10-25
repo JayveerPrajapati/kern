@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
@@ -42,6 +43,10 @@ var (
 	coordMu        sync.Mutex
 	activeHandoffs = map[string][]AgentHandoff{}           // root -> handoffs
 	activeClaims   = map[string]map[string]ResourceClaim{} // root -> resource -> claim
+	// coordSeq keeps handoff IDs unique under same-nanosecond rapid calls
+	// (L-batch: the %100000 modulo truncated both IDs, colliding within one
+	// nanosecond and silently overwriting on-disk handoffs).
+	coordSeq atomic.Uint64
 )
 
 // ResetMemory clears all in-memory claims and handoffs (used in tests to simulate fresh processes).
@@ -199,7 +204,9 @@ func coordHandoffLocked(root string, now time.Time, agentID, format string, args
 	}
 	taskID := mcpargs.ArgString(args, "task_id")
 	if taskID == "" {
-		taskID = fmt.Sprintf("task-%d", time.Now().UnixNano()%100000)
+		// Full UnixNano (no %100000 truncation): task IDs shared by two
+		// handoffs previously collided within one nanosecond.
+		taskID = fmt.Sprintf("task-%d", time.Now().UnixNano())
 	}
 
 	var payload map[string]any
@@ -208,7 +215,10 @@ func coordHandoffLocked(root string, now time.Time, agentID, format string, args
 	}
 
 	handoff := AgentHandoff{
-		ID:        fmt.Sprintf("hf-%d", time.Now().UnixNano()%100000),
+		// Handoff IDs are on-disk filenames; the atomic counter keeps them
+		// unique even under same-nanosecond rapid calls (a collision would
+		// silently overwrite a prior handoff).
+		ID:        fmt.Sprintf("hf-%d-%d", time.Now().UnixNano(), coordSeq.Add(1)),
 		FromAgent: from,
 		ToAgent:   to,
 		TaskID:    taskID,
@@ -307,11 +317,17 @@ func coordRelease(root, agentID string, args map[string]any) (string, error) {
 	if resource == "" {
 		return "", fmt.Errorf("kern_agent_coordination: 'resource' is required to release")
 	}
+	// Empty agent_id is a refusal, not a wildcard: claim requires one, so
+	// release must too (previously "" skipped the holder check and any
+	// caller could release anyone's claim).
+	if agentID == "" {
+		return "", fmt.Errorf("kern_agent_coordination: 'agent_id' is required to release a resource")
+	}
 	existing, exists := activeClaims[root][resource]
 	if !exists {
 		return fmt.Sprintf("Resource %q was not claimed.", resource), nil
 	}
-	if agentID != "" && existing.AgentID != agentID {
+	if existing.AgentID != agentID {
 		return "", fmt.Errorf("kern_agent_coordination: cannot release resource %q held by %q (caller is %q)", resource, existing.AgentID, agentID)
 	}
 	delete(activeClaims[root], resource)

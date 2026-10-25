@@ -1,14 +1,13 @@
 package mcpguide
 
-// Guide returns a concise guide to kern's current 31-tool MCP surface. It
+// Guide returns a concise guide to kern's current 32-tool MCP surface. It
 // intentionally defers detailed per-tool guidance to the generated
 // docs/tool-selection.md and avoids duplicating tool lists that can drift.
 func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
-kern exposes a 31-tool MCP catalog and advertises 29 tools by default.
-kern_graph and kern_arch are full-catalog tools (KERN_MCP_FULL=1), but remain
-callable through kern_meta.
+kern exposes a 32-tool MCP catalog and advertises the full catalog by default
+(standing mandate 2026-10-23: agents use all available tools).
 
 For the authoritative current surface, risk counts, and intent-to-tool mapping,
 see the generated Tool Selection Guide in docs/tool-selection.md.

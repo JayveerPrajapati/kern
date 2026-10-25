@@ -37,6 +37,13 @@ func runAudit(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
 
+	// NIT-18a: --limit -1 (like any negative) is junk input, not "all" —
+	// 0 is the documented everything cap. Reject as a usage error (exit 2),
+	// matching the parser's fail-loud treatment of non-numeric values.
+	if f.limitSet && f.limit < 0 {
+		fatalUsage("--limit: invalid integer %d (0 shows all entries)", f.limit)
+	}
+
 	taskID := ""
 	if len(args) > 0 {
 		taskID = args[0]
@@ -83,13 +90,20 @@ func runAudit(rest []string) {
 		if _, err := l.Replay(); err == nil {
 			all := l.All()
 			if brk, verified := l.VerifyChainReport(); brk >= 0 {
-				if verified == 0 {
+				tiers := l.ChainTierReport()
+				// NEW-5 tier-aware verification (mirrors platform startup):
+				// a break fully explained by format downgrades is an
+				// environment-degraded write, not tampering — report it
+				// accurately instead of "FAILED".
+				if tiers.DowngradeExplainsBreak() {
+					fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1], brk+1)
+				} else if verified == 0 {
 					fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit repair / kern evidence verify)\n", len(all))
 				} else {
 					fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit repair / kern evidence verify)\n", brk+1, len(all))
-				}
-				if d := l.ChainTierReport().Downgraded; d > 0 {
-					fmt.Fprintf(os.Stderr, "WARNING: %d entr%s verify only under a weaker unkeyed hash format than earlier keyed entries — a format downgrade, which is how a forged entry would look (or the HMAC key was unavailable when they were written)\n", d, map[bool]string{true: "y", false: "ies"}[d == 1])
+					if tiers.Downgraded > 0 {
+						fmt.Fprintf(os.Stderr, "WARNING: %d entr%s verify only under a weaker unkeyed hash format than earlier keyed entries — a format downgrade, which is how a forged entry would look (or the HMAC key was unavailable when they were written)\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1])
+					}
 				}
 			}
 			// Surface degraded chain integrity: when the HMAC secret is
@@ -108,10 +122,28 @@ func runAudit(rest []string) {
 			}
 		}
 	}
+	// NIT#34: `kern audit` dumped the whole chain to stdout unbounded (4.3 MB
+	// observed on a mature repo). Default to the 50 most recent entries;
+	// --limit N (alias --tail N) changes the cap, --limit 0 returns everything.
+	// The chain verification above always runs over the FULL chain — only the
+	// display is bounded.
+	limit := 50
+	if f.limitSet {
+		limit = f.limit
+	}
+	all := entries
+	if limit > 0 && len(all) > limit {
+		entries = all[len(all)-limit:]
+		if !f.json {
+			fmt.Fprintf(os.Stderr, "showing %d most recent of %d entries (kern audit --limit N to change, --limit 0 for all)\n", limit, len(all))
+		}
+	}
 	if f.json {
 		printJSON(map[string]any{
 			"entries": entries,
-			"chain":   auditChainJSON(root, entries),
+			"total":   len(all),
+			"limit":   limit,
+			"chain":   auditChainJSON(root, all),
 		})
 		return
 	}

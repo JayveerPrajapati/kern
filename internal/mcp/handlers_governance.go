@@ -12,8 +12,11 @@ import (
 // The governance-family handler bodies (kern_lock action=acquire|release|
 // status, kern_usage_guide, kern_rename) live in
 // internal/mcp/governance. These adapters are the dispatch-table surface;
-// they build the leaf Hooks from server state and delegate. (kern_authorize_context
-// died with the org plane, 2026-10-18 pivot cut.)
+// they build the leaf Hooks from server state and delegate.
+//
+// Only the MCP kern_authorize_context adapter was removed by the 2026-10-18
+// org-plane pivot. The underlying governance.AuthorizeContext core remains
+// active and is used by the CLI, guard, evidence, and authorization paths.
 
 func (s *Server) governanceHooks() mcpgovernance.Hooks {
 	return mcpgovernance.Hooks{

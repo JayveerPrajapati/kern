@@ -149,6 +149,7 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 	// serveMany); the gate's own tests exercise it explicitly.
 	s.gate = nil
 	s.preTool = nil
+	s.initialized.Store(true) // already-initialized session (Phase 4.2)
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -274,6 +275,7 @@ func TestCancelRequestAbortsRealToolCall(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	s := NewServer(strings.NewReader(""), buf)
+	s.initialized.Store(true) // already-initialized session (Phase 4.2)
 
 	done := make(chan any, 1)
 	go func() {

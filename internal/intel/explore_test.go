@@ -225,3 +225,41 @@ func TestRenderExploreExplain(t *testing.T) {
 		}
 	}
 }
+
+// TestExploreMaxNodesKeepsNearest pins the M9 fix: the maxNodes cap must
+// select the NEAREST symbols, not the alphabetically-first slice of the
+// radius list. The fixture is inner←Public←{Deep, client.Caller}: with
+// maxNodes=2, both depth-1 callers (Public, then whichever of Deep /
+// client.Caller BFS reached first) must be present while nothing deeper is
+// added — the in-walk bound stops expansion at the nearest 2. Before the
+// fix the walk expanded the whole graph and the post-sort truncation kept
+// the first 2 alphabetically, which could drop a near caller for a far one.
+func TestExploreMaxNodesKeepsNearest(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go":       srcLib,
+		"client/client.go": srcClient,
+	})
+	ix := buildIndex(t, dir)
+
+	// inner's blast radius at unlimited depth = {Public, Deep, Caller}
+	// (all transitive callers). With maxNodes=2 the in-walk cap must keep
+	// the nearest two — Public (depth 1) is always included; the second
+	// slot is whichever of Deep / client.Caller BFS reached first.
+	rep, err := Explore(ix, "inner", 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(rep.BlastRadius, "Public") {
+		t.Fatalf("maxNodes=2 blast radius must keep the nearest caller Public, got %v", rep.BlastRadius)
+	}
+	if len(rep.BlastRadius) > 2 {
+		t.Fatalf("maxNodes=2 blast radius has %d entries, want <= 2 (in-walk bound must stop expansion): %v", len(rep.BlastRadius), rep.BlastRadius)
+	}
+	// Every kept entry must be at depth <= 1 (the nearest two; anything
+	// deeper would prove the cap truncated alphabetically, not by distance).
+	for _, s := range rep.BlastRadius {
+		if d := rep.NearestDepth[s]; d > 1 {
+			t.Errorf("kept symbol %q at depth %d — the maxNodes cap kept a FAR symbol instead of the nearest (M9)", s, d)
+		}
+	}
+}

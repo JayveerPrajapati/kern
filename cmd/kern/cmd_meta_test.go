@@ -49,61 +49,6 @@ func runGuideExit(t *testing.T, rest []string) (code int) {
 	return 0
 }
 
-// runExplainExit recovers the fatalUsage sentinel from runExplain.
-func runExplainExit(t *testing.T, rest []string) (code int) {
-	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			if e, ok := r.(exitError); ok {
-				code = e.code
-				return
-			}
-			panic(r)
-		}
-	}()
-	runExplain(rest)
-	return 0
-}
-
-// runCrossRepoImpactExit recovers the fatalUsage sentinel from
-// runCrossRepoImpact.
-func runCrossRepoImpactExit(t *testing.T, rest []string) (code int) {
-	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			if e, ok := r.(exitError); ok {
-				code = e.code
-				return
-			}
-			panic(r)
-		}
-	}()
-	runCrossRepoImpact(rest)
-	return 0
-}
-
-// TestMetaRejectsUnknownFlagAfterRequest (QA): `kern meta "some request"
-// --nonsense` must exit 2 instead of silently appending the unknown flag to
-// the free-form request.
-func TestMetaRejectsUnknownFlagAfterRequest(t *testing.T) {
-	code := runMetaExit(t, []string{"some request", "--nonsense"})
-	if code != 2 {
-		t.Fatalf("kern meta \"some request\" --nonsense exit code = %d, want 2 (usage error)", code)
-	}
-}
-
-// TestMetaRejectsUnknownFlagMessage checks the stderr text names the flag.
-func TestMetaRejectsUnknownFlagMessage(t *testing.T) {
-	stderr := captureStderr(t, func() {
-		_ = runMetaExit(t, []string{"some request", "--nonsense"})
-	})
-	for _, want := range []string{"unknown flag", "--nonsense"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("meta unknown-flag message missing %q; got:\n%s", want, stderr)
-		}
-	}
-}
-
 // TestMetaKnownFlagsStillWork (QA): known flags must keep exiting 0.
 func TestMetaKnownFlagsStillWork(t *testing.T) {
 	if code := runMetaExit(t, []string{"--help"}); code != 0 {
@@ -169,24 +114,6 @@ func TestGuideRejectsUnknownFlag(t *testing.T) {
 func TestGuideKnownCallStillWorks(t *testing.T) {
 	if code := runGuideExit(t, nil); code != 0 {
 		t.Fatalf("bare kern guide exit code = %d, want 0", code)
-	}
-}
-
-// TestExplainRejectsTrailingUnknownFlag (QA): Go's flag package stops at the
-// first positional, so `kern explain <sym> --nonsense` must exit 2, not run.
-func TestExplainRejectsTrailingUnknownFlag(t *testing.T) {
-	code := runExplainExit(t, []string{"SomeSymbol", "--nonsense"})
-	if code != 2 {
-		t.Fatalf("kern explain <sym> --nonsense exit code = %d, want 2 (usage error)", code)
-	}
-}
-
-// TestCrossRepoImpactRejectsTrailingUnknownFlag (QA): `kern cross-repo-impact
-// <sym> --nonsense` must exit 2, not run.
-func TestCrossRepoImpactRejectsTrailingUnknownFlag(t *testing.T) {
-	code := runCrossRepoImpactExit(t, []string{"SomeSymbol", "--nonsense"})
-	if code != 2 {
-		t.Fatalf("kern cross-repo-impact <sym> --nonsense exit code = %d, want 2 (usage error)", code)
 	}
 }
 

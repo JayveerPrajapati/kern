@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,12 +131,28 @@ func nextScheduledRun(expr string, now time.Time) (time.Time, error) {
 // (signal.NotifyContext, matching the repo's signal conventions), so Ctrl-C
 // stops the loop gracefully with exit 0; a failed run propagates the error
 // (exit 1). An invalid cron expression is a usage error (exit 2).
+//
+// CHANGE DETECTION (M6): a scheduled fire re-runs the SAME intent on a cadence
+// with no regard for whether anything changed — at L2+ every fire pays a full
+// LLM code-generation pass, a fresh worktree, and another memory-lesson write,
+// even when the repo is byte-identical since the last fire. The last
+// repo-change fingerprint is kept in memory; a fire whose repo state matches
+// the previous fire's post-run state AND whose previous run produced no diff
+// reports "no change — skipping" and moves to the next fire instead of
+// re-running the expensive intent. When the fingerprint differs (new commits,
+// edited files) the intent re-runs against the new state. The fingerprint is
+// the git HEAD OID plus the working-tree status hash — cheap (two git
+// subprocesses), deterministic, and stable across identical trees.
 func runLoopScheduled(cmd string, f flags, root, intent string) {
 	if _, err := loop.ParseSchedule(f.schedule); err != nil {
 		fatalUsage("loop: --schedule %q: %v", f.schedule, err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	lastState := ""
+	lastRunHadDiff := false
+	first := true
 
 	for {
 		next, err := nextScheduledRun(f.schedule, time.Now())
@@ -158,13 +176,25 @@ func runLoopScheduled(cmd string, f flags, root, intent string) {
 			}
 		}
 
+		// Change detection: skip a fire when the repo is identical to the
+		// previous fire's post-run state and that run changed nothing. The
+		// FIRST fire always runs (there is no prior state to compare).
+		state := repoChangeFingerprint(root)
+		if !first && state != "" && state == lastState && !lastRunHadDiff {
+			fmt.Printf("[schedule] no repo change since the last run — skipping %q (fingerprint %s)\n", intent, state)
+			continue
+		}
+		first = false
+
 		if f.mode == "autonomous" {
 			text, err := runDo(root, f.level, intent)
 			if err != nil {
 				fmt.Print(text)
 				fatal("Loop: %v", err)
 			}
+			lastRunHadDiff = strings.Contains(text, "diff (")
 			fmt.Print(text)
+			lastState = repoChangeFingerprint(root)
 			continue
 		}
 		text, err := runLoopCLI(root, f.level, intent)
@@ -172,8 +202,31 @@ func runLoopScheduled(cmd string, f flags, root, intent string) {
 			fmt.Print(text)
 			fatal("Loop: %v", err)
 		}
+		lastRunHadDiff = strings.Contains(text, "diff (")
 		fmt.Print(text)
+		lastState = repoChangeFingerprint(root)
 	}
+}
+
+// repoChangeFingerprint returns a deterministic signature of the repository's
+// current state: the git HEAD OID plus the working-tree status hash. Identical
+// trees produce identical fingerprints; any committed or working-tree change
+// flips it. A non-git or gitless root returns "" (change detection disabled —
+// the scheduled loop runs every fire, preserving pre-M6 behavior).
+func repoChangeFingerprint(root string) string {
+	head, err := gitDiffC(root, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	status, err := gitDiffC(root, "status", "--porcelain")
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	h.Write(head)
+	h.Write([]byte{0})
+	h.Write(status)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // runLoopCLI drives the closed loop (Workflow E, autonomy-gated) against an

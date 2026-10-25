@@ -16,7 +16,7 @@ const IndexingMarkerRel = ".kern/indexing"
 // It is best-effort: failing to write it only loses the guard's fail-open.
 func markIndexing(root string) func() {
 	p := filepath.Join(root, filepath.FromSlash(IndexingMarkerRel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return func() {}
 	}
 	if err := os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {

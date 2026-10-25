@@ -92,12 +92,28 @@ func TestKernGuardAllowOnceConsume(t *testing.T) {
 	}
 }
 
+// buildCurrentKern builds the repository's current kern binary for hook
+// tests. The hook's bash arm now delegates classification to
+// `kern guard classify`; using the installed binary here can make a correct
+// source change fail under a stale install.
+func buildCurrentKern(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "kern")
+	cmd := exec.Command("go", "build", "-o", bin, "github.com/JayveerPrajapati/kern/cmd/kern")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build current kern: %v\n%s", err, out)
+	}
+	return bin
+}
+
 // TestKernGuardScript exercises the embedded PreToolUse guard: guarded tools
 // (read/grep/glob/bash and their per-agent aliases) must block with exit 2 and
 // a kern suggestion on stderr; unguarded tools, the KERN_ENFORCE=0 bypass and
 // unparseable payloads must pass through with exit 0.
 func TestKernGuardScript(t *testing.T) {
+	t.Parallel()
 	script := writeGuardScriptFile(t)
+	currentKern := buildCurrentKern(t)
 	// Isolated HOME for the bypass cases so their audit records land in a
 	// temp dir instead of the real ~/.kern/audit/bypass.jsonl.
 	auditHome := t.TempDir()
@@ -310,29 +326,40 @@ func TestKernGuardScript(t *testing.T) {
 		{name: "git log -u blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log -u"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "git log --raw blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --raw"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "git log --oneline -p blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline -p"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		// kern read-only diagnostics (version/--version/doctor/health) run raw
-		// — EXACT invocation only; any other kern subcommand (setup/mutate/
-		// update) or extra flag stays governed.
+		// ANY kern CLI invocation runs raw — the CLI carries its own
+		// governance (approvals, tty-gated allow-once, sandboxed exec,
+		// update provenance guard); the guard's deny messages steer agents
+		// TO kern commands. Pipes and wrapper-hidden kern stay governed.
 		{name: "kern version allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern version"}}`, wantExit: 0, wantStderr: nil},
 		{name: "kern --version allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern --version"}}`, wantExit: 0, wantStderr: nil},
 		{name: "kern doctor allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern doctor"}}`, wantExit: 0, wantStderr: nil},
 		{name: "kern health allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern health"}}`, wantExit: 0, wantStderr: nil},
-		{name: "kern version --json blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern version --json"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "bare kern blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "kern setup blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern setup"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "kern update blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern update"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "kern mutate blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern mutate"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "kern version --json allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern version --json"}}`, wantExit: 0, wantStderr: nil},
+		{name: "bare kern allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern setup allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern setup"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern update allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern update"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern mutate allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern mutate"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern mcp --help allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern mcp --help"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern guard allow allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern guard allow abc123"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern --version && kern mcp --help compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"kern --version && kern mcp --help"}}`, wantExit: 0, wantStderr: nil},
+		{name: "kern ast pipe blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"kern ast Foo | head -5"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "sudo kern update blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"sudo kern update"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		// git diff/show/blame emit file content — governed, no longer exempt.
 		{name: "git status && git log compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git status && git log --oneline"}}`, wantExit: 0},
 		{name: "git status; git status --porcelain compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git status; git status --porcelain"}}`, wantExit: 0},
 		{name: "git status && git log -p compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git status && git log -p"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "git status && cat main.go compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git status && cat main.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "git status && cat code file compound served", stdin: `{"tool_name":"bash","tool_input":{"command":"git status && cat guard_test.go"}}`, wantExit: 0, wantStderr: nil},
 		{name: "git status & git diff lone ampersand blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git status & git diff"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		{name: "pwd && echo hi compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd && echo hi"}}`, wantExit: 0},
-		{name: "pwd || whoami compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd || whoami"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		// Buddy C1: a compound of content-free segments (pwd || whoami) has
+		// no write/network surface — it runs raw instead of paying the
+		// governed wrapper.
+		{name: "pwd || whoami compound allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd || whoami"}}`, wantExit: 0},
 		{name: "go vet redirect suggests kern_verify", stdin: `{"tool_name":"bash","tool_input":{"command":"go vet ./..."}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify", "go vet"}},
-		{name: "git diff blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git diff"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "git show blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git show HEAD:main.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		// git diff/show emit file content — served from the readonly sandbox
+		// (rev-reads of the guard-consent campaign), no longer denied.
+		{name: "git diff served", stdin: `{"tool_name":"bash","tool_input":{"command":"git diff"}}`, wantExit: 0},
+		{name: "git show served", stdin: `{"tool_name":"bash","tool_input":{"command":"git show HEAD:main.go"}}`, wantExit: 0},
 		{name: "git blame blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git blame file.go"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		// Prefix lookalikes are NOT exempt (exact first-token matching).
 		{name: "pwd123 blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd123"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
@@ -341,12 +368,21 @@ func TestKernGuardScript(t *testing.T) {
 		{name: "echo $HOME blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"echo $HOME"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		// Newline-joined compounds bypassed the old predicate — must be governed.
 		{name: "pwd newline make blocked", stdin: "{\"tool_name\":\"bash\",\"tool_input\":{\"command\":\"pwd\\nmake\"}}", wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "git status newline rm blocked", stdin: "{\"tool_name\":\"bash\",\"tool_input\":{\"command\":\"git status\\nrm -rf /tmp/x\"}}", wantExit: 2, wantStderr: []string{"kern_verify"}},
-		// Pipe / substitution / redirection / compound operators — governed.
-		{name: "pipe blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline | head -5"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
+		{name: "git status newline rm blocked", stdin: "{\"tool_name\":\"bash\",\"tool_input\":{\"command\":\"git status\\nrm /etc/hosts\"}}", wantExit: 2, wantStderr: []string{"GATE command"}},
+		// Pipe / substitution / redirection / compound operators — classified
+		// by the risk axis: pure-read pipelines are SERVED, write-redirect /
+		// gate segments deny.
+		{name: "pipe served", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline | head -5"}}`, wantExit: 0, wantStderr: nil},
 		{name: "substitution blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"echo $(whoami)"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "semicolon compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"ls; rm -rf /tmp/x"}}`, wantExit: 2, wantStderr: []string{"kern_verify"}},
-		{name: "redirect blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"grep foo file.go > out.txt"}}`, wantExit: 2, wantStderr: []string{"kern_verify", "kern_search"}},
+		{name: "semicolon compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"ls; rm /etc/hosts"}}`, wantExit: 2, wantStderr: []string{"GATE command"}},
+		// path-aware writes: in-tree targets allow (exit 0, no stderr),
+		// tmp targets allow, out-of-root targets gate.
+		{name: "in-tree rm allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"rm scratch.go"}}`, wantExit: 0, wantStderr: []string{}},
+		{name: "in-tree mv allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"mv internal/a.go internal/b.go"}}`, wantExit: 0, wantStderr: []string{}},
+		{name: "tmp rm allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"rm -rf /tmp/x"}}`, wantExit: 0, wantStderr: []string{}},
+		{name: "credential write gated", stdin: `{"tool_name":"bash","tool_input":{"command":"touch .env"}}`, wantExit: 2, wantStderr: []string{"GATE"}},
+		{name: "git internals gated", stdin: `{"tool_name":"bash","tool_input":{"command":"rm .git/index.lock"}}`, wantExit: 2, wantStderr: []string{"GATE"}},
+		{name: "redirect blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"grep foo file.go > out.txt"}}`, wantExit: 2, wantStderr: []string{"GATE command"}},
 		// Code reads via bash stay governed (the auto-redirect default
 		// answers them via kern; KERN_GUARD_MODE=deny pins the deny path).
 		{name: "sed code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"sed -n '1,5p' file.go"}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify", "kern_explore"}},
@@ -366,7 +402,8 @@ func TestKernGuardScript(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, stderr := runGuard(t, script, tc.stdin, tc.env)
+			env := append([]string{"KERN_BIN=" + currentKern}, tc.env...)
+			code, stderr := runGuard(t, script, tc.stdin, env)
 			if code != tc.wantExit {
 				t.Fatalf("exit code = %d, want %d (stderr: %q)", code, tc.wantExit, stderr)
 			}
@@ -406,7 +443,25 @@ func TestKernGuardAutoRedirect(t *testing.T) {
 		t.Helper()
 		outLog = filepath.Join(t.TempDir(), "kern-args.log")
 		kernBin = filepath.Join(t.TempDir(), "kern")
-		fakeScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" >> %q\nprintf 'kern result: %%s\\n' \"$*\"\n", outLog)
+		fakeScript := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$@" >> %q
+if [ "$1" = guard ] && [ "$2" = grant ] && [ "$3" = --check ]; then
+  # Ask-Protocol grant check with no grant in the (absent) store: denied.
+  exit 3
+fi
+if [ "$1" = guard ] && [ "$2" = classify ] && [ "$3" = --json ]; then
+  shift 3
+  cmd="$*"
+  case "$cmd" in
+  rm\ *) printf '{"verdict":"gate","tier":0,"hash":"gatehash"}\n'; exit 0 ;;
+  cat\ *\|*) printf '{"verdict":"serve","tier":3}\n'; exit 0 ;;
+  cat\ *|\ cat\ *) printf '{"verdict":"serve","tier":1,"head":"cat","file":"%%s"}\n' "${cmd#cat }"; exit 0 ;;
+  esac
+  printf '{"verdict":"governed","tier":0,"hash":"governedhash"}\n'
+  exit 0
+fi
+printf 'kern result: %%s\n' "$*"
+`, outLog)
 		if err := os.WriteFile(kernBin, []byte(fakeScript), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -457,18 +512,54 @@ func TestKernGuardAutoRedirect(t *testing.T) {
 		}
 	})
 
-	t.Run("ambiguous command falls through to the deny", func(t *testing.T) {
-		// A compound command cannot be cleanly mapped — it must deny even in
-		// auto-redirect mode, and the fake kern must NOT be invoked.
+	t.Run("compound read pipeline is served, never denied", func(t *testing.T) {
+		// A pure-read pipeline (cat <file> | head -5) is a READ — under the
+		// 3-tier serve it is never denied; the untranslatable form (Tier 3)
+		// delegates to kern exec --readonly and exits 0 with the output. The
+		// fake kern binary records the invocation so the serve path is pinned.
 		home := t.TempDir()
 		kernBin, outLog := mkFakeKern(t)
 		payload := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":"cat %s | head -5"}}`, src)
-		code, _ := runGuard(t, script, payload, []string{"KERN_BIN=" + kernBin, "HOME=" + home})
-		if code != 2 {
-			t.Fatalf("exit=%d, want 2 (compound command is ambiguous, denies)", code)
+		code, stderr := runGuard(t, script, payload, []string{"KERN_BIN=" + kernBin, "HOME=" + home})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0 (pure-read pipeline is served, never denied), stderr %q", code, stderr)
 		}
-		if _, err := os.Stat(outLog); err == nil {
-			t.Fatalf("fake kern must not run for an ambiguous command")
+		if _, err := os.Stat(outLog); err != nil {
+			t.Fatalf("fake kern was not invoked — the Tier-3 serve must delegate to kern exec --readonly")
+		}
+		got, err := os.ReadFile(outLog)
+		if err != nil {
+			t.Fatalf("read fake kern log: %v", err)
+		}
+		if !strings.Contains(string(got), "exec") || !strings.Contains(string(got), "--readonly") {
+			t.Fatalf("Tier-3 serve invoked kern with %q, want exec --readonly", strings.TrimSpace(string(got)))
+		}
+	})
+
+	t.Run("gate command denies even in default mode", func(t *testing.T) {
+		// The risky axis is unchanged: a write/destructive/network/installer
+		// command denies (exit 2, GATE message) even in the default serve
+		// mode — reads are served, gates are denied. The fake kern must NOT
+		// be invoked for a gate.
+		home := t.TempDir()
+		kernBin, outLog := mkFakeKern(t)
+		payload := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":"rm -rf %s"}}`, src)
+		code, stderr := runGuard(t, script, payload, []string{"KERN_BIN=" + kernBin, "HOME=" + home})
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2 (GATE command denies), stderr %q", code, stderr)
+		}
+		if !strings.Contains(stderr, "GATE command") {
+			t.Fatalf("GATE deny must name the GATE contract, got %q", stderr)
+		}
+		got, err := os.ReadFile(outLog)
+		if err != nil {
+			t.Fatalf("fake kern must be invoked for classification: %v", err)
+		}
+		invoked := string(got)
+		for _, forbidden := range []string{"buddy", "compact", " exec", "--readonly"} {
+			if strings.Contains(invoked, forbidden) {
+				t.Fatalf("GATE command ran a non-classifier kern action %q: %q", forbidden, invoked)
+			}
 		}
 	})
 }

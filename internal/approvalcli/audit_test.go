@@ -166,6 +166,17 @@ func TestAuditRepairCommand(t *testing.T) {
 	}
 }
 
+// TestRunAuditRejectsNegativeLimit pins NIT-18a: `kern audit --limit -1` is
+// junk input and exits 2 (usage), like non-numeric values — it must NOT be
+// silently treated as "show everything" (that is --limit 0).
+func TestRunAuditRejectsNegativeLimit(t *testing.T) {
+	root := newRoot(t)
+	expectCode(t, 2, func() int { return RunAudit([]string{"--root", root, "--limit", "-1"}) })
+	expectCode(t, 2, func() int { return RunAudit([]string{"--root", root, "--tail", "-3"}) })
+	// --limit 0 (all entries) stays valid.
+	expectCode(t, 0, func() int { return RunAudit([]string{"--root", root, "--limit", "0"}) })
+}
+
 // TestRunAuditWarnsOnTamperedChain locks validation W-3: the audit viewer
 // verifies the tamper-evident hash chain and warns on stderr when persisted
 // records were modified, instead of presenting forged entries as genuine.

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -16,7 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
-	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	mcproot "github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/watcher"
 	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/mcpgate"
@@ -221,6 +222,13 @@ type Server struct {
 	// isError=true, no side effects). A nil hook preserves the default
 	// behavior exactly — callers that never set it see zero change.
 	preTool func(name string, args map[string]any) error
+
+	// initialized flips when the initialize request has been processed.
+	// Before it, every other request is rejected with -32002 per the MCP
+	// contract; notifications cannot be answered and are dropped by the
+	// notification short-circuit above the switch. Atomic because the
+	// HTTP transport handles requests concurrently.
+	initialized atomic.Bool
 	// gateway enforces the safety-budget dimension of ToolGateway at the
 	// tool-call choke point (precheckTool): every tools/call — direct and
 	// compose steps alike — is tracked against budget before dispatch, and
@@ -569,6 +577,12 @@ func (s *Server) write(v any) error {
 // each request with a single response body and has no push channel (SSE is
 // not supported). ctx guards against emitting progress after the request was
 // cancelled or answered.
+//
+// pct < 0 is a KEEPALIVE marker (L-batch): the numeric progress fields are
+// omitted so the notification carries only the message. The MCP spec's
+// progress notification requires progress to be within [0, total]; a keepalive
+// has no progress to report, and sending -1 (the previous behavior) emitted a
+// spec-invalid percentage that strict clients reject.
 func (s *Server) progress(ctx context.Context, token, tool string, pct int, msg string) {
 	if s.transport != "stdio" {
 		return
@@ -583,15 +597,18 @@ func (s *Server) progress(ctx context.Context, token, tool string, pct int, msg 
 	if ctx != nil && ctx.Err() != nil {
 		return
 	}
+	params := map[string]any{
+		"progressToken": token,
+		"message":       msg,
+	}
+	if pct >= 0 {
+		params["progress"] = pct
+		params["total"] = 100
+	}
 	n := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/progress",
-		"params": map[string]any{
-			"progressToken": token,
-			"progress":      pct,
-			"total":         100,
-			"message":       msg,
-		},
+		"params":  params,
 	}
 	// A failed progress write must be surfaced: the client's "still
 	// running" ticker stalls silently otherwise. The call itself is
@@ -727,17 +744,30 @@ func (s *Server) unregisterInflight(id string) {
 }
 
 // Serve runs until the stream ends.
+// startPreload fires the background index preload exactly once per server
+// lifetime (indexOnce). It is called at serve start so a fresh root's build
+// is underway before the client connects — the cold-start head start (MCP
+// audit 2026-10-25 R6) — and again from dispatch as a fallback for serve
+// paths that do not call it; the Once makes the later call a no-op. The
+// goroutine keeps setup instant.
+func (s *Server) startPreload() {
+	s.indexOnce.Do(func() { go s.preloadIndexes() })
+}
+
 // preloadIndexes builds and caches each workspace root's index in the
 // background so a later tool call reuses it instead of blocking on a cold
-// build. It is triggered lazily on the first MCP request (see indexOnce) and
-// runs in a goroutine so setup never blocks on it. Skipped for filesystem
-// roots and when KERN_PRELOAD=0 (test/CI guard).
+// build. It is triggered at serve start (see startPreload), falling back to
+// a lazy trigger on the first MCP request for non-serve paths, and runs in
+// a goroutine so setup never blocks on it. Skipped for filesystem
+// roots, for roots that are not plausible projects (NEW-2: a scratch cwd
+// must not get a silently built junk index — the .kern/index.sqlite that
+// used to appear there), and when KERN_PRELOAD=0 (test/CI guard).
 func (s *Server) preloadIndexes() {
 	if os.Getenv("KERN_PRELOAD") == "0" {
 		return
 	}
 	for _, r := range s.workspaceRoots() {
-		if isFilesystemRoot(r) {
+		if isFilesystemRoot(r) || !mcproot.PlausibleProject(resolveRoot(r)) {
 			continue
 		}
 		// Register under mu so Add cannot race Close's Wait, and so no
@@ -855,6 +885,11 @@ func (s *Server) startReactiveWatcher() {
 					continue
 				}
 				root := resolveRoot(r)
+				// NEW-2 consistency: a scratch cwd gets no watcher either —
+				// polling a non-project every interval is pure idle waste.
+				if !mcproot.PlausibleProject(root) {
+					continue
+				}
 				w := watcher.New(watcher.Options{
 					Root:     root,
 					Interval: interval,
@@ -934,6 +969,69 @@ func (s *Server) workspaceRoots() []string {
 	return out
 }
 
+// errLineTooLong reports a stdin line that exceeds the frame cap; the
+// caller logs it and keeps serving (envelope audit F-3, 2026-10-25).
+var errLineTooLong = errors.New("input line exceeds the frame cap")
+
+// readLineLimit reads one newline-terminated line from r, enforcing a hard
+// length cap. A line longer than max is drained to its newline and reported
+// as errLineTooLong — the next read starts at the FOLLOWING frame, so an
+// oversized line's remainder is never re-read as a garbage frame (the bug
+// the old bufio.Scanner approach had: its ErrTooLong path left the tail of
+// the line in the raw reader). The returned line excludes the trailing
+// newline (and \r before it); a final line without a trailing newline is
+// returned when EOF follows content.
+func readLineLimit(r *bufio.Reader, max int) ([]byte, error) {
+	var (
+		buf  []byte
+		over bool
+	)
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !over {
+			if len(buf)+len(chunk) > max {
+				// Over the cap: stop accumulating and drain the rest of the
+				// line so the next call starts at the next frame.
+				over = true
+				buf = nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		switch {
+		case err == nil:
+			if over {
+				return nil, errLineTooLong
+			}
+			return trimNewline(buf), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue // line longer than the 64 KiB read buffer: keep reading
+		case errors.Is(err, io.EOF):
+			if over {
+				return nil, errLineTooLong
+			}
+			if len(buf) == 0 {
+				return nil, io.EOF
+			}
+			return buf, nil // final frame without a trailing newline
+		default:
+			return nil, err
+		}
+	}
+}
+
+// trimNewline strips one trailing \n and an optional \r before it, matching
+// bufio.ScanLines' frame semantics.
+func trimNewline(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+		if n = len(b); n > 0 && b[n-1] == '\r' {
+			b = b[:n-1]
+		}
+	}
+	return b
+}
+
 // Serve runs the MCP server loop until EOF or a write error, draining
 // in-flight tool calls before returning.
 func (s *Server) Serve() error {
@@ -954,75 +1052,89 @@ func (s *Server) Serve() error {
 		wg.Wait()
 		s.Close()
 	}()
-	// newScanner rebuilds the stdio line scanner. A scanner cannot be reused
-	// after it hits bufio.ErrTooLong, so it is recreated from the raw reader.
-	newScanner := func() *bufio.Scanner {
-		sc := bufio.NewScanner(s.in)
-		// Small initial buffer (64 KiB); the scanner grows it on demand up to
-		// the 64 MiB max. The old eager 64 MiB allocation per connection cost
-		// real memory on idle connections that never see a large line.
-		sc.Buffer(make([]byte, 64<<10), 64<<20)
-		return sc
-	}
+	// Line framing with a hard 16 MiB per-line cap — the same cap the HTTP
+	// transport enforces on request bodies (413), so one transport cannot
+	// buffer 4x the other's worst case. The previous bufio.Scanner approach
+	// never actually discarded an oversized line's remainder: by the time
+	// ErrTooLong fired, the scanner had already consumed the line's first
+	// ~cap bytes into its own buffer, so the leftover fragment was re-read
+	// as a new (short) garbage line and answered with a -32700 parse
+	// error. readLineLimit tracks the true line length and drains the
+	// remainder of an oversized line before the next frame is read
+	// (envelope audit F-3, 2026-10-25).
+	rd := bufio.NewReaderSize(s.in, 64<<10)
 	for {
-		sc := newScanner()
-		for sc.Scan() {
-			line := sc.Bytes()
-			if len(line) == 0 {
-				continue
-			}
-			var req rpcRequest
-			if err := json.Unmarshal(line, &req); err != nil {
-				// A malformed line is a protocol error, not a silent drop.
-				if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
-					return err
-				}
-				continue
-			}
-			if req.Method == "" && rawPresent(req.Result) || req.Method == "" && rawPresent(req.Error) {
-				// A response to a server-initiated request (host sampling):
-				// deliver it to the waiting sampler, never dispatch it as a
-				// request.
-				if s.deliverSamplingReply(req) {
-					continue
-				}
-			}
-			if req.Method == "tools/call" {
-				// Run tools concurrently so a slow tool (build, heal, LLM
-				// optimize) can never freeze the stdio server: $/cancelRequest,
-				// progress and other tool calls keep being served while it runs.
-				// Response writes are serialized by s.write's mutex, and the
-				// request is captured by value so the loop can move on.
-				// Concurrency is bounded by s.sem so a burst of tool calls cannot
-				// spawn unbounded goroutines that each build a full project index.
-				wg.Add(1)
-				s.sem <- struct{}{}
-				go func(req rpcRequest) {
-					defer wg.Done()
-					defer func() { <-s.sem }()
-					if resp := s.safeDispatch(req); resp != nil {
-						if err := s.write(resp); err != nil {
-							fmt.Fprintf(os.Stderr, "kern-mcp: write response: %v\n", err)
-						}
-					}
-				}(req)
-				continue
-			}
-			if resp := s.safeDispatch(req); resp != nil {
-				if err := s.write(resp); err != nil {
-					return err
-				}
-			}
-		}
-		// A single oversized message (>64MB) must not kill the server: the
-		// scanner hit bufio.ErrTooLong, so skip the oversized token (in 64MB
-		// chunks until its newline passes), recreate the scanner and keep
-		// serving instead of terminating on the error.
-		if sc.Err() == bufio.ErrTooLong {
-			fmt.Fprintf(os.Stderr, "kern-mcp: skipping oversized input line (> %d bytes); continuing\n", 64<<20)
+		line, err := readLineLimit(rd, 16<<20)
+		if err == errLineTooLong {
+			fmt.Fprintf(os.Stderr, "kern-mcp: skipping oversized input line (> %d bytes); continuing\n", 16<<20)
 			continue
 		}
-		return sc.Err()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if len(line) == 0 {
+			continue
+		}
+		var req rpcRequest
+		if err := json.Unmarshal(line, &req); err != nil {
+			// A malformed line is a protocol error, not a silent drop.
+			if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
+				return err
+			}
+			continue
+		}
+		// JSON-RPC 2.0 envelope: a frame that parses but does not carry
+		// "jsonrpc":"2.0" exactly is not a valid request and is answered
+		// -32600 instead of being served (envelope audit F-1, 2026-10-25).
+		// Client replies to server-initiated requests carry the same
+		// envelope, so they still reach the branch below untouched.
+		if req.JSONRPC != "2.0" {
+			var envErrID json.RawMessage
+			if !req.isNotification() {
+				envErrID = req.ID
+			}
+			if err := s.write(errorResponse(envErrID, -32600, `invalid request: jsonrpc must be "2.0"`)); err != nil {
+				return err
+			}
+			continue
+		}
+		if req.Method == "" && rawPresent(req.Result) || req.Method == "" && rawPresent(req.Error) {
+			// A response to a server-initiated request (host sampling):
+			// deliver it to the waiting sampler, never dispatch it as a
+			// request.
+			if s.deliverSamplingReply(req) {
+				continue
+			}
+		}
+		if req.Method == "tools/call" {
+			// Run tools concurrently so a slow tool (build, heal, LLM
+			// optimize) can never freeze the stdio server: $/cancelRequest,
+			// progress and other tool calls keep being served while it runs.
+			// Response writes are serialized by s.write's mutex, and the
+			// request is captured by value so the loop can move on.
+			// Concurrency is bounded by s.sem so a burst of tool calls cannot
+			// spawn unbounded goroutines that each build a full project index.
+			wg.Add(1)
+			s.sem <- struct{}{}
+			go func(req rpcRequest) {
+				defer wg.Done()
+				defer func() { <-s.sem }()
+				if resp := s.safeDispatch(req); resp != nil {
+					if err := s.write(resp); err != nil {
+						fmt.Fprintf(os.Stderr, "kern-mcp: write response: %v\n", err)
+					}
+				}
+			}(req)
+			continue
+		}
+		if resp := s.safeDispatch(req); resp != nil {
+			if err := s.write(resp); err != nil {
+				return err
+			}
+		}
 	}
 }
 
@@ -1098,6 +1210,21 @@ func (s *Server) Close() {
 // the request needs no response (e.g. a notification). The response is a
 // transport-neutral object so both stdio and HTTP can send it.
 func (s *Server) dispatch(req rpcRequest) any {
+	// A frame with no method that carries result/error is a client reply to a
+	// server-initiated request (host sampling). The stdio loop delivers those
+	// before dispatch; on HTTP, or when no sampler is waiting, JSON-RPC
+	// defines no server-side error for an unsolicited response — drop it
+	// silently. A frame with no method and no result/error is simply invalid:
+	// -32600, not the old -32601 "method not found: " with an empty method
+	// (envelope audit F-4, 2026-10-25). Response frames are exempt from the
+	// pre-initialize gate below — they are replies, not session requests.
+	if req.Method == "" {
+		if rawPresent(req.Result) || rawPresent(req.Error) {
+			s.deliverSamplingReply(req)
+			return nil
+		}
+		return errorResponse(req.ID, -32600, "invalid request: missing method")
+	}
 	// KERN_MCP_ROOTS confinement gate (memory-#31): every tools/call whose
 	// path-typed arguments (root, dir, or any key containing "path") resolve
 	// outside the allowed roots is rejected here, before any handler runs.
@@ -1110,6 +1237,19 @@ func (s *Server) dispatch(req rpcRequest) any {
 	// exactly once (the gate previously re-unmarshalled what
 	// toolCallResponse had already decoded). A malformed params body is not
 	// a gate matter — the old gate decode silently skipped it and
+	// MCP initialization contract: the client must send initialize before
+	// any other request. Requests arriving before that are rejected with
+	// -32002; initialize itself is the entry point and exempt. LOW-10: this
+	// gate runs AHEAD of the tools/call confinement pre-check below, so a
+	// pre-init out-of-root tools/call sees the spec's -32002 (not the
+	// governance denial). Notifications carry no id, so no response is
+	// possible for them; they fall through to the silent-drop paths below.
+	// `$/`-prefixed lifecycle methods (e.g. $/cancelRequest) are exempt too:
+	// transport plumbing, not session tools — cancelling an in-flight call
+	// must work regardless of the init flag's state.
+	if req.Method != "initialize" && !s.initialized.Load() && !req.isNotification() && !strings.HasPrefix(req.Method, "$/") {
+		return errorResponse(req.ID, -32002, "server not initialized: send the initialize request first")
+	}
 	// toolCallResponse answered "invalid params"; the tools/call case below
 	// answers identically.
 	var callParams toolCallParams
@@ -1130,13 +1270,20 @@ func (s *Server) dispatch(req rpcRequest) any {
 	}
 	// $/cancelRequest is a notification per JSON-RPC (no response expected),
 	// but must still be processed: dispatch returns nil for notifications
-	// below, so it is handled here before the short-circuit.
-	if req.Method == "$/cancelRequest" {
+	// below, so it is handled here before the short-circuit. The MCP spec's
+	// own spelling notifications/cancelled is accepted as an alias, with its
+	// requestId param (envelope audit F-6, 2026-10-25).
+	if req.Method == "$/cancelRequest" || req.Method == "notifications/cancelled" {
 		var p struct {
-			ID json.RawMessage `json:"id"`
+			ID        json.RawMessage `json:"id"`
+			RequestID json.RawMessage `json:"requestId"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
-		key := idKey(p.ID)
+		cancelID := p.ID
+		if len(cancelID) == 0 {
+			cancelID = p.RequestID // spec spelling: {"requestId": ..., "reason": ...}
+		}
+		key := idKey(cancelID)
 		s.mu.Lock()
 		cancel, ok := s.inflight[key]
 		s.mu.Unlock()
@@ -1153,11 +1300,17 @@ func (s *Server) dispatch(req rpcRequest) any {
 	}
 	switch req.Method {
 	case "initialize":
-		// Kick off background indexing on the first connection so setup stays
-		// instant: graph tools block until the build finishes, while tools
-		// that don't need the index serve immediately. indexOnce guards the
-		// trigger so it fires exactly once per server lifetime.
-		s.indexOnce.Do(func() { go s.preloadIndexes() })
+		// Initialization flips the pre-init gate: every request before this
+		// one was rejected with -32002; from here on the full surface is
+		// available. Set before any fallible work so a client that races its
+		// next request sees a consistent view.
+		s.initialized.Store(true)
+		// Kick off background indexing so setup stays instant: graph tools
+		// block until the build finishes, while tools that don't need the
+		// index serve immediately. indexOnce guards the trigger so it fires
+		// exactly once per server lifetime; serve paths already called
+		// startPreload, making this a no-op fallback.
+		s.startPreload()
 		// ADR-0011 reactive file watcher: opt-in (KERN_MCP_WATCH_INTERVAL_MS,
 		// default OFF), started alongside the preload and stopped on Close.
 		s.startReactiveWatcher()
@@ -1311,14 +1464,14 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	// D6: enforce the string-argument coercion contract (accept string/number/
 	// bool; reject null/object/array) before the handler runs, so a wrong-typed
 	// argument surfaces as a clear isError instead of a silent mis-coercion.
-	if err := validateStringArgs(name, args); err != nil {
+	if err := validateArgTypes(name, args); err != nil {
 		return "", err
 	}
 	// R7 "more" cursor (see retain.go): a slice=<anchor>:lines:A-B|tail:N
 	// re-call reads a sandbox-truncated response's ELIDED part from the
 	// retained-output store WITHOUT executing the tool. Intercepted here —
 	// before the D1 cache gate and dispatch — so a slice request can never
-	// reach tool execution. precheckTool and validateStringArgs still gate it
+	// reach tool execution. precheckTool and validateArgTypes still gate it
 	// (F4: like a cache hit, it never skips allowlist/root validation/budget),
 	// and the audit/metrics deferred above record the read. The response is
 	// still bounded by the output budget (A3): toolCallResponse applies the
@@ -1375,7 +1528,7 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 		return ptr, nil
 	}
 	// D1 — tool-response cache: check INSIDE runTool, after precheckTool and
-	// validateStringArgs succeed and before dispatchTool (F4), so a cache hit
+	// validateArgTypes succeed and before dispatchTool (F4), so a cache hit
 	// never skips the KERN_TOOLS allowlist, root validation, the 	// safety budget, metrics or the audit chain. Only Cacheable (explicit
 	// opt-in allowlist, F1) tools participate; KERN_MCP_CACHE=0 and per-call
 	// no_cache=1 bypass. The effective flag is call-level (cacheableForCall):
@@ -1552,7 +1705,7 @@ func serveView(name string, args map[string]any) string {
 // provably identical, so the handler render is skipped entirely — saving
 // the compute cost of a full re-render, not just the response tokens. It
 // runs after the D1 gate (a cache hit already skips the render) and after
-// precheckTool/validateStringArgs — it never bypasses the allowlist, root
+// precheckTool/validateArgTypes — it never bypasses the allowlist, root
 // validation or the audit chain; it only answers a verified re-read. Any
 // mismatch (foreign etag, evicted entry, content change — the probe-gated
 // identity from C2/F1 rebuilds on staleness — or view drift) falls back to
@@ -1678,7 +1831,7 @@ func (s *Server) evictSessionState(root string) {
 // directory. This guards every index-using tool against traversal-style root
 // values and turns confusing downstream index errors into clear ones.
 func resolveRoot(r string) string {
-	return root.ResolveRoot(r)
+	return mcproot.ResolveRoot(r)
 }
 
 // withinRoot resolves file against root (absolute paths are used as-is) and

@@ -13,9 +13,6 @@ blueprint-result.json
 # Node/plugin
 node_modules/
 
-# Local wiring (machine-specific absolute paths)
-.mcp.json
-
 # Go
 *.test
 *.out
@@ -28,7 +25,6 @@ __pycache__/
 
 # Editor
 .idea/
-.vscode/
 
 # Local test fixtures
 /tmp/
@@ -46,6 +42,9 @@ TODO.md
 # Agentic benchmark outputs (kept workspaces + raw agent event streams)
 evaluate/agentic/results/
 
+# Arena-skill scratch worktrees (throwaway benchmark/escape fixtures)
+.arena/
+
 # Deepwork session state (progress ledgers)
 .slim/deepwork/
 
@@ -53,38 +52,11 @@ evaluate/agentic/results/
 # keeping them out of git + the indexer avoids root-path index/parity test noise)
 .slim/clonedeps/
 
-
 # --- internal planning docs moved to sibling support_docs/kern_docs/ (not for open source) ---
-docs/deepseek-harness-compliance.md
-docs/phase-reports/
 docs/audit/
 docs/architecture/*
 !docs/architecture/ledger-details.md
-docs/roadmap.md
-docs/repo-exploration-report.md
-docs/agent-intelligence-roadmap.md
 # --- end internal planning docs ---
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # --- blueprint runtime state (kern generated) ---
 .blueprint/audit/
@@ -108,6 +80,7 @@ docs/agent-intelligence-roadmap.md
 .windsurf/
 .opencode/node_modules/
 .opencode/package-lock.json
+opencode.json.bak
 .cortexkit/
 CLAUDE.md
 GEMINI.md

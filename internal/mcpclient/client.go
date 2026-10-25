@@ -437,7 +437,7 @@ func LoadConfig(root string) ([]Server, error) {
 
 // SaveConfig writes the server config to root/.kern/mcp-servers.json.
 func SaveConfig(root string, servers []Server) error {
-	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(servers, "", "  ")

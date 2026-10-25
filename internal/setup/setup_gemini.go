@@ -13,7 +13,7 @@ import "path/filepath"
 // without per-repo setup. Existing hooks and the mcpServers key are preserved;
 // stale kern hooks are replaced on re-run (overwrite-always).
 func wireGeminiHooks(bin string) Status {
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{Agent: "gemini-hooks", Installed: false, Path: filepath.Join(globalHomeDir(), ".gemini", "settings.json"), Note: err.Error()}
 	}
@@ -25,7 +25,7 @@ func wireGeminiHooks(bin string) Status {
 				"hooks": []any{
 					map[string]any{
 						"type":        "command",
-						"command":     guardPath,
+						"command":     guardCmd,
 						"name":        "kern-before-tool",
 						"description": "kern: block built-in read/grep/glob/bash, suggest kern equivalents",
 					},

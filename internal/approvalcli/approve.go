@@ -74,45 +74,16 @@ func runApprove(rest []string) {
 		approver = "cli-user"
 	}
 
-	if !f.reject {
-		rec := domain.Approval{ID: id}
-		if store := governance.NewFileStore(root); store.LoadError() == nil {
-			if existing, gerr := store.Get(id); gerr == nil {
-				if existing.DecidedAt != nil {
-					fatalPolicy("approve: approval %q already decided as %s — check kern audit %s for state", id, existing.Status, id)
-				}
-				rec = existing
-			}
-		}
-		// Blueprint two-person-rule requests share the decided-state guard,
-		// and it must fire BEFORE the interactive gate: prompting a human to
-		// type an id for an approval that is already decided reads as a
-		// silent hang (QA 2026-10-15 finding) — and the re-decision refusal
-		// is rc=3 either way, so the guard order changes nothing else.
-
-		tty, terr := approveTerminal()
-		if terr != nil {
-			recordApprovalAttemptAudit(root, id, approver, "no-terminal", terr.Error())
-			fatal("approve: %v — approval %s NOT decided (human confirmation requires an interactive terminal)", terr, id)
-		}
-		// The confirmation prompt itself goes to the interactive terminal,
-		// which a non-interactive caller (a governed agent, a script) cannot
-		// see — say on stdout WHY the command is waiting, so it never reads
-		// as a silent hang (QA 2026-10-15 finding). Nothing is decided
-		// until a human types the id.
-		fmt.Printf("approve: waiting for interactive confirmation of %s (a human must type the id on the terminal; confirm timeout %s) — approval NOT decided until then; a waiting agent should use: kern approval wait %s\n", id, approveConfirmTimeout, id)
-		if cerr := requireInteractiveApproval(tty, rec); cerr != nil {
-			result := "refused"
-			if errors.Is(cerr, errConfirmTimeout) {
-				// A timeout is an aborted attempt (no human input), not a
-				// human refusal — audit it as such so the chain never claims
-				// a refusal that never happened.
-				result = "confirm-timeout"
-			}
-			recordApprovalAttemptAudit(root, id, approver, result, cerr.Error())
-			fatal("approve: %v — approval %s NOT decided", cerr, id)
-		}
+	// Both polarities are human-gated: approving AND rejecting require a
+	// human to type the id on the interactive terminal (an agent with CLI
+	// access must not approve OR reject without a human, M3). The decided-
+	// state guard fires before the gate (already-decided → rc=3 without
+	// prompting).
+	verb := "approve"
+	if f.reject {
+		verb = "reject"
 	}
+	requireApprovalConfirmation(root, id, approver, verb)
 
 	// Resolve the id against the same two approval stores decideApproval
 	// serves — governance first (via the app layer), then the blueprint
@@ -141,6 +112,22 @@ func runApprove(rest []string) {
 		if a.TaskID != "" {
 			fmt.Printf("  resume: kern workflow --task %s\n", a.TaskID)
 		}
+		// Ask Protocol (P1): `kern approve <id> --scope prefix [--prefix P]`
+		// widens the just-made once-decision into a session-scoped prefix
+		// grant (commands starting with the prefix run without re-asking,
+		// use-capped and expiry-bounded, every use audit-logged). Only the
+		// approve polarity qualifies — a rejection is never widened.
+		if !f.reject && f.scope != "" && f.scope != "once" {
+			if f.scope != "prefix" {
+				fatalUsage("approve: --scope must be once or prefix (got %q)", f.scope)
+			}
+			grant, gerr := governance.SetScopePrefix(root, id, f.prefix, approver)
+			if gerr != nil {
+				fatal("approve --scope prefix: %v (the once-decision stands — this command authorized exactly one execution)", gerr)
+			}
+			fmt.Printf("  prefix grant: commands starting with %q run without re-asking\n", grant.Prefix)
+			fmt.Printf("  uses: %d/%d — expires %s\n", grant.Uses, grant.MaxUses, grant.ExpiresAt.Format(time.RFC3339))
+		}
 	}
 	// The confirmation above is printed immediately after the decision was
 	// persisted (os.Stdout is unbuffered — each Printf is an immediate write
@@ -149,6 +136,54 @@ func runApprove(rest []string) {
 	// (recordPolicySignalsBounded) — it must never hold up the command exit.
 	if mem != nil {
 		recordPolicySignalsBounded(root, mem)
+	}
+}
+
+// requireApprovalConfirmation runs the interactive human-confirmation gate
+// for a decision (approve OR reject): a human must type the approval id on
+// the interactive terminal before ANY decision is persisted. It is shared by
+// runApprove and runReject so a reject is every bit as human-gated as an
+// approve — an agent with CLI access must not be able to reject a pending
+// approval without a human typing the id, exactly as it cannot approve one.
+//
+// The decided-state guard fires BEFORE the gate (an already-decided approval
+// is refused rc=3 without prompting — prompting a human to confirm an
+// already-decided id reads as a silent hang). A missing interactive terminal
+// fails closed (rc=1, "no-terminal", undecided, audited); a wrong typed token
+// is a human refusal ("refused", undecided, audited); a timeout is an aborted
+// attempt ("confirm-timeout", undecided, audited).
+func requireApprovalConfirmation(root, id, approver, verb string) {
+	rec := domain.Approval{ID: id}
+	if store := governance.NewFileStore(root); store.LoadError() == nil {
+		if existing, gerr := store.Get(id); gerr == nil {
+			if existing.DecidedAt != nil {
+				fatalPolicy("%s: approval %q already decided as %s — check kern audit %s for state", verb, id, existing.Status, id)
+			}
+			rec = existing
+		}
+	}
+
+	tty, terr := approveTerminal()
+	if terr != nil {
+		recordApprovalAttemptAuditVerb(root, verb, id, approver, "no-terminal", terr.Error())
+		fatal("%s: %v — approval %s NOT decided (human confirmation requires an interactive terminal)", verb, terr, id)
+	}
+	// The confirmation prompt itself goes to the interactive terminal,
+	// which a non-interactive caller (a governed agent, a script) cannot
+	// see — say on stdout WHY the command is waiting, so it never reads
+	// as a silent hang (QA 2026-10-15 finding). Nothing is decided
+	// until a human types the id.
+	fmt.Printf("%s: waiting for interactive confirmation of %s (a human must type the id on the terminal; confirm timeout %s) — approval NOT decided until then; a waiting agent should use: kern approval wait %s\n", verb, id, approveConfirmTimeout, id)
+	if cerr := requireInteractiveApproval(tty, rec); cerr != nil {
+		result := "refused"
+		if errors.Is(cerr, errConfirmTimeout) {
+			// A timeout is an aborted attempt (no human input), not a
+			// human refusal — audit it as such so the chain never claims
+			// a refusal that never happened.
+			result = "confirm-timeout"
+		}
+		recordApprovalAttemptAuditVerb(root, verb, id, approver, result, cerr.Error())
+		fatal("%s: %v — approval %s NOT decided", verb, cerr, id)
 	}
 }
 
@@ -216,9 +251,16 @@ func requireInteractiveApproval(f io.ReadWriter, a domain.Approval) error {
 // typing the wrong token is a refusal; a timeout or a missing terminal is
 // not a decision. Best-effort: a failure never blocks the abort.
 func recordApprovalAttemptAudit(root, id, approver, result, reason string) {
+	recordApprovalAttemptAuditVerb(root, "approve", id, approver, result, reason)
+}
+
+// recordApprovalAttemptAuditVerb is recordApprovalAttemptAudit with the
+// action verb (approve|reject) explicit, so a rejected attempt is recorded
+// as Action reject in the chain.
+func recordApprovalAttemptAuditVerb(root, verb, id, approver, result, reason string) {
 	entry := governance.AuditEntry{
 		AgentID:   approver,
-		Action:    "approve",
+		Action:    verb,
 		Resource:  "approval:" + id,
 		Approved:  false,
 		Result:    result,

@@ -4,7 +4,7 @@ The full command reference for the `kern` CLI. The README keeps a compact
 summary and links here. This list mirrors the shipped dispatch table
 (`cmd/kern/dispatch_table.go`) — when the CLI grows, this file grows with it.
 `kern --all` prints the authoritative catalog; this document is the
-curated one-liner reference for the same 60 commands.
+curated one-liner reference for the same 65 commands.
 
 ## Command list
 
@@ -47,24 +47,27 @@ kern build "<command>" [--dir DIR] [--root ROOT] [--session ID] [--timeout s]   
 
 # analysis
 kern plan <change> [--root ROOT] [--json]    analyze a proposed change (blast-radius impact + surgical refactor planning)
+kern apply <edits-file|-> [--root ROOT] [--test] [--dry-run] [--json]    apply edits transactionally, verify, roll back on failure (edits = JSON array of {path, content}; exit 0 applied+verified, 1 failed/rolled back, 2 usage)
 kern impact <change> [kind] [new-target] [--root ROOT] [--json] [--precision] [--risk] [--runtime]   blast radius of a change
 
 # autonomy
 kern run <intent> [--root ROOT]              intent through the task pipeline
 
 # governance
-kern approve <id> | kern approve list        resolve an approval gate (interactive by design: type the id on the terminal)
+kern approve <id> | kern approve list        resolve an approval gate (interactive by design: type the id on the terminal); --scope once (default) or prefix with --prefix P records a live prefix grant — same-prefix commands run without re-asking for the session
+kern approval ask <id> [--root R]           answer a pending approval at the terminal: [1] accept once / [2] accept prefix this session / [3] reject
 kern approval wait <id> [--timeout 30m] [--root R]   block until a pending approval is decided (exit 0 approved / 3 rejected / 1 timed out)
+kern approval list [--root R]               list pending approvals and active prefix grants (uses, expiry)
 kern approval clear <id> [--approver] [--reason]     remove a blocking approval record (operator escape hatch)
 kern policy <set|get|apply> [--file F] [--merge] [--json] [--root R]   org-level governance policy distribution
 kern reject <id> [--approver ID] [--reason TEXT]     reject a pending approval request
-kern audit [flags] | kern audit append | kern audit repair   governance audit log (tamper-evident chain)
+kern audit [flags] | kern audit append | kern audit repair   governance audit log (tamper-evident chain; bounded display: 50 most recent by default, --limit N / --tail N, 0 = all)
 
 # security
 kern sec [root] [--engine internal|gosec|all|none] [--json] [--max N] [--severity ...]   security scan (exit 1 on error findings)
 
 # verification
-kern verify [<types>|<file|->] [flags]       unified verification engine (types: build,test,security,architecture,dependency; --types T);
+kern verify [<types>|<file|->] [flags]       unified verification engine (types: build,test,security,architecture,dependency,reuse,e2e,static-analysis,performance,cve,license,secrets,ci,arch; --types T);
                                              --command CMD --output summary|failures|tail:N|lines:A-B|full; --anchor ID re-slices a kept run;
                                              --short/--fast/--changed/--changed-since/--staged/--full; compliance: --cve --license --secrets
 kern heal "<task>" [--llm MODEL] [--force] [--yes] [--task]   self-correct failing files (snapshot-based)
@@ -91,20 +94,25 @@ kern project [root]                          compact project map
 kern context <symbol> [root] [--lines N] [--lens] [--profile] [--etag E]   minimal source slice
 kern authorize-context -agent <id> -task <task> [--deny-path ...] [--symbol SYM] [--root ROOT] [--json]   compute authorized context
 kern explain-context --task "<change or intent>" [--root ROOT] [--budget N] [--json]   explainable deterministic context plan
+kern orchestrate "<intent>" [--root ROOT] [--mode full|envelope|plan|fix|review|architecture|incident|explain]   silent context pipeline over an intent (JSON)
 
 # review
 kern review [--file F] [--lens] [--max N] [--range a..b] [--root R] [--runtime]   review context for changed files (exits 1 when changed files carry risk — findings)
 
 # memory
 kern memory <subcommand>                     engineering memory ops (add/list/recall/ranked/remove/clear)
+kern remember <lesson> [--auto]              store a lesson ('memory add' alias)
+kern memory-ranked <prompt> [--k 5] [--half-life 7.0] [--root ROOT]   decay-weighted memory retrieval
 
 # evidence
 kern evidence [flags]                        evidence store: export/verify/explain signed bundles, full-state dump (--full-state, --restore)
+kern evidence-anchor [--claim TEXT] [--file F] [--line N] [--symbol NAME] [--root ROOT]   verify citations and cryptographic proof
 kern anchor <anchor-id>                      fetch raw uncompressed anchor content
+kern health [--root ROOT] [--json]           read-only JSON health snapshot (version, index, catalog)
 
 # locks
-kern guard <check|init|allow> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]
-                                             architecture guardrails (reject boundary violations, exit 3 when count > threshold)
+kern guard <check|init|allow|classify|hook|grant|pause|paused|resume> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]
+                                             architecture guardrails (reject boundary violations, exit 3 when count > threshold); classify <cmd> [--json] prints the risk-axis verdict (allow|gate|serve|governed + tier) for one command — the Go source the plugin's bash arm shells out to; grant [--check] [--root R] <command> is the Ask-Protocol bridge for GATE commands: exit 0 when an active approval covers the command (consumed; retry byte-identical), exit 3 with --check when not granted (nothing minted), otherwise mints approval appr-<id> and prints the ask-wait-retry instructions the operator answers via kern approval ask
 kern fingerprint [root] [--file f1,f2] [--json]   repo fingerprint
 
 # git
@@ -113,11 +121,13 @@ kern commit [--all] [--dry-run] [--message M]   stage+commit
 
 # servers
 kern mcp [tools [category] [--json] [--category X]] [flags]   run the MCP server ('kern mcp tools' lists the catalog)
+kern mcp-client <add|list|rm|call> [args...]   manage external MCP servers and call their tools (config: .kern/mcp-servers.json; see docs/mcp-client.md)
 
 # docgen
 kern gen-catalog [--root ROOT] [--check]     regenerate (or verify without writing) docs/tool-catalog.md
 kern gen-contracts [--root ROOT] [--check]   regenerate (or verify without writing) docs/mcp/tool-contracts.md
 kern gen-docs --doc catalog|contracts|schemas|site|selection [--root ROOT] [--check]   regenerate or verify docs (tool catalog, contracts, schemas, tool-selection guide, or the mechanical file-tree block of docs/index.md)
+kern gen-plugin [--root ROOT] [--check]   sync the opencode plugin's canonical .opencode/plugins/kern.ts into the embedded asset (byte-identical; --check verifies parity without writing)
 ```
 
 ## Conditional fetch: `--etag`
@@ -154,6 +164,17 @@ platforms where that isolation is unavailable (e.g. macOS, some containers)
 silently degrading to full network egress. A local operator can explicitly
 opt out of the isolation requirement per-machine with
 `export KERN_ALLOW_UNISOLATED=1` (alias: `KERN_ALLOW_NET=1`).
+
+Filesystem confinement is platform-split and honest about it: sensitive-path
+reads (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.netrc, cloud credentials) are
+blocked on both macOS (Seatbelt deny-list) and Linux (Landlock), but
+**filesystem writes are not contained on macOS** — the profile is a deny-list
+over `(allow default)`, so a script can still write outside its temp dir.
+On Linux with Landlock (kernel ≥ 5.13) writes are confined to the workspace,
+temp and cache dirs (`KERN_SANDBOX_WRITE_CONFINEMENT`, default on); where
+Landlock is unavailable the behavior degrades safely to the macOS-equivalent
+posture. Set expectations accordingly: `kern exec` is a network isolation
+boundary, not a full filesystem sandbox.
 
 Host command execution is gated by a governance firewall (fail-closed): set
 `KERN_ALLOW_EXEC=1` or allowlist tools via `KERN_TOOLS` to opt in. `kern build`

@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// SupportedLanguages returns the canonical set of language ids kern's index
+// recognizes — the distinct ids DetectLang can return, sorted. It is the
+// single source of truth for "N indexed languages" claims in README/docs; a
+// language added to DetectLang's switch (or the shebang branch) must be added
+// here, and the README language list is pinned to this set by
+// TestReadmeLanguageCountMatchesLangparse.
+func SupportedLanguages() []string {
+	return []string{
+		"c", "cpp", "csharp", "css", "dart", "go", "html", "java",
+		"javascript", "json", "markdown", "php", "python", "ruby",
+		"rust", "shell", "typescript", "yaml",
+	}
+}
+
 // DetectLang maps a file path (and optional first-line shebang) to a language
 // id. Returns "" for unsupported files.
 func DetectLang(rel string, src []byte) string {

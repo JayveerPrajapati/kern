@@ -9,22 +9,22 @@ import (
 )
 
 // TestDefaultSurfaceAcceptanceGate is the L6 acceptance fixture: a fresh
-// agent that sees ONLY the 29-tool default surface (the original L3+D5 set —
+// agent that sees the full 32-tool default surface (the original L3+D5 set —
 // kern_meta, kern_explore, kern_impact, kern_search, kern_verify, kern_buddy,
-// kern_exec — plus the 22 usage-curated additions: kern_compact_file,
+// kern_exec — plus the 25 usage-curated additions: kern_compact_file,
 // kern_run, kern_optimize, kern_context, kern_memory, kern_evidence,
 // kern_probe, kern_plan, kern_doc, kern_project_map, kern_ast_search,
-
 // kern_plan_context, kern_path, kern_semcache, kern_swap, kern_mask_pii,
-// kern_fetch_raw_anchor, kern_review) must be able to complete a scoped
-// codebase task using only those tools, and must be genuinely unable to call
-// any non-default tool (the surface is a real gate, not an advertisement).
+// kern_fetch_raw_anchor, kern_review, kern_graph, kern_arch) must be able to
+// complete a scoped codebase task using only those tools, with every catalog
+// tool advertised (the surface is the full catalog, standing mandate
+// 2026-10-23).
 func TestDefaultSurfaceAcceptanceGate(t *testing.T) {
 	// The default surface must be exactly the toolsurface.Default set — the
-	// L3 contract plus D5 plus the 3.4-B usage-curated additions. If this
-	// drifts, the acceptance gate itself is broken.
-	if len(toolsurface.Default) != 29 {
-		t.Fatalf("default surface = %d tools, want 30: %v", len(toolsurface.Default), toolsurface.Default)
+	// full 32-tool catalog (standing mandate 2026-10-23: agents use ALL
+	// available tools). If this drifts, the acceptance gate itself is broken.
+	if len(toolsurface.Default) != 32 {
+		t.Fatalf("default surface = %d tools, want 32: %v", len(toolsurface.Default), toolsurface.Default)
 	}
 
 	root := fixtureRoot(t) // real fixture repo: symbols NewServer, UserService, ...
@@ -87,19 +87,13 @@ func TestDefaultSurfaceAcceptanceGate(t *testing.T) {
 	// 3. The surface is an ADVERTISEMENT gate (tools/list), not an execution
 	// firewall: precheckTool validates against the full catalog by design so
 	// kern_meta's NL router can reach every sub-tool internally; execution
-	// gating lives in KERN_TOOLS/governance (pinned by their own tests). So
-	// a non-default tool must NOT be advertised...
-	for _, hidden := range []string{"kern_graph", "kern_arch"} {
-		for _, got := range listed {
-			if got == hidden {
-				t.Fatalf("non-default tool %s IS advertised in tools/list — the surface gate is broken: %v", hidden, listed)
-			}
-		}
-	}
-	// ...while kern_meta (the default router) can still reach a sub-tool
-	// that is not on the default surface — the router's contract. The agent
-	// sees 29 tools; the router gives it access to the deep catalog when the
-	// task demands it, behind the governance firewall.
+	// gating lives in KERN_TOOLS/governance (pinned by their own tests). The
+	// full 32-tool catalog is the default surface (standing mandate
+	// 2026-10-23), so every catalog tool must be advertised.
+	// ...while kern_meta (the default router) can still reach any sub-tool
+	// internally — the router's contract. The agent sees the full 32-tool
+	// catalog by default; kern_meta routes to every sub-tool behind the
+	// governance firewall.
 	subOut := mcpAssertOK(t, "kern_meta", map[string]any{"root": root, "request": "run a full verification of this repo"})
 	if !strings.Contains(subOut, "kern_verify") && !strings.Contains(subOut, "verdict") {
 		t.Fatalf("kern_meta did not route to a deep-catalog sub-tool: %q", subOut)

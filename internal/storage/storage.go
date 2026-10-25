@@ -53,7 +53,7 @@ func (s *LocalStore) Put(ctx context.Context, key string, value json.RawMessage)
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(s.dir, key+".json")

@@ -90,6 +90,11 @@ func runGraph(rest []string) {
 		return
 	}
 	symbol := args[0]
+	// Same empty-symbol alignment as runWhy: MCP rejects symbol:"" with
+	// "symbol is required"; no-symbol + --entities stays the inventory.
+	if strings.TrimSpace(symbol) == "" {
+		fatalUsage("symbol is required (a symbol name, or no symbol with --entities for the inventory)")
+	}
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 1 {
 		root = args[1]
@@ -369,6 +374,12 @@ func runWhy(rest []string) {
 		fatalUsage("usage: kern why <symbol> [root] [--json] [--etag H]")
 	}
 	symbol := args[0]
+	// Empty/whitespace symbols are usage errors, not no-match results —
+	// MCP rejects symbol:"" with "symbol is required" (blind-critique
+	// Phase 3.3 CLI/MCP alignment).
+	if strings.TrimSpace(symbol) == "" {
+		fatalUsage("symbol is required (e.g. kern why RunServer)")
+	}
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 1 {
 		root = args[1]
@@ -834,6 +845,12 @@ func runExplore(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain] [--etag H]")
+	}
+	// Same empty-symbol alignment as runWhy (MCP: "symbol is required").
+	// Note explore also accepts a file path as the positional; an empty
+	// string is neither a symbol nor a path.
+	if strings.TrimSpace(args[0]) == "" {
+		fatalUsage("symbol is required (e.g. kern explore RunServer)")
 	}
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 1 {

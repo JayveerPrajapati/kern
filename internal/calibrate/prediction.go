@@ -60,6 +60,9 @@ func shortHash(parts ...string) string {
 // RecordPrediction appends one prediction to <root>/.kern/predictions.jsonl
 // (append-only JSONL, 0600), keeping the newest predictionLogCap entries.
 func RecordPrediction(root string, p Prediction) error {
+	if os.Getenv("KERN_READONLY") == "1" {
+		return nil // read-path telemetry suppressed for read-only sessions
+	}
 	if p.TS.IsZero() {
 		p.TS = time.Now()
 	}

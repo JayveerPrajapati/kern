@@ -50,6 +50,7 @@ type Finding struct {
 	Rule     string `json:"rule"`
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
+	Label    string `json:"label,omitempty"` // pii label for hardcoded-secret (e.g. "EMAIL"); empty for non-pii rules
 	Snippet  string `json:"snippet,omitempty"`
 }
 
@@ -329,6 +330,7 @@ func ScanFile(rel string, src []byte) []Finding {
 				Rule:     r.ID,
 				Severity: string(r.Severity),
 				Message:  r.Summary,
+				Label:    r.Label,
 				Snippet:  snippet(src, idx[0], idx[1]),
 			})
 		}
@@ -1059,6 +1061,7 @@ func ScanConfigFile(rel string, src []byte) []Finding {
 				Rule:     r.ID,
 				Severity: string(r.Severity),
 				Message:  r.Summary,
+				Label:    r.Label,
 				Snippet:  snippet(src, idx[0], idx[1]),
 			})
 		}
@@ -1091,7 +1094,13 @@ func snippet(src []byte, start, end int) string {
 	for hi < len(src) && src[hi] != '\n' {
 		hi++
 	}
-	s := strings.TrimSpace(string(src[lo:hi]))
+	// Mask secrets BEFORE truncation: a hardcoded-secret finding's snippet
+	// carries the credential itself, and these snippets flow into every
+	// output path (Render, --json, the MCP security tool, prompts prepped
+	// for remote LLMs). Masking first means a secret straddling the byte cut
+	// can never leak its tail — the same mask-before-truncate discipline the
+	// exec/sandbox output paths use.
+	s := pii.Mask(strings.TrimSpace(string(src[lo:hi]))).Text
 	if len(s) > 120 {
 		s = s[:117] + "..."
 	}

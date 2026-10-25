@@ -26,6 +26,10 @@ func testGit(t *testing.T, dir string, args ...string) string {
 }
 
 func TestFreshnessProof_GitApplyDetected(t *testing.T) {
+	// This test mutates files and re-checks the SAME index instance, so the
+	// freshness-proof memo must be off (it re-serves the last verdict for
+	// KERN_FRESHNESS_PROOF_CACHE_MS).
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	dir := t.TempDir()
 	testGit(t, dir, "init")
 	mainGo := "package main\n\nfunc A() {}\n\nfunc B() {}\n"
@@ -90,6 +94,8 @@ func TestFreshnessProof_GitApplyDetected(t *testing.T) {
 // TestFreshnessProof_NonGitRepo: without git, TreeOID is empty and the
 // content root is the only signal — any edit must flip the verdict to stale.
 func TestFreshnessProof_NonGitRepo(t *testing.T) {
+	// Mutate-then-recheck on one instance: memo off (see GitApplyDetected).
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	dir := writeTree(t, map[string]string{
 		"main.go": "package main\n\nfunc A() {}\n",
 	})
@@ -403,13 +409,17 @@ func TestFreshnessProofStrict_LazyCurrentTreeOID(t *testing.T) {
 	}
 }
 
-// TestFreshnessProofStrict_WalkFailureTrustsGitLazily covers the walk-failure
-// fallback under the lazy contract: when the content walk errors (here: an
-// unreadable broken symlink with a .go name), the strict proof computes the
-// tree OID lazily and trusts git when it vouches for the tree (recorded ==
-// current). Current.TreeOID is present ONLY in this fallback case; when the
-// tree changed, the fallback yields "unknown", never a silent fresh.
-func TestFreshnessProofStrict_WalkFailureTrustsGitLazily(t *testing.T) {
+// TestFreshnessProofStrict_BrokenSymlinkConsistentSkip pins the M1 walk-
+// selection fix: a broken symlink (non-regular file) is skipped by BOTH the
+// build walk and the strict content walk, so it can never force a walk
+// failure or a permanent false-STALE verdict. The strict proof converges via
+// the content walk alone (a broken symlink adds nothing to either side's
+// file set), and a content edit still flips the verdict to stale — the
+// content proof, not the git fallback, is authoritative. (Before the fix the
+// proof walk followed the symlink and read-failed, forcing the trust-git
+// fallback on every check; git-trust is now reserved for genuine transient
+// read failures, pinned separately.)
+func TestFreshnessProofStrict_BrokenSymlinkConsistentSkip(t *testing.T) {
 	dir := t.TempDir()
 	testGit(t, dir, "init")
 	testGit(t, dir, "config", "user.name", "t")
@@ -418,8 +428,8 @@ func TestFreshnessProofStrict_WalkFailureTrustsGitLazily(t *testing.T) {
 	if err := os.WriteFile(mainPath, []byte("package main\n\nfunc A() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A broken symlink is skipped by Build (non-regular file) but read-fails
-	// in the strict content walk, forcing walkErr -> the trust-git fallback.
+	// A broken symlink is skipped by Build (non-regular) and — after the M1
+	// fix — by the content walk too, so it never reaches the readFile worker.
 	if err := os.Symlink(filepath.Join(dir, "does-not-exist.go"), filepath.Join(dir, "broken.go")); err != nil {
 		t.Fatal(err)
 	}
@@ -434,27 +444,25 @@ func TestFreshnessProofStrict_WalkFailureTrustsGitLazily(t *testing.T) {
 		t.Fatalf("Build must record a git TreeOID, got %+v", ix.Identity)
 	}
 
-	// Same tree as build time: the walk fails, but git vouches for the tree,
-	// so the lazy fallback trusts git -> fresh, and Current.TreeOID IS set
-	// (the one case where it is computed).
+	// Same tree as build time: the content walk succeeds (symlink skipped),
+	// so the verdict is fresh WITHOUT the git fallback — Current.TreeOID stays
+	// empty because the content proof decided, exactly like the clean-tree
+	// path.
 	p := ix.FreshnessProofStrict(dir)
 	if p.Verdict != FreshnessFresh {
-		t.Fatalf("strict verdict with walk failure + matching tree = %q, want %q (trust-git fallback)", p.Verdict, FreshnessFresh)
+		t.Fatalf("strict verdict with broken symlink + matching tree = %q, want %q (content walk converges)", p.Verdict, FreshnessFresh)
 	}
-	if p.Current.TreeOID == "" {
-		t.Error("Current.TreeOID = \"\", want set on the walk-failure fallback (lazy computation must still run)")
-	}
-	if p.Current.TreeOID != p.Recorded.TreeOID {
-		t.Errorf("Current.TreeOID = %q, want recorded %q (fallback compares the same OIDs)", p.Current.TreeOID, p.Recorded.TreeOID)
+	if p.Current.TreeOID != "" {
+		t.Errorf("Current.TreeOID = %q, want \"\" (verdict must come from the content walk, not git)", p.Current.TreeOID)
 	}
 
-	// Change the tree after build: the walk still fails, git no longer
-	// vouches -> unknown (fail-closed), never a silent fresh.
+	// Change the tree after build: the content root differs, so the verdict
+	// is stale — the content proof catches it, no git fallback needed.
 	if err := os.WriteFile(mainPath, []byte("package main\n\nfunc A() {}\n\nfunc B() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	p = ix.FreshnessProofStrict(dir)
-	if p.Verdict != FreshnessUnknown {
-		t.Errorf("strict verdict with walk failure + changed tree = %q, want %q (fallback cannot vouch)", p.Verdict, FreshnessUnknown)
+	if p.Verdict != FreshnessStale {
+		t.Errorf("strict verdict with broken symlink + changed tree = %q, want %q (content proof must catch the edit)", p.Verdict, FreshnessStale)
 	}
 }

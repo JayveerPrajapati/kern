@@ -3,6 +3,7 @@ package intel
 import (
 	"container/list"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -483,6 +484,60 @@ func TestRankedSearchExactNameOutranksSuperstring(t *testing.T) {
 	}
 }
 
+// TestRankedSearchDigitSuffixIdentifier: an identifier with a short
+// all-digit segment after a separator — "Fn0_5", "Fn59_79" — must be
+// findable by exact-name search. wordRuns split the underscore,
+// splitIdentifierSegments dropped the all-digit segment, so the digit word
+// never matched, MatchedAll never became true, and the P0-1 gate zeroed the
+// whole result: a confident "no symbols matched" for a symbol that existed.
+// The digit-run match tier plus the separator-stripped exact comparison fix
+// it; the garbage gate must still fire.
+func TestRankedSearchDigitSuffixIdentifier(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"pkg/a.go": `package pkg
+
+func Fn0_5() {}
+func Fn0_50() {}
+func Fn59_79() {}
+func Fn0_5Handler() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact single-digit suffix: must resolve, ranked first.
+	hits := RankedSearch(ix, "Fn0_5", 10)
+	if len(hits) == 0 {
+		t.Fatal("exact digit-suffix identifier returned 0 hits (G-1 regression)")
+	}
+	if hits[0].Name != "Fn0_5" {
+		t.Fatalf("top hit for Fn0_5 = %q; want Fn0_5", hits[0].Name)
+	}
+	// Exact two-digit suffix.
+	hits = RankedSearch(ix, "Fn59_79", 10)
+	if len(hits) == 0 || hits[0].Name != "Fn59_79" {
+		t.Fatalf("top hit for Fn59_79 = %+v; want Fn59_79", hits)
+	}
+	// The longer container Fn0_5Handler must not shadow the exact name.
+	hits = RankedSearch(ix, "Fn0_5", 10)
+	if len(hits) < 2 || hits[1].Name != "Fn0_5Handler" {
+		t.Fatalf("expected Fn0_5Handler as second hit for Fn0_5, got %+v", hits)
+	}
+	// Prefix query over the same family still works (Fn0_5, Fn0_50,
+	// Fn0_5Handler — Fn59_79 correctly excluded).
+	hits = RankedSearch(ix, "Fn0", 10)
+	if len(hits) != 3 {
+		t.Fatalf("prefix query Fn0 must match the family, got %d hits", len(hits))
+	}
+	// The garbage-identifier gate must stay intact: a digit-suffixed query
+	// that names nothing still returns zero hits (did-you-mean path).
+	if hits := RankedSearchScored(ix, "NoSuchSymbol_42", 10); len(hits) != 0 {
+		t.Fatalf("garbage digit-suffixed identifier must return 0 hits, got %d (%+v)", len(hits), hits)
+	}
+}
+
 // TestRankedSearchIdentifierGarbageNoPartialHits (P0-1): an identifier-shaped
 // query that does not name a real symbol must return ZERO hits so the CLI's
 // no-match path (exit 1 + did-you-mean) fires. "NoSuchSymbol12345"
@@ -711,4 +766,15 @@ func equalHitNameFiles(a, b []RepoHit) bool {
 		}
 	}
 	return true
+}
+
+// TestQueryWords (moved from segments_test.go when the segmentation family
+// moved to internal/tokenize; queryWords itself is ranking logic and stays
+// in intel).
+func TestQueryWords(t *testing.T) {
+	got := queryWords(" state-machine  LOAD index ")
+	want := []string{"state", "machine", "load", "index"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("queryWords = %v, want %v", got, want)
+	}
 }

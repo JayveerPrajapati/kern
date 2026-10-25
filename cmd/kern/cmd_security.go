@@ -106,7 +106,10 @@ func runSec(rest []string) {
 	// cannot fail one surface and pass the other. Suppressed findings stay
 	// visible — marked [suppressed] with their reason — but never count
 	// toward the error gate.
-	reg := verification.LoadSuppressionRegistry(root)
+	reg, err := verification.LoadSuppressionRegistry(root)
+	if err != nil {
+		fatal("kern sec: %v", err)
+	}
 	type triagedFinding struct {
 		secscan.Finding
 		Reason string `json:"reason"`

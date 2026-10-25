@@ -273,7 +273,7 @@ func TestDirectCallersNamesAuthorizeContextScenario(t *testing.T) {
 // first-match name→file mapping.
 func TestBlastRadiusPackageAware(t *testing.T) {
 	ix := authorizeContextIndex()
-	radius, radiusSyms, _, _ := blastRadiusWalk(ix, []string{"AuthorizeContext"}, false)
+	radius, radiusSyms, _, _ := blastRadiusWalk(ix, []string{"AuthorizeContext"}, false, 0)
 	for _, want := range []string{"internal/governance.AuthorizeContext", "internal/mcp/governance.AuthorizeContext", "TestAuthorizeContextDenial", "New", "Generate", "runAuthorizeContext", "guardAuthzVerdict"} {
 		if !containsID(radius, want) {
 			t.Errorf("BlastRadius(AuthorizeContext) = %v; missing %q", radius, want)
@@ -315,7 +315,7 @@ func TestBlastRadiusParallelSymbols(t *testing.T) {
 		},
 		UpdatedAt: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC),
 	}
-	out, outSyms, _, _ := blastRadiusWalk(ix, []string{"run_backtest"}, false)
+	out, outSyms, _, _ := blastRadiusWalk(ix, []string{"run_backtest"}, false, 0)
 	if len(out) != len(outSyms) {
 		t.Fatalf("blastRadiusWalk parallel contract broken: len(out)=%d len(outSyms)=%d (an unresolved member must keep its zero-value slot, not shift the slice)", len(out), len(outSyms))
 	}

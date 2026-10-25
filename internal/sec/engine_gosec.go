@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
@@ -113,7 +114,10 @@ func RunGosec(root string) GosecResult {
 			Message:  iss.Details,
 		}
 		if iss.Code != "" {
-			f.Snippet = iss.Code
+			// Mask before it becomes a Finding snippet: gosec code excerpts
+			// can carry the very credential the rule flagged, and snippets
+			// flow into every output path (Render, --json, MCP, LLM prompts).
+			f.Snippet = pii.Mask(iss.Code).Text
 		}
 		findings = append(findings, f)
 	}

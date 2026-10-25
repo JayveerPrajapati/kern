@@ -206,9 +206,16 @@ func serveListener(ctx context.Context, ln net.Listener, tlsCfg *TLSConfig, h ht
 	hs := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
-		// Timeouts guard the socket phase, not handler duration; a long tool
-		// finishes in the handler and only then writes the small response.
-		WriteTimeout: 60 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		// WriteTimeout is an ABSOLUTE deadline from request-read to
+		// response-write in net/http — it is NOT a socket-phase timeout. It
+		// must therefore exceed the per-call tool ceiling (30 minutes,
+		// toolCallResponseDecoded) or any tool call taking longer than the
+		// timeout gets its connection torn down mid-handler. 31 minutes is
+		// the tool ceiling plus headroom for the final small response write;
+		// the exec-family handlers install their own shorter deadlines on
+		// top, so this is a ceiling, not a typical latency.
+		WriteTimeout: 31 * time.Minute,
 		IdleTimeout:  60 * time.Second,
 	}
 	if tlsCfg != nil && tlsCfg.Valid() {

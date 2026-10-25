@@ -69,7 +69,7 @@ func hookCommand(bin, sub string) string {
 // hooks fire in EVERY project without per-repo setup. Existing hooks are
 // preserved; stale kern hooks are replaced on re-run (overwrite-always).
 func wireClaudeHooks(bin string) Status {
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{Agent: "claude-hooks", Installed: false, Path: filepath.Join(globalHomeDir(), ".claude", "settings.json"), Note: err.Error()}
 	}
@@ -79,7 +79,7 @@ func wireClaudeHooks(bin string) Status {
 			map[string]any{
 				"matcher": "Read|Grep|Glob|Bash",
 				"hooks": []any{
-					map[string]any{"type": "command", "command": guardPath},
+					map[string]any{"type": "command", "command": guardCmd},
 				},
 			},
 		},
@@ -159,8 +159,9 @@ func mergeHookGroups(path string, groups map[string]any) error {
 
 // filterKernHooks returns groups with any kern-owned hook groups removed. A
 // group is kern-owned when any of its hook commands contains " hook " (kern
-// hook subcommands) or "kern-guard.sh" (the PreToolUse guard script). Used by
-// mergeHookGroups to strip stale kern hooks before re-inserting fresh ones.
+// hook subcommands), "guard hook" (the pure-Go PreToolUse guard) or
+// "kern-guard.sh" (the legacy shell guard). Used by mergeHookGroups to strip
+// stale kern hooks before re-inserting fresh ones.
 func filterKernHooks(groups []any) []any {
 	out := make([]any, 0, len(groups))
 	for _, g := range groups {
@@ -172,15 +173,15 @@ func filterKernHooks(groups []any) []any {
 }
 
 // hasKernHook reports whether any group in an event's hook groups already
-// contains a kern hook command (either a "kern <sub> hook ..." command or the
-// kern-guard.sh PreToolUse guard).
+// contains a kern hook command (a "kern <sub> hook ..." command, the
+// `kern guard hook` PreToolUse guard, or the kern-guard.sh script).
 func hasKernHook(groups []any) bool {
 	for _, g := range groups {
 		gm, _ := g.(map[string]any)
 		hs, _ := gm["hooks"].([]any)
 		for _, h := range hs {
 			hm, _ := h.(map[string]any)
-			if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") || strings.Contains(cmd, "kern-guard.sh") {
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") || strings.Contains(cmd, "guard hook") || strings.Contains(cmd, "kern-guard.sh") {
 				return true
 			}
 		}

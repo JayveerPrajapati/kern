@@ -8,18 +8,30 @@ package verification
 
 import (
 	"encoding/json"
-	"log"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // Suppression triages one security finding as known/accepted. A finding
-// matches when EITHER key matches:
+// matches when ANY key matches:
 //
 //	file:line:rule  — the entry pins Line > 0 (line-specific)
 //	file:rule       — the entry omits Line (Line == 0, file-wide)
+//	file:func:rule  — the entry pins Func (func-scoped; the finding's line
+//	                  resolves to that enclosing Go function, so an edit
+//	                  above the site no longer un-suppresses the class)
+//
+// Func wins over Line when both are set.
 //
 // Reason is MANDATORY: it must be a concrete sentence explaining why the
 // finding is accepted (a false positive, a test fixture, an intentional
@@ -35,6 +47,9 @@ import (
 //	    {"file": "internal/config/config.go", "line": 42,
 //	     "rule": "hardcoded-secret",
 //	     "reason": "documented test-only token, not a credential."},
+//	    {"file": "internal/execution/worktree.go", "func": "Diff",
+//	     "rule": "unsafe-exec",
+//	     "reason": "fixed-argv git plumbing; func-scoped so line edits don't un-suppress."},
 //	    {"file": "sdk/python/kern_sdk/engine.py",
 //	     "rule": "py-subprocess",
 //	     "reason": "the SDK's own execution API; every call passes shell=False."}
@@ -42,29 +57,60 @@ import (
 //	}
 //
 // Line is optional; omit it (or set 0) for a file-wide suppression that
-// matches every finding of Rule in File. File paths are repo-root-relative
-// with forward slashes, exactly as the scanner reports them. A malformed
-// file is logged and treated as absent — a broken triage file must never
-// crash or fail a verification run.
+// matches every finding of Rule in File. Func is optional too and preferred
+// over Line when set: the finding's line is resolved to its enclosing Go
+// function, so the entry survives line drift (only .go files resolve; a
+// Func on a non-Go file never matches). Label is optional as well; when set,
+// only findings carrying that pii label (e.g. "EMAIL") match, so a
+// file-wide suppression of a false-positive class never covers a real
+// secret of a different class in the same file. File paths are
+// repo-root-relative with forward slashes, exactly as the scanner reports
+// them. A malformed file is logged and treated as absent — a broken triage
+// file must never crash or fail a verification run.
 type Suppression struct {
 	File   string `json:"file"`
 	Line   int    `json:"line,omitempty"` // 0 = file-wide (matches any line of File)
+	Func   string `json:"func,omitempty"` // optional: enclosing Go func name (preferred over Line when set)
 	Rule   string `json:"rule"`
+	Label  string `json:"label,omitempty"` // optional: narrow the rule to one pii label (e.g. "EMAIL")
 	Reason string `json:"reason"`
 }
 
 // SuppressionRegistry is the merged, additive set of built-in and user
-// suppressions consulted by VerifySecurity.
+// suppressions consulted by VerifySecurity. resolver lazily maps a
+// file:line to its enclosing Go function (go/parser) so Func-keyed entries
+// survive line drift; nil when the registry is used without a root.
 type SuppressionRegistry struct {
 	Suppressions []Suppression `json:"suppressions"`
+	resolver     *funcResolver
 }
 
 // Match reports whether f is suppressed, returning the suppression reason.
-// A finding matches if any entry keys it by file:line:rule (line-specific)
-// OR by file:rule (file-wide).
+// A finding matches if any entry keys it by file:line:rule (line-specific),
+// by file:rule (file-wide), or by file:func:rule (func-scoped — resolved
+// lazily via the registry's funcResolver, surviving line drift within the
+// named function). An entry may additionally narrow to one pii Label (e.g.
+// "EMAIL"); when set, only findings carrying that label match — so a
+// file-wide suppression of a false-positive class never covers a real
+// secret of a different class in the same file.
 func (r *SuppressionRegistry) Match(f secscan.Finding) (reason string, ok bool) {
 	for _, s := range r.Suppressions {
-		if s.File == f.File && s.Rule == f.Rule && (s.Line == 0 || s.Line == f.Line) {
+		if s.File != f.File || s.Rule != f.Rule {
+			continue
+		}
+		if s.Label != "" && s.Label != f.Label {
+			continue
+		}
+		if s.Func != "" {
+			if r.resolver == nil {
+				continue
+			}
+			if fn := r.resolver.funcFor(f.File, f.Line); fn != s.Func {
+				continue
+			}
+			return s.Reason, true
+		}
+		if s.Line == 0 || s.Line == f.Line {
 			return s.Reason, true
 		}
 	}
@@ -90,9 +136,9 @@ func (r *SuppressionRegistry) Match(f secscan.Finding) (reason string, ok bool) 
 var defaultSuppressions = []Suppression{
 	{
 		File:   ".github/workflows/ci.yml",
-		Line:   62,
 		Rule:   "hardcoded-secret",
-		Reason: "false positive: the EMAIL pattern matches the pinned Go module version selector (a module at-version string) in a go run command, not an address or credential.",
+		Label:  "EMAIL",
+		Reason: "false positive: the EMAIL pattern matches pinned Go module version selectors (go install ...@vX.Y.Z / go run ...@X.Y.Z) in ci.yml, not an address or credential. Label-scoped to EMAIL so a REAL secret (GITHUB token, API key, ...) in any workflow file is never suppressed; file-wide within the label because the selector lines shift whenever the workflow env block changes — a line pin would un-suppress the same class on every workflow edit.",
 	},
 	{
 		File:   "internal/langparse/compiler/KernJavaBindings.java",
@@ -153,11 +199,6 @@ var defaultSuppressions = []Suppression{
 		Reason: "git helper wrappers: gitDiff/gitDiffC translate caller-passed literal arg strings (\"diff --cached\", \"diff HEAD\", \"rev-parse --short HEAD\") into git -C <root> argv — the only variables are the trusted repo root and literal args, no shell.",
 	},
 	{
-		File:   "internal/app/surface_drift.go",
-		Rule:   "unsafe-exec",
-		Reason: "SurfaceTouchesFromGit's git log --name-status parity probe: fixed argv with the trusted repo root and a capped integer commit count as the only variables — no shell, no user-controlled command string.",
-	},
-	{
 		File:   "internal/sandbox/landlock/landlock_linux.go",
 		Line:   196,
 		Rule:   "unsafe-exec",
@@ -202,39 +243,33 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/diffgate/diffgate.go",
-		Line:   135,
+		Func:   "Run",
 		Rule:   "unsafe-exec",
 		Reason: "gofmt -l over internally collected file paths — fixed argv, no shell.",
 	},
 	{
 		File:   "internal/doctor/doctor.go",
-		Line:   201,
+		Func:   "checkExec",
 		Rule:   "unsafe-exec",
 		Reason: "doctor exec probe: runs a resolved binary path with no arguments to test availability (deadline overridable via KERN_DOCTOR_EXEC_TIMEOUT_MS).",
 	},
 	{
 		File:   "internal/doctor/doctor.go",
-		Line:   443,
+		Func:   "gitHead",
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
 		File:   "internal/doctor/global.go",
-		Line:   96,
+		Func:   "checkGlobalHealth",
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
 		File:   "internal/execution/worktree.go",
-		Line:   121,
+		Func:   "Diff",
 		Rule:   "unsafe-exec",
-		Reason: "fixed-argv git diff against the execution worktree (the operator's isolated copy) — trusted paths, no shell.",
-	},
-	{
-		File:   "internal/execution/worktree.go",
-		Line:   162,
-		Rule:   "unsafe-exec",
-		Reason: "fixed-argv git diff --no-index between the repo root and the isolated worktree copy — trusted paths, no shell.",
+		Reason: "fixed-argv git diff (both the worktree diff and the --no-index repo-vs-worktree form) against the execution worktree (the operator's isolated copy) — trusted paths, no shell.",
 	},
 	{
 		File:   "internal/fetch/fetch.go",
@@ -394,7 +429,7 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/mcp/server.go",
-		Line:   1914,
+		Line:   1923,
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
@@ -441,6 +476,12 @@ var defaultSuppressions = []Suppression{
 		Reason: "compile step with internally assembled argv; the MCP boundary applies governance.CheckExecCommand + minimalExecEnv (2026-10-05 exec-firewall fix).",
 	},
 	{
+		File:   "internal/apply/apply.go",
+		Line:   233,
+		Rule:   "unsafe-exec",
+		Reason: "apply's runGo: `go test` with internally derived package paths (affectedPackages from the git-scoped change set, ./dir form, no shell) under fsutil.MinimalExecEnv — same class as the refactor/mutation compile steps; the MCP boundary carries the documented governance carve-out for the engine-derived default.",
+	},
+	{
 		File:   "internal/runtime/live.go",
 		Line:   411,
 		Rule:   "unsafe-http",
@@ -460,49 +501,49 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/sandbox/sandbox.go",
-		Line:   836,
+		Line:   866,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/sandbox/sandbox.go",
-		Line:   861,
+		Line:   891,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/sandbox/sandbox.go",
-		Line:   870,
+		Line:   900,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   212,
+		Line:   218,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   224,
+		Line:   230,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   501,
+		Line:   511,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   513,
+		Line:   523,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   521,
+		Line:   531,
 		Rule:   "unsafe-exec",
 		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
 	},
@@ -520,13 +561,12 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/sec/engine_gosec.go",
-		Line:   72,
+		Line:   73,
 		Rule:   "unsafe-exec",
 		Reason: "gosec -quiet -json ./...: fixed argv scanner invocation.",
 	},
 	{
 		File:   "internal/setup/cli.go",
-		Line:   466,
 		Rule:   "unsafe-exec",
 		Reason: "launches an operator-configured MCP server command (stdio transport) during setup — operator config authorship, same trust class as the CLI itself.",
 	},
@@ -594,22 +634,83 @@ var defaultSuppressions = []Suppression{
 
 // LoadSuppressionRegistry merges the compiled-in defaults with the optional
 // user file <root>/.kern/verify-suppressions.json (same schema, additive).
-// A malformed user file is logged and treated as absent — a broken triage
-// file must never crash or fail a verification run. Exported so the `kern sec`
-// CLI applies the SAME triage as VerifySecurity: a suppressed finding must
-// not fail one surface while passing the other.
-func LoadSuppressionRegistry(root string) *SuppressionRegistry {
-	reg := &SuppressionRegistry{Suppressions: append([]Suppression(nil), defaultSuppressions...)}
+// The file is operator triage policy, so it is validated fail-closed: a
+// missing file is the normal built-ins-only path, but an unreadable file,
+// malformed JSON, or an entry lacking file/rule/reason is an error rather
+// than being silently dropped. Exported so the `kern sec` CLI applies the
+// SAME triage as VerifySecurity: a suppressed finding must not fail one
+// surface while passing the other.
+func LoadSuppressionRegistry(root string) (*SuppressionRegistry, error) {
+	reg := &SuppressionRegistry{Suppressions: append([]Suppression(nil), defaultSuppressions...), resolver: newFuncResolver(root)}
 	path := filepath.Join(root, ".kern", "verify-suppressions.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return reg // absent — built-ins only
+		if errors.Is(err, fs.ErrNotExist) {
+			return reg, nil
+		}
+		return nil, fmt.Errorf("verification: read %s: %w", path, err)
 	}
 	var user SuppressionRegistry
 	if err := json.Unmarshal(data, &user); err != nil {
-		log.Printf("verification: ignoring malformed %s: %v", path, err)
-		return reg
+		return nil, fmt.Errorf("verification: malformed %s: %w", path, err)
+	}
+	for i, s := range user.Suppressions {
+		if strings.TrimSpace(s.File) == "" || strings.TrimSpace(s.Rule) == "" || strings.TrimSpace(s.Reason) == "" {
+			return nil, fmt.Errorf("verification: invalid %s entry %d: file, rule, and reason are required", path, i+1)
+		}
 	}
 	reg.Suppressions = append(reg.Suppressions, user.Suppressions...)
-	return reg
+	return reg, nil
+}
+
+// funcResolver maps a repo file:line to its enclosing Go function name,
+// lazily and cached per file. It lets Func-keyed suppressions survive line
+// drift (an edit above the site no longer un-suppresses the class). Only
+// .go files are parsed, and only on first query for that file; a file that
+// fails to parse or lies outside the root resolves to "" (no match) so a
+// Func-keyed entry never silently suppresses on broken input.
+type funcResolver struct {
+	root  string
+	cache map[string]map[int]string // rel path -> line -> enclosing func name
+	mu    sync.Mutex
+}
+
+func newFuncResolver(root string) *funcResolver {
+	return &funcResolver{root: root, cache: map[string]map[int]string{}}
+}
+
+func (r *funcResolver) funcFor(rel string, line int) string {
+	if r == nil || r.root == "" || !strings.HasSuffix(rel, ".go") {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m, ok := r.cache[rel]; ok {
+		return m[line]
+	}
+	m := map[int]string{}
+	path := filepath.Join(r.root, filepath.FromSlash(rel))
+	src, err := os.ReadFile(path)
+	if err == nil {
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, src, 0)
+		if perr == nil {
+			for _, decl := range f.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				name := fd.Name.Name
+				start := fset.Position(fd.Pos()).Line
+				end := fset.Position(fd.End()).Line
+				for l := start; l <= end; l++ {
+					if _, exists := m[l]; !exists {
+						m[l] = name
+					}
+				}
+			}
+		}
+	}
+	r.cache[rel] = m
+	return m[line]
 }

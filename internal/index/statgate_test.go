@@ -14,6 +14,8 @@ import (
 // check takes the content-walk branch (treeOID cannot vouch) — exactly the
 // dirty-tree hot path the gate exists for.
 func TestStaleStatGateSkipsRehash(t *testing.T) {
+	// Mutate-then-recheck on one instance: memo off.
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	root := fixtureTree(t)
 	ix, err := Build(root)
 	if err != nil {

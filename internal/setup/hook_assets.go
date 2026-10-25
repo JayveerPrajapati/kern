@@ -39,13 +39,30 @@ func writeGuardScriptGlobal() (string, error) {
 	return writeGuardScriptTo(filepath.Join(globalHomeDir(), ".kern", "hooks"))
 }
 
+// guardHookCommand returns the PreToolUse command hosts install: the pure-Go
+// `kern guard hook` (one process — classify, serve and audit without
+// sh/jq/shasum spawns; parity-pinned by guard_hook_parity_test.go) when the
+// running kern binary can be resolved, with the shell script as the fallback
+// when it cannot. The fallback script is always shipped to
+// ~/.kern/hooks/kern-guard.sh either way (hosts may exec it via sh, and
+// `kern remove` treats it as the shared piece).
+func guardHookCommand() (string, error) {
+	if _, err := writeGuardScriptGlobal(); err != nil {
+		return "", err
+	}
+	if bin, err := os.Executable(); err == nil && bin != "" {
+		return bin + " guard hook", nil
+	}
+	return writeGuardScriptGlobal()
+}
+
 // wireGuardHook registers a single kern-guard PreToolUse hook group at path
 // via mergeHookGroups. event is the hooks-object key (agents disagree on
 // casing: Claude/Qwen/Qoder/Codex/Continue use "PreToolUse", Cursor/Copilot
 // "preToolUse"); matcher selects the built-in tools to gate; note is the
 // success Status text.
 func wireGuardHook(agent, event, matcher, path, note string) Status {
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{Agent: agent, Installed: false, Path: path, Note: err.Error()}
 	}
@@ -54,7 +71,7 @@ func wireGuardHook(agent, event, matcher, path, note string) Status {
 			map[string]any{
 				"matcher": matcher,
 				"hooks": []any{
-					map[string]any{"type": "command", "command": guardPath},
+					map[string]any{"type": "command", "command": guardCmd},
 				},
 			},
 		},

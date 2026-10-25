@@ -128,7 +128,7 @@ func categoryToolAllowed(t Tool, category string) bool {
 // Server) rather than re-read from the environment on every call. Catalog
 // membership is resolved through the init-built toolByName map (O(1)) — built
 // from the same `tools` slice every caller passes — instead of a linear scan
-// of the ~140-tool catalog per call.
+// of the tool catalog per call.
 func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 	if len(allowed) == 0 {
 		return true
@@ -251,8 +251,8 @@ func (s *Server) filteredTools() []Tool {
 		return s.filtered
 	}
 	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 6-tool middle set (deprecated;
-	// prefer the default 29-tool set or KERN_MCP_FULL). Otherwise the
-	// DEFAULT: the 29-tool defaultTools surface.
+	// prefer the full 32-tool catalog). Otherwise the
+	// DEFAULT: the full 32-tool catalog (standing mandate 2026-10-23).
 	var keep map[string]bool
 	if highLevelOnly() {
 		keep = highLevelTools

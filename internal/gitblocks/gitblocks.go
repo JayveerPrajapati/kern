@@ -119,6 +119,7 @@ var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line
 .windsurf/
 .opencode/node_modules/
 .opencode/package-lock.json
+opencode.json.bak
 .cortexkit/
 CLAUDE.md
 GEMINI.md

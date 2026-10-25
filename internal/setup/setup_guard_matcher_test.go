@@ -28,9 +28,9 @@ func TestWireCodexHooksFullMatcher(t *testing.T) {
 	if !strings.Contains(string(b), `"matcher": "Read|Grep|Glob|Bash"`) {
 		t.Fatalf("codex PreToolUse matcher must be Read|Grep|Glob|Bash:\n%s", b)
 	}
-	// The hook must reference the guard script (wiring sanity).
-	if !strings.Contains(string(b), "kern-guard.sh") {
-		t.Fatalf("codex hook does not reference kern-guard.sh:\n%s", b)
+	// The hook must reference the guard hook command (wiring sanity).
+	if !strings.Contains(string(b), " guard hook") {
+		t.Fatalf("codex hook does not reference the guard hook command:\n%s", b)
 	}
 }
 

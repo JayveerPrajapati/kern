@@ -3,35 +3,36 @@
      The catalog:doc gate (G36) fails when this file is stale or a tool is missing. -->
 # MCP Tool Catalog
 
-Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
+Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
-| `kern_arch` | explore | low | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings. |
+| `kern_apply` | edit | high | Apply edits transactionally, verify, roll back on failure: the safe edit path. Multi-file {path, content} edits go through a sandboxed compile gate, then scoped `go test` on the modified packages; a verify failure restores the live tree. Returns a deterministic receipt hash. |
+| `kern_arch` | explore | low | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple. Large by default (tens of KB on big repos) — set max_output to bound it. |
 | `kern_ast_search` | explore | low | AST-level symbol search over the indexed project (all indexed languages — Go extraction is richest; Java, Python, TS/JS, Rust and more carry symbols, calls, inheritance): patterns like 'func greet', 'type *User*'. |
 | `kern_buddy` | explore | low | Session onboarding digest: the project's conventions, layout, entry points and gotchas distilled from the index, docs, history. |
 | `kern_compact_file` | explore | low | Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Pass tier=full for the verbatim file, tier=folded for signatures. Use before reading files in large codebases. |
 | `kern_context` | explore | low | Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls. |
 | `kern_doc` | cross | medium | Project documentation, one tool for every action: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (the ONLY network call in kern), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
 | `kern_evidence` | verify | medium | Signed-evidence toolkit: verify validates a bundle (tamper-seal, signature, audit-chain replay), explain renders it in plain language, export builds a signed bundle, anchor validates a code claim and issues a tamper-evident SHA-256 certificate. |
-| `kern_exec` | edit | critical | Run code in an isolated runtime, return ONLY stdout. Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). |
+| `kern_exec` | edit | critical | Run code in a network-isolated runtime (egress denied), return ONLY stdout. Sensitive-path reads are blocked; filesystem WRITES are not contained on macOS (Linux Landlock confines writes). Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). |
 | `kern_explore` | explore | low | One-call symbol exploration: definition source, callers, callees, and blast radius up to N hops; optional why-rationale. |
 | `kern_fetch_raw_anchor` | cross | low | Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand. |
-| `kern_fit_context` | plan | low | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). |
-| `kern_graph` | explore | low | One-call graph context. |
+| `kern_fit_context` | plan | low | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). Pass at least one of files, symbols or query — with none, the call returns "No matching files or symbols found to fit." |
+| `kern_graph` | explore | low | One-call graph context: a symbol's call-graph neighbourhood — callers first, then callees, every edge tagged with its provenance tier; use format=one-line for the compact single-line adjacency. |
 | `kern_heal` | edit | high | Self-correction loop: run validation, ask a local Ollama model to fix failing files in a throwaway snapshot, re-validate. Never edits the working tree. |
-| `kern_impact` | plan | medium | Estimate the impact/blast radius of a change to a symbol. |
+| `kern_impact` | plan | medium | Estimate the impact/blast radius of a change to a symbol: transitively affected symbols/files/services/tests, deterministic risk, typed claims. Read-only; risk=true renders the governance risk assessment instead. |
 | `kern_mask_pii` | cross | low | Locally scan text for secrets/PII (API keys, passwords, tokens, URLs, emails). |
 | `kern_memory` | cross | medium | Project brain memory, one tool for every action: add a lesson, list stored lessons, recall by prompt, ranked recall with decay half-life, remove by list-index or text prefix, or clear the whole store. |
 | `kern_meta` | meta | medium | Single entry point: describe what you need in natural language; kern classifies and runs the right tool(s). Full catalog reachable through this router. |
-| `kern_optimize` | cross | low | Compress context, one tool for every action: action=prompt compresses and masks a raw prompt, action=log strips log noise (errors/warnings/stack traces), action=output compresses an LLM response. Deliberately not cacheable: prompt optimization injects project memory and session state. |
+| `kern_optimize` | cross | low | Compress context: action=prompt compresses and masks a raw prompt, action=log strips log noise (errors/warnings/stack traces), action=output compresses an LLM response. Not cacheable: prompt optimization injects project memory and session state. |
 | `kern_path` | explore | low | Shortest call path between two symbols, following in-project call edges in either direction. |
 | `kern_plan` | plan | medium | Produce an implementation plan for a proposed change: affected files, dependencies, risks, required validation. Deterministic; no LLM. |
-| `kern_plan_context` | plan | low | Deterministically plan which context to include for a change. |
+| `kern_plan_context` | plan | low | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable; json=true returns the structured plan. |
 | `kern_probe` | explore | low | Micro-context router: extract symbols from a task (bug report, error text) and return a budget-capped bundle of definitions, callers, callees and tests. |
 | `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. |
-| `kern_review` | verify | low | Token-optimised code-review context for changed files. |
-| `kern_run` | cross | high | Run an intent through the full task pipeline. |
+| `kern_review` | verify | low | Token-optimised code-review context for changed files: line-scoped changed symbols with their callers, blast radius, risk and test gaps — the smallest answer a reviewer needs. Scope: a git range (default: working-tree changes) or an explicit file list. |
+| `kern_run` | cross | high | Run an intent through the full task pipeline: compile it, select workflow + capabilities + agents, create the Task, run the policy preflight, and return the result (task, workflow, risk/approval, caps, tools, agents, next steps). |
 | `kern_search` | explore | low | Ranked free-text symbol search: symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama. |
 | `kern_semcache` | cross | medium | Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity. |
 | `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered. |
@@ -39,19 +40,26 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 | `kern_verify` | verify | medium | Verify a change with the unified engine (build, unit tests, security, architecture, dependency). fast=changed-scope build+tests; full=complete suite |
 | `kern_why` | explore | low | Rationale and doc-reference report for a symbol: doc comment, who depends on it and why, in/out edge counts. |
 
+## `kern_apply`
+
+- Phase: `edit`
+- Risk: `high`
+- Description: Apply edits transactionally, verify, roll back on failure: the safe edit path. Multi-file {path, content} edits go through a sandboxed compile gate, then scoped `go test` on the modified packages; a verify failure restores the live tree. Returns a deterministic receipt hash.
+- Input parameters: `dry_run`, `edits`, `format`, `root`, `test`
+
 ## `kern_arch`
 
 - Phase: `explore`
 - Risk: `low`
-- Description: Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings.
-- Input parameters: `root`
+- Description: Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple. Large by default (tens of KB on big repos) — set max_output to bound it.
+- Input parameters: `max_output`, `no_cache`, `root`, `slice`
 
 ## `kern_ast_search`
 
 - Phase: `explore`
 - Risk: `low`
 - Description: AST-level symbol search over the indexed project (all indexed languages — Go extraction is richest; Java, Python, TS/JS, Rust and more carry symbols, calls, inheritance): patterns like 'func greet', 'type *User*'.
-- Input parameters: `limit`, `max_output`, `pattern`, `root`, `slice`
+- Input parameters: `limit`, `max_output`, `no_cache`, `pattern`, `root`, `slice`
 
 ## `kern_buddy`
 
@@ -65,14 +73,14 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Pass tier=full for the verbatim file, tier=folded for signatures. Use before reading files in large codebases.
-- Input parameters: `etag`, `max_output`, `path`, `root`, `slice`, `tier`
+- Input parameters: `etag`, `max_output`, `no_cache`, `path`, `root`, `slice`, `tier`
 
 ## `kern_context`
 
 - Phase: `explore`
 - Risk: `low`
 - Description: Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls.
-- Input parameters: `agent_id`, `agent_token`, `etag`, `lens`, `lines`, `max_tokens`, `profile`, `root`, `scope`, `symbol`, `task`, `with_freshness`
+- Input parameters: `agent_id`, `agent_token`, `etag`, `lens`, `lines`, `max_tokens`, `no_cache`, `profile`, `root`, `scope`, `symbol`, `task`, `with_freshness`
 
 ## `kern_doc`
 
@@ -92,7 +100,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 
 - Phase: `edit`
 - Risk: `critical`
-- Description: Run code in an isolated runtime, return ONLY stdout. Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1).
+- Description: Run code in a network-isolated runtime (egress denied), return ONLY stdout. Sensitive-path reads are blocked; filesystem WRITES are not contained on macOS (Linux Landlock confines writes). Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1).
 - Input parameters: `anchor`, `code`, `egress`, `lang`, `list`, `max`, `no_isolate`, `output`, `stdin`, `timeout`
 
 ## `kern_explore`
@@ -100,7 +108,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: One-call symbol exploration: definition source, callers, callees, and blast radius up to N hops; optional why-rationale.
-- Input parameters: `agent_id`, `agent_token`, `depth`, `etag`, `explain`, `max`, `max_output`, `max_tokens`, `min_confidence`, `root`, `scope`, `slice`, `symbol`, `task`, `with_freshness`
+- Input parameters: `agent_id`, `agent_token`, `depth`, `etag`, `explain`, `max`, `max_output`, `max_tokens`, `min_confidence`, `no_cache`, `root`, `scope`, `slice`, `symbol`, `task`, `with_freshness`
 
 ## `kern_fetch_raw_anchor`
 
@@ -113,15 +121,15 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 
 - Phase: `plan`
 - Risk: `low`
-- Description: Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary).
+- Description: Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). Pass at least one of files, symbols or query — with none, the call returns "No matching files or symbols found to fit."
 - Input parameters: `files`, `format`, `max_tokens`, `query`, `root`, `symbols`
 
 ## `kern_graph`
 
 - Phase: `explore`
 - Risk: `low`
-- Description: One-call graph context.
-- Input parameters: `agent_id`, `agent_token`, `entities`, `etag`, `format`, `max_tokens`, `min_confidence`, `root`, `scope`, `symbol`, `task`, `with_freshness`
+- Description: One-call graph context: a symbol's call-graph neighbourhood — callers first, then callees, every edge tagged with its provenance tier; use format=one-line for the compact single-line adjacency.
+- Input parameters: `agent_id`, `agent_token`, `entities`, `etag`, `format`, `max_tokens`, `min_confidence`, `no_cache`, `root`, `scope`, `symbol`, `task`, `with_freshness`
 
 ## `kern_heal`
 
@@ -134,7 +142,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 
 - Phase: `plan`
 - Risk: `medium`
-- Description: Estimate the impact/blast radius of a change to a symbol.
+- Description: Estimate the impact/blast radius of a change to a symbol: transitively affected symbols/files/services/tests, deterministic risk, typed claims. Read-only; risk=true renders the governance risk assessment instead.
 - Input parameters: `change`, `kind`, `max_output`, `new_target`, `persist_task`, `risk`, `root`, `slice`
 
 ## `kern_mask_pii`
@@ -142,7 +150,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `cross`
 - Risk: `low`
 - Description: Locally scan text for secrets/PII (API keys, passwords, tokens, URLs, emails).
-- Input parameters: `mask_names`, `text`
+- Input parameters: `mask_names`, `no_cache`, `text`
 
 ## `kern_memory`
 
@@ -156,13 +164,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `meta`
 - Risk: `medium`
 - Description: Single entry point: describe what you need in natural language; kern classifies and runs the right tool(s). Full catalog reachable through this router.
-- Input parameters: `agent_id`, `args`, `max_output`, `phase`, `request`, `root`, `scope`, `slice`, `task`
+- Input parameters: `agent_id`, `args`, `max_output`, `no_cache`, `phase`, `request`, `root`, `scope`, `slice`, `task`
 
 ## `kern_optimize`
 
 - Phase: `cross`
 - Risk: `low`
-- Description: Compress context, one tool for every action: action=prompt compresses and masks a raw prompt, action=log strips log noise (errors/warnings/stack traces), action=output compresses an LLM response. Deliberately not cacheable: prompt optimization injects project memory and session state.
+- Description: Compress context: action=prompt compresses and masks a raw prompt, action=log strips log noise (errors/warnings/stack traces), action=output compresses an LLM response. Not cacheable: prompt optimization injects project memory and session state.
 - Input parameters: `action`, `attached_log`, `cache`, `context_after`, `context_before`, `few_shot`, `log`, `mask`, `mask_names`, `model`, `profile`, `prompt`, `root`, `session`, `structured_markers`, `text`
 
 ## `kern_path`
@@ -170,7 +178,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Shortest call path between two symbols, following in-project call edges in either direction.
-- Input parameters: `from`, `min_confidence`, `root`, `to`
+- Input parameters: `from`, `min_confidence`, `no_cache`, `root`, `to`
 
 ## `kern_plan`
 
@@ -183,7 +191,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 
 - Phase: `plan`
 - Risk: `low`
-- Description: Deterministically plan which context to include for a change.
+- Description: Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable; json=true returns the structured plan.
 - Input parameters: `budget`, `change`, `json`, `root`
 
 ## `kern_probe`
@@ -191,7 +199,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Micro-context router: extract symbols from a task (bug report, error text) and return a budget-capped bundle of definitions, callers, callees and tests.
-- Input parameters: `max_tokens`, `min_confidence`, `root`, `task`
+- Input parameters: `max_tokens`, `min_confidence`, `no_cache`, `root`, `task`
 
 ## `kern_project_map`
 
@@ -204,14 +212,14 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 
 - Phase: `verify`
 - Risk: `low`
-- Description: Token-optimised code-review context for changed files.
+- Description: Token-optimised code-review context for changed files: line-scoped changed symbols with their callers, blast radius, risk and test gaps — the smallest answer a reviewer needs. Scope: a git range (default: working-tree changes) or an explicit file list.
 - Input parameters: `file`, `lens`, `max_tokens`, `profile`, `range`, `root`
 
 ## `kern_run`
 
 - Phase: `cross`
 - Risk: `high`
-- Description: Run an intent through the full task pipeline.
+- Description: Run an intent through the full task pipeline: compile it, select workflow + capabilities + agents, create the Task, run the policy preflight, and return the result (task, workflow, risk/approval, caps, tools, agents, next steps).
 - Input parameters: `intent`, `root`
 
 ## `kern_search`
@@ -219,7 +227,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Ranked free-text symbol search: symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama.
-- Input parameters: `etag`, `limit`, `max_output`, `query`, `root`, `semantic`, `slice`
+- Input parameters: `etag`, `limit`, `max_output`, `no_cache`, `query`, `root`, `semantic`, `slice`
 
 ## `kern_semcache`
 
@@ -254,5 +262,5 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 31 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Rationale and doc-reference report for a symbol: doc comment, who depends on it and why, in/out edge counts.
-- Input parameters: `etag`, `min_confidence`, `root`, `symbol`
+- Input parameters: `etag`, `max_output`, `min_confidence`, `no_cache`, `root`, `symbol`
 

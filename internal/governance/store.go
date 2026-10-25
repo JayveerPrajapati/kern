@@ -490,6 +490,15 @@ func pruneApprovals(approvals []domain.Approval) []domain.Approval {
 			pending = append(pending, a)
 			continue
 		}
+		// Live Ask-Protocol prefix grants are active authorizations, not
+		// history: pruning one would silently revoke a grant a human
+		// explicitly gave (and whose expiry/uses they can see in
+		// `kern approval list`). Keep them alongside pending records; dead
+		// grants (expired/capped/tampered) fall through to resolved history.
+		if livePrefixGrant(a) {
+			pending = append(pending, a)
+			continue
+		}
 		resolved = append(resolved, a)
 	}
 	if len(resolved) <= maxResolvedApprovals {

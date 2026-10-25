@@ -17,8 +17,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	mcpcatalog "github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 )
 
 // cliTableKeyRe recovers each `"name": {` entry key from the commandTable
@@ -138,5 +141,65 @@ func TestCLIReferenceDocListsOnlyLiveCommands(t *testing.T) {
 			"Remove or rewrite the one-liner — the doc must mirror the shipped dispatch table only "+
 			"(pivot slims deleted these commands; re-adding a command means re-registering it, not re-advertising it).",
 			len(ghost), tablePath, strings.Join(ghost, ", "))
+	}
+}
+
+// TestVerifyUsageListsAllCheckTypes pins the blind-critique Phase 3 fix
+// (2026-10-24): the `kern verify` usage string in dispatch_table.go AND the
+// verify row in docs/cli-reference.md must list EVERY check type the runtime
+// accepts (catalog.VerifyTypesKnown) and nothing else. Before the fix the
+// usage listed 8 of 14 and the doc 5 of 14 — dispatch usage strings are not
+// covered by the markdown parity gates above, which is exactly how the drift
+// survived; this test closes that hole for the verify types family.
+func TestVerifyUsageListsAllCheckTypes(t *testing.T) {
+	tableB, err := os.ReadFile("dispatch_table.go")
+	if err != nil {
+		t.Fatalf("read dispatch_table.go: %v", err)
+	}
+	docPath := filepath.Join("..", "..", "docs", "cli-reference.md")
+	docB, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", docPath, err)
+	}
+
+	// The usage high-level line: "kern verify [build,test,...] [--types X]".
+	usageList := regexp.MustCompile(`high-level: kern verify \[([^\]]+)\]`).
+		FindSubmatch(tableB)
+	if usageList == nil {
+		t.Fatalf("dispatch_table.go verify usage lost its high-level type list")
+	}
+	// The doc row: "unified verification engine (types: build,test,...; --types T)".
+	// (The class must allow digits — e2e is a valid type.)
+	docList := regexp.MustCompile(`unified verification engine \(types: ([a-z0-9,\-]+);`).
+		FindSubmatch(docB)
+	if docList == nil {
+		t.Fatalf("docs/cli-reference.md verify row lost its types list")
+	}
+
+	known := map[string]bool{}
+	for _, ty := range mcpcatalog.VerifyTypesKnown {
+		known[ty] = true
+	}
+	for _, pair := range []struct {
+		surface string
+		got     []string
+	}{
+		{"dispatch_table.go verify usage", strings.Split(string(usageList[1]), ",")},
+		{"docs/cli-reference.md verify row", strings.Split(string(docList[1]), ",")},
+	} {
+		if len(pair.got) != len(mcpcatalog.VerifyTypesKnown) {
+			t.Errorf("%s lists %d check types (%s), runtime accepts %d — help/runtime drift",
+				pair.surface, len(pair.got), strings.Join(pair.got, ","), len(mcpcatalog.VerifyTypesKnown))
+		}
+		for _, ty := range pair.got {
+			if !known[ty] {
+				t.Errorf("%s lists unknown check type %q (not in VerifyTypesKnown)", pair.surface, ty)
+			}
+		}
+		for _, ty := range mcpcatalog.VerifyTypesKnown {
+			if !slices.Contains(pair.got, ty) {
+				t.Errorf("%s does not mention check type %q — runtime accepts it (VerifyTypesKnown) but the help text hides it", pair.surface, ty)
+			}
+		}
 	}
 }

@@ -372,6 +372,9 @@ func saveIndex(ns string, es []entry) error {
 // appended and the index is capped at MaxEntries (least-recently-used dropped
 // first, ordered by the last-use At that hits refresh).
 func Store(ns, input string, v any) error {
+	if os.Getenv("KERN_READONLY") == "1" {
+		return nil // read-path persistence suppressed for read-only sessions
+	}
 	st := lockFor(ns)
 	key := "sem/" + ns + "/" + cache.Hash([]byte(input))
 	// Record the payload size so hits can report a savings estimate (bytes

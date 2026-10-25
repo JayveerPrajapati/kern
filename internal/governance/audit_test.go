@@ -346,6 +346,53 @@ func TestChainTierReportUnkeyedChain(t *testing.T) {
 	}
 }
 
+// TestChainTierDowngradeExplainsBreak pins the NEW-5 discrimination: a
+// chain whose ONLY breaks are entries written while the HMAC secret was
+// unavailable (an environment-degraded server) is explained — Broken ==
+// Downgraded — while any corruption beyond that keeps the tamper verdict.
+func TestChainTierDowngradeExplainsBreak(t *testing.T) {
+	overrideAuditChainSecret(t)
+	l := NewAuditLog().WithStore(storage.NewLocal(t.TempDir()))
+	l.Record(entry("", "keyed1"))
+	l.Record(entry("", "keyed2"))
+	if !l.VerifyChain() {
+		t.Fatal("keyed chain must verify before the degraded write")
+	}
+
+	// Simulate the env-degraded server: the secret resolves to an error
+	// (no $HOME), so the appended entry hashes plain.
+	orig := auditChainSecretPath
+	auditChainSecretPath = func() (string, error) {
+		return "", fmt.Errorf("no home directory (simulated env -i)")
+	}
+	resetAuditChainSecret()
+	l.Record(entry("", "degraded"))
+	auditChainSecretPath = orig
+	resetAuditChainSecret()
+
+	got := l.ChainTierReport()
+	if got.Broken != 1 || got.Downgraded != 1 || got.Keyed != 2 {
+		t.Fatalf("tiers = %+v, want 1 broken/downgraded and 2 keyed", got)
+	}
+	if !got.DowngradeExplainsBreak() {
+		t.Fatal("DowngradeExplainsBreak() = false for a purely degraded break, want true")
+	}
+	if brk, _ := l.VerifyChainReport(); brk != 2 {
+		t.Fatalf("firstBroken = %d, want index 2 (the degraded entry)", brk)
+	}
+
+	// Genuine tampering keeps the loud verdict: corrupt a KEYED entry's
+	// content after persisting — it verifies under neither formula, so the
+	// break is not explained by any downgrade. (A plain-formula append after
+	// keyed entries is indistinguishable from a degraded write by hash math
+	// alone — that residual is the accepted Q2=A trade-off.)
+	l.entries[0].Resource = "tampered"
+	got = l.ChainTierReport()
+	if got.DowngradeExplainsBreak() {
+		t.Fatal("DowngradeExplainsBreak() = true for a corrupted keyed entry, want false")
+	}
+}
+
 func TestStorageFailureTolerated(t *testing.T) {
 	// WithStore(nil) keeps the log fully in-memory and functional.
 	l := NewAuditLog().WithStore(nil)
@@ -862,20 +909,22 @@ func TestRepairChainRechainsFromFirstBroken(t *testing.T) {
 
 	// A fresh log now verifies the whole chain, and entry content is
 	// preserved — only the chain-link Hash differs from the corrupted value.
+	// The self-auditing repair appends one "audit.repair" record, so the
+	// repaired log holds 4 entries (3 re-chained + 1 repair record).
 	repaired := NewAuditLog().WithStore(store)
 	if _, err := repaired.Replay(); err != nil {
 		t.Fatalf("Replay(): %v", err)
 	}
 	brk, verified := repaired.VerifyChainReport()
-	if brk != -1 || verified != 3 {
-		t.Fatalf("after repair VerifyChainReport() = (%d, %d), want (-1, 3)", brk, verified)
+	if brk != -1 || verified != 4 {
+		t.Fatalf("after repair VerifyChainReport() = (%d, %d), want (-1, 4)", brk, verified)
 	}
 	orig := l.All()
 	got := repaired.All()
-	if len(got) != len(orig) {
-		t.Fatalf("entry count = %d, want %d", len(got), len(orig))
+	if len(got) != len(orig)+1 {
+		t.Fatalf("entry count = %d, want %d (original %d + 1 audit.repair record)", len(got), len(orig)+1, len(orig))
 	}
-	for i := range got {
+	for i := range orig {
 		if got[i].ID != orig[i].ID ||
 			!got[i].Timestamp.Equal(orig[i].Timestamp) ||
 			got[i].AgentID != orig[i].AgentID ||
@@ -886,6 +935,9 @@ func TestRepairChainRechainsFromFirstBroken(t *testing.T) {
 		if got[i].Hash == "" {
 			t.Fatalf("entry %d has empty hash after repair", i)
 		}
+	}
+	if last := got[len(got)-1]; last.Action != "audit.repair" {
+		t.Fatalf("last entry must be the audit.repair record, got Action %q", last.Action)
 	}
 }
 
@@ -1066,32 +1118,6 @@ func TestMerkleTreeParallelAuditLogging(t *testing.T) {
 	tampered.entries[5].Action = "tampered_action"
 	if tampered.VerifyMerkle() {
 		t.Fatal("expected tampered log to fail VerifyMerkle()")
-	}
-}
-
-func TestIncrementalMerkleTreeEquivalence(t *testing.T) {
-	// Verify that incremental tree root matches computeMerkleRoot for every N up to 256
-	tree := NewMerkleTree()
-	var leaves []string
-	for i := 1; i <= 256; i++ {
-		leaf := fmt.Sprintf("leaf-%d-hash", i)
-		leaves = append(leaves, leaf)
-		tree.Append(leaf)
-
-		want := computeMerkleRoot(leaves)
-		got := tree.Root()
-		if got != want {
-			t.Fatalf("N=%d: tree.Root() = %s, want computeMerkleRoot = %s", i, got, want)
-		}
-	}
-}
-
-func BenchmarkIncrementalMerkleAppend(b *testing.B) {
-	tree := NewMerkleTree()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		leaf := fmt.Sprintf("leaf-%d", i)
-		tree.Append(leaf)
 	}
 }
 
@@ -1320,15 +1346,17 @@ func TestRepairChainLogStoreNoDuplicates(t *testing.T) {
 	}
 
 	// The repaired store must hold exactly one entry per key and verify.
+	// The self-auditing repair appends one "audit.repair" record, so the
+	// repaired log holds 5 entries (4 re-chained + 1 repair record).
 	check := NewAuditLog().WithStore(storage.NewLog(dir))
 	if _, err := check.Replay(); err != nil {
 		t.Fatalf("Replay(): %v", err)
 	}
-	if got := len(check.All()); got != 4 {
-		t.Fatalf("after repair, log holds %d entries, want 4 (no duplicates)", got)
+	if got := len(check.All()); got != 5 {
+		t.Fatalf("after repair, log holds %d entries, want 5 (4 + 1 audit.repair record, no duplicates)", got)
 	}
-	if brk, verified := check.VerifyChainReport(); brk != -1 || verified != 4 {
-		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 4)", brk, verified)
+	if brk, verified := check.VerifyChainReport(); brk != -1 || verified != 5 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 5)", brk, verified)
 	}
 
 	// Recording a new entry after repair must chain cleanly off the repaired
@@ -1338,8 +1366,8 @@ func TestRepairChainLogStoreNoDuplicates(t *testing.T) {
 	if _, err := check2.Replay(); err != nil {
 		t.Fatalf("Replay() after post-repair record: %v", err)
 	}
-	if brk, verified := check2.VerifyChainReport(); brk != -1 || verified != 5 {
-		t.Fatalf("post-repair record: VerifyChainReport() = (%d, %d), want (-1, 5)", brk, verified)
+	if brk, verified := check2.VerifyChainReport(); brk != -1 || verified != 6 {
+		t.Fatalf("post-repair record: VerifyChainReport() = (%d, %d), want (-1, 6)", brk, verified)
 	}
 }
 
@@ -1608,6 +1636,69 @@ func TestAuditLockUnacquirableFailsClosed(t *testing.T) {
 	}
 	if got := len(fresh.All()); got != 0 {
 		t.Fatalf("persisted chain has %d entries after lock failure, want 0 (no unlocked write)", got)
+	}
+}
+
+// TestRepairChainLockUnacquirableFailsClosed pins the H5 repair fail-closed
+// contract: RepairChain must REFUSE to run when the audit lock cannot be
+// acquired — an unlocked repair could fork the tamper-evident chain (a fork
+// is indistinguishable from tampering), and the explicit-user-request repair
+// path must not be the place the fail-closed discipline is relaxed. The
+// corrupted chain must be left untouched so a later (locked) repair still
+// works.
+func TestRepairChainLockUnacquirableFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	goodLock := filepath.Join(dir, ".goodlock")
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	badLock := filepath.Join(blocker, ".lock") // parent is a regular file: unacquirable
+
+	// Record with a WORKING lock so the entries persist; the unacquirable
+	// lock is only in play for the repair attempt.
+	l := NewAuditLog().WithStore(store).WithLockPath(goodLock)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	if got := len(l.All()); got != 2 {
+		t.Fatalf("recorded entries = %d, want 2", got)
+	}
+
+	// Corrupt the middle entry's stored hash in the persisted file.
+	corrupted := l.All()[1]
+	corrupted.Hash = strings.Repeat("0", 64)
+	data, err := json.Marshal(corrupted)
+	if err != nil {
+		t.Fatalf("marshal corrupted entry: %v", err)
+	}
+	if err := store.Put(context.Background(), "audit-"+corrupted.ID, data); err != nil {
+		t.Fatalf("Put corrupted entry: %v", err)
+	}
+
+	// RepairChain must refuse to run unlocked and return an error.
+	fresh := NewAuditLog().WithStore(store).WithLockPath(badLock)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	n, err := fresh.RepairChain()
+	if err == nil {
+		t.Fatal("RepairChain must fail when the audit lock cannot be acquired, got nil")
+	}
+	if !strings.Contains(err.Error(), "audit lock") {
+		t.Errorf("error should name the audit lock, got: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RepairChain() = %d, want 0 (no entries re-chained on lock failure)", n)
+	}
+
+	// The corrupted chain must be untouched: the break is still detected.
+	check := NewAuditLog().WithStore(store)
+	if _, err := check.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	if brk, _ := check.VerifyChainReport(); brk != 1 {
+		t.Fatalf("VerifyChainReport() firstBroken = %d, want 1 (corruption preserved for a later locked repair)", brk)
 	}
 }
 

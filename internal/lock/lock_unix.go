@@ -24,7 +24,7 @@ func Acquire(root, scope string) (*Lock, error) {
 	if scope == "" {
 		return nil, ErrScopeRequired
 	}
-	if err := os.MkdirAll(dir(root), 0o755); err != nil {
+	if err := os.MkdirAll(dir(root), 0o700); err != nil {
 		return nil, err
 	}
 	p := pathFor(root, scope)
@@ -64,7 +64,7 @@ func (l *Lock) Release() error {
 // PID. The lock file is created if absent so status listings are stable.
 func Held(root, scope string) (bool, int, error) {
 	p := pathFor(root, scope)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return false, 0, err
 	}
 	f, err := flock.TryLock(p)

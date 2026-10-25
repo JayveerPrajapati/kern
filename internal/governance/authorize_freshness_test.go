@@ -16,6 +16,11 @@ import (
 // unchanged tree read an hour after the build must report "fresh" here —
 // previously it said "stale" while every other tool said "fresh".
 func TestFreshnessMatchesProofNotWallClock(t *testing.T) {
+	// Pin the LIVE FreshnessProof computation: the per-index proof memo
+	// (Phase 4.4, KERN_FRESHNESS_PROOF_CACHE_MS, default 5s) would re-serve
+	// the memoized "fresh" verdict from the first call below within its TTL
+	// — this test mutates the tree and must observe the change immediately.
+	t.Setenv("KERN_FRESHNESS_PROOF_CACHE_MS", "0")
 	dir := t.TempDir()
 	main := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(main, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {

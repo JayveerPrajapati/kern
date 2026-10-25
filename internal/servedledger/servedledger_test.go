@@ -19,7 +19,7 @@ func TestRecordLookupRoundtrip(t *testing.T) {
 	if !ok {
 		t.Fatal("lookup must hit after record")
 	}
-	want := "already served this session (call #1, etag etagA) — re-send with etag etagA to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
+	want := "already served this session (call #1, etag etagA) — re-send with that etag to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
 	if ptr != want {
 		t.Fatalf("pointer = %q, want %q", ptr, want)
 	}

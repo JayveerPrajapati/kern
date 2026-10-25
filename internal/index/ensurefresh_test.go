@@ -315,14 +315,16 @@ func TestEnsureFresh_DecisiveStaleSkipsLooseCheck(t *testing.T) {
 	}
 }
 
-// TestEnsureFresh_NonConvergence: an index that stays stale after the update
-// must fail closed with Freshness "stale". Deterministic non-convergence:
-// a non-git repo (no tree-OID identity to fall back on) whose source tree
-// contains a file larger than the build's maxFileBytes cap — the build (and
-// the incremental update) skip it, but the strict/loose content-root proof
-// counts every indexable file, so the content root can never match. Both the
-// strict and the loose re-verify report stale → fail-closed "stale".
-func TestEnsureFresh_NonConvergence(t *testing.T) {
+// TestEnsureFresh_OverCapFileConverges: a source file larger than the build's
+// maxFileBytes cap is EXCLUDED from the index by policy — the build skips it,
+// and (after the M1 walk-selection fix) the content-root proof skips it the
+// same way. Before the fix the proof counted every indexable file while the
+// build skipped the over-cap one, so the content root could never match and
+// the index was PERMANENTLY stale — every freshness check rebuilt (and then
+// failed to converge). With both walks selecting the same file set the index
+// honestly converges: the over-cap file is not indexable, so its exclusion is
+// part of the truth. Regression test for the false-STALE rebuild loop.
+func TestEnsureFresh_OverCapFileConverges(t *testing.T) {
 	root := t.TempDir()
 	writeGoFile(t, root, "small.go", "package small\n\nfunc S() {}\n")
 	// > maxFileBytesCap (64 MiB) so no machine's adaptive limit admits it.
@@ -337,11 +339,11 @@ func TestEnsureFresh_NonConvergence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
 	}
-	if res.Freshness != "stale" {
-		t.Fatalf("Freshness = %q, want %q (non-converging index must fail closed)", res.Freshness, "stale")
+	if res.Freshness != "fresh" {
+		t.Fatalf("Freshness = %q, want %q (over-cap file excluded by BOTH walks — the index must converge, not rebuild-loop)", res.Freshness, "fresh")
 	}
-	if res.FreshnessProof.Verdict == FreshnessFresh {
-		t.Errorf("verdict = %q, want non-fresh for a non-converged index", res.FreshnessProof.Verdict)
+	if res.FreshnessProof.Verdict != FreshnessFresh {
+		t.Errorf("verdict = %q, want %q for a converged index", res.FreshnessProof.Verdict, FreshnessFresh)
 	}
 }
 

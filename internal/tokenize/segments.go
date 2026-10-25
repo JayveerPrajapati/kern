@@ -1,4 +1,4 @@
-package intel
+package tokenize
 
 import (
 	"strings"
@@ -9,9 +9,13 @@ import (
 // would use in prose, and prose normalized into candidate words to match those
 // segments with. "OrderStateMachine" -> order/state/machine, so a query like
 // "state machine" can hit it without a keyword list ever knowing the words.
+//
+// Moved out of internal/intel when its search ranking crossed the
+// architecture ledger's LOC cap (extraction, never cap-raising); the family
+// is pure string tokenization, which is this package's concern.
 
-// Bounds keep degenerate identifiers (minified names, hashes) from bloating the
-// vocabulary: segments outside them carry no prose signal anyway.
+// Bounds keep degenerate identifiers (minified names, hashes) from bloating
+// the vocabulary: segments outside them carry no prose signal anyway.
 const (
 	minSegmentChars    = 2
 	maxSegmentChars    = 32
@@ -20,19 +24,19 @@ const (
 	maxProseChars      = 24
 )
 
-// splitIdentifierSegments splits a symbol or file name into lowercase word
+// SplitIdentifierSegments splits a symbol or file name into lowercase word
 // segments. Handles camelCase / PascalCase (inner lower->Upper), acronym runs
 // ("HTMLParser" -> html/parser), snake_case / kebab-case / dotted names
 // (non-alphanumerics separate), and keeps digits glued to their word
 // ("base64Encode" -> base64/encode). Digit-only fragments are dropped.
-func splitIdentifierSegments(name string) []string {
+func SplitIdentifierSegments(name string) []string {
 	if name == "" {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, run := range wordRuns(name) {
-		for _, part := range splitCamel(run) {
+	for _, run := range WordRuns(name) {
+		for _, part := range SplitCamel(run) {
 			if len(out) >= maxSegmentsPerName {
 				return out
 			}
@@ -40,7 +44,7 @@ func splitIdentifierSegments(name string) []string {
 			if len(seg) < minSegmentChars || len(seg) > maxSegmentChars {
 				continue
 			}
-			if isAllDigits(seg) {
+			if IsAllDigits(seg) {
 				continue
 			}
 			if !seen[seg] {
@@ -52,10 +56,11 @@ func splitIdentifierSegments(name string) []string {
 	return out
 }
 
-// splitCamel splits a run of letters/digits at camelCase humps and acronym-run
-// ends: "orderState" -> [order, State], "base64Encode" -> [base64, Encode],
-// "HTMLParser" -> [HTML, Parser]. Digits act like lowercase for hump detection.
-func splitCamel(run string) []string {
+// SplitCamel splits a run of letters/digits at camelCase humps and
+// acronym-run ends: "orderState" -> [order, State], "base64Encode" ->
+// [base64, Encode], "HTMLParser" -> [HTML, Parser]. Digits act like lowercase
+// for hump detection.
+func SplitCamel(run string) []string {
 	rs := []rune(run)
 	if len(rs) <= 1 {
 		return []string{run}
@@ -79,9 +84,9 @@ func splitCamel(run string) []string {
 	return parts
 }
 
-// wordRuns splits s into maximal runs of letters and digits; anything else
+// WordRuns splits s into maximal runs of letters and digits; anything else
 // (spaces, hyphens, underscores, dots) is a separator.
-func wordRuns(s string) []string {
+func WordRuns(s string) []string {
 	var runs []string
 	start := -1
 	for i, r := range s {
@@ -103,7 +108,9 @@ func wordRuns(s string) []string {
 func isUpper(r rune) bool { return unicode.IsUpper(r) }
 func isLower(r rune) bool { return unicode.IsLower(r) }
 func isDigit(r rune) bool { return unicode.IsDigit(r) }
-func isAllDigits(s string) bool {
+
+// IsAllDigits reports whether s is non-empty and consists only of digits.
+func IsAllDigits(s string) bool {
 	for _, r := range s {
 		if !isDigit(r) {
 			return false
@@ -112,16 +119,17 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// normalizeProseWord lowercases and strips Latin diacritics so "résolution"
-// matches the segment "resolution". Identifiers are overwhelmingly ASCII; this
-// is what buys Latin-script languages their cross-lingual reach on loanwords.
-func normalizeProseWord(word string) string {
+// NormalizeProseWord lowercases and strips Latin diacritics so "résolution"
+// matches the segment "resolution". Identifiers are overwhelmingly ASCII;
+// this is what buys Latin-script languages their cross-lingual reach on
+// loanwords.
+func NormalizeProseWord(word string) string {
 	return strings.ToLower(stripDiacritics(word))
 }
 
-// accentMap maps common accented Latin letters to their base letter. Kept as a
-// dependency-free stand-in for NFD decomposition; covers the diacritics that
-// actually appear in technical prose (é, ü, ñ, ç, å, ...).
+// accentMap maps common accented Latin letters to their base letter. Kept as
+// a dependency-free stand-in for NFD decomposition; covers the diacritics
+// that actually appear in technical prose (é, ü, ñ, ç, å, ...).
 var accentMap = func() map[rune]rune {
 	const accented = "ÀÁÂÃÄÅàáâãäåÈÉÊËèéêëÌÍÎÏìíîïÒÓÔÕÖòóôõöÙÚÛÜùúûüÑñÇç"
 	const base = "AAAAAAaaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuNnCc"
@@ -148,11 +156,11 @@ func stripDiacritics(s string) string {
 	return b.String()
 }
 
-// segmentLookupVariants returns lookup variants for a prose word: the word
+// SegmentLookupVariants returns lookup variants for a prose word: the word
 // itself plus light plural folding ("services" -> service). Only unambiguous
 // English plural spellings are stripped; a trailing -ss is a singular
 // (class, process) and never stripped.
-func segmentLookupVariants(word string) []string {
+func SegmentLookupVariants(word string) []string {
 	variants := []string{word}
 	canStrip2 := len(word) >= minProseChars+2
 	canStrip1 := len(word) >= minProseChars+1

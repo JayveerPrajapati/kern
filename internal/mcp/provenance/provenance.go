@@ -95,7 +95,9 @@ type SymbolProvenance struct {
 // would leak their existence); the denial stays in the auditable proof
 // only. When the returned set exceeds maxResponseSymbols, Symbols carries
 // the first maxResponseSymbols entries and SymbolsTruncated is set; the
-// content text remains the complete listing.
+// content text remains the complete listing. Independently of the count cap,
+// the MCP server trims the listing to the call's output budget — the same
+// cap that bounds the content text.
 type Provenance struct {
 	SchemaVersion    int                `json:"schema_version"`
 	Mode             ProvenanceMode     `json:"mode"`

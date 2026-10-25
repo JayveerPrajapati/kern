@@ -102,15 +102,19 @@ func TestFilteredToolsKernToolsAllowlist(t *testing.T) {
 }
 
 // TestCallToolResolvesUnadvertisedHandler is the correctness invariant for
-// the minimal default surface: kern_meta's NL router must still reach
-// sub-tool handlers that are NOT advertised. kern_graph is not in
-// defaultTools, so with default env the tools/call dispatch must resolve it
-// to its real handler (which errors on a missing symbol arg) rather than
-// failing with "unknown tool".
+// the filtered surface: kern_meta's NL router must still reach sub-tool
+// handlers that are NOT advertised in the active surface. Under
+// KERN_MCP_PHASE=plan, kern_graph (explore-phase) is not advertised, yet the
+// tools/call dispatch must resolve it to its real handler (which errors on a
+// missing symbol arg) rather than failing with "unknown tool".
 func TestCallToolResolvesUnadvertisedHandler(t *testing.T) {
 	clearMCPSurfaceEnv(t)
-	if defaultTools["kern_graph"] {
-		t.Fatal("test premise broken: kern_graph must not be in the default surface")
+	t.Setenv("KERN_MCP_PHASE", "plan")
+	if defaultTools["kern_graph"] && !phaseSurfaceFor(defaultTools, "plan")["kern_graph"] {
+		// kern_graph IS in the default surface but is explore-phase, so the
+		// plan phase must not advertise it — the premise that holds.
+	} else {
+		t.Fatal("test premise broken: kern_graph must not be advertised under phase=plan")
 	}
 	text := mcpToolError(t, "kern_graph", map[string]any{})
 	if strings.Contains(text, "unknown tool") {
@@ -178,8 +182,8 @@ func TestFilteredTools_PhaseExplore(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "explore")
 	assertPhaseSurface(t, "explore",
-		[]string{"kern_search", "kern_meta"},
-		[]string{"kern_plan", "kern_verify", "kern_graph"})
+		[]string{"kern_search", "kern_meta", "kern_graph"},
+		[]string{"kern_plan", "kern_verify"})
 }
 
 // TestFilteredTools_PhasePlan verifies KERN_MCP_PHASE=plan advertises only

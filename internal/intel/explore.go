@@ -274,7 +274,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 
 	rep.fitBudget(ix, maxTokens, calleeSyms)
 
-	radius, radiusSyms, dist, _ := blastRadiusWalk(ix, []string{resolved}, false, *d)
+	radius, radiusSyms, dist, _ := blastRadiusWalk(ix, []string{resolved}, false, maxNodes, *d)
 	rep.NearestDepth = dist
 
 	if depth > 0 {
@@ -290,10 +290,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	} else {
 		rep.BlastRadius = radius
 	}
-	if maxNodes > 0 && len(rep.BlastRadius) > maxNodes {
-		rep.BlastRadius = rep.BlastRadius[:maxNodes]
-		radiusSyms = radiusSyms[:maxNodes]
-	}
+	// The in-walk cap bounds the radius to maxNodes (BFS order ⇒ nearest).
 	// BlastFiles come from the RESOLVED radius symbols, not the names: a
 	// bare name like "Generate" is shared by several packages, and a
 	// first-match name→file map would attribute it to the wrong file

@@ -74,7 +74,7 @@ func equalStrings(a, b []string) bool {
 // from the live table at authoring time (2026-10-01); every token below is
 // the deterministic output of the same extraction expectedFlags uses.
 var goldenUsageFlags = map[string][]string{
-	"approve": {"--approver", "--reason", "--reject", "--root"},
+	"approve": {"--approver", "--prefix", "--reason", "--reject", "--root", "--scope"},
 
 	"approval": {"--approver", "--reason", "--timeout", "--root"},
 
@@ -84,7 +84,7 @@ var goldenUsageFlags = map[string][]string{
 
 	"ast": {"--all", "--root"},
 
-	"audit": {"--file", "--json", "--root"},
+	"audit": {"--file", "--json", "--limit", "--tail", "--root"},
 
 	"authorize-context": {"--agent", "--task", "--deny-path", "--symbol", "--root", "--json"},
 
@@ -108,9 +108,15 @@ var goldenUsageFlags = map[string][]string{
 
 	"evidence": {"--full-state", "--restore", "--root", "--out", "--agent-id", "--task", "--sign", "--file", "--url", "--expect-fingerprint"},
 
-	"exec": {"--json", "--lang", "--list", "--max", "--stdin", "--timeout"},
+	"exec": {"--json", "--lang", "--readonly", "--list", "--max", "--stdin", "--timeout"},
 
 	"explain-context": {"--task", "--budget", "--json", "--root"},
+
+	"orchestrate":     {"--budget", "--json", "--max-tokens", "--mode", "--root", "--task", "--with-skill"},
+	"remember":        {"--auto", "--root"},
+	"memory-ranked":   {"--half-life", "--k", "--root"},
+	"evidence-anchor": {"--claim", "--file", "--line", "--root", "--symbol"},
+	"health":          {"--json", "--root"},
 
 	"explore": {"--depth", "--explain", "--json", "--max", "--max-tokens", "--min-confidence", "--root", "--etag"},
 
@@ -122,11 +128,13 @@ var goldenUsageFlags = map[string][]string{
 
 	"gen-contracts": {"--root", "--check"},
 
+	"gen-plugin": {"--root", "--check"},
+
 	"gen-docs": {"--doc", "--root", "--check"},
 
 	"graph": {"--cypher", "--entities", "--graphml", "--html", "--json", "--limit", "--max-tokens", "--mermaid", "--min-confidence", "--one-line", "--out", "--root", "--etag"},
 
-	"guard": {"--task", "--agent-id", "--file", "--force", "--json", "--precision", "--range", "--sarif", "--threshold"},
+	"guard": {"--task", "--check", "--reason", "--agent-id", "--duration", "--file", "--force", "--json", "--precision", "--range", "--require-boundaries", "--root", "--sarif", "--scope", "--threshold"},
 
 	"heal": {"--force", "--yes", "--llm", "--task"},
 
@@ -134,11 +142,14 @@ var goldenUsageFlags = map[string][]string{
 
 	"impact": {"--json", "--precision", "--risk", "--lens", "--root", "--runtime"},
 
+	"apply": {"--root", "--test", "--dry-run", "--json"},
+
 	"index": {"--force", "--json", "--root", "--status", "--strict", "--update"},
 
 	"mask": {"--names"},
 
-	"mcp": {"--http", "--tls-cert", "--tls-key"},
+	"mcp":        {"--http", "--tls-cert", "--tls-key"},
+	"mcp-client": {"--url", "--root"},
 
 	"memory": {"--auto", "--clear", "--json", "--limit", "--root"},
 
@@ -219,18 +230,25 @@ func TestUsageFlagSetsPinnedToGolden(t *testing.T) {
 // list is auditable; adding a flag here without a matching reader is the
 // exact drift the parser-oracle gate exists to catch.
 var handlerReadUsageFlags = map[string]string{
-	"--":         "sandbox: command separator (kern sandbox [root] -- <command...>); parseFlags accepts it as a positional",
-	"--anchor":   "verify: runVerifyCommand → internal/verifycmd command mode (re-slice a saved run by anchor id)",
-	"--check":    "gen-docs/gen-catalog/gen-contracts: runGenDocsImpl compares the generated artifact without writing it",
-	"--command":  "verify: runVerifyCommand → internal/verifycmd command mode (governed allowlist)",
-	"--doc":      "gen-docs: runGenDocsImpl own switch (catalog|contracts|schemas|site|selection)",
-	"--list":     "exec: runExec strips --list before parseFlags (kern exec --list lists runtimes; accepted in any position)",
-	"--map":      "brief/buddy: runBrief strips --map in its own switch before calling brief.BuildWithOptions",
-	"--obsidian": "wiki: runWiki strips before parseFlags",
-	"--output":   "verify: runVerifyCommand → internal/verifycmd command-mode output slice (summary|failures|tail:N|lines:A-B|full)",
-	"--probe":    "agents: runAgents strips before parseFlags",
-	"--staged":   "verify: internal/verifycmd parseVerifyFlags (staged-package scope, the pre-commit hook tier)",
-	"--watch":    "precache: runPrecache strips before parseFlags",
+	"--":                   "sandbox: command separator (kern sandbox [root] -- <command...>); parseFlags accepts it as a positional",
+	"--anchor":             "verify: runVerifyCommand → internal/verifycmd command mode (re-slice a saved run by anchor id)",
+	"--check":              "gen-docs/gen-catalog/gen-contracts/gen-plugin: runGenDocsImpl compares the generated artifact without writing it",
+	"--duration":           "guard: internal/contextcli parsePauseFlags (pause subcommand)",
+	"--scope":              "guard: internal/contextcli parsePauseFlags (pause subcommand); approve: internal/approvalcli parseFlags (Ask-Protocol --scope once|prefix)",
+	"--prefix":             "approve: internal/approvalcli parseFlags (Ask-Protocol --scope prefix prefix override)",
+	"--command":            "verify: runVerifyCommand → internal/verifycmd command mode (governed allowlist)",
+	"--doc":                "gen-docs: runGenDocsImpl own switch (catalog|contracts|schemas|site|selection)",
+	"--list":               "exec: runExec strips --list before parseFlags (kern exec --list lists runtimes; accepted in any position)",
+	"--readonly":           "exec: internal/execution parseExecFlags (read-only bash fallbacks; skip the KERN_TOOLS/KERN_ALLOW_EXEC gate, keep the firewall)",
+	"--require-boundaries": "guard: internal/contextcli RunGuard own switch (strict mode: fail when .kern/boundaries.json is missing)",
+	"--map":                "brief/buddy: runBrief strips --map in its own switch before calling brief.BuildWithOptions",
+	"--obsidian":           "wiki: runWiki strips before parseFlags",
+	"--output":             "verify: runVerifyCommand → internal/verifycmd command-mode output slice (summary|failures|tail:N|lines:A-B|full)",
+	"--probe":              "agents: runAgents strips before parseFlags",
+	"--staged":             "verify: internal/verifycmd parseVerifyFlags (staged-package scope, the pre-commit hook tier)",
+	"--tail":               "audit: internal/approvalcli parseFlags (alias for --limit; the N most recent audit entries)",
+	"--test":               "apply: parseApplyFlags in cmd_apply.go (scoped go test on modified packages after the build gate)",
+	"--watch":              "precache: runPrecache strips before parseFlags",
 }
 
 // usageProseArtifacts is intentionally gone. The tokens it allowlisted

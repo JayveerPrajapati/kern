@@ -85,6 +85,12 @@ type Run struct {
 	Stdin   string        // piped to the script's stdin
 	Timeout time.Duration // default 10s
 	MaxOut  int           // max stdout bytes returned; default 16 KiB
+	// Ctx carries the caller's context (per-call deadline, $/cancelRequest).
+	// When set, the script's timeout context is derived from it — so an
+	// enclosing deadline or cancellation propagates to the child process
+	// group. When nil, context.Background() is used (the historical
+	// behavior), so existing callers are unaffected.
+	Ctx context.Context
 	// NoIsolate opts out of the sandbox: when set, the script inherits the
 	// caller's environment and full network access. Isolation is on by default,
 	// and NoIsolate is only honored when the local operator has explicitly
@@ -134,6 +140,31 @@ var sensitivePathDirs = []string{
 	".netrc",
 }
 
+// absoluteSensitivePaths mirrors internal/sandbox's NEW-1 addition: system
+// credential files denied regardless of $HOME, so an absolute-path read
+// cannot bypass the home-relative blocklist.
+var absoluteSensitivePaths = []string{
+	"/etc/shadow",
+	"/etc/master.passwd",
+	"/etc/sudoers",
+	"/etc/sudoers.d",
+}
+
+// canonicalSensitivePath resolves the canonical spelling of an absolute
+// blocklist path, preferring the path itself and falling back to its parent
+// directory plus basename (the parent — e.g. /etc — always exists even when
+// the leaf — e.g. /etc/shadow on darwin — does not). Returns the input
+// unchanged when neither resolves (fail-safe: the as-written deny remains).
+func canonicalSensitivePath(p string) string {
+	if canon, err := filepath.EvalSymlinks(p); err == nil {
+		return canon
+	}
+	if canon, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(canon, filepath.Base(p))
+	}
+	return p
+}
+
 // fsConfinementEnabled reports whether script runs add the sensitive-path
 // read blocklist to the Seatbelt profile (KERN_SANDBOX_FS_CONFINEMENT,
 // default ON; "0"/"false"/"off" disables — the codebase's "0 disables"
@@ -158,6 +189,16 @@ func seatbeltScriptProfile() string {
 	b.WriteString("(version 1)\n(allow default)\n(deny network*)")
 	if !fsConfinementEnabled() {
 		return b.String()
+	}
+	// System credential files are denied regardless of $HOME (NEW-1): an
+	// absolute-path read must not bypass the home-relative blocklist.
+	// Canonical spelling via the PARENT directory (the leaf may not exist
+	// on this platform while /etc always does); as-written always emitted.
+	for _, p := range absoluteSensitivePaths {
+		fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", p)
+		if canon := canonicalSensitivePath(p); canon != p {
+			fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", canon)
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -444,7 +485,11 @@ func RunScript(r Run) *Result {
 		return res
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), r.Timeout)
+	base := r.Ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, r.Timeout)
 	defer cancel()
 
 	// Defense in depth: an arbitrary agent call must never be able to drop

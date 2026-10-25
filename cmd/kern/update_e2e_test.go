@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -70,11 +71,11 @@ func TestUpdateE2E(t *testing.T) {
 	scriptURL := "file://" + filepath.Join(root, "install.sh")
 
 	// buildAll compiles kern and kern-mcp into dir, each
-	// stamped with ver via the Makefile-style ldflags pair.
-	buildAll := func(dir, ver string) {
-		t.Helper()
+	// stamped with ver via the Makefile-style ldflags pair. It returns an
+	// error (rather than calling t.Fatalf) so it can run from a goroutine.
+	buildAll := func(dir, ver string) error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
@@ -83,8 +84,9 @@ func TestUpdateE2E(t *testing.T) {
 			"-o", dir+"/", "./cmd/kern", "./cmd/kern-mcp")
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("go build %s: %v\n%s", ver, err, out)
+			return fmt.Errorf("go build %s: %v\n%s", ver, err, out)
 		}
+		return nil
 	}
 
 	// fixtureTag packages the three binaries in src into the fake release
@@ -122,15 +124,32 @@ func TestUpdateE2E(t *testing.T) {
 		}
 	}
 
-	// Shared build artifacts (each stamp built once).
+	// Shared build artifacts (each stamp built once). The four builds are
+	// independent (distinct output dirs; go's build cache is lock-safe under
+	// concurrent invocations), so they run in parallel — this is the dominant
+	// serial cost of the test (the full suite's slowest test).
 	dirHash := filepath.Join(base, "build-hash")
 	dir952 := filepath.Join(base, "build-952")
 	dir99 := filepath.Join(base, "build-99")
 	dir991 := filepath.Join(base, "build-991")
-	buildAll(dirHash, "deadbeef")
-	buildAll(dir952, "v0.9.5.2")
-	buildAll(dir99, "v0.9.9")
-	buildAll(dir991, "v0.9.9.1")
+	var buildWG sync.WaitGroup
+	buildWG.Add(4)
+	buildErrs := make(chan error, 4)
+	for _, b := range []struct {
+		dir, ver string
+	}{{dirHash, "deadbeef"}, {dir952, "v0.9.5.2"}, {dir99, "v0.9.9"}, {dir991, "v0.9.9.1"}} {
+		go func(dir, ver string) {
+			defer buildWG.Done()
+			buildErrs <- buildAll(dir, ver)
+		}(b.dir, b.ver)
+	}
+	buildWG.Wait()
+	close(buildErrs)
+	for err := range buildErrs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	fixtureTag("v0.9.9.1", dir991)
 	fixtureTag("v0.9.9", dir99)
 	fixtureTag("v0.9.5.2", dir952)

@@ -62,7 +62,7 @@ type Hooks struct {
 // already allows this package to import) so every catalog tool except
 // kern_meta itself is routable: routing to the router would recurse, so it
 // is deliberately excluded. Deriving the set instead of hand-maintaining a
-// 76-name map keeps the drift gate (TestMetaRouterCatalogCoverage) and the
+// fixed name map keeps the drift gate (TestMetaRouterCatalogCoverage) and the
 // plugin's "NL router → all sub-tools" promise honest as the catalog grows.
 // The set is built once at package init; it is not sorted (Handle only
 // membership-tests it, and RoutableTools sorts on return). Names the
@@ -276,22 +276,35 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			subArgs["text"] = text
 		}
 	}
-	// Forward the governed-mode agent context (P1.2) so kern_meta's routed
-	// retrieval sub-tools can authorize: agent_id/task/scope reach the same
-	// handlers an explicit kern_explore/kern_context/kern_graph call would.
-	for _, k := range []string{"agent_id", "task", "scope"} {
-		if v, ok := args[k]; ok {
-			subArgs[k] = v
-		}
-	}
 	// Structured passthrough (F3): the caller can supply an optional `args`
 	// object whose entries are merged into the routed tool's params AFTER
 	// classification, so params the request text cannot carry (path,
 	// pattern, command, ...) reach the routed handler. Explicit passthrough
 	// values override classifier-synthesized ones on key collision — the
 	// caller's structured value is the more authoritative signal.
+	//
+	// The governed-mode identity keys (agent_id/task/scope) are EXCLUDED
+	// from this override surface: they are forwarded from the top-level MCP
+	// call args below, AFTER the passthrough merge, so the call's own
+	// identity always wins. A passthrough args={"agent_id": "..."} can
+	// otherwise spoof the identity the audit/budget layers attribute the
+	// routed call to.
 	if passthrough, ok := args["args"].(map[string]any); ok {
 		for k, v := range passthrough {
+			if k == "agent_id" || k == "task" || k == "scope" {
+				continue
+			}
+			subArgs[k] = v
+		}
+	}
+	// Forward the governed-mode agent context (P1.2) so kern_meta's routed
+	// retrieval sub-tools can authorize: agent_id/task/scope reach the same
+	// handlers an explicit kern_explore/kern_context/kern_graph call would.
+	// These are applied AFTER the passthrough merge so the call's own
+	// identity is authoritative and can never be overridden by a passthrough
+	// arg.
+	for _, k := range []string{"agent_id", "task", "scope"} {
+		if v, ok := args[k]; ok {
 			subArgs[k] = v
 		}
 	}

@@ -13,7 +13,7 @@ import (
 // Antigravity's PreToolUse hook intercepts built-in view_file/run_command calls and
 // redirects them to kern's MCP equivalents.
 func wireAntigravityHooks() Status {
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{
 			Agent:     "antigravity-hooks",
@@ -24,7 +24,7 @@ func wireAntigravityHooks() Status {
 	}
 
 	path := filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")
-	if err := mergeAntigravityHooks(path, guardPath); err != nil {
+	if err := mergeAntigravityHooks(path, guardCmd); err != nil {
 		return Status{Agent: "antigravity-hooks", Path: path, Note: err.Error()}
 	}
 
@@ -49,7 +49,7 @@ func wireProjectAntigravityHooks(root string) Status {
 		}
 	}
 
-	guardPath, err := writeGuardScriptGlobal()
+	guardCmd, err := guardHookCommand()
 	if err != nil {
 		return Status{
 			Agent:     "antigravity-project-hooks",
@@ -60,7 +60,7 @@ func wireProjectAntigravityHooks(root string) Status {
 	}
 
 	path := filepath.Join(agentsDir, "hooks.json")
-	if err := mergeAntigravityHooks(path, guardPath); err != nil {
+	if err := mergeAntigravityHooks(path, guardCmd); err != nil {
 		return Status{Agent: "antigravity-project-hooks", Path: path, Note: err.Error()}
 	}
 

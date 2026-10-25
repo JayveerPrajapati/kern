@@ -57,11 +57,12 @@ persistence layer.
 ## 3. The MCP surface (2 minutes)
 
 `internal/mcp` is the server; `internal/mcpcatalog/tools.go` is the single
-source of truth for the 31-tool catalog (name, phase, risk, schema).
+source of truth for the 32-tool catalog (name, phase, risk, schema).
 
-- 29 tools are advertised by default (`internal/mcp/toolsurface` —
-  `kern_meta`, `kern_explore`, `kern_impact`, `kern_search`, `kern_verify`,
-  `kern_buddy`, `kern_exec`); `KERN_MCP_FULL=1` advertises the rest. The
+- The full 32-tool catalog is advertised by default (`internal/mcp/toolsurface`
+  — the original `kern_meta`, `kern_explore`, `kern_impact`, `kern_search`,
+  `kern_verify`, `kern_buddy`, `kern_exec` plus the usage-curated additions);
+  standing mandate 2026-10-23. The
   advertisement gate never blocks execution: `kern_meta`'s natural-language
   router reaches every tool.
 - Every tool call passes `precheckTool` → string validation → the governance

@@ -4,11 +4,9 @@
 //   - fatal()/fatalUsage() in cmd/kern/helpers.go panic exitError{code:1}
 //     / exitError{code:2}; main() recovers the sentinel and exits with it.
 //   - dispatchCommand returns 2 for unknown commands (usage + exit 2).
-//   - the blueprint change-governance suite (kern check, kern ci, kern
-//     request-approval, kern reject, kern verify-receipt) uses 3 for
-//     decided-state / policy outcomes: already-decided approvals, invalid
-//     Blueprint configuration, and receipts that cannot be found; a tampered
-//     receipt or broken audit chain is 2 (invalid).
+//   - decided-state / policy outcomes exit 3: already-decided approvals
+//     (kern approve / kern reject), denied context authorization
+//     (kern authorize-context), update refusals, and guard violations.
 //   - the review family (kern review / kern changes) exits 1 (findings tier)
 //     when changed files carry risk; a clean review exits 0.
 //   - kern authorize-context exits 3 (policy family) when a context request
@@ -64,7 +62,7 @@ func runExitcode(rest []string) {
 	fmt.Println("  kern review (risk found)                            -> 1 (findings)")
 	fmt.Println("  kern authorize-context (request denied)             -> 3 (denied)")
 	fmt.Println("  kern sec (error-severity findings)                   -> 1 (findings)")
-	fmt.Println("  kern search <query> (no symbols matched)             -> 1 (no-match error; empty --json result stays 0)")
+	fmt.Println("  kern search <query> (no symbols matched)             -> 1 (no-match error; empty --json result stays 0; empty query -> 2 usage, aligned with MCP)")
 	fmt.Println("  kern verify --types cve (SKIPPED: govulncheck absent) -> 0 (reported)")
 	fmt.Println("  kern verify (FAIL verdict)                           -> 1 (failure)")
 	fmt.Println("  kern build <cmd> (child exits 7)                     -> 7 (child exit code propagates)")

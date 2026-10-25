@@ -13,8 +13,8 @@ import (
 // leaf, advertisement filters against this map; drift would make the
 // annotation lie).
 func TestDefaultToolsMatchToolsurface(t *testing.T) {
-	if len(defaultTools) != 29 {
-		t.Fatalf("defaultTools size = %d, want 29", len(defaultTools))
+	if len(defaultTools) != 32 {
+		t.Fatalf("defaultTools size = %d, want 32", len(defaultTools))
 	}
 	if len(toolsurface.Default) != len(defaultTools) {
 		t.Fatalf("toolsurface.Default size = %d, defaultTools size = %d — surface drift", len(toolsurface.Default), len(defaultTools))
@@ -37,11 +37,11 @@ func TestDefaultToolsMatchToolsurface(t *testing.T) {
 // that pin the downstream copies.
 func TestSurfaceCountsPinned(t *testing.T) {
 	full := ToolNames()
-	if len(full) != 31 {
-		t.Fatalf("full catalog = %d tools, want 31 — an unapproved surface change (updating this pin is a deliberate act)", len(full))
+	if len(full) != 32 {
+		t.Fatalf("full catalog = %d tools, want 32 — an unapproved surface change (updating this pin is a deliberate act)", len(full))
 	}
-	if len(defaultTools) != 29 {
-		t.Fatalf("default surface = %d tools, want 29 — an unapproved surface change", len(defaultTools))
+	if len(defaultTools) != 32 {
+		t.Fatalf("default surface = %d, want 32 — an unapproved surface change", len(defaultTools))
 	}
 	var fullOnly []string
 	for _, n := range full {
@@ -50,8 +50,8 @@ func TestSurfaceCountsPinned(t *testing.T) {
 		}
 	}
 	slices.Sort(fullOnly)
-	want := []string{"kern_arch", "kern_graph"}
+	want := []string{}
 	if !slices.Equal(fullOnly, want) {
-		t.Fatalf("full-only tools = %v, want %v — the default surface and the full catalog drifted apart (31 full / 29 default implies exactly these two full-only)", fullOnly, want)
+		t.Fatalf("full-only tools = %v, want %v — the default surface IS the full catalog (standing mandate 2026-10-23); any full-only tool is unapproved drift", fullOnly, want)
 	}
 }

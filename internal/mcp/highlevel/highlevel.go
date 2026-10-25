@@ -243,6 +243,23 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			types = append(types, t)
 		}
 	}
+	// Phase 2 timeout plumbing: the bare path accepts a caller deadline in
+	// seconds (0/absent = the engine's own per-phase timeouts: build 5m,
+	// tests 10m). The MCP call's ctx is threaded into the engine either
+	// way, so a client disconnect kills in-flight subprocesses instead of
+	// orphaning them; an explicit timeout additionally makes long runs
+	// (full=true complete suite) return a PARTIAL result before the host's
+	// tool-call ceiling kills the call opaquely.
+	timeoutSec, terr := mcpargs.ArgInt(args, "timeout", 0)
+	if terr != nil {
+		return "", terr
+	}
+	vctx := ctx
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		vctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+		defer cancel()
+	}
 	// Phase 4 fast/full tiers mirror the CLI (--fast/--full): fast forces the
 	// pre-commit tier (build + changed-package tests); full opts into the
 	// COMPLETE test suite. full beats fast when both are set, exactly like the
@@ -312,6 +329,9 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// forcing that is always the case). Mode notes are rendered into the text
 	// output (the highlevel surface returns text, not JSON).
 	var verifyOpts []verification.Option
+	// Cancellation/deadline reach the engine's subprocesses (see the
+	// timeout note above).
+	verifyOpts = append(verifyOpts, verification.WithContext(vctx))
 	var notes []string
 	if full && catalog.ContainsVerifyTestType(types) {
 		verifyOpts = append(verifyOpts, verification.FullTests(true))
@@ -351,6 +371,13 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 	verifyStart := time.Now()
 	t, v, err := ts.Verify(types, verifyOpts...)
+	// A caller deadline that fired mid-run: the engine returned a PARTIAL
+	// result (killed checks report cancelled/failed, the summary records the
+	// truncation) — surface the cut in the mode notes so the caller knows
+	// to raise timeout or switch to command mode for the kept full log.
+	if vctx.Err() != nil {
+		notes = append(notes, fmt.Sprintf("run cut short at %s (%v): partial result — raise timeout or use command mode (output+anchor) for the kept full log", time.Since(verifyStart).Round(time.Second), vctx.Err()))
+	}
 	// Telemetry: one verification sample per kern_verify call (the server
 	// recorder is long-lived; surfaces in kern stats performance).
 	metrics.Default().RecordVerification(time.Since(verifyStart))

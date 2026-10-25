@@ -75,7 +75,15 @@ var DefaultPatterns = []Pattern{
 	// form alongside = and :. A bare keyword inside a longer word
 	// (notpassword) still cannot match: the optional prefix requires a
 	// `_`/`-` separator and the keyword itself stays `\b`-anchored.
-	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?(?:\s*[=:]\s*|\s+is\s+|\s+)["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
+	// The separator classes are split deliberately (QA 2026-10-19): the
+	// assignment separators (= and :) are high-confidence contexts — a value
+	// follows, lenient match — but the PROSE forms ("password is X", a bare
+	// space) must not mask innocent sentences like "password is required":
+	// there the value must contain a digit or a special character, the shape
+	// of an actual secret, not an adjective. "password is hunter2safe"
+	// (digit) masks; "password is required" (no digit/special) does not.
+	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
+	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?(?:\s+is\s+|\s+)["']?[A-Za-z0-9_/\-+=@!#$^*~]*[0-9#@!$^*~][A-Za-z0-9_/\-+=@!#$^*~]*`)},
 	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
 	// URL_CRED (scheme-less): DSN/userinfo forms without a scheme, e.g.

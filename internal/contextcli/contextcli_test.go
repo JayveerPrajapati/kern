@@ -181,6 +181,9 @@ func TestGuardCheckHelperProcess(t *testing.T) {
 	if a := os.Getenv("GUARD_HELPER_TASK"); a != "" {
 		args = append(args, "--task", a)
 	}
+	if os.Getenv("GUARD_HELPER_STRICT") == "1" {
+		args = append(args, "--require-boundaries")
+	}
 	runGuardCLI(args)
 }
 
@@ -393,6 +396,46 @@ func TestGuardCheckPublishesEvents(t *testing.T) {
 		t.Fatalf("events file missing after REJECT: %v", err)
 	} else if !strings.Contains(string(data), `"Kind":"architecture.violation"`) {
 		t.Fatalf("events file lost the violation after REJECT, got: %s", string(data))
+	}
+}
+
+// R3: `kern guard allow` must require the complete approval hash, not a short
+// predictable y/yes token. Surrounding terminal whitespace is harmless.
+func TestGuardAllowAnswerMatches(t *testing.T) {
+	const hash = "5bb27152ff38e56ca21e9edf740ffbbcbd26eb7d5a912dc0351804d6ef9ac518"
+	for _, answer := range []string{hash, " " + hash + "\n"} {
+		if !guardAllowAnswerMatches(answer, hash) {
+			t.Errorf("answer %q must match", answer)
+		}
+	}
+	for _, answer := range []string{"", "y", "Y", "yes", hash[:8], strings.ToUpper(hash)} {
+		if guardAllowAnswerMatches(answer, hash) {
+			t.Errorf("answer %q must not match", answer)
+		}
+	}
+}
+
+// TestGuardCheckPublishesWarningWhenUnconfigured: with no boundaries file the
+// guard publishes a single ArchitectureWarning event instead of a violation.
+func TestGuardCheckStrictRequiresBoundaries(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := guardCheckFixture(t) // no .kern/boundaries.json
+
+	// Default mode stays backward compatible: infer and warn, not deny.
+	out := guardCheckJSON(t, root, "--file", "main.go")
+	if _, ok := out["error"]; ok {
+		t.Fatalf("default mode must not emit an error: %v", out)
+	}
+
+	// Strict mode is a policy denial with a machine-consumable classification.
+	_, stderr, code := runGuardHelper(t, root, "GUARD_HELPER_STRICT=1")
+	if code != 3 {
+		t.Fatalf("strict unconfigured exit code = %d, want 3", code)
+	}
+	for _, want := range []string{"strict configuration", "no boundary rules configured", "--require-boundaries disables inference"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q: %s", want, stderr)
+		}
 	}
 }
 

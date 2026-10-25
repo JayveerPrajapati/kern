@@ -29,7 +29,12 @@ func newHTTPServer() *Server {
 	// cover the exact field set the HTTP transport serves with — svc,
 	// allowlist, and samplingSlots included. The pre-fix hand-rolled literal
 	// skipped them, panicking svc-backed tools and ignoring KERN_TOOLS.
-	return newServerCore("http")
+	s := newServerCore("http")
+	// Phase 4.2: model an already-initialized session (the -32002
+	// pre-initialize gate is pinned by TestPreInitializeRequestsRejected in
+	// server_test.go).
+	s.initialized.Store(true)
+	return s
 }
 
 func doHTTP(t *testing.T, s *Server, method, ctype, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -185,6 +190,9 @@ func TestHandleHTTPMissingProtocolVersion(t *testing.T) {
 	if v := rr.Header().Get("MCP-Protocol-Version"); v != protocolVersion {
 		t.Fatalf("expected MCP-Protocol-Version echoed, got %q", v)
 	}
+	if body := rr.Body.String(); !strings.Contains(body, "missing MCP-Protocol-Version header") {
+		t.Fatalf("an absent header must answer the missing-header message (R4), got: %q", body)
+	}
 }
 
 // TestHandleHTTPInitializeWithoutHeader pins the spec-conformant handshake: a
@@ -227,6 +235,9 @@ func TestHandleHTTPNonInitializeWithoutHeader(t *testing.T) {
 	if v := rr.Header().Get("MCP-Protocol-Version"); v != protocolVersion {
 		t.Fatalf("expected MCP-Protocol-Version echoed, got %q", v)
 	}
+	if body := rr.Body.String(); !strings.Contains(body, "missing MCP-Protocol-Version header") {
+		t.Fatalf("an absent header must answer the missing-header message (R4), got: %q", body)
+	}
 }
 
 func TestHandleHTTPBadProtocolVersion(t *testing.T) {
@@ -235,6 +246,9 @@ func TestHandleHTTPBadProtocolVersion(t *testing.T) {
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": "2030-01-01"})
 	if rr.Code != http.StatusPreconditionFailed {
 		t.Fatalf("expected 412 for wrong protocol version, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "unsupported MCP protocol version") {
+		t.Fatalf("a present-but-unsupported header must answer the unsupported-version message (R4), got: %q", body)
 	}
 }
 
@@ -568,6 +582,7 @@ func strconv_quote(s string) string { return `"` + s + `"` }
 // surfaces as a bind error inside ServeListener, and the scenario retries with
 // a fresh port instead of flaking the way the two racing TLS tests did.
 func TestServeHTTPContextTCPAddrServesHealth(t *testing.T) {
+	t.Setenv("KERN_PRELOAD", "0") // hermetic: serve-start preload must not build an index
 	client := &http.Client{Timeout: 2 * time.Second}
 	for attempt := 0; attempt < 10; attempt++ {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")

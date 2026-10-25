@@ -73,7 +73,7 @@ func BenchmarkBlastRadiusDistinctDeclarations(benchmark *testing.B) {
 			benchmark.ReportAllocs()
 			benchmark.ResetTimer()
 			for iteration := 0; iteration < benchmark.N; iteration++ {
-				radius, _, _, _ := blastRadiusWalk(ix, []string{"Core"}, false)
+				radius, _, _, _ := blastRadiusWalk(ix, []string{"Core"}, false, 0)
 				if len(radius) != 5 {
 					benchmark.Fatalf("radius = %v, want exactly five declarations", radius)
 				}
@@ -109,11 +109,11 @@ func TestBlastRadiusCyclesUseDeclarationIdentity(t *testing.T) {
 		Callers: map[string][]string{"a.Loop": {"Loop"}, "b.Loop": {"Loop"}},
 		Pkgs:    map[string]*index.Pkg{"a": {Name: "a", Files: []string{"a/a.go"}}, "b": {Name: "b", Files: []string{"b/b.go"}}},
 	}
-	radius, symbols, depths, _ := blastRadiusWalk(ix, []string{"a.Loop"}, false)
+	radius, symbols, depths, _ := blastRadiusWalk(ix, []string{"a.Loop"}, false, 0)
 	if len(radius) != 2 || len(symbols) != 2 || depths["a.Loop"] != 0 || depths["b.Loop"] != 1 {
 		t.Errorf("cycle radius = %v, symbols = %v, depths = %v", radius, symbols, depths)
 	}
-	_, _, depths, _ = blastRadiusWalk(ix, []string{"a.Loop", "b.Loop"}, false)
+	_, _, depths, _ = blastRadiusWalk(ix, []string{"a.Loop", "b.Loop"}, false, 0)
 	if depths["a.Loop"] != 0 || depths["b.Loop"] != 0 {
 		t.Errorf("multi-root depths = %v, want both declarations at depth zero", depths)
 	}
@@ -134,7 +134,7 @@ func TestBlastRadiusMixedAmbiguousAndResolvedCallers(t *testing.T) {
 		}},
 		Callers: map[string][]string{"Core": {"Shared"}},
 	}
-	radius, symbols, _, _ := blastRadiusWalk(ix, []string{"Core"}, false)
+	radius, symbols, _, _ := blastRadiusWalk(ix, []string{"Core"}, false, 0)
 	if len(radius) != 3 || !contains(radius, "b.Shared") || !contains(radius, "Shared") {
 		t.Fatalf("radius = %v, want core, resolved b.Shared, and an opaque Shared caller", radius)
 	}
@@ -157,7 +157,7 @@ func TestBlastRadiusKeepsUnownedSyntheticEdges(t *testing.T) {
 		}},
 		Callers: map[string][]string{"Core": {"Known"}},
 	}
-	radius, _, _, _ := blastRadiusWalk(ix, []string{"Core"}, false)
+	radius, _, _, _ := blastRadiusWalk(ix, []string{"Core"}, false, 0)
 	if !contains(radius, "Known") {
 		t.Errorf("radius = %v, unowned synthetic caller was dropped", radius)
 	}

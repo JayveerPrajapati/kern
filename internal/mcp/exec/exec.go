@@ -75,7 +75,9 @@ func maskedOutput(out string, limit int) string {
 	return out
 }
 
-// Sandbox runs a command in an isolated snapshot worktree.
+// Sandbox runs a command in a snapshot rollback worktree. This is not
+// OS-level privilege isolation: the command still runs with the user’s
+// privileges, and out-of-root writes are not guaranteed to roll back.
 func Sandbox(ctx context.Context, id string, args map[string]any) (string, error) {
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	cmdLine := mcpargs.ArgString(args, "command")
@@ -92,12 +94,12 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 	}
 	timeout := 120 * time.Second
 	if s := mcpargs.ArgString(args, "timeout"); s != "" {
-		sec, err := strconv.Atoi(s)
+		sec, err := parseTimeoutSecs(s)
 		if err != nil {
-			return "", fmt.Errorf("timeout: invalid integer %q", s)
+			return "", err
 		}
 		if sec > 0 {
-			timeout = time.Duration(sec) * time.Second
+			timeout = scriptTimeout(sec)
 		}
 	}
 	res := sandbox.RunGuarded(ctx, root, parts[0], parts[1:], timeout, mcpargs.ArgBool(args, "force"))
@@ -143,15 +145,60 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 	return b.String(), nil
 }
 
-// defaultExecTimeout is the execution timeout for RunBuild when
-// KERN_EXEC_TIMEOUT is unset or invalid.
-const defaultExecTimeout = 5 * time.Minute
+// maxExecScriptTimeout is the hard ceiling on a single kern_exec script's
+// runtime. The MCP server's per-call deadline is 30 minutes
+// (toolCallResponseDecoded), so a timeout beyond that could never be honored
+// by the enclosing context anyway; clamping keeps an oversized caller-supplied
+// value (e.g. timeout=999999999) from silently meaning "effectively forever"
+// on direct (non-server) paths. The local operator can raise the ceiling
+// per-invocation with KERN_EXEC_MAX_TIMEOUT_SEC (a positive integer; invalid
+// or unset values keep this cap).
+const maxExecScriptTimeout = 30 * time.Minute
+
+func scriptTimeout(sec int) time.Duration {
+	d := time.Duration(sec) * time.Second
+	if cap := execScriptTimeoutCap(); d > cap {
+		d = cap
+	}
+	if d <= 0 {
+		return 10 * time.Second
+	}
+	return d
+}
+
+// parseTimeoutSecs parses the shared `timeout` argument (seconds). Negative
+// values are rejected loudly (NIT-19b: they were silently ignored, running
+// with the default); zero means "keep the default" and is accepted to stay
+// compatible with clients that send an explicit 0.
+func parseTimeoutSecs(s string) (int, error) {
+	sec, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("timeout: invalid integer %q", s)
+	}
+	if sec < 0 {
+		return 0, fmt.Errorf("timeout: negative integer %d (want a positive number of seconds)", sec)
+	}
+	return sec, nil
+}
+
+func execScriptTimeoutCap() time.Duration {
+	if ov := strings.TrimSpace(os.Getenv("KERN_EXEC_MAX_TIMEOUT_SEC")); ov != "" {
+		if c, err := strconv.Atoi(ov); err == nil && c > 0 {
+			return time.Duration(c) * time.Second
+		}
+	}
+	return maxExecScriptTimeout
+}
 
 // maxExecMaxOut is the hard ceiling (4 MiB) on a single script's retained
 // stdout. A larger --max value is clamped so the in-memory anchor store and
 // the exec-runs disk mirror stay bounded; the local operator can raise the
 // ceiling per-invocation with KERN_EXEC_MAX_BYTES.
 const maxExecMaxOut = 4 << 20
+
+// defaultExecTimeout is the execution timeout for RunBuild when
+// KERN_EXEC_TIMEOUT is unset or invalid.
+const defaultExecTimeout = 5 * time.Minute
 
 // execTimeout returns the execution timeout for RunBuild: the KERN_EXEC_TIMEOUT
 // env var parsed as a Go duration (e.g. "90s", "10m") when set and valid,
@@ -226,13 +273,14 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 		Stdin:     mcpargs.ArgString(args, "stdin"),
 		NoIsolate: noIsolate,
 		Egress:    mcpargs.ArgStrings(args, "egress"),
+		Ctx:       ctx,
 	}
 	if v := mcpargs.ArgString(args, "timeout"); v != "" {
-		sec, err := strconv.Atoi(v)
+		sec, err := parseTimeoutSecs(v)
 		if err != nil {
-			return "", fmt.Errorf("timeout: invalid integer %q", v)
+			return "", err
 		}
-		run.Timeout = time.Duration(sec) * time.Second
+		run.Timeout = scriptTimeout(sec)
 	}
 	if v := mcpargs.ArgString(args, "max"); v != "" {
 		n, err := strconv.Atoi(v)

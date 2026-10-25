@@ -268,7 +268,7 @@ func loadDogfoodLog(root string) []domain.DogfoodRecord {
 // 0600 atomic write, mirroring the context_usage.json convention).
 func saveDogfoodLog(root string, records []domain.DogfoodRecord) error {
 	path := dogfoodLogPath(root)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(records, "", "  ")

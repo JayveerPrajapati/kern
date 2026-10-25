@@ -57,7 +57,7 @@ func TestServedLedgerRepeatServesPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
-	want := "already served this session (call #1, etag " + e1 + ") — re-send with etag " + e1 + " to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
+	want := "already served this session (call #1, etag " + e1 + ") — re-send with that etag to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
 	if out2 != want {
 		t.Fatalf("second call must return the pointer line, got %q", out2)
 	}
@@ -101,7 +101,7 @@ func TestServedLedgerChangedViewServesFullPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third call failed: %v", err)
 	}
-	want := "already served this session (call #2, etag " + e2 + ") — re-send with etag " + e2 + " to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
+	want := "already served this session (call #2, etag " + e2 + ") — re-send with that etag to confirm unchanged, or vary the view (tier/lines/max_tokens), or no_cache=1 to re-emit"
 	if out3 != want {
 		t.Fatalf("a repeat of the changed view must return the pointer, got %q", out3)
 	}

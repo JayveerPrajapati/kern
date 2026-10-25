@@ -135,3 +135,30 @@ func TestScriptReadConfinementBlocksSensitivePath(t *testing.T) {
 		t.Fatalf("benign script must succeed under FS confinement: %v stdout=%q", ok.Err, ok.Stdout)
 	}
 }
+
+// TestScriptProfileDeniesAbsoluteCredentials mirrors the sandbox-side NEW-1
+// regression: system credential files (/etc/shadow-class) are denied
+// regardless of $HOME — an absolute-path read must not bypass the
+// home-relative blocklist, and an unset home must not weaken the absolute
+// denies. /etc/passwd stays readable (blocklist-only design).
+func TestScriptProfileDeniesAbsoluteCredentials(t *testing.T) {
+	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "")
+	// Simulate the home-unavailable path: absolute denies must still emit.
+	t.Setenv("HOME", "")
+	prof := seatbeltScriptProfile()
+	for _, p := range absoluteSensitivePaths {
+		want := "(deny file-read-data (subpath \"" + p + "\"))"
+		if !strings.Contains(prof, want) {
+			t.Errorf("profile missing absolute deny rule for %q; want %q in:\n%s", p, want, prof)
+		}
+		if canon := canonicalSensitivePath(p); canon != p {
+			wantCanon := "(deny file-read-data (subpath \"" + canon + "\"))"
+			if !strings.Contains(prof, wantCanon) {
+				t.Errorf("profile missing canonical alias deny for %q; want %q in:\n%s", p, wantCanon, prof)
+			}
+		}
+	}
+	if strings.Contains(prof, "subpath \"/etc/passwd\"") {
+		t.Errorf("/etc/passwd must not be denied (blocklist-only design):\n%s", prof)
+	}
+}

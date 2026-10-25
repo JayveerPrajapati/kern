@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/mcp/transport"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -55,14 +56,46 @@ func (s *stringList) Set(val string) error {
 	return nil
 }
 
+// preindexRoots synchronously builds and persists each listed root's symbol
+// index (bare path or NAME=PATH) so a later tool call loads it instead of
+// blocking on a cold build (MCP audit 2026-10-25, R6). It reuses
+// index.LoadOrBuild, so a fresh root gets its one-time build announced on
+// stderr and persisted to .kern/ for the server and any later kern CLI run.
+func preindexRoots(entries []string) error {
+	for _, e := range entries {
+		_, root, ok := strings.Cut(e, "=")
+		if !ok || root == "" {
+			root = e
+		}
+		if _, err := index.LoadOrBuild(root); err != nil {
+			return fmt.Errorf("preindex %s: %w", root, err)
+		}
+	}
+	return nil
+}
+
 func main() {
 	var projects stringList
 	flag.Var(&projects, "project", "register a project (NAME=PATH, repeatable)")
+	var preindex stringList
+	flag.Var(&preindex, "preindex", "warm and persist the index for a project root before serving (PATH or NAME=PATH, repeatable)")
 	httpAddr := flag.String("http", "", "serve MCP over HTTP instead of stdio: an address (:8080, unix:/path) or \"auto\" for a 0600 unix socket (default transport; force loopback TCP with KERN_MCP_TRANSPORT=tcp)")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (PEM) for the HTTP transport; env KERN_MCP_TLS_CERT")
 	tlsKey := flag.String("tls-key", "", "TLS private key file (PEM) for the HTTP transport; env KERN_MCP_TLS_KEY")
 	longVer := flag.Bool("version", false, "print version and exit")
 	shortVer := flag.Bool("v", false, "shorthand for -version")
+	// Augment the default usage with the environment surface: an operator
+	// (or agent) bootstrapping from --help alone otherwise never learns the
+	// governance knobs exist (envelope audit F-5, 2026-10-25).
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprint(os.Stderr, `
+Governance and tuning (environment): KERN_MCP_ROOTS, KERN_MCP_PHASE,
+KERN_MCP_FULL, KERN_PRELOAD, KERN_MCP_WATCH, KERN_MCP_TRANSPORT,
+KERN_ALLOW_EXEC — full reference: docs/mcp/protocol.md
+`)
+	}
 	flag.Parse()
 	if len(projects) > 0 {
 		var roots []string
@@ -96,6 +129,16 @@ func main() {
 	}
 	mcp.SetServerVersion(version)
 	_ = optimize.EnsureRecorder()
+	// R6 (MCP audit 2026-10-25): --preindex warms project roots
+	// synchronously before serving, so a deploy script can warm the roots it
+	// will serve in one process and the first tool call finds a persisted
+	// index instead of blocking on a multi-minute build.
+	if len(preindex) > 0 {
+		if err := preindexRoots(preindex); err != nil {
+			fmt.Fprintln(os.Stderr, "kern-mcp:", err)
+			os.Exit(1)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *httpAddr != "" {

@@ -90,6 +90,10 @@ type Index struct {
 	// name-heuristic cross-file), "heuristic" (regex). Drives --precision strict.
 	PrecisionByLang map[string]string   `json:"precision_by_lang,omitempty"`
 	SymbolsByFile   map[string][]Symbol `json:"-"`
+	// freshnessMemo caches the last non-strict FreshnessProof verdict
+	// (single-flight + TTL — see identity.go) so warm tool calls do not
+	// re-walk the tree or re-stage git per call. Never serialized.
+	freshnessMemo proofMemo `json:"-"`
 	// PromotedLowEdges / UnresolvedLowEdges are the finalize-time
 	// reconciliation counters (CG-P0-5): call edges whose target resolved
 	// against the completed symbol table and was promoted from LOW to
@@ -376,7 +380,8 @@ func (ix *Index) Save() error {
 		if serr := SaveSQLite(ix.Root, ix); serr == nil {
 			return nil
 		} else {
-			log.Printf("kern index: sqlite persist failed for %s, falling back to the JSON cache: %v", ix.Root, serr)
+			// LOW-8: the root is operator-supplied — clip before reflecting.
+			log.Printf("kern index: sqlite persist failed for %s, falling back to the JSON cache: %v", ClipReflect(ix.Root, 160), serr)
 		}
 	}
 	data, err := json.Marshal(ix)
@@ -387,7 +392,7 @@ func (ix *Index) Save() error {
 	if v := onDiskVersion(p); v > ix.Version {
 		return fmt.Errorf("refusing to overwrite index schema v%d with v%d: the on-disk index was written by a newer kern — restart this process so it loads the newer index", v, ix.Version)
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 
@@ -482,7 +487,7 @@ func ensureGitExclude(root string) {
 	} else {
 		return
 	}
-	_ = os.MkdirAll(infoDir, 0o755)
+	_ = os.MkdirAll(infoDir, 0o700)
 	excludePath := filepath.Join(infoDir, "exclude")
 	b, _ := os.ReadFile(excludePath)
 	content := string(b)
@@ -822,6 +827,11 @@ var ignoreDirs = map[string]bool{
 	// tools: multi-MB JSON/HTML that is never project source and can hang
 	// the foreign-language parser on large graphs (51MB+ graph.json files).
 	"graphify-out": true,
+	// Agent-arena scratch worktrees (the arena skill's run dirs): throwaway
+	// benchmark/escape fixtures that are never project source — excluding
+	// them keeps the index content root stable and the sandbox snapshot cap
+	// un-tripped (same class as graphify-out).
+	".arena": true,
 }
 
 // IgnoredDir reports whether a directory name is skipped during index walks

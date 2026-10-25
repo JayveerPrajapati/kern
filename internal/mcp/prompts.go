@@ -104,16 +104,15 @@ func promptText(name string, args map[string]any) string {
 	case "review_changes":
 		return strings.Join([]string{
 			"Review the current changes against the call graph.",
-			n(1, "kern_changes", "Map changed files to affected symbols, blast radius, risk scores and test gaps."),
-			n(2, "kern_test_gaps", "Confirm which untested hotspots fall inside the blast radius."),
-			n(3, "kern_guard_check", "Enforce architectural boundaries; REJECT exit 2 means a boundary violation."),
+			n(1, "kern_review", "Get the token-optimised review context for the diff: changed symbols with file:line spans, their callers, blast radius, risk and test gaps."),
+			n(2, "kern_verify", "Enforce architectural boundaries on the changed files (pass types \"architecture\"); a FAIL verdict means a boundary violation."),
 			"Synthesize a prioritized review: blockers first, then risk, then test gaps. Cite symbol file:line.",
 		}, "\n")
 	case "architecture_map":
 		return strings.Join([]string{
 			"Build an architecture digest of the project.",
 			n(1, "kern_arch", "List subsystems/communities with their hubs and packages, plus coupling warnings."),
-			n(2, "kern_hubs", "Rank the most depended-on symbols and cross-package bridges."),
+			n(2, "kern_why", "For the top hub symbol from step 1, see who depends on it and why (in/out edge counts and caller rationales)."),
 			"Synthesize: what the subsystems are, what everything flows through, and where changes ripple.",
 		}, "\n")
 	case "debug_issue":
@@ -125,22 +124,21 @@ func promptText(name string, args map[string]any) string {
 		}
 		step = 2
 		if t := argString(args, "trace"); t != "" {
-			lines = append(lines, fmt.Sprintf("%d. Call `kern_trace` (trace %q) to overlay the stack frames on the call graph and find hot symbols.", step, t))
+			lines = append(lines, fmt.Sprintf("%d. Call `kern_explore` (root %q) for each symbol named in the stack trace to see its callers, callees and blast radius.", step, root))
 			step++
 		}
 		lines = append(lines,
 			n(step, "kern_context", "Read the minimal source slice for each hot symbol."),
-			n(step+1, "kern_near", "Expand the neighborhood of the root-cause candidates."),
+			n(step+1, "kern_graph", "Expand the neighborhood of the root-cause candidates: callers first, then callees, every edge provenance-tagged."),
 			"Hypothesize the root cause, verify against source, and state the fix with file:line references.",
 		)
 		return strings.Join(lines, "\n")
 	case "onboard_developer":
 		return strings.Join([]string{
 			"Onboard to this codebase in one pass.",
-			n(1, "kern_project_map", "Get the compressed project map (files + symbols)."),
-			n(2, "kern_hubs", "Identify what everything depends on."),
-			n(3, "kern_larges", "Spot god functions that dominate the code."),
-			n(4, "kern_arch", "See the subsystem structure and coupling."),
+			n(1, "kern_buddy", "Get the onboarding digest: conventions, layout, entry points, gotchas and project memory."),
+			n(2, "kern_project_map", "Get the compressed project map (files + symbols + line counts)."),
+			n(3, "kern_arch", "See the subsystem structure, hub symbols and coupling hotspots."),
 			"Synthesize an onboarding brief: structure, entry points, hotspots, and where to be careful.",
 		}, "\n")
 	case "pre_merge_check":
@@ -149,9 +147,8 @@ func promptText(name string, args map[string]any) string {
 		}
 		return strings.Join([]string{
 			"Assess PR readiness before merge.",
-			n(1, "kern_review", "Get token-optimised review context for the diff: changed symbols, blast radius, risk, test gaps."),
-			n(2, "kern_test_gaps", "Find untested hotspots touched by the change."),
-			n(3, "kern_guard_check", "Enforce boundaries across the changed files."),
+			n(1, "kern_review", "Get token-optimised review context for the diff: changed symbols, callers, blast radius, risk and test gaps."),
+			n(2, "kern_verify", "Enforce boundaries and run the security gate across the changed files (pass types \"architecture,security\")."),
 			"Give a go/no-go verdict with reasons and any required follow-ups.",
 		}, "\n")
 	case "refactor_symbol":
@@ -162,8 +159,9 @@ func promptText(name string, args map[string]any) string {
 		return strings.Join([]string{
 			fmt.Sprintf("Safely refactor the Go package-level symbol %q.", symbol),
 			n(1, "kern_why", fmt.Sprintf("Understand who depends on %q and why before touching it.", symbol)),
-			n(2, "kern_near", "Expand the neighbourhood of the symbol to find every reference context."),
-			fmt.Sprintf("%d. Call `kern_rename` (symbol=%s) in preview mode, review every file:line:col edit, then re-run with apply=true if the preview is correct.", 3, symbol),
+			n(2, "kern_graph", fmt.Sprintf("Expand the neighbourhood of %q: every caller and callee, edge provenance included.", symbol)),
+			fmt.Sprintf("%d. Call `kern_impact` (change=%s, kind=rename_symbol, new_target=<new name>, root %q) to enumerate every affected symbol, file and test before editing.", 3, symbol, root),
+			fmt.Sprintf("%d. Apply the mechanical edits with `kern_apply` (root %q); it verifies and rolls back on failure.", 4, root),
 			"Report what was renamed and confirm the index rebuilt.",
 		}, "\n")
 	case "compute_quick_answer":
@@ -174,7 +172,7 @@ func promptText(name string, args map[string]any) string {
 		return strings.Join([]string{
 			fmt.Sprintf("Compute this exactly by running code, not by guessing: %q", task),
 			"1. Write the smallest Python3 (or Node) script that prints exactly the answer to stdout and nothing else.",
-			"2. Call `kern_exec` (code=..., lang=python3 or node). The result is pure stdout.",
+			"2. Call `kern_exec` (code=..., lang=python3 or node). The result is pure stdout. (kern_exec is governance-gated: it fails closed unless the operator enabled KERN_ALLOW_EXEC=1 or listed it in KERN_TOOLS.)",
 			"3. If it failed, read the stderr in the error, fix the script, and re-run.",
 			"4. Report the computed answer plainly; do not include the script source unless asked.",
 		}, "\n")

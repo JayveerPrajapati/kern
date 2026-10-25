@@ -339,6 +339,15 @@ func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]a
 	return e.Text, true
 }
 
+// readonlyMode reports whether KERN_READONLY=1 is set: pure-read MCP
+// sessions suppress their read-path state writes (tool-call audit-chain
+// appends, D1 cache persistence, prediction telemetry, the index
+// watcher) so read-only sessions leave the project's .kern/ untouched.
+// Opt-in and per-process (host env, fixed at start). Index maintenance
+// for a stale index is correctness-preserving and still writes — point
+// the knob at an already-indexed checkout for strict zero-write runs.
+func readonlyMode() bool { return os.Getenv("KERN_READONLY") == "1" }
+
 // cacheStore persists a successful tool response (raw pre-sandbox text plus
 // the provenance stamped at store time) under the call's key. Entries whose
 // raw text exceeds the size cap are skipped (F9). Best-effort by design: a
@@ -348,6 +357,10 @@ func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]a
 // secrets (e.g. source lines with API keys) — cache hits replay the masked
 // form.
 func (s *Server) cacheStore(ctx context.Context, name string, args map[string]any, text string) {
+	if readonlyMode() {
+		return // KERN_READONLY=1: read-path persistence suppressed; cache
+		// lookups still serve entries stored by non-readonly sessions.
+	}
 	if len(text) > toolCacheEntrySizeCap {
 		return // F9: huge outputs cost more to persist than recompute
 	}

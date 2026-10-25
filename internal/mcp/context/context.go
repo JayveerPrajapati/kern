@@ -105,6 +105,15 @@ func BuddyWarmWait() {
 	buddyWarmWG.Wait()
 }
 
+// clipReflect bounds and sanitizes a value echoed into an operator-facing
+// stderr line (NIT#33 payload-reflection hygiene; no execution path
+// exists). Delegates to index.ClipReflect, which the buddy digest header
+// and the index persist-fallback line share (LOW-8: every site that
+// reflects an operator-supplied root clips).
+func clipReflect(s string, max int) string {
+	return index.ClipReflect(s, max)
+}
+
 // Buddy builds a session digest for the root (index warm-up happens in the
 // background so later calls render the fast path). no_memory skips the
 // digest's "Project memory" and "Recent session activity" sections — for
@@ -120,7 +129,7 @@ func Buddy(ctx context.Context, args map[string]any) (string, error) {
 	go func() {
 		defer buddyWarmWG.Done()
 		if werr := brief.Warm(root); werr != nil {
-			fmt.Fprintf(os.Stderr, "kern: buddy: could not warm index for %q: %v\n", root, werr)
+			fmt.Fprintf(os.Stderr, "kern: buddy: could not warm index for %q: %v\n", clipReflect(root, 160), clipReflect(werr.Error(), 512))
 		}
 	}()
 	out, err := brief.BuildWithOptions(root, brief.Options{NoMemory: mcpargs.ArgBool(args, "no_memory")})

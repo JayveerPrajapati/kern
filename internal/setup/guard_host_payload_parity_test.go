@@ -78,6 +78,7 @@ func hostPayloadContracts(readme, source string) []hostPayloadContract {
 }
 
 func TestGuardHostPayloadParity(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	readme := filepath.Join(dir, "README.md")
 	source := filepath.Join(dir, "source.go")

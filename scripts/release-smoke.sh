@@ -7,8 +7,8 @@
 #   3. `kern version` / `kern --version` / `kern-mcp version` run and
 #      report the expected stamp.
 #   4. A live MCP stdio handshake: initialize + tools/list. The default
-#      surface must be 29 tools; KERN_MCP_FULL=1 must expose 31, with
-#      kern_arch + kern_graph appearing only in the full surface.
+#      surface and the KERN_MCP_FULL=1 surface must both expose 32 tools
+#      (the full catalog is the default surface since 2026-10-23).
 #   5. The shipped binary indexes a real repo (`kern index .`) and serves
 #      a search query with results.
 #   6. `kern doctor` runs against that repo with zero [fail] findings
@@ -112,13 +112,13 @@ handshake "" "$SMOKE/default.json" || fail "default-surface handshake failed"
 handshake "KERN_MCP_FULL=1" "$SMOKE/full.json" || fail "full-surface handshake failed"
 default_n=$(tool_names "$SMOKE/default.json" | grep -c .)
 full_n=$(tool_names "$SMOKE/full.json" | grep -c .)
-[ "$default_n" -eq 29 ] || fail "default MCP surface is $default_n tools, expected 29"
-[ "$full_n" -eq 31 ] || fail "full MCP surface (KERN_MCP_FULL=1) is $full_n tools, expected 31"
+[ "$default_n" -eq 32 ] || fail "default MCP surface is $default_n tools, expected 32"
+[ "$full_n" -eq 32 ] || fail "full MCP surface (KERN_MCP_FULL=1) is $full_n tools, expected 32"
 for t in kern_arch kern_graph; do
-  tool_names "$SMOKE/default.json" | grep -qx "$t" && fail "$t leaked into the default surface"
-  tool_names "$SMOKE/full.json" | grep -qx "$t" || fail "$t missing from the full surface"
+tool_names "$SMOKE/default.json" | grep -qx "$t" || fail "$t missing from the default surface"
+tool_names "$SMOKE/full.json" | grep -qx "$t" || fail "$t missing from the full surface"
 done
-echo "    default surface: $default_n tools · full surface: $full_n tools (kern_arch/kern_graph full-only)"
+echo "    default surface: $default_n tools · full surface: $full_n tools"
 
 echo "==> 5/6 index + search on the real repo"
 # shellcheck disable=SC2164
@@ -147,4 +147,4 @@ if [ "$rc" -eq 1 ]; then
 fi
 echo "    doctor: no [fail] findings"
 
-echo "release-smoke: PASS — $ARCHIVE verified (checksums, stamps, handshake 29/31, index+search, doctor)"
+echo "release-smoke: PASS — $ARCHIVE verified (checksums, stamps, handshake 32/32, index+search, doctor)"
