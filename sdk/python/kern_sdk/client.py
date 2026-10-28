@@ -16,7 +16,11 @@ class KernError(Exception):
 
 
 class Client:
-    """Typed client for the kern-server REST API.
+    """DEPRECATED: typed client for the removed kern-server REST API.
+
+    The server was retired in the platform pivot; these `/v1/*` routes do not
+    exist in a current install. Kept for source/contract compatibility — use
+    ``KernEngine`` (local) or MCP (``kern mcp``) instead.
 
     Args:
         base_url: Server URL (default http://localhost:8090).

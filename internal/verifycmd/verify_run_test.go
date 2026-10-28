@@ -606,6 +606,34 @@ func TestRunVerifyStagedNonEmptyOmitsFallbackNotice(t *testing.T) {
 	}
 }
 
+// TestRunVerifyStagedSecurityCriticalSecretExitsFail pins P0-1 (2026-10-28
+// adversarial audit): a critical secret in the scanned tree renders
+// `verdict: FAIL` AND exits 1. The machine-wide global pre-commit hook gates
+// on the exit status (`kern verify --staged security,architecture`), so an
+// exit 0 here means a private key commits silently.
+func TestRunVerifyStagedSecurityCriticalSecretExitsFail(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := fastVerifyFixture(t, false)
+	const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0auditfixturebody\n-----END RSA PRIVATE KEY-----\n"
+	if err := os.WriteFile(filepath.Join(dir, "leak.env"), []byte("PRIVATE_KEY="+pem), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "leak.env")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add leak.env: %v (%s)", err, out)
+	}
+	var code int
+	out := captureStdout(t, func() { code = VerifyRun([]string{"--staged", "security", "--root", dir}) })
+	if code != 1 {
+		t.Fatalf("a critical secret must make --staged security exit 1 (the pre-commit hook gates on it), got %d; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "verdict: FAIL") {
+		t.Fatalf("expected verdict: FAIL, got:\n%s", out)
+	}
+}
+
 // TestVerifySecurityDetailWarnLabel pins the honest render: a security check
 // with findings but no unsuppressed critical is OK (non-blocking) — but the
 // detail line must say WARN, never the self-contradictory "OK findings=N".

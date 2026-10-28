@@ -59,6 +59,7 @@ import (
 // one line in docs/benchmarks/telemetry-audit.md.
 var networkAllowlist = []string{
 	"internal/enterprise",   // enterprise auth + org API (outbound and serving)
+	"internal/daemon",       // LOCAL unix-domain socket only (net.Listen("unix")/Dial("unix")): IPC between kern processes in one checkout; no TCP/IP, no name resolution, no egress
 	"internal/fetch",        // outbound HTTP fetcher for pages/documents
 	"internal/llm",          // outbound LLM provider clients (OpenAI/Anthropic/Google/Ollama)
 	"internal/mcp",          // MCP loopback HTTP server (+ transport TLS loopback listener, doc uses fetch)

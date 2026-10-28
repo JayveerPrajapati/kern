@@ -102,7 +102,12 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 			timeout = scriptTimeout(sec)
 		}
 	}
-	res := sandbox.RunGuarded(ctx, root, parts[0], parts[1:], timeout, mcpargs.ArgBool(args, "force"))
+	// The user-facing command sandbox opts into darwin write confinement
+	// rooted at the project: an untrusted child may write the workdir (which
+	// is snapshotted/restored) and the Go caches, never $HOME, /etc or
+	// another repo. Before this, `(allow default)` let an absolute-path write
+	// escape the sandbox entirely (2026-10-26 audit).
+	res := sandbox.RunGuardedWithOptions(ctx, root, parts[0], parts[1:], timeout, mcpargs.ArgBool(args, "force"), sandbox.RunOptions{WriteRoot: root})
 	var b strings.Builder
 	if res.OK {
 		fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))

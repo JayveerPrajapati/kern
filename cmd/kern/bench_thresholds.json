@@ -1,8 +1,15 @@
 {
-  "_comment": "Versioned gate config for `kern bench --check`. Ceilings are generous multipliers over the 2026-10-19 measured baseline on the kern repo (warm load 174 ms, worst query 91 ms, cold/warm speedup 4.6x) so the gate fails on REGRESSIONS, never on machine noise — a machine several times slower than the baseline still passes. The speedup floor guards the persisted-store fast path: a warm Load that falls through to a full Build collapses the ratio to ~1x. min_results fails a query that returns nothing (a wiring regression, not a latency). KERN_BENCH_THRESHOLDS points at an override file for testing.",
-  "warm_load_ms_max": 2000,
-  "query_ms_max": 1000,
-  "cold_vs_warm_min": 2,
-  "warn_factor": 0.5,
-  "min_results": 1
+"_comment": "Versioned gate config for `kern bench --check`. warm_load/query ceilings are generous multipliers over the 2026-10-19 measured baseline (warm load 174 ms, worst query 91 ms) so the gate fails on REGRESSIONS, never on machine noise. The speedup floor guards the persisted-store fast path. min_results fails a query that returns nothing (a wiring regression, not a latency). cli_ms_max gates the one-shot CLI commands (search/context/explore/impact on a leaf symbol, plus impact-hub on the index's heaviest TYPE — types aggregate methods+constructors, the worst impact shape; a leaf-only gate let real p95s regress invisibly). Each CLI row gets one untimed warm-up invocation, so rows measure the warm daemon by construction, not ambient machine state. search/context/explore/impact stay at 2x the 2026-10-27 SLO targets (150/250/300/400 ms — met through the warm daemon; KERN_DAEMON=0 reproduces the cold in-process path at ~0.7-2.2 s, which this gate then correctly fails, because losing the warm path IS the regression). impact-hub is a worst-shape probe, not an SLO: 2026-10-28 measured 981 ms after the impact attribution fixes (per-edge caller resolution memoized once per graph — internal/intel callerIndex — and the graphNodeFile node lookup made index-backed in tasklife; was 2293 ms when the report re-resolved every edge per root through a linear node scan), then 190 ms after campaign 3 (per-edge callee/caller incidence indexes replaced the per-root full-edge scans, and test-coverage tiering stopped materializing a per-root map plus per-root name tokenization). The 400 ms ceiling ratchets just above that measurement so the gate fails on a return to the old 981 ms shape; the residual is the six per-root graph walks (dependents, direct dependents, services, APIs, events, tests — closure-memoized, structurally per-root) plus entity attachment. warn_factor 0.5 warns exactly at the target and fails at 2x. KERN_BENCH_THRESHOLDS points at an override file for testing.",
+"warm_load_ms_max": 2000,
+"query_ms_max": 1000,
+"cold_vs_warm_min": 2,
+"warn_factor": 0.5,
+"min_results": 1,
+"cli_ms_max": {
+"search": 300,
+"context": 500,
+"explore": 600,
+"impact": 800,
+"impact-hub": 400
+}
 }

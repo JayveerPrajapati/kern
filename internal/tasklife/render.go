@@ -404,6 +404,9 @@ func renderImpactText(r domain.ImpactReport) string {
 	} else {
 		fmt.Fprintf(&b, "Risk: %s\n", r.Risk)
 	}
+	if r.TypeExpanded != "" {
+		fmt.Fprintf(&b, "Type scope: %s (type nodes carry no call edges; methods/constructors were aggregated)\n", r.TypeExpanded)
+	}
 	// WhoCalls counts graph nodes with a direct "calls" edge into the target
 	// (Graph.WhoCallsPrecise) — a different universe from explore's caller
 	// count (unique simple names), so the label says which one this is (P2).
@@ -432,6 +435,15 @@ func renderImpactText(r domain.ImpactReport) string {
 	// listed the files the way explore does).
 	fmt.Fprintf(&b, "Affected files: %d\n", len(r.Files))
 	renderImpactList(&b, r.Files)
+	// Non-callable symbols (types used only in declarations, consts, vars)
+	// have no call edges, so a bare "0 affected files" is a false all-clear.
+	// The textual reference scan is the honest interim blast radius; label its
+	// confidence so it is never mistaken for a resolved reference set (P0-1).
+	if r.ReferenceConfidence != "" {
+		fmt.Fprintf(&b, "Referencing files: %d (%s confidence)\n", len(r.ReferenceFiles), r.ReferenceConfidence)
+		renderImpactList(&b, r.ReferenceFiles)
+		fmt.Fprintf(&b, "Reference count: %d\n", r.ReferenceCount)
+	}
 	// The header shows the number DISPLAYED when the list is capped, with the
 	// real total alongside, so it never contradicts the "+N more (use --json
 	// for full list)" overflow line below (V3). Uncapped reports keep the

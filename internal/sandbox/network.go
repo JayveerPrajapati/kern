@@ -200,6 +200,72 @@ func homeDir() string {
 // pre-option shape. Unix sockets are local by construction, so the UDS
 // rules never open a cross-machine egress path.
 func seatbeltProfileFor(home string, fsConfine bool, allowLoopbackBind bool) string {
+	return seatbeltProfileWithWriteRoot(home, fsConfine, allowLoopbackBind, "")
+}
+
+// seatbeltProfileWithWriteRoot is seatbeltProfileFor plus the optional write
+// contract: when writeRoot is non-empty (and filesystem confinement is on),
+// every filesystem write outside the writable set is DENIED. The writable set
+// is the declared root (both path aliases), the process temp dir, the Go build
+// caches, and the device sinks — enough for a real build/test run, nothing
+// else. Without this arm `(allow default)` let an absolute-path write escape
+// into $HOME or another repo (2026-10-26 audit).
+//
+// SBPL is last-match-wins, so the deny is emitted after the base/read rules
+// and the allows after the deny. An empty writeRoot keeps the profile
+// byte-identical to the pre-confinement shape.
+func seatbeltProfileWithWriteRoot(home string, fsConfine bool, allowLoopbackBind bool, writeRoot string) string {
+	base := seatbeltProfileBase(home, fsConfine, allowLoopbackBind)
+	if writeRoot == "" || !fsConfine {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n(deny file-write*)")
+	for _, root := range writeConfinementRoots(writeRoot, home) {
+		fmt.Fprintf(&b, "\n(allow file-write* (subpath %q))", root)
+	}
+	for _, dev := range []string{"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/dtracehelper", "/dev/tty"} {
+		fmt.Fprintf(&b, "\n(allow file-write* (literal %q))", dev)
+	}
+	return b.String()
+}
+
+// writeConfinementRoots returns the paths a write-confined child may write
+// under: the declared root (as-written and canonical), the process temp dir,
+// and the build-cache locations a Go build/test needs. Caches are included by
+// design — denying GOCACHE would turn every sandboxed build into a failure —
+// but nothing else in $HOME is writable.
+func writeConfinementRoots(writeRoot, home string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+		if canon, err := filepath.EvalSymlinks(p); err == nil && canon != p && !seen[canon] {
+			seen[canon] = true
+			out = append(out, canon)
+		}
+	}
+	add(writeRoot)
+	add(os.TempDir())
+	for _, env := range []string{"TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH", "GOTMPDIR", "XDG_CACHE_HOME"} {
+		add(os.Getenv(env))
+	}
+	if home != "" {
+		add(filepath.Join(home, "Library", "Caches"))
+		add(filepath.Join(home, ".cache"))
+		add(filepath.Join(home, "go"))
+	}
+	return out
+}
+
+// seatbeltProfileBase is the pre-write-contract profile: network isolation
+// plus the optional read blocklist and loopback-bind relaxation.
+func seatbeltProfileBase(home string, fsConfine bool, allowLoopbackBind bool) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))")
 	if allowLoopbackBind {
@@ -279,13 +345,13 @@ func canonicalSensitivePath(p string) string {
 // bind half. On darwin the generated profile also carries the
 // sensitive-path read blocklist (Stage 1 FS confinement) when
 // KERN_SANDBOX_FS_CONFINEMENT is on (the default).
-func netIsolationPrefix(allowLoopbackBind bool) (prefix []string, ok bool) {
+func netIsolationPrefix(allowLoopbackBind bool, writeRoot string) (prefix []string, ok bool) {
 	if runtime.GOOS == "darwin" {
 		bin, err := exec.LookPath("sandbox-exec")
 		if err != nil {
 			return nil, false
 		}
-		return []string{bin, "-p", seatbeltProfileFor(homeDir(), fsConfinementEnabled(), allowLoopbackBind)}, true
+		return []string{bin, "-p", seatbeltProfileWithWriteRoot(homeDir(), fsConfinementEnabled(), allowLoopbackBind, writeRoot)}, true
 	}
 	bin, err := exec.LookPath("unshare")
 	if err != nil {

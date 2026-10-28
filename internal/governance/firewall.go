@@ -11,6 +11,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
@@ -23,7 +24,7 @@ type Firewall struct {
 	agents       map[string]*AgentIdentity
 	assessor     *RiskAssessor
 	approval     *ApprovalWorkflow
-	audit        *AuditLog
+	audit        *govaudit.AuditLog
 	approvedKeys map[string]bool
 	bus          *eventbus.Bus // optional event publisher; nil = no-op
 	egress       EgressRule    // outbound-connection posture (zero value = local-only default)
@@ -38,7 +39,7 @@ func NewFirewall() *Firewall {
 		agents:       map[string]*AgentIdentity{},
 		assessor:     NewRiskAssessor(DefaultPolicies()),
 		approval:     NewApprovalWorkflow(),
-		audit:        NewAuditLog(),
+		audit:        govaudit.NewAuditLog(),
 		approvedKeys: map[string]bool{},
 	}
 }
@@ -54,7 +55,7 @@ func NewFirewallWithApprovalStore(root string) *Firewall {
 		agents:       map[string]*AgentIdentity{},
 		assessor:     NewRiskAssessor(DefaultPolicies()),
 		approval:     NewPersistedApprovalWorkflow(root),
-		audit:        NewAuditLog(),
+		audit:        govaudit.NewAuditLog(),
 		approvedKeys: map[string]bool{},
 	}
 }
@@ -212,7 +213,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	f.mu.RUnlock()
 	if !ok {
 		r := domain.Risk{Level: domain.RiskCritical, Score: 1.0, Factors: []string{"unknown agent"}, Mitigation: "register the agent before use", Blocked: true}
-		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
+		f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "unknown agent"}})
 		return false, r, nil, fmt.Errorf("governance: unknown agent %q", agentID)
 	}
@@ -221,7 +222,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	if !agent.Can(resource, action) {
 		r := f.assessor.AssessAction(resource, action)
 		r.Blocked = true
-		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
+		f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "lacks permission"}})
 		return false, r, nil, fmt.Errorf("governance: agent %q lacks permission %q:%q", agentID, resource, action)
 	}
@@ -256,7 +257,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 5. Always-blocked CRITICAL actions.
 	if r.Level == domain.RiskCritical && action == "drop" {
 		r.Blocked = true
-		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "blocked"})
+		f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "blocked"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "always blocked"}})
 		return false, r, nil, fmt.Errorf("governance: %s:%s is always blocked", resource, action)
 	}
@@ -295,10 +296,10 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 			}
 			appr, err := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, evidence, "", kinds...)
 			if err != nil {
-				f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
+				f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 				return false, r, nil, fmt.Errorf("governance: approval for %s:%s could not be persisted: %w", resource, action, err)
 			}
-			f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
+			f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
 			f.publish(eventbus.Event{Kind: eventbus.ApprovalRequested, Subject: appr.ID, Payload: map[string]string{"resource": resource, "action": action, "risk_level": string(r.Level)}})
 			metrics.Default().RecordApproval()
 			return false, r, &appr, nil
@@ -306,7 +307,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	}
 
 	// 7. Allowed.
-	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Approved: true, Result: "allowed"})
+	f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Approved: true, Result: "allowed"})
 	return true, r, nil, nil
 }
 
@@ -406,7 +407,7 @@ func (f *Firewall) ApproveAction(approvalID, approver string) error {
 	f.approvedKeys[appr.TaskID] = true
 	f.mu.Unlock()
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"approved by human"}, Mitigation: "human approval granted"}
-	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Approved: true, Result: "approved"})
+	f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Approved: true, Result: "approved"})
 	metrics.Default().RecordApproval()
 	return nil
 }
@@ -423,12 +424,12 @@ func (f *Firewall) RejectAction(approvalID, approver, reason string) error {
 	delete(f.approvedKeys, appr.TaskID)
 	f.mu.Unlock()
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"rejected by human"}, Mitigation: "human approval denied"}
-	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: "denied"})
+	f.audit.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: "denied"})
 	metrics.Default().RecordApproval()
 	return nil
 }
 
 // AuditLog returns the firewall's audit log for inspection.
-func (f *Firewall) AuditLog() *AuditLog {
+func (f *Firewall) AuditLog() *govaudit.AuditLog {
 	return f.audit
 }

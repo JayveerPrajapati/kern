@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/claims"
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/gitrun"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/skills"
@@ -26,6 +28,24 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
+
+// indexOnlyVerifyTypes reports whether every requested check is served by the
+// index alone. Those checks spawn no build/test process and need none of the
+// application Platform's twin extractors, memory store, firewall, or audit
+// replay — constructing it was ~3 s of the machine-wide pre-commit hook.
+func indexOnlyVerifyTypes(types []string) bool {
+	if len(types) == 0 {
+		return false
+	}
+	for _, t := range types {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "security", "sec", "architecture", "arch", "dependency", "depend", "dep", "reuse":
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // runVerifyMode handles the silent-orchestrator and harness verification
 // modes (--verify-pipeline / --verify-silent / --verify-token-reduction /
@@ -256,6 +276,51 @@ func runVerifyMode(f verifyFlags, args []string, root string) bool {
 // the requested checks through the task service and renders the typed
 // verdict, honoring --json, --fast/--full, the compliance trio and the
 // changed/staged scoping flags.
+// fastTypes applies the --fast tier to the requested type set. The implicit
+// default becomes build+test (the fast tier's scope); an explicit list is
+// returned unchanged so a requested check is never silently dropped.
+func fastTypes(types []string, explicit bool) []string {
+	if explicit {
+		return types
+	}
+	return []string{"build", "test"}
+}
+
+// hasClaimType reports whether the requested types include the claims gate.
+func hasClaimType(types []string) bool {
+	for _, t := range types {
+		if strings.EqualFold(strings.TrimSpace(t), "claims") {
+			return true
+		}
+	}
+	return false
+}
+
+// runClaimsGate runs the deterministic claims gate and renders its report.
+// A FAIL exits 1 (the findings tier); a SKIP never fails the run but is always
+// printed with its reason, so an unexercised claim cannot look like a pass.
+func runClaimsGate(root string, jsonOut bool) {
+	rep := claims.Run(root)
+	if jsonOut {
+		printJSON(rep)
+		if !rep.OK {
+			fatal("verify claims: %d claim(s) FAILED — the artifact does not meet its public claims", rep.Failed)
+		}
+		return
+	}
+	for _, c := range rep.Claims {
+		fmt.Println(c.String())
+		for _, e := range c.Evidence {
+			fmt.Println("    " + e)
+		}
+	}
+	fmt.Printf("claims: %d passed, %d failed, %d skipped (%s)\n",
+		len(rep.Claims)-rep.Failed-rep.Skipped, rep.Failed, rep.Skipped, rep.Elapsed)
+	if !rep.OK {
+		fatal("verify claims: %d claim(s) FAILED — the artifact does not meet its public claims", rep.Failed)
+	}
+}
+
 func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 	typesArg := "build,test"
 	if f.types != "" {
@@ -278,15 +343,29 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 			fatalUsage("invalid --types value '%s' (valid: %s)", t, strings.Join(catalog.VerifyTypesKnown, ", "))
 		}
 	}
+	// The claims gate proves the public product claims (blast-radius
+	// reference evidence, audit-chain integrity, guard gate corpus, tool
+	// catalog contract). It is not an engine check and does not merge into a
+	// Code-verification verdict, so it runs on its own: mixing it with build/
+	// test would produce two independent outcomes behind one exit code.
+	if hasClaimType(types) {
+		if len(types) > 1 {
+			fatalUsage("verify: \"claims\" runs the claims gate on its own — run `kern verify claims` and your other checks as separate commands")
+		}
+		runClaimsGate(root, f.json)
+		return
+	}
 	// --fast: pre-commit tier — build + changed-package tests only.
-	// It skips security/architecture/dependency/reuse/e2e/static/perf
-	// and keeps the -short suite (the default). --fast wins over any
-	// explicit type list; the opt-in compliance flags (--cve/--license/
-	// --secrets) below still append. --full beats --fast: when both are
-	// given, --fast is ignored entirely (full suite, default scope).
+	// It scopes the IMPLICIT default (build+test) and skips the heavier
+	// checks then. An EXPLICIT type list is honored verbatim: `kern verify
+	// build,security,architecture --fast` must not silently drop security
+	// and architecture and report a green PASS (2026-10-26 audit). The
+	// opt-in compliance flags below still append. --full beats --fast: when
+	// both are given, --fast is ignored entirely (full suite, default scope).
 	fastMode := f.fast && !f.full
+	explicitTypes := f.types != "" || len(args) > 0
 	if fastMode {
-		types = []string{"build", "test"}
+		types = fastTypes(types, explicitTypes)
 	}
 	// Opt-in compliance checks (--cve/--license/--secrets): each flag
 	// appends its check to the requested types — the compliance trio runs
@@ -335,11 +414,6 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 			fmt.Println("short mode (full suite: kern verify --full)")
 		}
 	}
-	p, perr := app.New(root)
-	if perr != nil {
-		fatal("%v — run kern index to rebuild it", perr)
-	}
-	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	// --changed: scope the test step to packages with uncommitted
 	// changes vs HEAD (incremental verification; the 2-minute full
 	// suite stays the default for --full). --fast implies the same
@@ -349,13 +423,12 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 	// build-only — never a silent empty run.
 	// --staged with NOTHING staged (a manual run on a clean tree, or the
 	// fresh-checkout CI case): say so explicitly instead of letting the
-	// run look like a staged-diff gate. --staged scopes the TEST step;
-	// security and architecture are whole-tree checks by design, so the
-	// run still verifies something — the notice teaches both facts. Never
-	// printed in --json mode (machine-readable contract).
+	// run look like a staged-diff gate. --staged scopes only the TEST step;
+	// the later branch drops that step and runs build only. Never printed in
+	// --json mode (machine-readable contract).
 	if f.staged && !f.json {
 		if out, err := gitrun.Output(root, "diff", "--cached", "--name-only", "--"); err == nil && strings.TrimSpace(out) == "" {
-			fmt.Println("nothing staged — the test step has no staged scope; security and architecture scan the whole tree (not just staged changes)")
+			fmt.Println("nothing staged — the test step has no staged scope")
 		}
 	}
 	if (f.changed || fastMode || f.staged) && catalog.ContainsVerifyTestType(types) {
@@ -376,6 +449,12 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 			}
 		} else if fastMode || f.staged {
 			types = catalog.DropVerifyTestTypes(types)
+			if len(types) == 0 {
+				// An empty types list means "defaults", not "nothing":
+				// without this the dropped test step silently comes back as
+				// the default build+test pair (QA 2026-10-26).
+				types = []string{"build"}
+			}
 			if !f.json {
 				scope := "no changed Go packages"
 				if f.staged {
@@ -409,8 +488,32 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 			fmt.Printf("changed packages since %s (%d): %s\n", f.changedSince, len(pkgs), strings.Join(pkgs, " "))
 		}
 	}
+	// Index-only check types (security/architecture/dependency/reuse) never
+	// touch the twin extractors, memory store, firewall, or audit replay that
+	// app.New builds — that Platform construction was ~3 s of the 15 s
+	// pre-commit hook. Build the verification engine directly over the index;
+	// the full Platform is only for checks that actually need it (the pre-commit hook regression).
+	var v verdict.VerificationResult
+	var err error
 	verifyStart := time.Now()
-	_, v, err := ts.Verify(types, verifyOpts...)
+	if indexOnlyVerifyTypes(types) {
+		ix, ierr := index.LoadOrBuild(root)
+		if ierr != nil {
+			fatal("%v — run kern index to rebuild it", ierr)
+		}
+		eng := verification.NewEngineWithIndex(root, ix)
+		for _, o := range verifyOpts {
+			o(eng)
+		}
+		v = eng.Verify(types)
+	} else {
+		p, perr := app.New(root)
+		if perr != nil {
+			fatal("%v — run kern index to rebuild it", perr)
+		}
+		ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
+		_, v, err = ts.Verify(types, verifyOpts...)
+	}
 	// CLI telemetry: the in-process recorder is loaded/saved by main()
 	// for every invocation, so this lands in the persisted snapshot
 	// (`kern stats performance`).
@@ -434,7 +537,7 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 			fmt.Println(verdict.RenderCompact(v))
 			// Calibration (Feature Batch C): aggregate confidence line on the
 			// non-pass path too (best-effort; omitted when there is no data).
-			if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
+			if line := tasklife.VerifyConfidenceLine(root); line != "" {
 				fmt.Println(line)
 			}
 			if VerifyExitCode(v.Verdict) != 0 {
@@ -450,6 +553,14 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 	if f.json {
 		v.Version = version
 		printJSON(v)
+		// The JSON payload IS the report, but a FAIL verdict must still be the
+		// process outcome: the machine-wide pre-commit hook gates on the exit
+		// status, so a rendered FAIL with exit 0 lets a critical secret commit
+		// through (2026-10-28 adversarial audit P0-1). Same mapping as the
+		// error branch above — never a second, drifting exit contract.
+		if VerifyExitCode(v.Verdict) != 0 {
+			fatal("verify: FAIL — see JSON output above")
+		}
 		return
 	}
 	fmt.Printf("verdict: %s\n", v.Verdict)
@@ -625,8 +736,15 @@ func runVerifyTypesForm(f verifyFlags, args []string, root string) {
 	// Calibration (Feature Batch C): append the aggregate confidence line at
 	// the end of the rendered report (best-effort; omitted when the model has
 	// no data or a read fails).
-	if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
+	if line := tasklife.VerifyConfidenceLine(root); line != "" {
 		fmt.Println(line)
+	}
+	// The report is fully rendered above; the verdict now decides the process
+	// outcome. FAIL → exit 1 so `kern verify --staged security,architecture`
+	// (the global pre-commit hook) actually blocks the commit; WARN/SKIPPED
+	// stay 0 (reported outcomes, F7). P0-1, 2026-10-28 adversarial audit.
+	if VerifyExitCode(v.Verdict) != 0 {
+		fatal("verification FAILED — see report above; fix failing checks and rerun kern verify")
 	}
 }
 

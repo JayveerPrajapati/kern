@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -20,7 +21,7 @@ import (
 // this check `kern audit --root <missing>` would exit 0 with "no audit
 // entries" and a receipt whose worktree was cleaned up would be wrongly
 // invalidated.
-func ReadAuditTrail(ctx context.Context, root, taskID string) ([]AuditEntry, error) {
+func ReadAuditTrail(ctx context.Context, root, taskID string) ([]govaudit.AuditEntry, error) {
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("audit: root directory does not exist: %s", root)
 	}
@@ -29,9 +30,9 @@ func ReadAuditTrail(ctx context.Context, root, taskID string) ([]AuditEntry, err
 	if err != nil {
 		return nil, err
 	}
-	var out []AuditEntry
+	var out []govaudit.AuditEntry
 	for _, e := range entries {
-		var entry AuditEntry
+		var entry govaudit.AuditEntry
 		if err := storage.UnmarshalValue(e.Value, &entry); err != nil {
 			continue // malformed entry — skip, never fail the whole trail
 		}

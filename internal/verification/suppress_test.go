@@ -372,8 +372,24 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 // never match, so deleting it restores the drift pin to the verified set.
 // 83 -> 82 on 2026-10-24: the two worktree.go line pins (Diff's two fixed-argv
 // git diff forms at :121/:162) merged into one Func-scoped entry.
+// 82 -> 84 on 2026-10-27: two func-scoped unsafe-exec pins for fixed-argv
+// plumbing surfaced by the release-readiness audit (server short-HEAD probe
+// and setup's `claude mcp add`); the default scan now reports zero
+// unsuppressed high findings.
+// 84 -> 81 on 2026-10-27: the five line-pinned internal/script/script.go
+// entries (253/265/546/558/566) collapsed into two Func-scoped entries
+// (networkNSFor, RunScript) after the write-confinement profile shifted the
+// lines — the audit's point that line pins rot on unrelated edits.
+// 81 -> 79 on 2026-10-27: the two line-pinned duplicates of the func-scoped
+// server short-HEAD and `claude mcp add` entries were removed once the line
+// pins went stale; the func-scoped entries already cover both sites.
+// 79 -> 75 on 2026-10-27 (self-scan pass): the eight line-pinned unsafe-exec
+// entries for sandbox.go / identity.go / network.go collapsed into three
+// file-wide entries after the write-contract edits shifted their lines, and
+// the benchmark harness got its own entry (the last unsuppressed informational
+// hit). The same rot the comment above describes, fixed the durable way.
 func TestBuiltinCountIsSixteen(t *testing.T) {
-	if len(defaultSuppressions) != 82 {
-		t.Errorf("len(defaultSuppressions) = %d, want 82 (the verified finding set on kern's repo)", len(defaultSuppressions))
+	if len(defaultSuppressions) != 75 {
+		t.Errorf("len(defaultSuppressions) = %d, want 75 (the verified finding set on kern's repo)", len(defaultSuppressions))
 	}
 }

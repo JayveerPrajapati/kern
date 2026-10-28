@@ -57,7 +57,31 @@ type Graph struct {
 	// kern_why, blast radius): every call re-walked all edges with map
 	// allocations and per-node sorts before traversal even started. The
 	// graph is read-only after construction, so the caches never go stale.
-	adjLooseOut, adjLooseIn   map[string][]string
+	adjLooseOut, adjLooseIn map[string][]string
+	// callerAttr caches the target-independent caller attribution of every
+	// "calls" edge for DirectDependsOnNames: per edge, the resolved caller
+	// node ID when unambiguous, else the callee-anchored attribution, with
+	// the raw endpoints kept for the target-dependent fallbacks. One build
+	// per graph (guarded by callerOnce); the per-root loop of a hub-type
+	// impact report otherwise re-resolves every edge per root — for a
+	// heavily-used type that is dozens of roots x ~51k edges of name
+	// resolution, measured as the dominant cost of `kern impact` in the
+	// 2026-10-27 audit. The graph is read-only after construction, so the
+	// cache never goes stale.
+	callerAttr []edgeCallerAttr
+	callerOnce sync.Once
+	// callerEdges / calleeEdges index "calls" edges by the node IDs each
+	// endpoint can name, so DirectDependsOnNames / DirectCallersNames touch
+	// only incident edges instead of rescanning every edge per root. A hub
+	// type expands to dozens–hundreds of roots (Server: 189), so the
+	// per-root full scan was the dominant cost of `kern impact` (2026-10-28
+	// backlog item 1). callerEdges holds indices into callerAttr and is built
+	// in the same callerOnce pass; calleeEdges holds indices into Edges and is
+	// built once on first callee query. The graph is read-only after
+	// construction, so neither index goes stale.
+	callerEdges               map[string][]int
+	calleeEdges               map[string][]int
+	calleeOnce                sync.Once
 	adjLooseOnce              sync.Once
 	adjStrictOut, adjStrictIn map[string][]string
 	adjStrictOnce             sync.Once
@@ -72,6 +96,12 @@ type Graph struct {
 	// rebuilt and a fresh Graph is constructed.
 	testsByPkg map[string][]string
 	testsOnce  sync.Once
+	// testTokens caches each test node's name-token set (camelCase/separator
+	// split, lowercased). A hub-type impact re-runs the name-match tier for
+	// every expanded root, and tokenizing every covered test per root was
+	// ~80 ms of the report (2026-10-28 profile). The cache is lazy per node
+	// and per graph, so a leaf query only tokenizes the tests it inspects.
+	testTokens sync.Map
 
 	// foreignBases is the set of import path bases ("http", "fmt") that are
 	// not project package directory bases. A callee key whose FIRST qualifier

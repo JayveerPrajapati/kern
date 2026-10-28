@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -139,9 +139,9 @@ func TestAuditRepairCommand(t *testing.T) {
 	}
 	lock := filepath.Join(auditDir, ".lock")
 	store := storage.NewLocal(auditDir)
-	l := governance.NewAuditLog().WithStore(store).WithLockPath(lock)
+	l := govaudit.NewAuditLog().WithStore(store).WithLockPath(lock)
 	for i := 0; i < 3; i++ {
-		l.Record(governance.AuditEntry{
+		l.Record(govaudit.AuditEntry{
 			AgentID: "agent-x", Action: "write", Resource: "source", Result: "allowed",
 		})
 	}

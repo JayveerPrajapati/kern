@@ -27,6 +27,7 @@ func runGoHook(t *testing.T, bin, stdin string, env []string) (int, string, stri
 	cmd.Env = append(os.Environ(), append([]string{
 		"KERN_GUARD_CONFIRM_TIMEOUT=1",
 		"KERN_GUARD_ASSUME_KERN=1",
+		"KERN_DAEMON=0",
 		"HOME=" + t.TempDir(),
 		"KERN_BIN=" + bin,
 	}, env...)...)
@@ -53,6 +54,7 @@ func runScriptHook(t *testing.T, script, bin, stdin string, env []string) (int, 
 	cmd.Env = append(os.Environ(), append([]string{
 		"KERN_GUARD_CONFIRM_TIMEOUT=1",
 		"KERN_GUARD_ASSUME_KERN=1",
+		"KERN_DAEMON=0",
 		"HOME=" + t.TempDir(),
 		"KERN_BIN=" + bin,
 	}, env...)...)

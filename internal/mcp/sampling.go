@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/execshell"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/pii"
@@ -71,13 +71,13 @@ func (s *Server) registerHostSampling() func() {
 
 // registerCommandSampler registers (or, with an empty command, unregisters)
 // the explicit host-sampler command for this server's slot. The command runs
-// via sh -c for every generation: the user prompt on stdin, the system prompt
+// via the platform shell for every generation: the user prompt on stdin, the system prompt
 // in $KERN_SYSTEM_PROMPT, stdout is the reply. Unregistering restores the
 // passive MCP-sampling sampler when the client announced sampling capability.
 // key allows advanced callers to namespace a registration beyond the server's
 // own slot (e.g. per agent or per repo); the empty key uses this server's slot.
 //
-// Security contract: a registered command is an exec surface (sh -c per
+// Security contract: a registered command is an exec surface (the platform shell per
 // generation). The client-callable entry point (handleRegisterHostSampler)
 // gates registration through governance.CheckExecCommand — the same
 // KERN_ALLOW_EXEC / KERN_TOOLS allowlist firewall as kern_exec/kern_sandbox.
@@ -139,7 +139,7 @@ func (s *Server) serverRoot() string {
 }
 
 // handleRegisterHostSampler implements kern_register_host_sampler. Registering
-// a command is an exec-surface action (the command runs via sh -c for every
+// a command is an exec-surface action (the command runs via the platform shell for every
 // generation), so a non-empty command must pass the governance exec firewall
 // first — KERN_ALLOW_EXEC=1, or a KERN_TOOLS allowlist naming
 // kern_register_host_sampler (or any exec tool). Fail closed: the gate error
@@ -180,7 +180,7 @@ func (s *Server) handleRegisterHostSampler(ctx context.Context, args map[string]
 	return msg, nil
 }
 
-// runHostSamplerCommand executes a registered sampler command via sh -c.
+// runHostSamplerCommand executes a registered sampler command via the platform shell.
 // The user prompt is fed on stdin, the system prompt exported as
 // $KERN_SYSTEM_PROMPT; stdout (trimmed) is the reply. Output is capped at
 // 64KiB so a misbehaving command cannot flood the caller.
@@ -198,7 +198,7 @@ func runHostSamplerCommand(ctx context.Context, cmd string, timeout time.Duratio
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := exec.CommandContext(cctx, "sh", "-c", cmd)
+	c := execshell.CommandContext(cctx, cmd)
 	c.Stdin = strings.NewReader(user)
 	c.Env = []string{
 		"PATH=" + os.Getenv("PATH"),

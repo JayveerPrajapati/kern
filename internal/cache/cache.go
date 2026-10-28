@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -26,6 +27,16 @@ import (
 // is stable (the production case) resolves once, while tests that set
 // XDG_CACHE_HOME/HOME per test still get the correct per-test root.
 func resolveCacheDir() string {
+	// KERN_CACHE_DIR is the explicit escape hatch for sandboxes and
+	// restricted CI runners where ~/.cache is not writable. It wins over the
+	// XDG/HOME resolution so an operator can point every cache write at a
+	// repo-local or /tmp directory.
+	if dir := strings.TrimSpace(os.Getenv("KERN_CACHE_DIR")); dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			return abs
+		}
+		return dir
+	}
 	base := os.Getenv("XDG_CACHE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -55,7 +66,7 @@ func WaitForMaintain() {
 // previously re-resolved env + home + joined the path. If a test or caller
 // changes XDG_CACHE_HOME/HOME, the memo is invalidated and re-resolved.
 func Dir() string {
-	envKey := os.Getenv("XDG_CACHE_HOME") + "|" + os.Getenv("HOME")
+	envKey := os.Getenv("XDG_CACHE_HOME") + "|" + os.Getenv("HOME") + "|" + os.Getenv("KERN_CACHE_DIR")
 	dirMu.Lock()
 	defer dirMu.Unlock()
 	if dirVal == "" || dirEnvKey != envKey {
@@ -63,6 +74,38 @@ func Dir() string {
 		dirEnvKey = envKey
 	}
 	return dirVal
+}
+
+// ReadOnly reports whether cache writes must be skipped
+// (KERN_CACHE_READONLY=1). Reads still use Dir(), so a pre-populated cache
+// remains usable on a read-only filesystem.
+func ReadOnly() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KERN_CACHE_READONLY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// Writable probes the cache root for write access (create + remove a temp
+// file). Callers that persist optional state use it to degrade to a warning
+// instead of failing the whole command in a restricted sandbox.
+func Writable() bool {
+	if ReadOnly() {
+		return false
+	}
+	dir := Dir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false
+	}
+	file, err := os.CreateTemp(dir, ".write-probe-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 // Path returns an absolute path inside the cache root.

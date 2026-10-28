@@ -57,7 +57,7 @@ func ClassifyTask(intent string) TaskType {
 		return TaskFixBug
 	case containsKeyword(intent, "security", "vuln", "injection", "secret", "xss", "sqli", "auth"):
 		return TaskSecurityReview
-	case containsKeyword(intent, "refactor", "restructure", "cleanup", "simplify", "rename"):
+	case containsKeyword(intent, "refactor", "restructure", "cleanup", "simplify", "rename", "signature", "parameter", "argument", "receiver"):
 		return TaskRefactor
 	case containsKeyword(intent, "feature", "implement", "support", "new"):
 		return TaskAddFeature

@@ -3,6 +3,7 @@
 package index
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -324,6 +325,20 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 	var walk func(*sitter.Node)
 	walk = func(n *sitter.Node) {
 		kind := n.Kind()
+		// Dart nests function_signature inside method_signature (and, for
+		// abstract members, abstract_method_signature). Both node kinds map
+		// to a symbol, so emitting the inner signature mints every method
+		// twice (live: 1,875 symbols for 12 Dart files, every method
+		// duplicated). The enclosing method node owns the identity.
+		if kind == "function_signature" {
+			for p := n.Parent(); p != nil; p = p.Parent() {
+				switch p.Kind() {
+				case "method_signature", "abstract_method_signature", "method_definition",
+					"getter_signature", "setter_signature":
+					return
+				}
+			}
+		}
 		// Python typing stubs: skip @overload-decorated defs wholesale — the
 		// signature carries no body and the real implementation (defined
 		// separately) owns the identity. Without this, the stub and the impl
@@ -334,6 +349,13 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 		}
 		if symKind, ok := tsNodeTypes[kind]; ok {
 			name := langparse.ExtractName(n, src, kind)
+			// Dart getters and setters share a name; without a distinct
+			// identity the duplicate gate refuses the file. Name the
+			// setter `<name>=` (the Dart convention) so index succeeds
+			// while both members stay searchable.
+			if name != "" && lang == "dart" && dartSetter(n, src) {
+				name += "="
+			}
 			// Skip the file root node (Python's "module"): a container.
 			if name != "" && n != node {
 				// Only CSS custom properties (--*) are props worth indexing.
@@ -679,6 +701,29 @@ func outerOfClass(n, root *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// dartSetter reports whether a Dart method_signature declares a setter
+// (`set name(...)`), which must not share the getter's identity.
+func dartSetter(n *sitter.Node, src []byte) bool {
+	start := int(n.StartByte())
+	// The "set" keyword may be a sibling token outside the signature node, so
+	// look at the text immediately before it on the same line first.
+	lineStart := bytes.LastIndexByte(src[:start], '\n') + 1
+	if prefix := strings.TrimSpace(string(src[lineStart:start])); strings.HasSuffix(prefix, "set") {
+		return true
+	}
+	text := string(src[start:n.EndByte()])
+	if i := strings.IndexByte(text, '('); i >= 0 {
+		text = text[:i]
+	}
+	fields := strings.Fields(text)
+	for i, f := range fields {
+		if f == "set" && i+1 < len(fields) {
+			return true
+		}
+	}
+	return false
 }
 
 // findEnclosingFunction finds the function containing a call and returns its

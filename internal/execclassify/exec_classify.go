@@ -1,18 +1,18 @@
 package execclassify
 
-// exec_classify.go — command-class classification for the exec firewall
-// (audit-table-2 A). Dangerous command classes — destructive, network-pipe
-// install, and installer — require human approval BY DEFAULT regardless of
-// KERN_EXEC_RISK. KERN_EXEC_RISK=LOW is the explicit operator opt-out that
-// disables class escalation. The classifier is deterministic, lexical, and
-// quote-aware: a bar-raiser against naive hostile commands, not a sandbox.
-// Obfuscated exec (base64 -d | sh, python -c "...") is residual risk.
+// exec_classify.go — command-class classification for the exec firewall.
+// Dangerous classes require approval by default regardless of KERN_EXEC_RISK
+// (LOW opts out). Deterministic, lexical, quote-aware: a bar-raiser, not a
+// sandbox; obfuscated exec (base64 -d | sh) is residual risk.
 
 import (
-	"net"
 	"os"
-	"regexp"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/destructive"
+	"github.com/JayveerPrajapati/kern/internal/destrules"
+	"github.com/JayveerPrajapati/kern/internal/execinterp"
+	"github.com/JayveerPrajapati/kern/internal/execwin"
 )
 
 // DangerClass is the class of a dangerous command.
@@ -154,12 +154,32 @@ func classifySegment(seg string) (DangerClass, string) {
 		return DangerNone, ""
 	}
 	name := tokens[0]
+	lname := strings.ToLower(name)
 
-	// One level of recursion into sh -c "…" / bash -c "…" wrappers.
-	if (name == "sh" || name == "bash" || name == "dash" || name == "zsh") && len(tokens) >= 3 && tokens[1] == "-c" {
+	// One level of recursion into POSIX and Windows shell wrappers. Windows
+	// has no /bin/sh; the equivalent bypass is `cmd /c` or a PowerShell
+	// `-Command` string, so both are unwrapped here (P0-4).
+	if inner, encoded, ok := execwin.Unwrap(name, tokens); ok {
+		if encoded {
+			return DangerDestructive, name + " executes an encoded script"
+		}
+		if cls, why := ClassifyDangerousCommand(inner); cls != DangerNone {
+			return cls, name + ": " + why
+		}
+		return DangerNone, ""
+	}
+	if (lname == "sh" || lname == "bash" || lname == "dash" || lname == "zsh") && len(tokens) >= 3 && tokens[1] == "-c" {
 		inner := strings.Join(tokens[2:], " ")
 		if cls, why := ClassifyDangerousCommand(inner); cls != DangerNone {
 			return cls, name + " -c: " + why
+		}
+		return DangerNone, ""
+	}
+	// `eval 'rm -rf d'` is a shell wrapper too.
+	if lname == "eval" && len(tokens) >= 2 {
+		inner := strings.Join(tokens[1:], " ")
+		if cls, why := ClassifyDangerousCommand(inner); cls != DangerNone {
+			return cls, "eval: " + why
 		}
 		return DangerNone, ""
 	}
@@ -167,6 +187,19 @@ func classifySegment(seg string) (DangerClass, string) {
 	// Destructive triggers.
 	if cls, why := classifyDestructive(name, tokens); cls != DangerNone {
 		return cls, why
+	}
+	// Interpreter/eval forms (python -c subprocess, perl -e unlink, ruby -e
+	// File.delete, node -e fs.rmSync) are best-effort pattern matches.
+	if hit, why := execinterp.ClassifyInterpreter(name, seg, tokens); hit {
+		return DangerDestructive, why
+	}
+	// Side-effect writes and outside-the-repo state live in destrules (shared
+	// with the bash oracle, so both surfaces gate one list).
+	if hit, why := destrules.ClassifyShellWrite(name, seg, tokens); hit {
+		return DangerDestructive, why
+	}
+	if hit, why := destrules.ClassifyStateful(name, seg, tokens); hit {
+		return DangerDestructive, why
 	}
 
 	// Network-fetch (after destructive; F2-2): a plain curl/wget/fetch
@@ -177,8 +210,8 @@ func classifySegment(seg string) (DangerClass, string) {
 	// targets: local-dev health probes (kern-server, localhost fixtures)
 	// are the common no-risk case. Never a blanket exemption — a loopback
 	// listener can proxy outward, and URL-less invocations stay gated.
-	if name == "curl" || name == "wget" || name == "fetch" {
-		if os.Getenv("KERN_ALLOW_LOOPBACK") == "1" && loopbackOnlySegment(seg) {
+	if execwin.NetworkFetch(lname) || lname == "curl" || lname == "wget" || lname == "fetch" {
+		if os.Getenv("KERN_ALLOW_LOOPBACK") == "1" && destrules.LoopbackOnlySegment(seg) {
 			return DangerNone, ""
 		}
 		return DangerNetworkFetch, name + " performs an outbound network fetch"
@@ -188,32 +221,10 @@ func classifySegment(seg string) (DangerClass, string) {
 	if strings.Contains(seg, "--dry-run") {
 		return DangerNone, ""
 	}
-	return classifyInstaller(name, tokens)
-}
-
-// loopbackOnlySegment reports whether EVERY http(s) URL in the command
-// targets a loopback host. A command with no URL never qualifies (the
-// redirect/fetch target cannot be proven from the text alone).
-func loopbackOnlySegment(seg string) bool {
-	re := regexp.MustCompile(`https?://[^/\s"']+`)
-	found := false
-	for _, m := range re.FindAllString(seg, -1) {
-		found = true
-		host := m
-		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		host = strings.Trim(host, "[]")
-		if host == "localhost" {
-			continue
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			continue
-		}
-		return false
+	if hit, why := destrules.ClassifyInstaller(name, tokens); hit {
+		return DangerInstaller, why
 	}
-	return found
+	return DangerNone, ""
 }
 
 // StripPrefixes removes leading sudo/doas and VAR=VALUE environment prefixes
@@ -238,6 +249,14 @@ func StripPrefixes(tokens []string) []string {
 // classifyDestructive applies the destructive-class rules to one segment.
 func classifyDestructive(name string, tokens []string) (DangerClass, string) {
 	rest := tokens[1:]
+	// Windows-native destructive families (P0-4) live in execwin to keep this
+	// file under its LOC cap.
+	if why, ok := execwin.Destructive(name, tokens); ok {
+		return DangerDestructive, why
+	}
+	if strings.EqualFold(name, "unlink") {
+		return DangerDestructive, "unlink deletes a file"
+	}
 
 	// rm: recursive flag with an absolute/~/..-escaping operand, or -f
 	// (force) present — `rm -rf /tmp/x` is always destructive; `rm -r build`
@@ -302,6 +321,26 @@ func classifyDestructive(name string, tokens []string) (DangerClass, string) {
 		}
 	}
 
+	// find is a READ command by default, so its destructive predicates must
+	// be classified explicitly. The 2026-10-26 audit executed
+	// `find <dir> -delete` while the guard classified the command "serve":
+	// the file tree was deleted without an approval. xargs/tee/shred forward
+	// the same destruction from a benign head, and dd/git clean/reset destroy
+	// state too. The rules live in internal/destructive (execclassify sits at
+	// its ARCHITECTURE.md cap).
+	if hit, why := destructive.PredicateForwarding(name, rest); hit {
+		return DangerDestructive, why
+	}
+
+	// Forced process kills (kill -9 / pkill -9 / killall).
+	if name == "kill" || name == "pkill" || name == "killall" {
+		for _, t := range rest {
+			if t == "-9" || t == "-KILL" || t == "--signal=KILL" || strings.HasPrefix(t, "--signal=9") {
+				return DangerDestructive, name + " forcibly kills a process"
+			}
+		}
+	}
+
 	// Redirect to a block device: ... > /dev/sda (also /dev/disk*, /dev/nvme*),
 	// whether the device is attached (> /dev/sda) or in the next token ("> /dev/sda").
 	for i, t := range rest {
@@ -347,6 +386,13 @@ func classifyPipeInstall(stages []stage) (DangerClass, string) {
 		for runEnd+1 < len(stages) && stages[runEnd+1].pipe {
 			runEnd++
 		}
+		var texts []string
+		for k := runStart; k <= runEnd; k++ {
+			texts = append(texts, stages[k].text)
+		}
+		if hit, why := execinterp.ClassifyEncodedPipe(texts); hit {
+			return DangerPipeInstall, why
+		}
 		for a := runStart; a < runEnd; a++ {
 			firstA := firstShellToken(stages[a].text)
 			if !downloaders[firstA] {
@@ -360,45 +406,6 @@ func classifyPipeInstall(stages []stage) (DangerClass, string) {
 			}
 		}
 		i = runEnd
-	}
-	return DangerNone, ""
-}
-
-// classifyInstaller applies the installer-class rules to one segment.
-func classifyInstaller(name string, tokens []string) (DangerClass, string) {
-	rest := tokens[1:]
-	// npm/pnpm/yarn install|add|ci; pip/pip3 install; go install.
-	switch name {
-	case "npm", "pnpm", "yarn":
-		if len(rest) > 0 && (rest[0] == "install" || rest[0] == "add" || rest[0] == "ci") {
-			return DangerInstaller, name + " " + rest[0]
-		}
-	case "pip", "pip3":
-		if len(rest) > 0 && rest[0] == "install" {
-			return DangerInstaller, name + " install"
-		}
-	case "go":
-		if len(rest) > 0 && rest[0] == "install" {
-			return DangerInstaller, "go install"
-		}
-	case "make":
-		if len(rest) > 0 && rest[0] == "install" {
-			return DangerInstaller, "make install"
-		}
-	case "apt", "apt-get", "dnf", "yum", "apk", "brew":
-		if len(rest) > 0 && (rest[0] == "install" || rest[0] == "upgrade") {
-			return DangerInstaller, name + " " + rest[0]
-		}
-	case "pacman":
-		// pacman installs/upgrades with -S / -Syu / --sync / --upgrade flags.
-		for _, t := range rest {
-			if strings.HasPrefix(t, "--") && (t == "--sync" || t == "--upgrade") {
-				return DangerInstaller, "pacman " + t
-			}
-			if strings.HasPrefix(t, "-S") && len(t) >= 2 {
-				return DangerInstaller, "pacman " + t
-			}
-		}
 	}
 	return DangerNone, ""
 }

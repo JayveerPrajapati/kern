@@ -40,10 +40,18 @@ func (s *TaskService) ResolveApproval(id, approver string, approve bool, reason 
 // out-of-band) is left untouched and the workflow engine still handles it on
 // resume. The decision itself is always persisted (fail closed on error).
 func (s *TaskService) ResolveApprovalForTask(id, approver string, approve bool, reason string) (domain.Approval, error) {
+	return s.ResolveApprovalForTaskWithSigner(id, approver, approve, reason, nil)
+}
+
+// ResolveApprovalForTaskWithSigner is ResolveApprovalForTask plus the
+// interactive operator signature used to authorize exec approvals (P0-3). A
+// nil signer keeps non-exec approvals working and fails closed for an
+// approved exec record.
+func (s *TaskService) ResolveApprovalForTaskWithSigner(id, approver string, approve bool, reason string, sign governance.ExecSigner) (domain.Approval, error) {
 	if s.platform == nil {
 		return domain.Approval{}, fmt.Errorf("task service: platform not configured")
 	}
-	a, err := governance.NewFileStore(s.platform.Root()).Decide(id, approver, approve, reason)
+	a, err := governance.NewFileStore(s.platform.Root()).DecideWithSigner(id, approver, approve, reason, sign)
 	if err != nil {
 		return a, err
 	}

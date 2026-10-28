@@ -72,7 +72,7 @@ flowchart TD
 | Dimension | Traditional Agent (`grep` / `read` / `glob`) | Agent Powered by `kern` |
 |---|---|---|
 | **Token Consumption** | 50,000 – 150,000+ tokens per deep task | **~20% fewer tokens across real mixed sessions [self-reported]** (500–2,500 on deep tasks [illustrative]; per-query savings on the synthetic fixture: [measured] TS-001) |
-| **Search Latency** | 2 – 15 seconds walking disk trees | **0.64 ms symbol search · 6.1 ms transitive blast radius [measured]** (16.5k symbols, warm index — see [Benchmarks](#benchmark-results); warm index load 178 ms) |
+| **Search Latency** | 2 – 15 seconds walking disk trees | **0.64 ms symbol search · 6.1 ms transitive blast radius [measured]** (16.5k symbols, warm in-process index — see [Benchmarks](#benchmark-results); a fresh CLI process adds the 178 ms warm load) |
 | **Code Understanding** | Flat string/regex pattern matching | **Precise AST call graphs, callers, callees & inheritance** |
 | **Blast Radius & Risk** | Agent guesses dependencies | **Deterministic change impact & test coverage gaps** |
 | **Security & Privacy** | Prompts send raw secrets to LLM | **100% local, automatic PII/secret masking, snapshot rollback execution** |
@@ -130,18 +130,23 @@ Beyond the default install, the script manages the full lifecycle:
 ```sh
 curl -fsSL .../install.sh | sh -s -- status     # installed version, path, platform
 curl -fsSL .../install.sh | sh -s -- upgrade    # compare + swap if newer (with backup)
-curl -fsSL .../install.sh | sh -s -- uninstall  # binaries + optional config (--yes to skip prompt)
+curl -fsSL .../install.sh | sh -s -- uninstall  # prefix-scoped (--machine adds machine state; --yes skips prompt)
 ```
 
-`uninstall` removes the three binaries, the kern PATH lines from your shell
-rc, `~/.config/kern` / `~/.cache/kern` when present, and surgically excises
-the kern-first block from `~/AGENTS.md` (other content preserved). Pin a
+`uninstall` removes the binaries and the PATH rc lines naming this install
+prefix. Machine state — the kern block in `~/AGENTS.md` (surgically excised,
+backup kept), `~/.config/kern` / `~/.cache/kern`, and the machine-secret
+directory (`os.UserConfigDir`/kern: audit-chain key, approval signing keys) —
+is removed only with `uninstall --machine`, so a smoke install rooted at a
+scratch `KERN_INSTALL_DIR` can be uninstalled without touching the real
+install's state. Pin a
 version with `KERN_VERSION=v1.2.3`, relocate with `KERN_INSTALL_DIR=dir`;
 when a platform has no prebuilt asset the installer falls back to
 `go install` automatically. Windows users get the native PowerShell installer
 (`install.ps1` — the same install/upgrade/status/uninstall lifecycle, with
-checksum-verified downloads and an uninstall that removes the binaries, the
-User PATH entry, `~/.config/kern` / `~/.cache/kern`, and the kern block from
+checksum-verified downloads and the same prefix-scoped uninstall:
+`-Machine` opts into removing
+`~/.config/kern` / `~/.cache/kern` and the kern block from
 `~/AGENTS.md`); Git-Bash users can run `install.sh` (zip path documented).
 `kern update` is uniform across platforms — it runs `install.sh` on
 macOS/Linux and `install.ps1` via PowerShell on Windows automatically,
@@ -328,6 +333,14 @@ in-memory index unless noted; median of repeated runs):
 | **Transitive blast radius** | 6.07 ms | top-hub symbol, walks full caller graph |
 | **Hub ranking** | 91.55 ms | full-repo scan |
 
+These are **in-process** query times on a warm index. A fresh CLI process also
+pays command dispatch plus the warm index load: the 2026-10-28 audit measured
+**329 ms** for `kern search`, **377 ms context**, **799 ms explore**, **1,077 ms
+impact** per cold process. The resident daemon removes the reload for its
+proxied commands; it retains one hydrated index per project for 15 idle minutes,
+and a fully hydrated index costs roughly **339 MB at 17.7k symbols** — plan
+memory for large monorepos.
+
 **One-shot cold start vs `grep -rn`** [measured] — the question everyone asks,
 measured honestly on real repos with a same-tree protocol (both tools scan
 identical copies stripped to kern's own ignore list — see
@@ -466,21 +479,16 @@ when-to-use guidance, see [`docs/tool-selection.md`](docs/tool-selection.md).
 
 ## SDKs
 
-Thin, zero-dependency clients for the tool catalog:
+Local-engine SDKs (the supported integration path):
 
-- **Python** — [sdk/python/kern_sdk](sdk/python/kern_sdk) (stdlib-only)
-- **TypeScript** — [`sdk/typescript/src`](sdk/typescript/src) (zero-dep, uses `fetch`)
+- **Python** — [sdk/python/kern_sdk](sdk/python/kern_sdk) (stdlib-only; `KernEngine` + framework adapters)
+- **TypeScript** — [`sdk/typescript/src`](sdk/typescript/src) (zero-dep; `KernEngine`)
 
-The clients wrap the catalog's REST passthrough contract — `CallTool` POSTs
-the tool's argument map to `/v1/tools/{name}`, which delegates to the same
-governed in-process dispatch MCP clients hit and returns the raw tool output
-(`{"output": ...}`). **Note:** the HTTP host for that route (the former
-enterprise web console, `kern serve`) is not part of this tree today; the
-clients are kept as contract-pinned references and their shared route-shape
-fixture (`sdk/contract/tools_call.json`) pins the contract until the route
-reappears. For direct integration today, use MCP JSON-RPC over `kern mcp`
-(stdio) or `kern-mcp --http`. Run the contract suites with
-`sdk/contract/verify.sh` (fails on the first failure).
+> **Deprecated:** the REST `Client`/`callTool` classes targeted the retired
+> `kern-server` control plane (`/v1/*`, including `POST /v1/tools/{name}`).
+> They are kept as contract-pinned references (`sdk/contract/tools_call.json`)
+> and will fail against a current install. For programmatic tool calls use MCP
+> JSON-RPC over `kern mcp` (stdio) or `kern-mcp --http`.
 
 ---
 
@@ -556,6 +564,17 @@ The [`ci` workflow](.github/workflows/ci.yml) runs this repository's governance 
 Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# · Java · Ruby · PHP · Shell · Dart · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
 
 *SFCs (Vue, Svelte, Astro) extract `<script>` blocks automatically. 13 of the 18 languages use deep tree-sitter grammars in the default build (Go is also parsed precisely by `go/ast`); prebuilt installs ship this build on the 5 native platforms (see [Install](#1-install)), while the pure-Go build (`-tags notreesitter`) swaps in regex heuristics covering 16 languages — Dart is tree-sitter-only.*
+
+**Accuracy by language — Go first, everything else best-effort:**
+
+| Tier | Languages | What you get |
+|---|---|---|
+| **Compiler-bound** | Go | `go/ast` definitions plus `go/types`-style package binding; cross-package call edges, callers/callees, and blast radius are resolved, not guessed. |
+| **AST + resolver** | Java | Tree-sitter definitions with a member-invocation resolver for local variable types (`x.bar()` → `Foo.bar()`). |
+| **AST extraction** | Python, JavaScript/TypeScript, Rust, C, C++, C#, Ruby, PHP, Shell, Dart, CSS, HTML, Markdown, JSON, YAML | Tree-sitter definitions and same-file structure are reliable. Cross-file call edges rely on receiver/import heuristics and can be incomplete; treat blast radius as best-effort. |
+| **Regex fallback** | all except Dart (`-tags notreesitter`) | Symbol-level structure only; call edges are lower-fidelity and skipped under `--precision strict`. |
+
+`kern doctor` reports the tier actually recorded in your index. Add `--precision strict` to verification when a false-positive call edge is worse than a missed one.
 </details>
 
 <details>
@@ -586,7 +605,7 @@ Spring Boot, Django, FastAPI, Flask, Express, NestJS, Rails, Laravel, Gin, Echo,
 [ok] claude                 kern MCP registered
 [ok] cursor                 kern entry present
 [ok] freshness              index is fresh (16529 symbols, 1893 files)
-[ok] precision              all 11 languages at AST-or-better precision
+[ok] precision              tree-sitter extraction: 18 languages at AST level (2 resolved call graphs; non-Go/Java call edges are best-effort)
 [ok] stats                  3720 ops, 831446 tokens saved (19.9%)
 
 verdict: all systems operational

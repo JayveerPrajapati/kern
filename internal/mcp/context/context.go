@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/brief"
+	"github.com/JayveerPrajapati/kern/internal/clip"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/fit"
@@ -111,7 +112,7 @@ func BuddyWarmWait() {
 // and the index persist-fallback line share (LOW-8: every site that
 // reflects an operator-supplied root clips).
 func clipReflect(s string, max int) string {
-	return index.ClipReflect(s, max)
+	return clip.ClipReflect(s, max)
 }
 
 // Buddy builds a session digest for the root (index warm-up happens in the

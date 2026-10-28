@@ -175,7 +175,7 @@ func TestSeatbeltProbeValidatesExactWrapProfile(t *testing.T) {
 	t.Setenv("KERN_ALLOW_UNISOLATED", "")
 	t.Setenv("KERN_ALLOW_NET", "")
 
-	prefix, ok := netIsolationPrefix(false)
+	prefix, ok := netIsolationPrefix(false, "")
 	if !ok {
 		t.Fatal("netIsolationPrefix must be available when sandbox-exec is")
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
@@ -49,6 +50,19 @@ func runMask(rest []string) {
 
 }
 
+// secSummaryLine renders the one-line summary. Under the default error-only
+// lens it reports the pre-filter total so a hidden warning/info finding is
+// never presented as "0 findings (0 warning)".
+func secSummaryLine(shown int, counts map[string]int, defaultLens bool) string {
+	total := counts["error"] + counts["warning"] + counts["info"]
+	if defaultLens {
+		return fmt.Sprintf("kern sec: %d shown of %d findings (%d error, %d warning, %d info; default lens: error) [use --severity error,warning,info to view all]",
+			shown, total, counts["error"], counts["warning"], counts["info"])
+	}
+	return fmt.Sprintf("kern sec: %d findings (%d error, %d warning, %d info)",
+		shown, counts["error"], counts["warning"], counts["info"])
+}
+
 // runSec implements `kern sec` — the standalone security scan (the bridge
 // command the blueprint standalone repo consumes via its adapters/kern
 // client: `kern sec --json <path>`). Restored 2026-10-18 (P7 blueprint
@@ -62,6 +76,21 @@ func runSec(rest []string) {
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 0 {
 		root = args[0]
+	}
+	// Single-file mode: `kern sec <file>` scans exactly that file. Previously
+	// the positional was handed to the directory walker as a root, so every
+	// lookup probed <file>/.kern/... and failed with "not a directory"
+	// (P0-2). Keep the file's directory as the reporting/suppression root.
+	target := root
+	singleFile := false
+	if info, statErr := os.Stat(root); statErr == nil && !info.IsDir() {
+		abs, aerr := filepath.Abs(root)
+		if aerr != nil {
+			abs = root
+		}
+		singleFile = true
+		target = abs
+		root = filepath.Dir(abs)
 	}
 	maxN := f.max
 	// Default gate is error-only: warnings/info are triage material, not CI
@@ -88,7 +117,12 @@ func runSec(rest []string) {
 	case "all", "":
 		wantGosec = sec.GosecAvailable()
 	}
-	findings, serr := secscan.Scan(root)
+	// gosec is a package/directory scanner; a single-file request skips it
+	// rather than scanning the whole parent directory.
+	if singleFile {
+		wantGosec = false
+	}
+	findings, serr := secscan.ScanOne(root, target)
 	if serr != nil {
 		fatal("kern sec: %v", serr)
 	}
@@ -100,6 +134,7 @@ func runSec(rest []string) {
 		gres = sec.RunGosec(root)
 		findings = append(findings, gres.Findings...)
 	}
+	allCounts := secscan.Counts(findings)
 	findings = secscan.FilterBySeverity(findings, allow)
 	// Suppression triage (M-1, production-readiness audit 2026-10-17): apply
 	// the SAME registry `kern verify security` uses, so a triaged finding
@@ -153,11 +188,9 @@ func runSec(rest []string) {
 			supSuffix = fmt.Sprintf("; %d suppressed (triaged — see [suppressed] lines)", len(suppressedFindings))
 		}
 		if f.severity == "" {
-			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)%s [use --severity error,warning,info to view all]\n",
-				len(findings), counts["error"], counts["warning"], counts["info"], supSuffix)
+			fmt.Fprintln(os.Stderr, secSummaryLine(len(findings), allCounts, true)+supSuffix)
 		} else {
-			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)%s\n",
-				len(findings), counts["error"], counts["warning"], counts["info"], supSuffix)
+			fmt.Fprintln(os.Stderr, secSummaryLine(len(findings), counts, false)+supSuffix)
 		}
 		if wantGosec {
 			switch gres.Status {

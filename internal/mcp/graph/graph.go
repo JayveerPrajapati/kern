@@ -1113,6 +1113,12 @@ func Probe(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map
 }
 
 func Communities(ctx context.Context, ix *index.Index, sess *project.Session, args map[string]any) (string, error) {
+	// Arch tolerates a nil session (it falls back to a stateless analysis);
+	// CommunitiesList is a method on the session, so a nil here would panic
+	// and take the whole MCP server down. Fail loudly instead.
+	if sess == nil {
+		return "", fmt.Errorf("communities: session is required")
+	}
 	limit := 0
 	if v := mcpargs.ArgString(args, "limit"); v != "" {
 		n, err := mcpargs.AtoiArg(v, 0)

@@ -110,8 +110,11 @@ func TestPluginShadowExemptionParity(t *testing.T) {
 	block = strings.Replace(block, "function gateHit(cmd: string, depth = 0): boolean {", "function gateHit(cmd, depth = 0) {", 1)
 	block = strings.Replace(block, "function segName(rawSeg: string): string {", "function segName(rawSeg) {", 1)
 	block = strings.Replace(block, "function isReadOnlyCompanion(seg: string): boolean {", "function isReadOnlyCompanion(seg) {", 1)
-	block = strings.Replace(block, "function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; file?: string; tails?: string[] } | null {", "function readPipeline(cmd) {", 1)
-	block = strings.Replace(block, "function grepPatternAndTarget(args: string[]): { pattern: string; hasTarget: boolean } {", "function grepPatternAndTarget(args) {", 1)
+	block = strings.Replace(block, "function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; path?: string; file?: string; tails?: string[] } | null {", "function readPipeline(cmd) {", 1)
+	block = strings.Replace(block, "function grepPatternAndTarget(args: string[]): { pattern: string; targets: string[] } {", "function grepPatternAndTarget(args) {", 1)
+	block = strings.Replace(block, "function grepFlagsOK(args: string[]): boolean {", "function grepFlagsOK(args) {", 1)
+	block = strings.Replace(block, "function cleanScope(target: string): string | null {", "function cleanScope(target) {", 1)
+	block = strings.Replace(block, "function scopedGrep(args: string[]): { pattern: string; path: string } | null {", "function scopedGrep(args) {", 1)
 	block = strings.Replace(block, "const toks: string[] = []", "const toks = []", 1)
 	block = strings.Replace(block, "const segs: string[] = []", "const segs = []", 1)
 	block = strings.Replace(block, "const tails: string[] = []", "const tails = []", 1)
@@ -518,8 +521,11 @@ func TestPluginShadowContentIntentClassifier(t *testing.T) {
 	block = strings.Replace(block, "function gateHit(cmd: string, depth = 0): boolean {", "function gateHit(cmd, depth = 0) {", 1)
 	block = strings.Replace(block, "function segName(rawSeg: string): string {", "function segName(rawSeg) {", 1)
 	block = strings.Replace(block, "function isReadOnlyCompanion(seg: string): boolean {", "function isReadOnlyCompanion(seg) {", 1)
-	block = strings.Replace(block, "function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; file?: string; tails?: string[] } | null {", "function readPipeline(cmd) {", 1)
-	block = strings.Replace(block, "function grepPatternAndTarget(args: string[]): { pattern: string; hasTarget: boolean } {", "function grepPatternAndTarget(args) {", 1)
+	block = strings.Replace(block, "function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; path?: string; file?: string; tails?: string[] } | null {", "function readPipeline(cmd) {", 1)
+	block = strings.Replace(block, "function grepPatternAndTarget(args: string[]): { pattern: string; targets: string[] } {", "function grepPatternAndTarget(args) {", 1)
+	block = strings.Replace(block, "function grepFlagsOK(args: string[]): boolean {", "function grepFlagsOK(args) {", 1)
+	block = strings.Replace(block, "function cleanScope(target: string): string | null {", "function cleanScope(target) {", 1)
+	block = strings.Replace(block, "function scopedGrep(args: string[]): { pattern: string; path: string } | null {", "function scopedGrep(args) {", 1)
 	block = strings.Replace(block, "const toks: string[] = []", "const toks = []", 1)
 	block = strings.Replace(block, "const segs: string[] = []", "const segs = []", 1)
 	block = strings.Replace(block, "const tails: string[] = []", "const tails = []", 1)
@@ -544,7 +550,12 @@ const out = {
   read_pipeCount: readPipeline("grep foo | wc -l"),
   read_pipeCountScoped: readPipeline("grep foo file | wc -l"),
   read_pipeHead: readPipeline("grep foo file | head -5"),
+  read_scopedDir: readPipeline("grep -rn governance internal"),
   read_scopedFile: readPipeline("grep -n edit .opencode/plugins/kern.ts"),
+  not_scoped_regex: readPipeline("grep -rn 'func [A-Z]' internal"),
+  not_scoped_include: readPipeline("grep -rn foo internal --include=*.go"),
+  not_scoped_escape: readPipeline("grep -rn foo ../x"),
+  not_scoped_list: readPipeline("grep -rln foo internal"),
   read_envPrefix: readPipeline("ZZZ=1 grep -c x doctor_test.go"),
   read_sudoPrefix: readPipeline("sudo cat /etc/hosts"),
   read_shWrap: readPipeline('sh -c "cat .gitignore"'),
@@ -576,7 +587,12 @@ process.stdout.write(JSON.stringify(out));
 		ReadPipeCount       *readServe `json:"read_pipeCount"`
 		ReadPipeCountScoped *readServe `json:"read_pipeCountScoped"`
 		ReadPipeHead        *readServe `json:"read_pipeHead"`
+		ReadScopedDir       *readServe `json:"read_scopedDir"`
 		ReadScopedFile      *readServe `json:"read_scopedFile"`
+		NotScopedRegex      *readServe `json:"not_scoped_regex"`
+		NotScopedInclude    *readServe `json:"not_scoped_include"`
+		NotScopedEscape     *readServe `json:"not_scoped_escape"`
+		NotScopedList       *readServe `json:"not_scoped_list"`
 		ReadEnvPrefix       *readServe `json:"read_envPrefix"`
 		ReadSudoPrefix      *readServe `json:"read_sudoPrefix"`
 		ReadShWrap          *readServe `json:"read_shWrap"`
@@ -633,15 +649,31 @@ process.stdout.write(JSON.stringify(out));
 	if res.ReadPipeCount == nil || res.ReadPipeCount.Tier != 2 {
 		t.Errorf("grep | wc -l must serve Tier 2 (computed count), got %+v", res.ReadPipeCount)
 	}
-	// Grep fidelity: a grep naming an explicit file/directory target is
-	// Tier 3 (the real grep honors the scope) — never the repo-wide symbol
-	// search, with or without tails.
-	for name, got := range map[string]*readServe{
-		"scoped pipe count": res.ReadPipeCountScoped,
-		"scoped single":     res.ReadScopedFile,
+	// Grep scope fidelity: a scoped SYMBOL grep is served from the index
+	// with the caller's path (Tier 1/2), while regex/include/count/list
+	// shapes have no index equivalent and stay Tier 3 (a real grep in the
+	// sandbox).
+	for name, tc := range map[string]struct {
+		got  *readServe
+		tier int
+		path string
+	}{
+		"scoped dir":        {res.ReadScopedDir, 1, "internal"},
+		"scoped single":     {res.ReadScopedFile, 1, ".opencode/plugins/kern.ts"},
+		"scoped pipe count": {res.ReadPipeCountScoped, 2, "file"},
 	} {
-		if got == nil || got.Tier != 3 {
-			t.Errorf("grep fidelity regression: %s must serve Tier 3 (scoped grep, real grep in the sandbox), got %+v", name, got)
+		if tc.got == nil || tc.got.Tier != tc.tier || tc.got.Path != tc.path {
+			t.Errorf("scoped serve regression: %s = %+v, want tier %d path %q", name, tc.got, tc.tier, tc.path)
+		}
+	}
+	for name, got := range map[string]*readServe{
+		"scoped regex":   res.NotScopedRegex,
+		"scoped include": res.NotScopedInclude,
+		"scoped escape":  res.NotScopedEscape,
+		"scoped list":    res.NotScopedList,
+	} {
+		if got == nil || got.Tier != 3 || got.Path != "" {
+			t.Errorf("scope fallback regression: %s must serve Tier 3 (real grep), got %+v", name, got)
 		}
 	}
 
@@ -664,6 +696,7 @@ type readServe struct {
 	Tier    int      `json:"tier"`
 	Head    string   `json:"head,omitempty"`
 	Pattern string   `json:"pattern,omitempty"`
+	Path    string   `json:"path,omitempty"`
 	File    string   `json:"file,omitempty"`
 	Tails   []string `json:"tails,omitempty"`
 }
@@ -826,7 +859,9 @@ const os = require("node:os");
 const path = require("node:path");
 ` + sqLine + "\n" + `
 const printer = ` + strconv.Quote(printer) + `;
-const bin = "/bin/sh";
+// Mirrors the plugin's per-call bin resolution (F3): the plugin resolves the
+// CLI binary lazily via a closure, so the harness stands in with a function.
+const bin = () => "/bin/sh";
 const outFile = path.join(os.tmpdir(), "kern-fwd-" + process.pid + ".out");
 const cases = ` + string(casesJSON) + `;
 function forward(cmd) {

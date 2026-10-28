@@ -49,8 +49,17 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-tools
+      # Hermeticity guard: the suite must pass without a warm .kern store.
+      # A test that depends on one (the 2026-10-28 guard serve regression)
+      # must fail here; `make test-fresh` is the local equivalent.
+      - name: Ensure no warm index
+        run: rm -rf .kern
       - name: Test (with coverage)
         run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Aggregate coverage floor (>=68%)
+        run: bash scripts/cover-floor.sh coverage.out
+      - name: Security-surface coverage gate (>=70%)
+        run: bash scripts/cover-risky.sh
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
@@ -106,6 +115,11 @@ jobs:
             packages: ./internal/app/... ./internal/governance/...
           - shard: mcp-index-loop-rest
             packages: ./internal/mcp/... ./internal/index/... ./internal/project/... ./internal/loop/... ./internal/eventbus/... ./internal/processgroup/...
+          # tasklife owns the concurrent TaskService (the largest extracted
+          # subsystem); execution/setup/context run goroutines too. They were
+          # outside every -race shard before the 2026-10-28 audit.
+          - shard: tasklife-exec-setup-context
+            packages: ./internal/tasklife/... ./internal/execution/... ./internal/setup/... ./internal/context/...
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

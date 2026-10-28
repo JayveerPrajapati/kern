@@ -24,6 +24,21 @@ var ErrNotFound = errors.New("storage: not found")
 type Entry struct {
 	Key   string
 	Value json.RawMessage
+	// WriteOrder is set by List for stores that preserve append order: a
+	// positive 1-based line ordinal for entries read from the append-only log
+	// (chain.jsonl), and 0 for entries read from legacy per-key files (whose
+	// true order is the caller's logical sequence, not the listing order).
+	// Consumers that must reconstruct write order use it; it is never
+	// serialized.
+	WriteOrder int `json:"-"`
+}
+
+// WriteOrderedStore is implemented by append-only stores whose List reports
+// per-entry WriteOrder. A consumer that needs the true write order (the audit
+// tamper chain) must honor it instead of re-sorting by key/ID syntax: a custom
+// ID appended at the tail really did chain after the entries before it.
+type WriteOrderedStore interface {
+	WriteOrdered() bool
 }
 
 // Store is a vendor-agnostic key/value storage abstraction. Implementations

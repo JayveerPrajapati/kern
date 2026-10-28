@@ -48,10 +48,15 @@ func runPolicy(rest []string) {
 	if err != nil {
 		fatalUsage("policy: %v", err)
 	}
-	if len(args) > 0 {
-		fatalUsage("policy: unexpected argument: %s", args[0])
+	if len(args) > 1 {
+		fatalUsage("policy: unexpected argument: %s", args[1])
 	}
 	orgRoot := f.root
+	// `kern policy get .` / `kern policy apply .` accept a positional root,
+	// matching most kern commands; --root still wins when both are given.
+	if orgRoot == "" && len(args) == 1 {
+		orgRoot = args[0]
+	}
 	if orgRoot == "" {
 		orgRoot = governance.OrgRoot()
 	}

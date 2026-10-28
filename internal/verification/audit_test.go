@@ -150,3 +150,29 @@ func TestVerifyBuildSilentNoLog(t *testing.T) {
 		t.Errorf("LogPath = %q, want empty for a silent build", res.LogPath)
 	}
 }
+
+// TestCaptureOutputPrunesOldRuns pins the .kern/audit retention: starting a
+// new verification run deletes run directories beyond KERN_VERIFY_LOG_KEEP
+// (the 1,921-directory accumulation from the 2026-10-28 audit).
+func TestCaptureOutputPrunesOldRuns(t *testing.T) {
+	t.Setenv("KERN_VERIFY_LOG_KEEP", "1")
+	root := t.TempDir()
+	old := filepath.Join(root, ".kern", "audit", "20260101-000000.000000001")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "verify-test.log"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	_, logPath := captureOutput(root, now, "test", "fresh output", true)
+	if logPath == "" {
+		t.Fatal("captureOutput must persist the log")
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("old run directory must be pruned (stat err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.Dir(logPath))); err != nil {
+		t.Errorf("the new run directory must exist: %v", err)
+	}
+}

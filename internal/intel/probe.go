@@ -2,8 +2,10 @@ package intel
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
@@ -44,6 +46,14 @@ type ProbeReport struct {
 
 var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*`)
 
+// diagnosticRe matches compiler/linter locations:
+//
+//	path/to/file.go:30:2: message
+//
+// It anchors the symbol enclosing that line even when the message text has no
+// resolvable identifier (the QA 2026-10-26 incident-triage gap).
+var diagnosticRe = regexp.MustCompile(`([A-Za-z0-9_./\-]+\.(?:go|py|pyi|ts|tsx|js|jsx|java|kt|kts|rs|rb|c|cc|cpp|h|hpp|cs|php|scala|sh|swift)):(\d+)(?::(\d+))?`)
+
 // hyphenPairRe matches hyphenated word compounds in task prose
 // ("delivery-report") — joined into identifier forms and resolved exactly.
 var hyphenPairRe = regexp.MustCompile(`([A-Za-z][a-z0-9]*)-([A-Za-z][a-z0-9]*)`)
@@ -54,6 +64,56 @@ func joinVariants(a, b string) []string {
 	aUp := strings.ToUpper(a[:1]) + a[1:]
 	bUp := strings.ToUpper(b[:1]) + b[1:]
 	return []string{a + bUp, aUp + bUp, a + "_" + b}
+}
+
+// diagnosticAnchors resolves file:line locations in task text to the
+// innermost indexed declaration covering that line. Paths may be absolute or
+// relative to any prefix of the indexed path, so a compiler that prints an
+// absolute path still matches the repo-relative index.
+func diagnosticAnchors(ix *index.Index, task string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range diagnosticRe.FindAllStringSubmatch(task, -1) {
+		line, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+		file := filepath.ToSlash(strings.TrimSpace(m[1]))
+		var best *index.Symbol
+		for i := range ix.Symbols {
+			s := &ix.Symbols[i]
+			if !diagnosticFileMatches(s.File, file) || s.Line > line {
+				continue
+			}
+			if s.End > 0 && line > s.End {
+				continue
+			}
+			switch {
+			case best == nil:
+				best = s
+			case s.Line > best.Line:
+				best = s
+			case s.Line == best.Line && s.End > 0 && (best.End == 0 || s.End < best.End):
+				best = s
+			}
+		}
+		if best == nil {
+			continue
+		}
+		name := best.FullName()
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func diagnosticFileMatches(indexFile, diagnosticFile string) bool {
+	indexFile = filepath.ToSlash(indexFile)
+	return indexFile == diagnosticFile ||
+		strings.HasSuffix(indexFile, "/"+diagnosticFile) ||
+		strings.HasSuffix(diagnosticFile, "/"+indexFile)
 }
 
 // Probe turns a natural-language task (bug report, prompt, error text) into a
@@ -79,6 +139,16 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	candidates := map[string]bool{}
 	exact := map[string]bool{}
 	fuzzyHits := map[string]bool{}
+	// Compiler/linter diagnostics are the strongest anchor signal: a
+	// file:line points at the enclosing declaration exactly. Anchor those
+	// first and independently of identifier extraction.
+	for _, r := range diagnosticAnchors(ix, task) {
+		if !anchorableCandidate(kindByFull[r], yamlish) {
+			continue
+		}
+		candidates[r] = true
+		exact[r] = true
+	}
 	for _, w := range identRe.FindAllString(task, -1) {
 		// Consult the index FIRST: a token that resolves (case-sensitively)
 		// to a real symbol wins over the stopword filter, so a symbol whose

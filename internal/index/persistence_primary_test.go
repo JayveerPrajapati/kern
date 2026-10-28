@@ -1,10 +1,10 @@
 //go:build !nosqlite
 
-// SQLite-primary persistence tests (default build): pin that Save writes ONLY
-// the SQLite store (no JSON cache, no gob snapshot), that Load reads it back
-// identically, that staleness behaves, and that legacy JSON/gob caches still
-// load as a migration path and are superseded — never shadowed — by the next
-// SQLite-primary write.
+// SQLite-primary persistence tests (default build): pin that Save writes the
+// SQLite store as the canonical format plus the DERIVED fast gob snapshot, no
+// JSON cache; that Load reads it back identically; that staleness behaves; and
+// that legacy JSON/gob caches still load as a migration path and are
+// superseded — never shadowed — by the next SQLite-primary write.
 package index
 
 import (
@@ -13,10 +13,11 @@ import (
 	"testing"
 )
 
-// TestSaveIsSQLitePrimaryOnly: a default-build Save must write exactly one
-// persisted format — the SQLite store. The JSON cache and gob snapshot are
-// the nosqlite/fallback formats and must NOT appear on disk.
-func TestSaveIsSQLitePrimaryOnly(t *testing.T) {
+// TestSaveSQLitePrimaryWritesDerivedSnapshot: a default-build Save writes the
+// canonical SQLite store plus the derived fast snapshot (whose header is
+// keyed by the store's generation token). The JSON document is the
+// nosqlite/fallback format and must NOT appear on disk.
+func TestSaveSQLitePrimaryWritesDerivedSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	ix, err := Build(dir)
 	if err != nil {
@@ -39,8 +40,11 @@ func TestSaveIsSQLitePrimaryOnly(t *testing.T) {
 	if names["index.json"] {
 		t.Errorf("index.json written by SQLite-primary Save — the JSON cache is the nosqlite/fallback format")
 	}
-	if names["index.json.snap"] {
-		t.Errorf("index.json.snap written by SQLite-primary Save — the gob snapshot is the nosqlite/fallback format")
+	if !names["index.json.snap"] {
+		t.Errorf("index.json.snap missing — the derived fast snapshot is the CLI load path (SQLite stays canonical)")
+	}
+	if _, ok := loadSQLiteBinSnapshot(dir); !ok {
+		t.Error("the snapshot written by Save is not accepted by loadSQLiteBinSnapshot")
 	}
 }
 

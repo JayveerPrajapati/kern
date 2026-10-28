@@ -365,11 +365,12 @@ func runBuild(rest []string) {
 	// by RunBuild's sh -c — observed live: `echo \`touch /tmp/x\`` created the
 	// file. Reject BEFORE the governance check (the diagnostic must name the
 	// construct even for an otherwise-allowable command) and before any
-	// execution. Any occurrence rejects, including inside quoted literals:
-	// write literal text (e.g. a commit message containing backticks) to a
-	// file and pass it with -F instead.
+	// execution. Only ACTIVE constructs count: sh does not expand inside
+	// single quotes or a <<'EOF' heredoc body, so those stay usable (the old
+	// blanket scan denied a quoted heredoc whose markdown body contained a
+	// backtick — twice, live).
 	if containsCommandSubstitution(cmdStr) {
-		fatalPolicy("build: execution denied: command contains shell command-substitution constructs (backtick / $(...) — kern build does not execute them blind; for quoted literals such as commit messages write the text to a file and pass it with -F")
+		fatalPolicy("build: execution denied: command contains ACTIVE shell command-substitution (backtick or $(...) outside single quotes / a quoted heredoc) — kern build will not execute it blind; quote the literal (single quotes), write it to a file and pass -F, or remove the substitution")
 	}
 	// Building runs arbitrary host commands; it must pass the governance
 	// firewall, fail closed (same gate as the MCP tools). The concrete command
@@ -424,12 +425,148 @@ func runBuild(rest []string) {
 }
 
 // containsCommandSubstitution reports whether a command string carries shell
-// command-substitution constructs (backticks or $(...)). Presence alone
-// rejects: RunBuild executes through sh -c, which would evaluate the
-// substitution blind — so any occurrence (even inside a quoted literal) is
-// refused, with a file-based workaround for literal text.
+// command-substitution constructs that sh -c would EVALUATE. RunBuild executes
+// through sh -c, so an active backtick or $(...) runs blind and is refused.
+//
+// Literal occurrences are not substitutions and must not be refused: sh does
+// not expand inside single quotes, inside a quoted-delimiter heredoc body
+// (<<'EOF'), or after a backslash. The previous blanket strings.Contains scan
+// rejected those too, which denied a quoted heredoc whose markdown body held a
+// backtick (observed twice in the 2026-10-27 campaign).
 func containsCommandSubstitution(s string) bool {
-	return strings.Contains(s, "`") || strings.Contains(s, "$(")
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++ // escaped: the next byte is literal
+		case '\'':
+			// Single-quoted run: everything inside is literal.
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				return false // unterminated: sh errors before executing anything
+			}
+			i += j + 1
+		case '"':
+			// Double quotes still expand $() and backticks.
+			j := i + 1
+			for j < len(s) {
+				if s[j] == '\\' {
+					j += 2
+					continue
+				}
+				if s[j] == '"' {
+					break
+				}
+				if s[j] == '`' || (s[j] == '$' && j+1 < len(s) && s[j+1] == '(') {
+					return true
+				}
+				j++
+			}
+			i = j
+		case '`':
+			return true
+		case '$':
+			if i+1 < len(s) && s[i+1] == '(' {
+				return true
+			}
+		case '<':
+			// <<EOF / <<'EOF' / <<-EOF: the body is literal only when the
+			// delimiter is quoted. Consume the body here and keep scanning
+			// after it so a later line is still inspected.
+			if i+2 < len(s) && s[i+1] == '<' && s[i+2] != '<' {
+				delim, quoted, after := parseHeredocDelimiter(s, i+2)
+				if delim != "" {
+					body, next := heredocBody(s, after, delim)
+					if !quoted && heredocBodyHasSubstitution(body) {
+						return true
+					}
+					i = next - 1
+				}
+			}
+		}
+	}
+	return false
+}
+
+// parseHeredocDelimiter reads the delimiter token after "<<" (and an optional
+// "-"), returning it, whether it was quoted (literal body) and the index just
+// past the token.
+func parseHeredocDelimiter(s string, start int) (delim string, quoted bool, after int) {
+	i := start
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	var b strings.Builder
+	for i < len(s) && !strings.ContainsRune(" \t\n", rune(s[i])) {
+		c := s[i]
+		if c == '\'' || c == '"' {
+			quoted = true
+			closer := c
+			i++
+			for i < len(s) && s[i] != closer {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		if c == '\\' && i+1 < len(s) {
+			quoted = true
+			i++
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String(), quoted, i
+}
+
+// heredocBody returns the body of a heredoc starting at index start and the
+// index just past the terminating delimiter line.
+func heredocBody(s string, start int, delim string) (string, int) {
+	lineStart := start
+	for lineStart <= len(s) {
+		end := strings.IndexByte(s[lineStart:], '\n')
+		line := s[lineStart:]
+		next := len(s)
+		if end >= 0 {
+			line = s[lineStart : lineStart+end]
+			next = lineStart + end + 1
+		}
+		if strings.TrimLeft(line, "\t") == delim {
+			return s[start:lineStart], next
+		}
+		if end < 0 {
+			return s[start:], len(s)
+		}
+		lineStart = next
+	}
+	return s[start:], len(s)
+}
+
+// heredocBodyHasSubstitution scans an EXPANDING heredoc body for active
+// substitutions. A backslash escapes the next byte, matching sh's rule inside
+// an unquoted heredoc.
+func heredocBodyHasSubstitution(body string) bool {
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\\':
+			i++
+		case '`':
+			return true
+		case '$':
+			if i+1 < len(body) && body[i+1] == '(' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func runValidate(rest []string) {

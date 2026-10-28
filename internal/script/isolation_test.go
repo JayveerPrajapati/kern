@@ -84,7 +84,7 @@ func TestFailsClosedWithoutNetNS(t *testing.T) {
 	if res.Err == nil {
 		t.Fatalf("expected fail-closed refusal, got success (Isolated=%v, stdout=%q)", res.Isolated, res.Stdout)
 	}
-	for _, want := range []string{"network isolation not available", "KERN_ALLOW_UNISOLATED"} {
+	for _, want := range []string{"network isolation not available", "fail-closed", "KERN_ALLOW_UNISOLATED", "KERN_ALLOW_NET"} {
 		if !strings.Contains(res.Err.Error(), want) {
 			t.Errorf("fail-closed error %q missing %q", res.Err, want)
 		}

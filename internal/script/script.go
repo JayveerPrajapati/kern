@@ -185,10 +185,37 @@ func fsConfinementEnabled() bool {
 // is preserved, so nothing outside these paths is affected. Network posture
 // is unchanged from the pre-confinement profile (no loopback allowance).
 func seatbeltScriptProfile() string {
+	return seatbeltScriptProfileFor("")
+}
+
+// seatbeltScriptProfileFor is seatbeltScriptProfile plus a write contract:
+// when writeRoot is non-empty every filesystem write outside that root is
+// DENIED. kern_exec's docs promised an isolated runtime, but Seatbelt was
+// generated with (allow default), so an absolute-path write escaped the
+// ephemeral run dir and landed in the operator's repo (2026-10-26 audit).
+// With writeRoot set, writes are confined to the ephemeral sandbox dir (and
+// its canonical alias), the device sinks, and nothing else — a run cannot
+// mutate the working tree, $HOME or another project.
+func seatbeltScriptProfileFor(writeRoot string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n(allow default)\n(deny network*)")
 	if !fsConfinementEnabled() {
 		return b.String()
+	}
+	// Write contract: deny every write, then re-allow only the ephemeral run
+	// directory (in both spellings — macOS reports /var as /private/var) and
+	// the device sinks. Seatbelt applies later rules last, so the allow
+	// exceptions below win for their subpaths. This is the difference between
+	// "network-isolated" and "isolated": without it an absolute-path write
+	// escaped into the operator's repo (2026-10-26 audit).
+	if writeRoot != "" {
+		b.WriteString("\n(deny file-write*)")
+		for _, root := range writeRootAliases(writeRoot) {
+			fmt.Fprintf(&b, "\n(allow file-write* (subpath %q))", root)
+		}
+		for _, dev := range []string{"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/dtracehelper"} {
+			fmt.Fprintf(&b, "\n(allow file-write* (literal %q))", dev)
+		}
 	}
 	// System credential files are denied regardless of $HOME (NEW-1): an
 	// absolute-path read must not bypass the home-relative blocklist.
@@ -224,7 +251,18 @@ func seatbeltScriptProfile() string {
 	return b.String()
 }
 
-// networkNSBin caches the isolation wrapper probe: whether this host can run
+// writeRootAliases returns the as-written and canonical spellings of a
+// writable sandbox root. The darwin kernel canonicalizes accessed paths while
+// Seatbelt matches subpaths as written, so both are emitted (same R2 rule the
+// read blocklist follows).
+func writeRootAliases(root string) []string {
+	out := []string{root}
+	if canon, err := filepath.EvalSymlinks(root); err == nil && canon != root {
+		out = append(out, canon)
+	}
+	return out
+}
+
 // a script with network egress blocked is a per-host fact that does not
 // change during a process lifetime. The profile string itself is NOT cached
 // — it is regenerated per call so the sensitive-path blocklist always
@@ -241,6 +279,13 @@ var (
 // also carries the sensitive-path read blocklist (Stage 1 FS confinement)
 // when KERN_SANDBOX_FS_CONFINEMENT is on (the default).
 func networkNS() []string {
+	return networkNSFor("")
+}
+
+// networkNSFor is networkNS with the write contract rooted at writeRoot (the
+// ephemeral run directory). Empty means the legacy probe/profile with no
+// write confinement, used only for the availability probe.
+func networkNSFor(writeRoot string) []string {
 	netProbeOnce.Do(func() {
 		if goruntime.GOOS == "darwin" {
 			if bin, err := exec.LookPath("sandbox-exec"); err == nil {
@@ -270,7 +315,7 @@ func networkNS() []string {
 		return nil
 	}
 	if goruntime.GOOS == "darwin" {
-		return []string{netNSBin, "-p", seatbeltScriptProfile()}
+		return []string{netNSBin, "-p", seatbeltScriptProfileFor(writeRoot)}
 	}
 	return []string{netNSBin, "--user", "--map-root-user", "--net"}
 }
@@ -501,7 +546,7 @@ func RunScript(r Run) *Result {
 	}
 	var ns []string
 	if !r.NoIsolate {
-		ns = networkNS()
+		ns = networkNSFor(dir)
 		res.Isolated = ns != nil
 		// Never silently degrade to full network egress — fail closed on every
 		// platform. If isolation was requested but the netns/unshare path is

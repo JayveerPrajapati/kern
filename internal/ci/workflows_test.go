@@ -24,12 +24,13 @@ type workflow struct {
 }
 
 type job struct {
-	Uses           string         `yaml:"uses"`
-	RunsOn         any            `yaml:"runs-on"`
-	Needs          any            `yaml:"needs"`
-	TimeoutMinutes any            `yaml:"timeout-minutes"`
-	Env            map[string]any `yaml:"env"`
-	Steps          []step         `yaml:"steps"`
+	Uses            string         `yaml:"uses"`
+	RunsOn          any            `yaml:"runs-on"`
+	Needs           any            `yaml:"needs"`
+	TimeoutMinutes  any            `yaml:"timeout-minutes"`
+	ContinueOnError any            `yaml:"continue-on-error"`
+	Env             map[string]any `yaml:"env"`
+	Steps           []step         `yaml:"steps"`
 }
 
 type step struct {
@@ -135,5 +136,26 @@ func TestCIAggregatorCoversEveryJob(t *testing.T) {
 	sort.Strings(want)
 	if strings.Join(have, ",") != strings.Join(want, ",") {
 		t.Errorf("ci-ok needs %v, but ci.yml defines jobs %v", have, want)
+	}
+}
+
+// TestCIWindowsLegsAreBlocking pins the blocking requirement: the
+// Windows legs of the install smoke and platform tests must gate merges. A
+// continue-on-error on those jobs silently ships Windows regressions.
+func TestCIWindowsLegsAreBlocking(t *testing.T) {
+	w, ok := workflowFiles(t)["ci.yml"]
+	if !ok {
+		t.Skip("ci.yml not found")
+	}
+	for _, name := range []string{"global-install-smoke", "platform-tests"} {
+		j, ok := w.Jobs[name]
+		if !ok {
+			t.Fatalf("ci.yml has no %s job", name)
+		}
+		if j.ContinueOnError != nil {
+			if b, isBool := j.ContinueOnError.(bool); !isBool || b {
+				t.Errorf("%s must be blocking on Windows, found continue-on-error: %v", name, j.ContinueOnError)
+			}
+		}
 	}
 }

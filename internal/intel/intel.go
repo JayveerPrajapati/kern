@@ -520,8 +520,14 @@ func AffectedFiles(ix *index.Index, symbols []string) []string {
 // ReadIndex loads the persisted index for root, rebuilding it on demand when
 // it is absent, the on-disk version is incompatible, or any source file has
 // been added/removed/edited since the index was built (content-hash manifest).
+//
+// It asks for the CHEAP staleness verdict (the same stat-gate index.LoadOrBuild
+// uses for `kern search`): a full freshness PROOF re-walks the tree, and the
+// proof-walk cache lives only 5 s, so every read-only analysis command would
+// pay ~0.3 s per call to produce a proof it discards. Callers that publish the
+// provenance use ReadIndexWithProof.
 func ReadIndex(root string) (*index.Index, error) {
-	ix, _, err := ReadIndexWithProof(root)
+	ix, _, err := readIndex(root, false)
 	return ix, err
 }
 
@@ -532,9 +538,21 @@ func ReadIndex(root string) (*index.Index, error) {
 // tree ONCE instead of twice. The returned proof reflects the returned index:
 // fresh on the fresh path, and post-update on the update path.
 func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error) {
+	return readIndex(root, true)
+}
+
+// readIndex is the shared ladder: fresh → return; stale → incremental Update;
+// otherwise a full Build. wantProof selects the expensive verdict walk.
+func readIndex(root string, wantProof bool) (*index.Index, index.FreshnessProof, error) {
 	prev, lerr := index.Load(root)
 	if lerr == nil && prev != nil {
-		stale, proof := prev.StaleWithProof(root)
+		var stale bool
+		var proof index.FreshnessProof
+		if wantProof {
+			stale, proof = prev.StaleWithProof(root)
+		} else {
+			stale = prev.Stale()
+		}
 		if !stale {
 			return prev, proof, nil
 		}
@@ -551,6 +569,9 @@ func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error)
 			if serr := ix.Save(); serr != nil {
 				log.Printf("intel: incremental index save failed (next load will re-index): %v", serr)
 			}
+			if !wantProof {
+				return ix, index.FreshnessProof{}, nil
+			}
 			// Post-update proof: observe the tree the served index claims to
 			// reflect (expected: fresh — Update records the current identity).
 			return ix, ix.FreshnessProof(root), nil
@@ -562,6 +583,9 @@ func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error)
 	}
 	if serr := ix.Save(); serr != nil {
 		log.Printf("intel: index save failed (next load will re-index): %v", serr)
+	}
+	if !wantProof {
+		return ix, index.FreshnessProof{}, nil
 	}
 	return ix, ix.FreshnessProof(root), nil
 }

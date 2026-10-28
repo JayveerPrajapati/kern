@@ -175,7 +175,7 @@ func runHook(rest []string) {
 			fatal("hooks store: %v", err)
 		}
 		fmt.Println("diff stored in project memory.")
-	case "claude-post", "claude-prompt", "gemini-after", "gemini-prompt":
+	case "claude-post", "claude-prompt", "claude-session", "session-brief", "gemini-after", "gemini-prompt":
 		// Native hooks for non-opencode agents (wired by `kern setup`).
 		// Reads the agent's hook JSON from stdin and responds in that
 		// agent's framing. Failures never break the agent's tool call:
@@ -199,6 +199,15 @@ func runHook(rest []string) {
 			if err := ClaudePrompt(root, in); err != nil {
 				fatal("hooks claude-prompt: %v", err)
 			}
+		case "claude-session":
+			// SessionStart: stdout is injected into the session context, so
+			// this is the only pre-first-tool steering a Claude session gets.
+			fmt.Println(ClaudeSessionStart(in))
+		case "session-brief":
+			// Same brief for every host whose session event passes a cwd on
+			// argv (Qwen SessionStart, Continue SessionStart): equal steering,
+			// not a Claude-only privilege.
+			fmt.Println(setup.SteeringBrief(root))
 		case "gemini-after":
 			repl, err := GeminiAfter(root, in)
 			if err != nil {
@@ -215,7 +224,7 @@ func runHook(rest []string) {
 			}
 		}
 	default:
-		fatalUsage("usage: kern hook <install|uninstall|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b] [--global]")
+		fatalUsage("usage: kern hook <install|uninstall|diff|store|claude-post|claude-prompt|claude-session|session-brief|gemini-after|gemini-prompt> [root] [--range a..b] [--global]")
 	}
 }
 

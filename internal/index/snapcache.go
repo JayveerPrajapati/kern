@@ -12,22 +12,11 @@
 // fingerprint for the verify walk. Both coexist.
 //
 // Invariants:
-//   - index.json remains the canonical persisted format of the fallback path.
-//     Save is SQLite-primary in the default build, so the JSON + binary
-//     snapshot pair is written only when SQLite is compiled out (-tags
-//     nosqlite) or the SQLite write fails; index.json is then the read
-//     migration path for caches written by older kern, and Load/LoadFile
-//     fall back to it whenever the snapshot is missing, stale, or
-//     undecodable.
-//   - Freshness is proven by comparing the snapshot header against the
-//     current index.json stat (size + nanosecond mtime): any rewrite of the
-//     JSON invalidates the snapshot, so a stale snapshot can never be served.
-//     Load additionally refuses the snapshot when a newer SQLite store
-//     supersedes the JSON (sqliteStoreNewerThanJSON), so a legacy snapshot
-//     cannot shadow the SQLite-primary store.
-//   - A corrupt/foreign snapshot degrades to the JSON path, never to an
-//     error: loadBinSnapshot returns ok=false on any failure (including an
-//     over-cap file, which is never read into memory).
+//   - The JSON cache is the nosqlite/legacy format; Load falls back to it
+//     whenever the snapshot is missing, stale or undecodable.
+//   - Freshness compares the header against the current store (JSON stat pair,
+//     or the SQLite generation token), so a stale snapshot can never win.
+//   - A corrupt/foreign/oversized snapshot degrades to the JSON path.
 //
 // The SQLite store (default build; disabled only with -tags nosqlite) remains
 // the richer store; this snapshot exists specifically so the default build
@@ -37,8 +26,8 @@ package index
 import (
 	"bytes"
 	"encoding/gob"
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"os"
-	"path/filepath"
 )
 
 // binSnapshotMagic identifies the file as a kern binary index snapshot;
@@ -46,17 +35,27 @@ import (
 // indexVersion — bump only when the wrapper/header layout changes).
 const (
 	binSnapshotMagic   = "KERNSNAP"
-	binSnapshotVersion = 1
+	binSnapshotVersion = 2
 )
 
-// binSnapshotHeader records the source JSON's identity so a stale snapshot
-// (written before a newer index.json) is rejected by comparison, never by
-// trust. All fields exported for gob.
+// binSnapshotHeader records the source store's identity so a stale snapshot
+// (written before a newer store) is rejected by comparison, never by trust.
+// All fields exported for gob.
+//
+// Store + Token are the robust freshness proof: "json" snapshots fall back to
+// the JSON stat pair, while "sqlite" snapshots carry the generation token
+// persisted in the SQLite meta table (identity + updated-at + row counts), so
+// coarse-mtime filesystems, cp -p and rsync -t cannot let a stale snapshot win.
 type binSnapshotHeader struct {
-	Magic     string
-	Version   int
-	JSONSize  int64
-	JSONModNS int64
+	Magic        string
+	Version      int
+	Store        string // "json" | "sqlite"
+	Token        string // store generation token (sha256); empty for legacy JSON
+	IndexVersion int
+	JSONSize     int64
+	JSONModNS    int64
+	SQLiteSize   int64
+	SQLiteModNS  int64
 }
 
 // binSnapshot is the on-disk snapshot: the header plus the full index.
@@ -80,36 +79,65 @@ func writeBinSnapshot(ix *Index, jsonPath string) error {
 	if err != nil {
 		return err
 	}
-	snap := binSnapshot{
+	return writeBinSnapshotFile(binSnapshot{
 		H: binSnapshotHeader{
-			Magic:     binSnapshotMagic,
-			Version:   binSnapshotVersion,
-			JSONSize:  st.Size(),
-			JSONModNS: st.ModTime().UnixNano(),
+			Magic:        binSnapshotMagic,
+			Version:      binSnapshotVersion,
+			Store:        "json",
+			IndexVersion: ix.Version,
+			JSONSize:     st.Size(),
+			JSONModNS:    st.ModTime().UnixNano(),
 		},
-		I: ix,
-	}
-	// Unique temp name (like Save's) so concurrent writers (watch daemon +
-	// CLI) never share a temp file; rename is atomic, so a reader only ever
-	// sees a complete snapshot.
-	tmp, err := os.CreateTemp(filepath.Dir(jsonPath), ".index.snap.*.tmp")
+		I: snapshotCopy(ix),
+	}, jsonPath)
+}
+
+// writeSQLiteBinSnapshot writes the derived fast snapshot for the
+// SQLite-primary store (header token proves freshness without a full decode).
+func writeSQLiteBinSnapshot(ix *Index, root string) error {
+	st, err := os.Stat(SQLitePath(root))
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op if rename succeeded
-	if err := gob.NewEncoder(tmp).Encode(&snap); err != nil {
-		_ = tmp.Close()
-		return err
+	return writeBinSnapshotFile(binSnapshot{
+		H: binSnapshotHeader{
+			Magic:        binSnapshotMagic,
+			Version:      binSnapshotVersion,
+			Store:        "sqlite",
+			Token:        indexGeneration(ix),
+			IndexVersion: ix.Version,
+			SQLiteSize:   st.Size(),
+			SQLiteModNS:  st.ModTime().UnixNano(),
+		},
+		I: snapshotCopy(ix),
+	}, StorePath(root))
+}
+
+// snapshotCopy clears SymbolsByFile before encoding (Load rebuilds it).
+func snapshotCopy(ix *Index) *Index {
+	if ix == nil {
+		return nil
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
+	cp := *ix
+	cp.SymbolsByFile = nil
+	return &cp
+}
+
+func indexGeneration(ix *Index) string {
+	if ix == nil {
+		return ""
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	contentRoot := ""
+	if ix.Identity != nil {
+		// TreeOID/GitCommit are excluded: the commit-label self-heal rewrites
+		// GitCommit without changing indexed content.
+		contentRoot = ix.Identity.ContentRoot
 	}
-	return os.Rename(tmpName, binSnapshotPathFor(jsonPath))
+	return indexdb.GenerationToken(ix.Version, ix.UpdatedAt, len(ix.Symbols), len(ix.Calls), len(ix.FileHashes), contentRoot)
+}
+
+func writeBinSnapshotFile(snap binSnapshot, jsonPath string) error {
+	return indexdb.WriteGobAtomic(binSnapshotPathFor(jsonPath), &snap)
 }
 
 // loadBinSnapshot returns the index from the binary snapshot when it exists
@@ -124,26 +152,12 @@ func loadBinSnapshot(jsonPath string) (*Index, bool) {
 	if err != nil {
 		return nil, false // no canonical JSON → nothing to be a snapshot of
 	}
-	snapPath := binSnapshotPathFor(jsonPath)
-	fi, err := os.Stat(snapPath)
-	if err != nil {
-		return nil, false
-	}
-	if fi.Size() > snapshotMaxSize {
-		// Over-cap: never read an unbounded file into memory. Degrades to
-		// the JSON path like any other unreadable snapshot (see invariants).
-		return nil, false
-	}
-	data, err := os.ReadFile(snapPath)
-	if err != nil {
-		return nil, false
-	}
-	var snap binSnapshot
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snap); err != nil {
+	snap, ok := readBinSnapshot(jsonPath)
+	if !ok {
 		return nil, false
 	}
 	h := snap.H
-	if h.Magic != binSnapshotMagic || h.Version != binSnapshotVersion {
+	if h.Store != "" && h.Store != "json" {
 		return nil, false
 	}
 	if h.JSONSize != st.Size() || h.JSONModNS != st.ModTime().UnixNano() {
@@ -153,4 +167,59 @@ func loadBinSnapshot(jsonPath string) (*Index, bool) {
 		return nil, false
 	}
 	return snap.I, true
+}
+
+// loadSQLiteBinSnapshot returns the snapshot for a SQLite-primary store when
+// its header token matches the generation persisted in the store. The
+// generation token is authoritative; the database file's size/mtime are NOT
+// compared, because SQLite checkpointing/close can touch them after the
+// snapshot is written (and coarse mtimes made them fragile anyway). A store
+// rewrite without a snapshot rewrite changes the token, so a stale snapshot
+// cannot be served.
+func loadSQLiteBinSnapshot(root string) (*Index, bool) {
+	if !SQLiteEnabled() {
+		return nil, false
+	}
+	if _, err := os.Stat(SQLitePath(root)); err != nil {
+		return nil, false
+	}
+	snap, ok := readBinSnapshot(StorePath(root))
+	if !ok {
+		return nil, false
+	}
+	h := snap.H
+	if h.Store != "sqlite" || h.IndexVersion != indexVersion {
+		return nil, false
+	}
+	if snap.I == nil || !SQLiteSnapshotValid(root, h.Token, snap.I.UpdatedAt) {
+		return nil, false
+	}
+	return snap.I, true
+}
+
+// readBinSnapshot decodes the snapshot file and validates the wrapper
+// (magic/version). Store-specific freshness is the caller's job.
+func readBinSnapshot(jsonPath string) (binSnapshot, bool) {
+	snapPath := binSnapshotPathFor(jsonPath)
+	fi, err := os.Stat(snapPath)
+	if err != nil {
+		return binSnapshot{}, false
+	}
+	if fi.Size() > snapshotMaxSize {
+		// Over-cap: never read an unbounded file into memory. Degrades to
+		// the JSON path like any other unreadable snapshot (see invariants).
+		return binSnapshot{}, false
+	}
+	data, err := os.ReadFile(snapPath)
+	if err != nil {
+		return binSnapshot{}, false
+	}
+	var snap binSnapshot
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snap); err != nil {
+		return binSnapshot{}, false
+	}
+	if snap.H.Magic != binSnapshotMagic || snap.H.Version != binSnapshotVersion {
+		return binSnapshot{}, false
+	}
+	return snap, true
 }

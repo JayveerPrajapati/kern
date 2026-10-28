@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
@@ -55,7 +56,7 @@ type TaskService struct {
 	// the write is best-effort and never blocks the transition. A nil log
 	// (no wiring) is a no-op for back-compat. Defaults to the platform
 	// firewall's audit log when the platform carries one.
-	auditLog *governance.AuditLog
+	auditLog *govaudit.AuditLog
 	// persistTasks gates whether read-only analysis commands write task
 	// records to the persisted task store. It defaults to false: analysis
 	// commands (Analyze/AnalyzeWithLens/WhatIf/Plan/Impact) are
@@ -112,7 +113,7 @@ func NewTaskService(p PlatformAPI, bus *eventbus.Bus) *TaskService {
 
 // platformAuditLog returns the platform's unified audit log, or nil when the
 // platform is nil or carries no firewall (nil = transition auditing no-op).
-func platformAuditLog(p PlatformAPI) *governance.AuditLog {
+func platformAuditLog(p PlatformAPI) *govaudit.AuditLog {
 	if p == nil {
 		return nil
 	}
@@ -150,7 +151,7 @@ func (s *TaskService) WithAgentID(id string) *TaskService {
 // firewall's audit log; passing nil restores the no-op mode (transitions are
 // not audited), which is the back-compat behavior for services wired without
 // an audit log.
-func (s *TaskService) WithAuditLog(a *governance.AuditLog) *TaskService {
+func (s *TaskService) WithAuditLog(a *govaudit.AuditLog) *TaskService {
 	s.auditLog = a
 	return s
 }
@@ -338,13 +339,12 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		},
 	})
 
-	// Determine approval state and next action. A1 (deep-dive 2026-10-03):
-	// the recommended follow-up tools must be callable on a DEFAULT MCP
-	// install (the 22-tool surface) — kern_exec/kern_validate are
-	// KERN_MCP_FULL-gated, so they are named as such, never as the primary
-	// instruction.
+	// Determine approval state and next action. Every tool/command named here
+	// must exist on the current default surface (mcpcatalog) and in the CLI
+	// dispatch table; a NextAction that recommends a removed tool is worse
+	// than none. kern_exec is on the default surface but governance-gated.
 	approvalState := "none"
-	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_heal/kern_repair; kern_exec/kern_validate need KERN_MCP_FULL=1) or run the autonomous loop via CLI: kern do \"" + intent + "\""
+	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_heal; kern_exec needs KERN_ALLOW_EXEC=1) or run the same pipeline from the CLI: kern run \"" + intent + "\""
 	if risk.ApprovalRequired {
 		approvalState = "required"
 		nextAction = "request approval"

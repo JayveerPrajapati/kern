@@ -21,10 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/auditdiag"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"github.com/JayveerPrajapati/kern/internal/guardstats"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/script"
@@ -58,6 +60,9 @@ func Run(root string) []Finding {
 	out = append(out, checkConfig(root))
 	out = append(out, checkCache())
 	out = append(out, checkSandboxes(root))
+	for _, d := range auditdiag.Findings(root) {
+		out = append(out, Finding{Check: d.Check, Level: d.Level, Detail: d.Detail})
+	}
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkPluginSync()...)
 	out = append(out, checkGlobalRulesFreshness()...)
@@ -70,66 +75,10 @@ func Run(root string) []Finding {
 	out = append(out, checkRuntime(root))
 	out = append(out, checkLLM())
 	out = append(out, checkStats())
-	out = append(out, checkAuditDropped())
-	out = append(out, checkAuditChainSize(root))
 	out = append(out, checkAdoption(root))
+	level, detail := setup.LaunchIntegrity()
+	out = append(out, Finding{Check: "launch", Level: level, Detail: detail})
 	return out
-}
-
-// checkAuditDropped surfaces audit entries lost before they reached the
-// tamper-evident chain: the governance audit log appends one JSON line per
-// loss (store-write failure or a recovered panic on the MCP audit path) to
-// the global sidecar ~/.kern/audit/dropped.jsonl — outside the failing
-// store on purpose, because a store that cannot be written to cannot
-// record its own loss. Missing/empty file = nothing lost; non-empty = warn
-// with the count and the last drop's timestamp: the tool calls themselves
-// were unaffected (audit is best-effort by design), but a silent gap in
-// the evidence chain would undercut the tamper-evident claim.
-func checkAuditDropped() Finding {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Finding{Check: "audit-dropped", Level: "ok", Detail: "no home dir — dropped-audit sidecar not checked"}
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".kern", "audit", "dropped.jsonl"))
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return Finding{Check: "audit-dropped", Level: "ok", Detail: "no dropped audit entries (sidecar absent or empty)"}
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	noun := "entries"
-	if len(lines) == 1 {
-		noun = "entry"
-	}
-	detail := fmt.Sprintf("%d audit %s dropped — tool calls were unaffected, but the evidence chain has gaps (lost at write time, not tampered); review, then truncate the sidecar to re-arm", len(lines), noun)
-	var last struct {
-		Ts string `json:"ts"`
-	}
-	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) == nil && last.Ts != "" {
-		detail += ", last at " + last.Ts
-	}
-	return Finding{Check: "audit-dropped", Level: "warn", Detail: detail}
-}
-
-// checkAuditChainSize reports the governance audit chain's footprint
-// (<root>/.kern/audit/chain.jsonl). The chain is append-only by design —
-// each record's hash covers its predecessor, so in-place trimming or
-// rotation would break tamper-evidence — and kern deliberately never
-// truncates it. A missing or small file is ok; once it passes the warn
-// threshold the operator is told to ARCHIVE it (move the file aside; the
-// next append starts a fresh chain) and keep the archive, instead of
-// expecting kern to rotate the chain silently.
-func checkAuditChainSize(root string) Finding {
-	path := filepath.Join(root, ".kern", "audit", "chain.jsonl")
-	fi, err := os.Stat(path)
-	if err != nil || fi.Size() == 0 {
-		return Finding{Check: "audit-chain-size", Level: "ok", Detail: "no governance audit chain yet"}
-	}
-	const warnBytes = 50 << 20
-	size := fi.Size()
-	detail := fmt.Sprintf("governance audit chain: %.1f MB", float64(size)/(1<<20))
-	if size >= warnBytes {
-		return Finding{Check: "audit-chain-size", Level: "warn", Detail: detail + " — append-only by design (records are hash-chained, kern never truncates); archive it by moving chain.jsonl aside (a fresh chain starts on the next append) and keep the archive for audit history"}
-	}
-	return Finding{Check: "audit-chain-size", Level: "ok", Detail: detail}
 }
 
 func checkBinary() Finding {
@@ -768,20 +717,19 @@ func checkIndex(root string) Finding {
 		}
 	}
 	if ix, err := index.Load(root); err == nil && ix != nil {
-		// F5a: name the RESOLVED store path the root actually serves, not
-		// just the counts — "<root>/.kern/index.json" is where the index
-		// lives and what the tools read.
 		fresh, verdict := indexVerdict(root, ix)
 		_ = fresh
 		detail := fmt.Sprintf("%s: %d symbols, %d files, %s (%d cached projects)",
 			index.StorePath(root), len(ix.Symbols), len(ix.FileHashes), verdict, n)
-		return Finding{Check: "index", Level: "ok", Detail: detail}
+		level := "ok"
+		if note := indexdb.RetentionNote(index.LegacyJSONSize(root), indexdb.DirSize(filepath.Join(root, ".kern"))); note != "" {
+			detail, level = detail+note, "warn"
+		}
+		return Finding{Check: "index", Level: level, Detail: detail}
 	}
 	if f, ok := CheckMultiRepoIndex(root); ok {
 		return f
 	}
-	// No cached index: report whether the tree even has indexable sources,
-	// without building a throwaway index just to answer that.
 	if index.HasIndexableSources(root) {
 		return Finding{Check: "index", Level: "warn", Detail: "no cached index for this project — run `kern index .`"}
 	}
@@ -789,8 +737,7 @@ func checkIndex(root string) Finding {
 }
 
 // indexVerdict reports the freshness of a loaded index: "fresh"/"stale"
-// (with "unknown" for a nil index). The cheap git tree-OID probe decides
-// when it can; the loose content proof is the fallback for non-git roots and
+// ("unknown" for nil). The git tree-OID probe decides when it can.
 // legacy indexes without a recorded tree OID — the same decision order
 // `kern index` uses.
 func indexVerdict(root string, ix *index.Index) (fresh bool, verdict string) {
@@ -978,10 +925,10 @@ func checkPrecision(root string) Finding {
 	}
 	if index.TreesitterEnabled() {
 		return Finding{Check: "precision", Level: "ok",
-			Detail: fmt.Sprintf("all %d languages at AST-or-better precision (tree-sitter build; %d resolved)", resolvedCount+astCount, resolvedCount)}
+			Detail: fmt.Sprintf("tree-sitter extraction: %d languages at AST level (%d resolved call graphs; non-Go/Java call edges are best-effort)", resolvedCount+astCount, resolvedCount)}
 	}
 	return Finding{Check: "precision", Level: "ok",
-		Detail: fmt.Sprintf("all %d languages at resolved precision (Go + Java)", resolvedCount)}
+		Detail: fmt.Sprintf("%d languages resolved (Go + Java); other languages are best-effort", resolvedCount)}
 }
 
 // runtimeNoSourceHint is the enable hint shared by the no-source and

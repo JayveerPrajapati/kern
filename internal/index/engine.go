@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,12 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/clip"
 	"github.com/JayveerPrajapati/kern/internal/filecache"
 	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/ignore"
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
+	"github.com/JayveerPrajapati/kern/internal/indexmem"
 	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/tokstats"
@@ -47,6 +51,17 @@ type BuildStats struct {
 	Ms      int64  `json:"ms"`
 	Workers int    `json:"workers"`
 	Reused  int    `json:"reused"`
+}
+
+// Metadata is the metadata-only index view: enough to answer counts and a
+// freshness proof without loading symbols or call edges (`kern index where` /
+// `kern index --status`). Index carries Identity, FileHashes and the small
+// derived maps; Symbols and Calls are intentionally empty.
+type Metadata struct {
+	Index    *Index
+	Symbols  int
+	Files    int
+	Packages int
 }
 
 // Index is the in-memory representation of a project's AST index.
@@ -93,7 +108,7 @@ type Index struct {
 	// freshnessMemo caches the last non-strict FreshnessProof verdict
 	// (single-flight + TTL — see identity.go) so warm tool calls do not
 	// re-walk the tree or re-stage git per call. Never serialized.
-	freshnessMemo proofMemo `json:"-"`
+	freshnessMemo *proofMemo `json:"-"`
 	// PromotedLowEdges / UnresolvedLowEdges are the finalize-time
 	// reconciliation counters (CG-P0-5): call edges whose target resolved
 	// against the completed symbol table and was promoted from LOW to
@@ -148,12 +163,22 @@ type Index struct {
 	// off-lock Stale() walk), so the retained observation pointer is only
 	// written and read under this mutex. Published snapshots are immutable
 	// after retention — only the pointer swaps.
-	staleMu       sync.Mutex
+	staleMu       *sync.Mutex
 	staleSnapshot *FreshnessSnapshot
 	// reusedResults counts per-file results reused from a prior index in the
 	// build that produced this one (0 for full builds). Exposed via
 	// ReusedResults for diagnostics.
 	reusedResults int
+	// Adjacency is the persisted caller set (identity -> caller names) built
+	// once per save; CallersFor serves from it instead of rebuilding the
+	// export catalog per process. nil for in-memory/JSON-loaded indexes.
+	Adjacency map[string][]string `json:"-"`
+	// skipPersist marks a no-op Update result (content-identical to the
+	// persisted store): Save writes nothing because there is nothing new.
+	skipPersist bool
+	// delta names the files/owners an Update changed so Save can write those
+	// rows instead of rewriting the entire store (typically 900ms -> ~60ms).
+	delta *deltaPlan
 	// cache holds the lazily-built lookup tables: name -> symbols for
 	// symbolsFor, and kind -> symbols for kind-filtered Search. The build and
 	// update paths populate them eagerly (buildSymbolIndex, reindexByFile);
@@ -364,24 +389,42 @@ func StorePath(root string) string {
 // silently clobber a newer index.json written by a current binary — the
 // indexVersion guard only runs at load time, not at save time.
 func (ix *Index) Save() error {
+	if ix == nil || ix.skipPersist {
+		return nil
+	}
 	// Ensure the local repository ignores .kern via .git/info/exclude without
 	// dirtying or requiring a tracked .gitignore file.
 	ensureGitExclude(ix.Root)
 
-	// SQLite-primary (default build): the concurrent WAL store is the
-	// canonical write path for the persisted index, so a build/update writes
-	// ONE format instead of three (JSON + gob snapshot + SQLite). The JSON
-	// cache and its gob snapshot below are written only when SQLite is
-	// compiled out (-tags nosqlite) or the SQLite write fails — the
-	// persistence contract degrades to the legacy formats instead of
-	// disappearing. JSON remains the read-migration path for caches written
-	// by older kern (Load falls back to it).
+	// SQLite-primary: the WAL store is the canonical write path, so a build
+	// writes one format, not three. The JSON cache below is the nosqlite
+	// fallback and the read-migration path for older stores.
 	if SQLiteEnabled() {
+		if ix.delta != nil {
+			if derr := SaveSQLiteDelta(ix.Root, ix, ix.delta); derr == nil {
+				ix.delta = nil
+				ix.persistAdjacency()
+				if werr := writeSQLiteBinSnapshot(ix, ix.Root); werr != nil {
+					log.Printf("kern index: sqlite fast snapshot write failed for %s (index store is authoritative): %v", clip.ClipReflect(ix.Root, 160), werr)
+				}
+				return nil
+			} else {
+				log.Printf("kern index: delta persist failed for %s, falling back to a full save: %v", clip.ClipReflect(ix.Root, 160), derr)
+			}
+		}
 		if serr := SaveSQLite(ix.Root, ix); serr == nil {
+			ix.persistAdjacency()
+			// Derived fast snapshot: the SQLite store remains canonical, and
+			// the snapshot header carries the store's generation token so a
+			// stale snapshot can never win. Best-effort — a snapshot failure
+			// only costs the next process a full SQLite load.
+			if werr := writeSQLiteBinSnapshot(ix, ix.Root); werr != nil {
+				log.Printf("kern index: sqlite fast snapshot write failed for %s (index store is authoritative): %v", clip.ClipReflect(ix.Root, 160), werr)
+			}
 			return nil
 		} else {
 			// LOW-8: the root is operator-supplied — clip before reflecting.
-			log.Printf("kern index: sqlite persist failed for %s, falling back to the JSON cache: %v", ClipReflect(ix.Root, 160), serr)
+			log.Printf("kern index: sqlite persist failed for %s, falling back to the JSON cache: %v", clip.ClipReflect(ix.Root, 160), serr)
 		}
 	}
 	data, err := json.Marshal(ix)
@@ -423,6 +466,33 @@ func (ix *Index) Save() error {
 	// effort — a snapshot failure is non-fatal (JSON remains canonical).
 	_ = writeBinSnapshot(ix, p)
 	return nil
+}
+
+// PruneLegacyJSON removes the frozen index.json cache once a SQLite store
+// exists (the canonical store; JSON is only the nosqlite/legacy-migration
+// format). Keeps the derived .snap, which is the live SQLite fast snapshot.
+func PruneLegacyJSON(root string) bool {
+	if !SQLiteEnabled() {
+		return false
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	return indexdb.PruneFrozenJSON(SQLitePath(abs), StorePath(abs))
+}
+
+// LegacyJSONSize returns the size of a frozen index.json beside a SQLite
+// store (0 when absent), for kern doctor to surface retention work.
+func LegacyJSONSize(root string) int64 {
+	if !SQLiteEnabled() {
+		return 0
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	return indexdb.FrozenJSONSize(SQLitePath(abs), StorePath(abs))
 }
 
 // onDiskVersion reads the "version" field of a persisted index without
@@ -508,12 +578,54 @@ func ensureGitExclude(root string) {
 }
 
 // Load reads the index for root. Returns nil if absent.
+// MemoizeLoad enables per-process memoization of hydrated indexes. Set it only
+// in a warm, read-only process (cmd/kern's daemon); one-shot CLI processes must
+// always read the store. Correctness rests on the size+mtime generation of the
+// SQLite and JSON stores (both written via temp-file + rename), so any writer
+// invalidates the memo on the next load.
+var MemoizeLoad bool
+
 func Load(root string) (*Index, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = root
 	}
+	if MemoizeLoad {
+		if ix, ok := indexmem.Cached[*Index](abs, []string{SQLitePath(abs), StorePath(abs)}); ok {
+			return ix, nil
+		}
+	}
+	ix, err := loadStore(abs)
+	if MemoizeLoad && err == nil {
+		indexmem.Put(abs, []string{SQLitePath(abs), StorePath(abs)}, ix)
+	}
+	return ix, err
+}
+
+// loadStore hydrates the index for an absolute root from disk (derived
+// snapshot, then bin snapshot, then SQLite, then the JSON document). It is the
+// body of Load without the warm-process memo layer (see memcache.go).
+func loadStore(abs string) (*Index, error) {
 	p := StorePath(abs)
+	// Operator escape hatch: KERN_INDEX_NO_SNAPSHOT=1 bypasses both derived
+	// snapshot caches and loads the canonical store, for diagnosing a suspect
+	// snapshot without deleting files.
+	useSnapshot := os.Getenv("KERN_INDEX_NO_SNAPSHOT") != "1"
+	// Fastest path: the derived snapshot of the SQLite-primary store, trusted
+	// only when its header token matches the store's persisted generation.
+	// This is the restored fast load (the audit found Save stopped writing the
+	// snapshot, so every CLI process paid the full SQLite materialization).
+	if useSnapshot {
+		if ix, ok := loadSQLiteBinSnapshot(abs); ok {
+			reRootIndex(ix, abs)
+			ix.initMaps()
+			// SymbolsByFile is excluded from the snapshot (it duplicated every
+			// symbol); rebuild it from Symbols, exactly as the JSON path does.
+			ix.buildSymbolsByFile()
+			metrics.Default().RecordCacheHit()
+			return ix, nil
+		}
+	}
 	// Fast path (Rec P0-3): a fresh binary snapshot decodes ~5-10x faster
 	// than the JSON document; JSON stays canonical and any miss/staleness
 	// falls through to the existing path below. The snapshot is trusted only
@@ -521,7 +633,7 @@ func Load(root string) (*Index, error) {
 	// since Save became SQLite-primary, index.json is no longer rewritten, so
 	// a legacy snapshot would otherwise keep matching its frozen index.json
 	// stat and serve stale content forever.
-	if !sqliteStoreNewerThanJSON(p) {
+	if useSnapshot && !sqliteStoreNewerThanJSON(p) {
 		if ix, ok := loadBinSnapshot(p); ok {
 			if ix.Version != indexVersion {
 				metrics.Default().RecordCacheMiss()
@@ -588,12 +700,16 @@ func Load(root string) (*Index, error) {
 // resolve to the same directory and forcing a rebuild on every load would be
 // a needless full re-walk.
 func reRootIndex(ix *Index, abs string) {
-	if ix == nil || ix.Root == "" || !filepath.IsAbs(ix.Root) {
+	if ix == nil {
 		return
 	}
-	if filepath.Clean(ix.Root) != filepath.Clean(abs) {
+	if ix.Root != "" && filepath.IsAbs(ix.Root) && filepath.Clean(ix.Root) != filepath.Clean(abs) {
 		ix.Root = abs
 	}
+	// Seed the stat-gate with the previous process's content walk. Harmless
+	// for git roots (the git OID path never consults it) and load-bearing for
+	// non-git exports, where it turns a per-process re-hash into stats.
+	ix.loadPersistedFreshness()
 }
 
 // sqliteStoreNewerThanJSON reports whether the SQLite store was written after
@@ -914,6 +1030,14 @@ func BuildWithOptions(root string, opts ...BuildOption) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A missing or non-directory root is a caller error, not an empty repo:
+	// indexing it used to walk nothing and persist an empty index (and, with
+	// no .kern dir, could stall on the build lock). Fail fast instead.
+	if info, statErr := os.Stat(abs); statErr != nil {
+		return nil, fmt.Errorf("index: root %s: %w", abs, statErr)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("index: root %s is not a directory", abs)
+	}
 	var cfg buildConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -1028,9 +1152,36 @@ func copyPkg(p *Pkg) *Pkg {
 // shared by buildSerial, buildParallel and Update so the incremental path
 // never diverges from a full rebuild on skip rules.
 func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel, path string, mtime int64) error) error {
+	// When the tree contains Go modules, a .go file outside every module is
+	// not buildable (the classic stray test harness at a repo root above
+	// src/go.mod). Indexing it invents a duplicate "." package (QA
+	// 2026-10-26) and feeds phantom symbols to search/blast radius. Trees
+	// with no go.mod at all keep the historical index-everything behavior.
+	var moduleRoots []string
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		// Only a root without its own module can contain stray Go files.
+		// Normal module repos skip the extra directory pass entirely.
+		moduleRoots = goModuleRoots(root, ign)
+	}
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// The root itself failing (missing, not a dir, unreadable) is a
+			// real indexing error — abort, never return an empty index.
+			if path == root {
+				return err
+			}
+			// A walk error is almost always one unreadable entry or
+			// directory (permission denied mid-tree). Skip it and keep
+			// indexing the rest — one protected directory must not abort
+			// the whole index and every later search (campaign 2026-10-28,
+			// ripgrep-style). The operator still hears about it:
+			// one line on stderr, so the missing subtree is explainable.
+			if d != nil && d.IsDir() {
+				fmt.Fprintf(os.Stderr, "[kern] index: skipping unreadable directory %s: %v\n", path, err)
+				return filepath.SkipDir
+			}
+			fmt.Fprintf(os.Stderr, "[kern] index: skipping unreadable entry %s: %v\n", path, err)
+			return nil
 		}
 		if d.IsDir() {
 			if path != root && ignoreDirs[d.Name()] {
@@ -1060,6 +1211,9 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 		if !langparse.QuickExt(rel) && filepath.Ext(rel) != "" {
 			return nil
 		}
+		if filepath.Ext(rel) == ".go" && len(moduleRoots) > 0 && !underGoModule(path, moduleRoots) {
+			return nil
+		}
 		// Skip non-regular files (FIFOs, sockets, device nodes) to avoid blocking reads.
 		if !d.Type().IsRegular() {
 			return nil
@@ -1081,6 +1235,89 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 		}
 		return fn(rel, path, mtime)
 	})
+}
+
+// goModuleRoots returns every directory (absolute) that contains a go.mod,
+// skipping ignored directories. Empty means the tree has no Go module.
+type moduleImportPrefix struct {
+	path string // go.mod "module" declaration
+	dir  string // module root relative to the index root ("." or "src")
+}
+
+func (p moduleImportPrefix) dirFor(importPath string) (string, bool) {
+	if importPath == p.path {
+		return p.dir, true
+	}
+	if rest, ok := strings.CutPrefix(importPath, p.path+"/"); ok {
+		return filepath.ToSlash(filepath.Join(p.dir, rest)), true
+	}
+	return "", false
+}
+
+// moduleImportPrefixes returns the module paths declared by every go.mod in
+// the tree (root and nested modules) plus the module root's index-relative
+// directory. Import paths starting with one of these are in-repo; everything
+// else is stdlib/vendor, even when a local directory happens to share the
+// qualifier (net/http vs a local http/ package).
+func moduleImportPrefixes(root string) []moduleImportPrefix {
+	var prefixes []moduleImportPrefix
+	for _, modRoot := range goModuleRoots(root, nil) {
+		data, err := os.ReadFile(filepath.Join(modRoot, "go.mod"))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(root, modRoot)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+				if p := strings.TrimSpace(rest); p != "" {
+					prefixes = append(prefixes, moduleImportPrefix{path: p, dir: filepath.ToSlash(rel)})
+				}
+				break
+			}
+		}
+	}
+	return prefixes
+}
+
+func goModuleRoots(root string, ign *ignore.Matcher) []string {
+	var roots []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && ignoreDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			if path != root && ign != nil {
+				if rel, rerr := filepath.Rel(root, path); rerr == nil && ign.Ignored(filepath.ToSlash(rel)) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if d.Name() == "go.mod" {
+			if rel, rerr := filepath.Rel(root, path); rerr != nil || ign == nil || !ign.Ignored(filepath.ToSlash(rel)) {
+				roots = append(roots, filepath.Dir(path))
+			}
+		}
+		return nil
+	})
+	return roots
+}
+
+func underGoModule(path string, moduleRoots []string) bool {
+	path = filepath.Clean(path)
+	for _, root := range moduleRoots {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildSerial is the original single-threaded build: it walks root, parses
@@ -1450,7 +1687,7 @@ func computeFileResult(rel string, src []byte, mtime int64) fileResult {
 		rel:       rel,
 		hash:      cache.Hash(src),
 		mtime:     mtime,
-		generated: IsGeneratedPath(rel) || isGeneratedContent(src),
+		generated: langparse.IsGeneratedPath(rel) || langparse.IsGeneratedContent(src),
 	}
 	lang := langparse.DetectLang(rel, src)
 	if lang == "go" {
@@ -1657,6 +1894,7 @@ type CallResStats struct {
 	Unresolved int `json:"unresolved"`
 	External   int `json:"external,omitempty"`
 	InRepo     int `json:"in_repo,omitempty"`
+	Dynamic    int `json:"dynamic,omitempty"`
 }
 
 // measureCallResolution counts distinct callee targets and how many fail
@@ -1665,12 +1903,131 @@ type CallResStats struct {
 // can report the honest per-repo resolution rate.
 func (ix *Index) measureCallResolution() {
 	seen := map[string]struct{}{}
-	var external, inRepo int
+	var external, inRepo, dynamic int
 	// Foreign import bases ("fmt", "time") identify stdlib/vendor-qualified
 	// targets the index cannot and should not resolve; recomputed per call
 	// (same trust model as computeCallers, which runs before this pass).
 	foreign := ix.foreignImportBases()
-	for _, callees := range ix.Calls {
+	pkgQualifiers := map[string]bool{}
+	for path, pkg := range ix.Pkgs {
+		if pkg != nil && pkg.Name != "" {
+			pkgQualifiers[pkg.Name] = true
+		}
+		if base := filepath.Base(path); base != "" && base != "." {
+			pkgQualifiers[base] = true
+		}
+	}
+	// Receiver/type qualifiers are in-repo by definition: a miss like
+	// Widget.Missing is a genuine resolution failure, while tt.status.String
+	// (a variable/field receiver) is dynamic dispatch, not a miss.
+	definedQualifiers := map[string]bool{}
+	functionQualifiers := map[string]bool{}
+	fieldQualifiers := map[string]bool{}
+	for _, pkg := range ix.Pkgs {
+		if pkg == nil {
+			continue
+		}
+		for key := range pkg.StructFields {
+			fieldQualifiers[key] = true
+		}
+	}
+	for _, s := range ix.Symbols {
+		if s.Receiver != "" {
+			definedQualifiers[s.Receiver] = true
+		}
+		switch s.Kind {
+		case "type", "struct", "interface", "class", "record", "enum":
+			definedQualifiers[s.Name] = true
+		case "func", "method", "function":
+			functionQualifiers[s.Name] = true
+		}
+	}
+
+	// Caller-aware import classification: a local directory named "http"
+	// must not turn net/http calls into in-repo misses. For each caller we
+	// know the file's imports, so a qualifier imported from outside the repo
+	// is external even when it collides with a local package name.
+	directories := map[string]bool{}
+	pkgNames := map[string]string{}
+	for dir, pkg := range ix.Pkgs {
+		directories[filepath.ToSlash(dir)] = true
+		if pkg != nil && pkg.Name != "" {
+			pkgNames[filepath.ToSlash(dir)] = pkg.Name
+		}
+	}
+	prefixes := moduleImportPrefixes(ix.Root)
+	localImport := map[string]string{}
+	localImportDir := func(path string) (string, bool) {
+		if dir, ok := localImport[path]; ok {
+			return dir, dir != ""
+		}
+		if len(prefixes) > 0 {
+			// Go import paths inside the repo start with a module path. This
+			// is exact: net/http stays external even when a local package
+			// directory is also named "http".
+			for _, prefix := range prefixes {
+				if dir, ok := prefix.dirFor(path); ok {
+					localImport[path] = dir
+					return dir, true
+				}
+			}
+			localImport[path] = ""
+			return "", false
+		}
+		dir := matchImportDirectory(path, directories)
+		if dir == "" {
+			dir = matchImportByPackage(path, directories, pkgNames)
+		}
+		localImport[path] = dir
+		return dir, dir != ""
+	}
+	type callerImportSets struct {
+		local, foreign map[string]bool
+		aliases        map[string]string
+	}
+	callerImports := map[string]callerImportSets{}
+	addBase := func(set map[string]bool, base string) {
+		if base == "" {
+			return
+		}
+		set[base] = true
+		if i := strings.IndexByte(base, '.'); i > 0 {
+			set[base[:i]] = true
+		}
+	}
+	for caller := range ix.Calls {
+		sets := callerImportSets{local: map[string]bool{}, foreign: map[string]bool{}, aliases: map[string]string{}}
+		for _, sym := range ix.symbolsFor(caller) {
+			for _, imp := range ix.ImportsByFile[sym.File] {
+				base := filepath.Base(imp.Path)
+				alias := strings.TrimSpace(imp.Alias)
+				if dir, ok := localImportDir(imp.Path); ok {
+					addBase(sets.local, base)
+					keys := []string{base, lastSegment(base)}
+					if alias != "" && alias != "_" && alias != "." {
+						sets.local[alias] = true
+						keys = append(keys, alias)
+					}
+					if pkg := ix.Pkgs[dir]; pkg != nil && pkg.Name != "" {
+						keys = append(keys, pkg.Name)
+					}
+					for _, key := range keys {
+						if key != "" {
+							sets.aliases[key] = dir
+						}
+					}
+					continue
+				}
+				addBase(sets.foreign, base)
+				if alias != "" && alias != "_" && alias != "." {
+					sets.foreign[alias] = true
+				}
+			}
+		}
+		callerImports[caller] = sets
+	}
+	for caller, callees := range ix.Calls {
+		sets := callerImports[caller]
 		for _, ce := range callees {
 			if _, dup := seen[ce.Target]; dup {
 				continue
@@ -1679,14 +2036,102 @@ func (ix *Index) measureCallResolution() {
 			if _, ok := resolveName(ix, ce.Target); ok {
 				continue
 			}
-			if i := strings.Index(ce.Target, "."); i > 0 && foreign[ce.Target[:i]] {
-				external++
-			} else {
+			i := strings.Index(ce.Target, ".")
+			qualifier, method := "", ""
+			if i > 0 {
+				qualifier = ce.Target[:i]
+				method = ce.Target[i+1:]
+			}
+			if qualifier != "" {
+				if dir, ok := sets.aliases[qualifier]; ok {
+					if method != "" && !strings.Contains(method, ".") && ix.symbolInDir(method, dir) {
+						continue // resolved through the caller's import alias
+					}
+					if method != "" && strings.Contains(method, ".") {
+						dynamic++ // chained call on a value returned by the package
+					} else {
+						inRepo++
+					}
+					if os.Getenv("KERN_DEBUG_RESOLUTION") != "" {
+						cause := "in-repo"
+						if strings.Contains(method, ".") {
+							cause = "dynamic/untyped"
+						}
+						fmt.Fprintf(os.Stderr, "unresolved (%s) target: %s\n", cause, ce.Target)
+					}
+					continue
+				}
+				if first := firstSegment(qualifier); first != qualifier {
+					if _, ok := sets.aliases[first]; ok {
+						inRepo++
+						if os.Getenv("KERN_DEBUG_RESOLUTION") != "" {
+							fmt.Fprintf(os.Stderr, "unresolved (in-repo) target: %s\n", ce.Target)
+						}
+						continue
+					}
+				}
+			}
+			cause := "dynamic/untyped"
+			switch {
+			case method != "" && strings.Contains(method, "."):
+				// Chained member call (logger.Logger.Info, Component.mu.Lock,
+				// common.GetRequestLogger.Debug): dynamic dispatch on a value,
+				// not a package-qualified miss.
+				dynamic++
+			case qualifier != "" && functionQualifiers[qualifier]:
+				// Call on a local function's return value (fn.Field.Method).
+				dynamic++
+			case qualifier != "" && fieldQualifiers[qualifier+"."+method]:
+				// Struct field holding a func value (Component.InitFunc).
+				dynamic++
+			case qualifier != "" && sets.local[qualifier]:
+				// The caller imports this qualifier from an in-repo package:
+				// an unresolved call is a genuine package/type miss.
 				inRepo++
+				cause = "in-repo"
+			case qualifier != "" && (sets.foreign[qualifier] || foreign[qualifier]):
+				external++
+				cause = "external"
+			case qualifier != "" && (pkgQualifiers[qualifier] || definedQualifiers[qualifier] || definedQualifiers[lastSegment(qualifier)]):
+				inRepo++
+				cause = "in-repo"
+			default:
+				dynamic++
+			}
+			if os.Getenv("KERN_DEBUG_RESOLUTION") != "" {
+				fmt.Fprintf(os.Stderr, "unresolved (%s) target: %s\n", cause, ce.Target)
 			}
 		}
 	}
-	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: external + inRepo, External: external, InRepo: inRepo}
+	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: external + inRepo + dynamic, External: external, InRepo: inRepo, Dynamic: dynamic}
+}
+
+// lastSegment returns the final dot-separated segment of a qualifier
+// ("logger.Logger" -> "Logger").
+func lastSegment(qualifier string) string {
+	if i := strings.LastIndexByte(qualifier, '.'); i >= 0 {
+		return qualifier[i+1:]
+	}
+	return qualifier
+}
+
+// firstSegment returns the leading dot-separated segment of a qualifier
+// ("common.Logger" -> "common").
+func firstSegment(qualifier string) string {
+	if i := strings.IndexByte(qualifier, '.'); i >= 0 {
+		return qualifier[:i]
+	}
+	return qualifier
+}
+
+// symbolInDir reports whether name has a definition whose file lives in dir.
+func (ix *Index) symbolInDir(name, dir string) bool {
+	for _, s := range ix.symbolsFor(name) {
+		if filepath.ToSlash(filepath.Dir(s.File)) == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // methodLangFromFile resolves the language a method symbol's file must have
@@ -2088,7 +2533,26 @@ func buildSymbolTable(symbols []Symbol) map[string][]Symbol {
 			m[fn] = append(m[fn], s)
 		}
 	}
+	// Canonical candidate order (file, line, kind, name): resolveName and the
+	// other defs[0] consumers must not depend on insertion order, which a
+	// delta-written store changes relative to a full rebuild.
+	for _, list := range m {
+		sort.Slice(list, func(i, j int) bool { return symbolLess(list[i], list[j]) })
+	}
 	return m
+}
+
+func symbolLess(a, b Symbol) bool {
+	if a.File != b.File {
+		return a.File < b.File
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	return a.Name < b.Name
 }
 
 // buildSymbolIndex precomputes the name -> symbols map that turns
@@ -2599,8 +3063,19 @@ func (ix *Index) foreignImportBases() map[string]bool {
 	out := map[string]bool{}
 	for _, p := range ix.Pkgs {
 		for _, imp := range p.Imports {
-			if base := filepath.Base(imp.Path); base != "" && !pkgDirBases[base] {
-				out[base] = true
+			if alias := strings.TrimSpace(imp.Alias); alias != "" && alias != "_" && alias != "." {
+				out[alias] = true
+			}
+			base := filepath.Base(imp.Path)
+			if base == "" || pkgDirBases[base] {
+				continue
+			}
+			out[base] = true
+			// gopkg.in/yaml.v3 is imported as package yaml; the version
+			// suffix is not a Go identifier, so also record the stripped
+			// base or the qualifier never matches a foreign import.
+			if i := strings.IndexByte(base, '.'); i > 0 {
+				out[base[:i]] = true
 			}
 		}
 	}

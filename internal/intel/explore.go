@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/astrefs"
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/calleefilter"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/refscan"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/tokstats"
 )
@@ -38,6 +40,13 @@ type ExploreReport struct {
 	StaleBanner  string               `json:"stale_banner,omitempty"`
 	Stats        *tokstats.TokenStats `json:"stats,omitempty"`
 	Evidence     string               `json:"evidence,omitempty"` // P2 anchor: file:line + certificate for the subject
+	// ReferenceFiles / ReferenceCount / ReferenceConfidence report the
+	// TEXTUAL-reference safety net for non-callable symbols (types used only
+	// in declarations, consts, vars): the call graph has no edges for them, so
+	// a bare "0 callers" is absence of coverage, not an all-clear.
+	ReferenceFiles      []string `json:"reference_files,omitempty"`
+	ReferenceCount      int      `json:"reference_count,omitempty"`
+	ReferenceConfidence string   `json:"reference_confidence,omitempty"`
 }
 
 func (rep *ExploreReport) RetainBlastRadius(names []string) {
@@ -298,6 +307,17 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	rep.BlastSymbols = radiusSyms
 	rep.BlastFiles = affectedFilesOf(radiusSyms)
 	rep.StaleBanner = ix.StalenessBanner(append(append([]string{}, rep.Definition.File), rep.BlastFiles...))
+	// Non-callable symbols have no call edges at all. When the call graph
+	// produced no direct caller and no transitive radius, add the bounded
+	// textual reference safety net so the report cannot read as "nothing uses
+	// this" (P0-1). Confidence is labelled textual, never resolved.
+	if len(rep.Callers) == 0 && len(rep.BlastRadius) <= 1 && refscan.ReferenceOnlyKind(d.Kind) {
+		if r := astrefs.Lookup(ix, *d); r.Confidence != "" {
+			rep.ReferenceFiles = r.Files
+			rep.ReferenceCount = r.Count
+			rep.ReferenceConfidence = r.Confidence
+		}
+	}
 	return rep, nil
 }
 
@@ -800,6 +820,13 @@ func RenderExplore(r *ExploreReport) string {
 	if len(r.BlastFiles) > 0 {
 		b.WriteString("== affected files ==\n")
 		b.WriteString(joinLines(r.BlastFiles))
+	}
+	if r.ReferenceConfidence != "" {
+		b.WriteString("== references (" + strconv.Itoa(len(r.ReferenceFiles)) + " files, " + r.ReferenceConfidence + " confidence; the call graph does not cover this symbol kind) ==\n")
+		b.WriteString(joinLines(r.ReferenceFiles))
+		if r.ReferenceCount > 0 {
+			b.WriteString("reference count: " + strconv.Itoa(r.ReferenceCount) + "\n")
+		}
 	}
 	b.WriteString("== source ==\n")
 	b.WriteString(r.Source)

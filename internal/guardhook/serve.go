@@ -8,6 +8,7 @@ package guardhook
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -24,8 +25,16 @@ func runKern(args ...string) (string, bool) {
 
 // runKernDir executes the serving binary with a working directory.
 func runKernDir(dir string, args ...string) (string, int) {
+	return runKernDirEnv(dir, nil, args...)
+}
+
+// runKernDirEnv is runKernDir with extra environment entries.
+func runKernDirEnv(dir string, extraEnv []string, args ...string) (string, int) {
 	cmd := exec.Command(kernBin(), args...)
 	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -48,7 +57,7 @@ func emitShaped(stdout io.Writer, out string) {
 // servePipeline runs the serve tiers for a classified pipeline. A true
 // return means the pipeline was served (code is the hook exit code); false
 // falls through to auto-redirect/deny.
-func servePipeline(cmd string, res guardrule.ClassifyResult, root string, stdout io.Writer) (int, bool) {
+func servePipeline(cmd string, res guardrule.ClassifyResult, root string, stdout io.Writer, hasToolCall bool) (int, bool) {
 	switch res.Tier {
 	case 1:
 		switch res.Head {
@@ -60,52 +69,92 @@ func servePipeline(cmd string, res guardrule.ClassifyResult, root string, stdout
 			}
 		case "grep", "egrep", "rg", "ag":
 			if res.Pattern != "" {
-				if out, ok := runKern("ast", res.Pattern); ok {
-					auditRedirect(res.Head, "ast "+res.Pattern, res.Pattern)
+				// A scoped grep must stay scoped: the repo-wide symbol answer
+				// would be a fidelity regression (parity with the script).
+				var out string
+				var ok bool
+				if res.Scope != "" {
+					var code int
+					out, code = runKernDir(root, "search", res.Pattern, "--path", res.Scope)
+					ok = code == 0
+					if ok {
+						auditRedirect(res.Head, "search "+res.Pattern+" --path "+res.Scope, res.Pattern)
+					}
+				} else {
+					out, ok = runKern("ast", res.Pattern)
+					if ok {
+						auditRedirect(res.Head, "ast "+res.Pattern, res.Pattern)
+					}
+				}
+				if ok {
 					emitShaped(stdout, out)
 					return 0, true
 				}
 			}
 		case "cat", "head", "tail", "less", "more":
 			if res.File != "" {
-				if out, ok := runKern("compact", res.File); ok {
+				// --root root: resolve the token against the hook's working
+				// root (the agent's CWD) — not kern's project-root default,
+				// which turns a legitimate subdirectory read into a miss.
+				if out, ok := runKern("compact", "--root", root, res.File); ok {
 					auditRedirect(res.Head, "compact "+res.File, res.File)
 					emitShaped(stdout, out)
 					return 0, true
 				}
 			}
 		}
-		return 0, false
+		// Index-backed serve unavailable (fresh project / stale index): fall
+		// back to the readonly sandbox instead of denying a pure read.
+		return serveTier3(cmd, res, root, stdout, hasToolCall)
 	case 2:
 		if res.Pattern != "" {
-			if headout, ok := runKern("ast", res.Pattern); ok {
+			var headout string
+			var ok bool
+			if res.Scope != "" {
+				var code int
+				headout, code = runKernDir(root, "search", res.Pattern, "--path", res.Scope)
+				ok = code == 0
+			} else {
+				headout, ok = runKern("ast", res.Pattern)
+			}
+			if ok {
 				result := applyTails(cmd, headout)
-				auditRedirect(res.Head, "ast "+res.Pattern+" | tail", res.Pattern)
+				auditRedirect(res.Head, "ast/search "+res.Pattern+" | tail", res.Pattern)
 				emitShaped(stdout, result)
 				return 0, true
 			}
 		}
-		return 0, false
+		return serveTier3(cmd, res, root, stdout, hasToolCall)
 	case 3:
-		script := "cd '" + root + "' && " + cmd
-		body, code := runKernDir(root, "exec", "--readonly", "--lang", "sh", script)
-		if code == 0 || code == 1 {
-			auditRedirect(res.Head, "exec --readonly", "")
-			emitShaped(stdout, body)
-			return 0, true
-		}
-		if strings.Contains(body, "denied by governance") ||
-			strings.Contains(body, "blocked by governance") ||
-			strings.Contains(body, "approval required") {
-			return 0, false
-		}
-		// Fail-open raw serve: allow the original pipeline through.
-		fmt.Fprintf(stdout, "%s\n", cmd)
-		fmt.Fprintln(stdout, "[kern] index unavailable/stale — raw read served (pure-read pipeline)")
-		auditRedirect(res.Head, "exec --readonly (fallback raw)", "")
-		return 0, true
+		return serveTier3(cmd, res, root, stdout, hasToolCall)
 	}
 	return 0, false
+}
+
+// serveTier3 executes a pure read in the readonly sandbox. code 0/1 is a
+// served answer; a governance denial falls through to the deny; any other
+// failure fails open (the host runs the read raw).
+func serveTier3(cmd string, res guardrule.ClassifyResult, root string, stdout io.Writer, hasToolCall bool) (int, bool) {
+	script := "cd '" + root + "' && " + cmd
+	// The sandbox hides .git/.kern, so a daemon started from in there would
+	// key its socket on the subdirectory and outlive the read.
+	body, code := runKernDirEnv(root, []string{"KERN_DAEMON=0"}, "exec", "--readonly", "--lang", "sh", script)
+	if code == 0 || code == 1 {
+		auditRedirect(res.Head, "exec --readonly", "")
+		emitShaped(stdout, body)
+		return 0, true
+	}
+	if strings.Contains(body, "denied by governance") ||
+		strings.Contains(body, "blocked by governance") ||
+		strings.Contains(body, "approval required") {
+		return 0, false
+	}
+	if hasToolCall {
+		fmt.Fprintln(stdout, `{"decision":"allow"}`)
+	}
+	fmt.Fprintln(os.Stderr, "[kern] index unavailable/stale — raw read served (pure-read pipeline)")
+	auditRedirect(res.Head, "exec --readonly (fallback raw)", "")
+	return 0, true
 }
 
 // applyTails ports the script's tier-2 tail computation: everything after

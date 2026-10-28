@@ -187,17 +187,18 @@ func TestWireCodexQuoteInjection(t *testing.T) {
 	}
 }
 
-func TestWireCodexAlreadyRegisteredSkipsRewrite(t *testing.T) {
+func TestWireCodexRewritesKernTable(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	path := filepath.Join(dir, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("[mcp_servers.kern]\ncommand = \"/custom/bin/kern-mcp\"\n"), 0o600); err != nil {
+	body := "[mcp_servers.kern]\ncommand = \"/custom/bin/kern-mcp\"\n\n[mcp_servers.kern.env]\nKERN_ALLOW_EXEC = \"1\"\n\n[mcp_servers.other]\ncommand = \"/bin/other\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st := wireCodex("/ignored/bin")
+	st := wireCodex("/absolute/bin/kern-mcp")
 	if !st.Installed {
 		t.Fatalf("already-registered codex should report installed: %s", st.Note)
 	}
@@ -205,12 +206,23 @@ func TestWireCodexAlreadyRegisteredSkipsRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The pre-existing entry must be left untouched (no append, no rewrite).
-	if strings.Contains(string(b), "/ignored/bin") {
-		t.Fatalf("already-registered config must not be rewritten:\n%s", b)
+	got := string(b)
+	// The kern table is kern-owned: the command is rewritten to the absolute
+	// path (repairs a stale bare command) and the stale exec opt-in removed.
+	if !strings.Contains(got, `/absolute/bin/kern-mcp`) {
+		t.Fatalf("kern command not rewritten to the absolute path:\n%s", got)
 	}
-	if strings.Count(string(b), "[mcp_servers.kern]") != 1 {
-		t.Fatalf("kern MCP section duplicated:\n%s", b)
+	if strings.Contains(got, "/custom/bin/kern-mcp") {
+		t.Fatalf("stale command survived the rewrite:\n%s", got)
+	}
+	if strings.Contains(got, "KERN_ALLOW_EXEC") {
+		t.Fatalf("stale KERN_ALLOW_EXEC must be stripped (exec is opt-in per host):\n%s", got)
+	}
+	if strings.Count(got, "[mcp_servers.kern]") != 1 {
+		t.Fatalf("kern MCP section duplicated:\n%s", got)
+	}
+	if !strings.Contains(got, "[mcp_servers.other]") {
+		t.Fatalf("unrelated server table must be preserved:\n%s", got)
 	}
 }
 

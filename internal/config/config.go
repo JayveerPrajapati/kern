@@ -450,6 +450,89 @@ func resolveMCPRoots(root string) (any, string) {
 	return v, s
 }
 
+// FileStrings returns the []string value of key from .kern/config.json only
+// (no env tier). ok=false when the file or key is absent or not a JSON array
+// of strings. It exists for security-sensitive call sites that honor operator
+// env only while still detecting (and warning about) project-file values —
+// see EnvConfinementRoots.
+func FileStrings(root, key string) ([]string, bool) {
+	e := load(root)
+	if e.vals == nil {
+		return nil, false
+	}
+	raw, ok := lookup(e.vals, key)
+	if !ok {
+		return nil, false
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	var out []string
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out, true
+}
+
+// EnvConfinementRoots returns the operator-controlled confinement roots: the
+// KERN_MCP_ROOTS / KERN_ROOTS environment variables (':'-or-','-separated,
+// the historical KERN_ROOTS format), plus mcp.roots from .kern/config.json
+// ONLY when the operator explicitly opted in with
+// KERN_MCP_ALLOW_CONFIG_ROOTS=1. A project-supplied mcp.roots without the
+// opt-in is ignored — it cannot widen (or replace) the server's confinement
+// jail (2026-10-26 black-box audit, F-CRIT: starting the server inside an
+// untrusted repo let its .kern/config.json name arbitrary roots, and
+// kern_apply then wrote into them). Ignored config roots are named in the
+// returned notice (non-empty only then), which callers surface to operators
+// in addition to the one-time stderr warning printed here.
+func EnvConfinementRoots() (roots []string, notice string) {
+	seen := map[string]bool{}
+	add := func(r string) {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			return
+		}
+		if !seen[r] {
+			seen[r] = true
+			roots = append(roots, r)
+		}
+	}
+	for _, env := range []string{"KERN_MCP_ROOTS", "KERN_ROOTS"} {
+		// Empty key: the file tier is skipped, so this reads the env only.
+		envRoots, _ := stringsResolved("", env, "", nil, splitColonOrComma)
+		for _, r := range envRoots {
+			add(r)
+		}
+	}
+	if cfg, ok := FileStrings("", "mcp.roots"); ok && len(cfg) > 0 {
+		if os.Getenv("KERN_MCP_ALLOW_CONFIG_ROOTS") == "1" {
+			for _, r := range cfg {
+				add(r)
+			}
+		} else {
+			notice = fmt.Sprintf("ignoring mcp.roots from .kern/config.json (%s): project-supplied config cannot widen server confinement — operator opt-in: KERN_MCP_ALLOW_CONFIG_ROOTS=1, or set KERN_MCP_ROOTS in the server environment", strings.Join(cfg, ", "))
+			warnIgnoredConfigRoots(cfg)
+		}
+	}
+	return roots, notice
+}
+
+// warnIgnoredConfigRootsOnce keeps the F-CRIT stderr warning to one line per
+// process: both the server roots scan and the gate construction call
+// EnvConfinementRoots.
+var warnIgnoredConfigRootsOnce sync.Once
+
+func warnIgnoredConfigRoots(cfg []string) {
+	warnIgnoredConfigRootsOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "kern: ignoring mcp.roots from .kern/config.json (%s): project-supplied config cannot widen server confinement; operator opt-in is KERN_MCP_ALLOW_CONFIG_ROOTS=1 or KERN_MCP_ROOTS in the server environment\n", strings.Join(cfg, ", "))
+	})
+}
+
 // Registry is every file-configurable key, in display order. It powers
 // `kern config`; the getters above are used directly by the migrated sites.
 var Registry = []Key{

@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 )
 
 func TestRecordDecisionAudit(t *testing.T) {
-	l := NewAuditLog()
+	l := govaudit.NewAuditLog()
 	RecordDecision(l, nil, "agent", "egress", "connect", PolicyDecision{Policy: "egress", Decision: "denied", Reason: "external target"}, domain.Risk{Level: domain.RiskLow, Blocked: true})
 	entries := l.All()
 	if len(entries) != 1 {
@@ -32,7 +33,7 @@ func TestRecordDecisionEvent(t *testing.T) {
 	got := make(chan eventbus.Event, 4)
 	bus.Subscribe("", func(ev eventbus.Event) { got <- ev })
 
-	l := NewAuditLog()
+	l := govaudit.NewAuditLog()
 	RecordDecision(l, bus, "agent", "egress", "connect", PolicyDecision{Policy: "egress", Decision: "allowed", Reason: "local target"}, domain.Risk{Level: domain.RiskLow})
 	select {
 	case ev := <-got:
@@ -55,7 +56,7 @@ func TestRecordDecisionEvent(t *testing.T) {
 }
 
 func TestRecordDecisionNilBus(t *testing.T) {
-	l := NewAuditLog()
+	l := govaudit.NewAuditLog()
 	RecordDecision(l, nil, "agent", "egress", "connect", PolicyDecision{Policy: "egress", Decision: "allowed", Reason: "local target"}, domain.Risk{Level: domain.RiskLow})
 	if got := len(l.All()); got != 1 {
 		t.Errorf("entry should still be recorded with a nil bus, Len = %d", got)

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 	"log"
 	"path/filepath"
@@ -16,14 +16,14 @@ import (
 
 // auditTransition writes a task-lifecycle entry into the unified audit chain.
 // A nil audit log (no wiring) is a no-op. Entry shape matches the
-// governance.AuditEntry API used by firewall writers; the transition is
+// govaudit.AuditEntry API used by firewall writers; the transition is
 // recorded as an allowed task-lifecycle event carrying task ID, from → to
 // state, agent and timestamp.
 func (s *TaskService) auditTransition(t *agent.Task, from, to domain.TaskState) {
 	if s.auditLog == nil {
 		return // back-compat: no audit log wired = no-op
 	}
-	entry := governance.AuditEntry{
+	entry := govaudit.AuditEntry{
 		AgentID:   s.agentID,
 		TaskID:    t.ID,
 		Action:    "task.transition",
@@ -46,7 +46,7 @@ func (s *TaskService) auditTransition(t *agent.Task, from, to domain.TaskState) 
 // AuditLog returns the shared tamper-evident audit log backing this service. It
 // makes Audit a first-class application service so interfaces read the same
 // authoritative governance trail the running firewall writes.
-func (s *TaskService) AuditLog() *governance.AuditLog {
+func (s *TaskService) AuditLog() *govaudit.AuditLog {
 	if fw := s.Firewall(); fw != nil {
 		return fw.AuditLog()
 	}
@@ -60,7 +60,7 @@ func (s *TaskService) AuditLog() *governance.AuditLog {
 // missing/corrupt are skipped rather than aborting the listing; order matches
 // the store's List order (legacy per-key files by key, then chain entries in
 // append order).
-func (s *TaskService) AuditEntries() ([]governance.AuditEntry, error) {
+func (s *TaskService) AuditEntries() ([]govaudit.AuditEntry, error) {
 	if s.platform == nil {
 		return nil, fmt.Errorf("task service: platform not configured")
 	}
@@ -70,9 +70,9 @@ func (s *TaskService) AuditEntries() ([]governance.AuditEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []governance.AuditEntry
+	var out []govaudit.AuditEntry
 	for _, e := range entries {
-		var entry governance.AuditEntry
+		var entry govaudit.AuditEntry
 		if err := storage.UnmarshalValue(e.Value, &entry); err != nil {
 			continue
 		}
@@ -84,12 +84,12 @@ func (s *TaskService) AuditEntries() ([]governance.AuditEntry, error) {
 // AuditEntriesForTask returns only the persisted audit entries whose TaskID
 // matches, preserving order. It mirrors the CLI's filterByTask so every
 // interface (CLI, MCP) filters through the service.
-func (s *TaskService) AuditEntriesForTask(taskID string) ([]governance.AuditEntry, error) {
+func (s *TaskService) AuditEntriesForTask(taskID string) ([]govaudit.AuditEntry, error) {
 	entries, err := s.AuditEntries()
 	if err != nil {
 		return nil, err
 	}
-	var out []governance.AuditEntry
+	var out []govaudit.AuditEntry
 	for _, e := range entries {
 		if e.TaskID == taskID {
 			out = append(out, e)

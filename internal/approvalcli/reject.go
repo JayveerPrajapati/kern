@@ -34,7 +34,7 @@ func runReject(rest []string) {
 
 	// Shared with runApprove: same store order (governance via the app layer,
 	// then blueprint), same decided-state guard (rc=3), same audit chaining.
-	a, mem := decideApproval(root, "reject", id, approver, false, f.reason)
+	a, mem := decideApproval(root, "reject", id, approver, false, f.reason, newApprovalSigner())
 	fmt.Printf("rejected: %s (by %s)\n", a.ID, approver)
 	if a.TaskID != "" {
 		fmt.Printf("  task: %s marked REJECTED\n", a.TaskID)

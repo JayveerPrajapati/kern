@@ -162,12 +162,58 @@ func SafeWriteSegment(seg, root string, extraRoots []string) bool {
 			if !ok || isWorkspaceRoot(res, root, extraRoots) {
 				return false
 			}
-			if name == "rm" && recursive && !strings.Contains(strings.TrimSuffix(p, "/"), "/") {
+			if name == "rm" && recursive && isTopLevelTarget(res, root, extraRoots) {
 				return false // recursive rm of a top-level path — GATE
 			}
 		}
 	}
 	return true
+}
+
+// TempOnlyDestructiveSegment reports whether every write target of a
+// destructive rm segment is temp-dir scratch space. It reuses the full write
+// analysis with an empty root, under which only explicit absolute temp paths
+// resolve: in-tree recursive deletes therefore gate while `rm -rf /tmp/x`
+// stays raw. Callers only pass destructive-class segments.
+func TempOnlyDestructiveSegment(seg string) bool {
+	return SafeWriteSegment(seg, "", nil)
+}
+
+// DestructiveAllowed reports whether cmd has no destructive-class operation,
+// or every destructive target is temp-dir scratch space. The path-aware write
+// arm calls it before allowing an in-tree write, so `rm -rf internal/x` gates
+// like `rm -rf .git` while scratch deletes stay frictionless. Deliberately
+// conservative for compound commands: a non-simple destructive line gates.
+func DestructiveAllowed(cmd string) bool {
+	cls, _ := execclassify.ClassifyDangerousCommand(cmd)
+	return cls != execclassify.DangerDestructive || TempOnlyDestructiveSegment(cmd)
+}
+
+// isTopLevelTarget reports whether an already-resolved path is a workspace
+// root itself or one of its DIRECT children. The check is on the resolved
+// path, not the spelling: `rm -rf internal`, `rm -rf ./internal`,
+// `rm -rf internal/` and `rm -rf <abs>/internal` all name the same top-level
+// directory and must all gate (the 2026-10-26 audit found the first gated
+// while the other spellings were allowed — a one-character bypass).
+func isTopLevelTarget(res, root string, extraRoots []string) bool {
+	roots := append([]string{root}, extraRoots...)
+	for _, r := range roots {
+		rc := filepath.Clean(r)
+		if rc == "" {
+			continue
+		}
+		if res == rc {
+			return true
+		}
+		rel, err := filepath.Rel(rc, res)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if rel != "." && !strings.Contains(rel, string(filepath.Separator)) {
+			return true // exactly one component below a workspace root
+		}
+	}
+	return false
 }
 
 // safeSedInPlaceSegment validates a `sed -i <script> <files>` argument

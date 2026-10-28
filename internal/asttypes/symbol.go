@@ -3,9 +3,10 @@ package asttypes
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"path"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Symbol is one top-level declaration.
@@ -57,15 +58,95 @@ func (s Symbol) FullName() string {
 // its file, language, kind, receiver, name, line and parameter list. It
 // survives symbol edits (renames, body changes) so cross-file binding facts
 // (compiler IDs, endpoint claims) stay attached to the same declaration.
+//
+// The digest input is byte-identical to the historical
+// json.Marshal([]any{...}) encoding this function used to build via
+// reflection — including HTML escaping (<, >, &), control-character escapes,
+// and the always-array params element (the old code appended onto a
+// non-nil empty slice, so a nil Params marshaled as [] too). The
+// append-based encoder exists because this runs per symbol AND per call
+// edge: buildCallerAdjacency and the export catalog call it tens of
+// thousands of times per index, and the reflection marshal dominated that
+// build in profiles. TestDeclarationIDMatchesJSONOracle pins the
+// equivalence, so the persisted identity can never drift.
 func (symbol Symbol) DeclarationID() string {
-	params := append([]string{}, symbol.Params...)
-	data, _ := json.Marshal([]any{
-		path.Clean(strings.ReplaceAll(symbol.File, "\\", "/")),
-		symbol.Lang, symbol.Kind, symbol.Outer, symbol.Receiver,
-		symbol.Name, symbol.Line, params,
-	})
-	digest := sha256.Sum256(data)
+	var b []byte
+	b = append(b, '[')
+	b = appendJSONString(b, path.Clean(strings.ReplaceAll(symbol.File, "\\", "/")))
+	b = append(b, ',')
+	b = appendJSONString(b, symbol.Lang)
+	b = append(b, ',')
+	b = appendJSONString(b, symbol.Kind)
+	b = append(b, ',')
+	b = appendJSONString(b, symbol.Outer)
+	b = append(b, ',')
+	b = appendJSONString(b, symbol.Receiver)
+	b = append(b, ',')
+	b = appendJSONString(b, symbol.Name)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, int64(symbol.Line), 10)
+	b = append(b, ',', '[')
+	for i, param := range symbol.Params {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = appendJSONString(b, param)
+	}
+	b = append(b, ']', ']')
+	digest := sha256.Sum256(b)
 	return "decl:" + hex.EncodeToString(digest[:])
+}
+
+// jsonHexDigits is the lowercase hex alphabet used by encoding/json's
+// \u00XX escapes.
+const jsonHexDigits = "0123456789abcdef"
+
+// appendJSONString appends s to dst as a JSON string literal, byte-identical
+// to what encoding/json (with its default HTML escaping) produces: printable
+// ASCII passes through except the four escaped runes (" \ < > &), \n \r \t
+// use two-char escapes, other control bytes become \u00XX, U+2028/U+2029 are
+// escaped, and invalid UTF-8 becomes \ufffd.
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			switch {
+			case b >= 0x20 && b != '"' && b != '&' && b != '<' && b != '>' && b != '\\':
+				dst = append(dst, b)
+			case b == '"' || b == '\\':
+				dst = append(dst, '\\', b)
+			case b == '\n':
+				dst = append(dst, '\\', 'n')
+			case b == '\r':
+				dst = append(dst, '\\', 'r')
+			case b == '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', jsonHexDigits[b>>4], jsonHexDigits[b&0xF])
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			// encoding/json replaces each invalid byte with the UTF-8
+			// encoding of U+FFFD (not the \ufffd escape) — match it.
+			dst = append(dst, '\xef', '\xbf', '\xbd')
+			i++
+		case r == '\u2028':
+			dst = append(dst, '\\', 'u', '2', '0', '2', '8')
+			i += size
+		case r == '\u2029':
+			dst = append(dst, '\\', 'u', '2', '0', '2', '9')
+			i += size
+		default:
+			dst = append(dst, s[i:i+size]...)
+			i += size
+		}
+	}
+	return append(dst, '"')
 }
 
 // Pkg is one package/module discovered in the project.

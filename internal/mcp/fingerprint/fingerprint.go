@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 )
@@ -30,8 +31,8 @@ type AgentFingerprintReport struct {
 
 // Hooks provides audit access from the owning MCP server.
 type Hooks struct {
-	AuditFilter func(agentID string) []governance.AuditEntry
-	AuditAll    func() []governance.AuditEntry
+	AuditFilter func(agentID string) []govaudit.AuditEntry
+	AuditAll    func() []govaudit.AuditEntry
 }
 
 // Analyze analyzes an agent's tool-call sequence from the audit log to detect loops or drift.
@@ -41,7 +42,7 @@ func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 		agentID = governance.DefaultAgentID
 	}
 
-	var entries []governance.AuditEntry
+	var entries []govaudit.AuditEntry
 	if h.AuditFilter != nil {
 		entries = h.AuditFilter(agentID)
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestBareNameMatchesAnyDepth(t *testing.T) {
@@ -222,4 +223,116 @@ func mustRules(t *testing.T, lines ...string) []scopedRule {
 		out = append(out, scopedRule{rule: r})
 	}
 	return out
+}
+
+// treeFiles writes name→content under dir, creating parent directories.
+func treeFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// bumpMtime forces a distinct fingerprint even on coarse-mtime filesystems.
+func bumpMtime(t *testing.T, path string) {
+	t.Helper()
+	when := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadCachedMatchesLoad(t *testing.T) {
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{
+		".gitignore":     "*.log\nbuild/\n",
+		".kernignore":    "!keep.log\n",
+		"sub/.gitignore": "!inner.log\n",
+	})
+	m := LoadCached(dir)
+	for _, rel := range []string{"a.log", "keep.log", "build/x.go", "sub/inner.log", "src/main.go"} {
+		if got, want := m.Ignored(rel), Load(dir).Ignored(rel); got != want {
+			t.Errorf("Ignored(%q) = %v, want %v (Load cached vs live)", rel, got, want)
+		}
+	}
+}
+
+func TestLoadCachedInvalidatesOnRootIgnoreEdit(t *testing.T) {
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{".gitignore": "*.log\n"})
+	if !LoadCached(dir).Ignored("a.log") {
+		t.Fatal("first load should ignore a.log")
+	}
+	treeFiles(t, dir, map[string]string{".gitignore": "*.txt\n"})
+	bumpMtime(t, filepath.Join(dir, ".gitignore"))
+	m := LoadCached(dir)
+	if m.Ignored("a.log") {
+		t.Error("edited .gitignore must be re-read: *.log no longer ignored")
+	}
+	if !m.Ignored("a.txt") {
+		t.Error("edited .gitignore must be re-read: *.txt newly ignored")
+	}
+}
+
+func TestLoadCachedSeesNewRootKernignore(t *testing.T) {
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{".gitignore": "*.log\n"})
+	if !LoadCached(dir).Ignored("keep.log") {
+		t.Fatal("keep.log should be ignored before .kernignore exists")
+	}
+	treeFiles(t, dir, map[string]string{".kernignore": "!keep.log\n"})
+	if LoadCached(dir).Ignored("keep.log") {
+		t.Error("new root .kernignore must invalidate the cached load immediately")
+	}
+}
+
+func TestLoadCachedInvalidatesOnNestedIgnoreEdit(t *testing.T) {
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{
+		".gitignore":     "*.log\n",
+		"sub/.gitignore": "!keep.log\n",
+	})
+	if LoadCached(dir).Ignored("sub/keep.log") {
+		t.Fatal("nested !keep.log should re-include sub/keep.log on first load")
+	}
+	treeFiles(t, dir, map[string]string{"sub/.gitignore": "*.tmp\n"})
+	bumpMtime(t, filepath.Join(dir, "sub/.gitignore"))
+	if !LoadCached(dir).Ignored("sub/keep.log") {
+		t.Error("edited nested .gitignore must invalidate: negation is gone, root *.log applies")
+	}
+}
+
+func TestLoadCachedTTLDiscoversNewNestedIgnore(t *testing.T) {
+	t.Setenv("KERN_IGNORE_CACHE_MS", "5")
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{".gitignore": "*.log\n"})
+	if !LoadCached(dir).Ignored("sub/keep.log") {
+		t.Fatal("sub/keep.log should be ignored before sub/.gitignore exists")
+	}
+	treeFiles(t, dir, map[string]string{"sub/.gitignore": "!keep.log\n"})
+	// Within the window a newly created nested file may still be unseen; after
+	// the TTL the walk must discover it.
+	time.Sleep(15 * time.Millisecond)
+	if LoadCached(dir).Ignored("sub/keep.log") {
+		t.Error("TTL expiry must re-walk and pick up a new nested .gitignore")
+	}
+}
+
+func TestLoadCachedDisabled(t *testing.T) {
+	t.Setenv("KERN_IGNORE_CACHE_MS", "0")
+	dir := t.TempDir()
+	treeFiles(t, dir, map[string]string{".gitignore": "*.log\n"})
+	if !LoadCached(dir).Ignored("a.log") {
+		t.Fatal("first load should ignore a.log")
+	}
+	treeFiles(t, dir, map[string]string{".gitignore": ""})
+	if LoadCached(dir).Ignored("a.log") {
+		t.Error("with the cache disabled every call must read the live tree")
+	}
 }

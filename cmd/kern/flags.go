@@ -91,7 +91,10 @@ type flags struct {
 	sarif                bool
 	threshold            int
 	severity             string
-	engine               string // --engine (sec: internal|gosec|all|none; default all = internal + gosec when available)
+	engine               string
+	namespace            string
+	textA                string
+	textB                string // --engine (sec: internal|gosec|all|none; default all = internal + gosec when available)
 	semantic             bool
 	lang                 string
 	stdin                string

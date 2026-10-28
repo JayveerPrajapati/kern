@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 )
 
 // maxJSONFieldLen bounds any single string field emitted by Print. It is
@@ -38,6 +39,31 @@ const jsonTruncMarker = "\n… [kern: field truncated at 512 KiB safety cap — 
 // oversized string fields clipped by ClipStrings before marshaling. An
 // error is returned for a marshal failure; callers route it through their
 // family's fatal sentinel with the historical "printJSON: %v" phrasing.
+// DisplayPath renders a filesystem path for line-structured CLI output:
+// control characters (a newline or carriage return in a filename — indexed
+// exactly as stored, 2026-10-28 campaign) are escaped so one hostile
+// filename cannot forge extra output lines and confuse line-based
+// consumers. Paths used for file ACCESS keep their raw form; this is a
+// display-only transform.
+func DisplayPath(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func Print(w io.Writer, v any) error {
 	b, err := json.MarshalIndent(ClipStrings(v), "", "  ")
 	if err != nil {

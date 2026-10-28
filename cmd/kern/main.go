@@ -54,7 +54,8 @@ Core Workflows (The 5 Essential Verbs):
   kern explore <symbol|file> [--arch] [--json]    Deep symbol/file exploration (source, call flow, blast radius)
   kern search <query> [--repos] [--semantic]      AST symbol & full-text search across codebase
   kern plan <symbol|task> [--json]                Blast-radius impact & surgical refactor planning
-  kern verify [types] [--types build,test,sec]    Unified build/test/firewall gate validation (G0-G39; G10 retired)
+  kern verify build,test [--types ...]            Unified build/test/firewall gate validation (G0-G39; G10 retired)
+                                                  (bare 'kern verify' is a usage error: checks must be named)
 
 Context & Token Optimization:
   kern optimize <prompt> [--fewshot] [--mask]     Compress & fine-tune prompts with project memory
@@ -209,6 +210,17 @@ func usageAll(flat bool) {
 
 func main() {
 	cmd, rest := resolveCommandAndFlags()
+	// Warm-daemon fast path: read-only index commands are answered by the
+	// per-project daemon when one can serve this build (daemon_proxy.go).
+	// Every failure path falls through to the in-process run below, so this
+	// is purely an optimization — never a new failure mode.
+	if resp, ok := daemonDispatch(cmd, rest); ok {
+		_, _ = os.Stdout.WriteString(resp.Stdout)
+		_, _ = os.Stderr.WriteString(resp.Stderr)
+		os.Exit(resp.Exit)
+	}
+	// Wire the daemon child's dispatcher (see daemonExec in cmd_daemon.go).
+	daemonExec = dispatchCommand
 	// Inject the live tool catalog into the diff-gate drift checks at startup — explicitly, never via init().
 	// This covers pure CLI paths (`kern diff-gate`, `kern gen-catalog`) that
 	// never construct an MCP server; server binaries are also wired inside

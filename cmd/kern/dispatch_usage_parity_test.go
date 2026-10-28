@@ -84,7 +84,7 @@ var goldenUsageFlags = map[string][]string{
 
 	"ast": {"--all", "--root"},
 
-	"audit": {"--file", "--json", "--limit", "--tail", "--root"},
+	"audit": {"--file", "--json", "--keep", "--limit", "--tail", "--root"},
 
 	"authorize-context": {"--agent", "--task", "--deny-path", "--symbol", "--root", "--json"},
 
@@ -132,6 +132,8 @@ var goldenUsageFlags = map[string][]string{
 
 	"gen-docs": {"--doc", "--root", "--check"},
 
+	"fts": {"--json", "--limit", "--root"},
+
 	"graph": {"--cypher", "--entities", "--graphml", "--html", "--json", "--limit", "--max-tokens", "--mermaid", "--min-confidence", "--one-line", "--out", "--root", "--etag"},
 
 	"guard": {"--task", "--check", "--reason", "--agent-id", "--duration", "--file", "--force", "--json", "--precision", "--range", "--require-boundaries", "--root", "--sarif", "--scope", "--threshold"},
@@ -171,15 +173,17 @@ var goldenUsageFlags = map[string][]string{
 
 	"reject": {"--approver", "--reason", "--root"},
 
+	"refs": {"--json", "--root"},
+
 	"review": {"--file", "--json", "--lens", "--max", "--profile", "--range", "--root", "--runtime"},
 
 	"run": {"--root"},
 
-	"search": {"--json", "--limit", "--repos", "--root", "--semantic", "--etag"},
+	"search": {"--json", "--limit", "--path", "--repos", "--root", "--semantic", "--etag"},
 
 	"sec": {"--engine", "--json", "--max", "--root", "--severity"},
 
-	"semcache": {"--json"},
+	"semcache": {"--a", "--b", "--json", "--namespace"},
 
 	"setup": {"--agents", "--agents-md", "--all-agents", "--check", "--detect", "--dry-run", "--global", "--global-only", "--global-rules", "--json", "--plain", "--remove", "--root", "--verify", "--yes"},
 
@@ -239,11 +243,13 @@ var handlerReadUsageFlags = map[string]string{
 	"--command":            "verify: runVerifyCommand → internal/verifycmd command mode (governed allowlist)",
 	"--doc":                "gen-docs: runGenDocsImpl own switch (catalog|contracts|schemas|site|selection)",
 	"--list":               "exec: runExec strips --list before parseFlags (kern exec --list lists runtimes; accepted in any position)",
+	"--keep":               "audit: internal/approvalcli runAuditRotate own switch (rotate --keep N keeps the newest N archives)",
 	"--readonly":           "exec: internal/execution parseExecFlags (read-only bash fallbacks; skip the KERN_TOOLS/KERN_ALLOW_EXEC gate, keep the firewall)",
 	"--require-boundaries": "guard: internal/contextcli RunGuard own switch (strict mode: fail when .kern/boundaries.json is missing)",
 	"--map":                "brief/buddy: runBrief strips --map in its own switch before calling brief.BuildWithOptions",
 	"--obsidian":           "wiki: runWiki strips before parseFlags",
 	"--output":             "verify: runVerifyCommand → internal/verifycmd command-mode output slice (summary|failures|tail:N|lines:A-B|full)",
+	"--path":               "search: internal/graphcli parseFlags (scope ranked symbols to a repo-relative file/dir; the served scoped-grep path)",
 	"--probe":              "agents: runAgents strips before parseFlags",
 	"--staged":             "verify: internal/verifycmd parseVerifyFlags (staged-package scope, the pre-commit hook tier)",
 	"--tail":               "audit: internal/approvalcli parseFlags (alias for --limit; the N most recent audit entries)",

@@ -370,6 +370,7 @@ func TestUpdateFiltersNoiseCalleesCopiedFromPrev(t *testing.T) {
 	// Simulate a pre-filter index: inject a builtin edge and a deep
 	// chain-shaped edge (which must SURVIVE — merge-time filtering is
 	// conservative without the AST).
+	loaded.Adjacency = nil // in-place edge mutation invalidates the cache
 	loaded.Calls[owner] = append(loaded.Calls[owner],
 		CallEdge{Target: "append"}, CallEdge{Target: "a.b.c"})
 	updated, err := Update(root, loaded)

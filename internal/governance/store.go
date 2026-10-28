@@ -16,6 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -39,6 +40,9 @@ const maxResolvedApprovals = 100
 type FileStore struct {
 	mu   sync.RWMutex // serializes save/load against concurrent in-process writers
 	path string
+	// rootID: canonical root identity (execRootIdentity) that records are
+	// MAC-verified and re-stamped against — v4 stamps are root-bound.
+	rootID string
 	// loadErr records a failure of the construction-time prime load (a missing
 	// file is not an error). It is advisory: every operation re-reads the file
 	// and fails closed on its own while it is unreadable, and recovers
@@ -57,7 +61,7 @@ func NewFileStore(root string) *FileStore {
 	// it owner-only (0o700) so other local users cannot read who approved
 	// what or the gated task keys (audit A2: approvals are sensitive).
 	_ = os.MkdirAll(dir, 0o700)
-	s := &FileStore{path: filepath.Join(dir, "approvals.json")}
+	s := &FileStore{path: filepath.Join(dir, "approvals.json"), rootID: execRootIdentity(root)}
 	// Prime the store on construction. Every read/write re-loads the file (so
 	// the store observes cross-process writes), but loading here surfaces a
 	// corrupt file early and satisfies restore-on-startup for read-only
@@ -80,6 +84,12 @@ func (s *FileStore) LoadError() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.loadErr
+}
+
+// RootID returns the canonical root identity the store's records are
+// MAC-verified and re-stamped against (v4 root-bound stamps).
+func (s *FileStore) RootID() string {
+	return s.rootID
 }
 
 // loadLocked is the lock-free read core. Caller must hold s.mu (read or write).
@@ -268,7 +278,7 @@ func (s *FileStore) Clear(approvalID, actor, reason string) (domain.Approval, er
 	if reason == "" {
 		reason = fmt.Sprintf("cleared by %s (was %s)", actor, removed.Status)
 	}
-	entry := AuditEntry{
+	entry := govaudit.AuditEntry{
 		AgentID:   actor,
 		TaskID:    removed.TaskID,
 		Action:    "clear",
@@ -288,46 +298,74 @@ func (s *FileStore) Clear(approvalID, actor, reason string) (domain.Approval, er
 // Decide marks an approval as approved or rejected, sets the DecidedAt timestamp,
 // and saves. Returns the updated approval and an error if not found.
 func (s *FileStore) Decide(approvalID, approver string, approved bool, reason string) (domain.Approval, error) {
+	return s.DecideWithSigner(approvalID, approver, approved, reason, nil)
+}
+
+// DecideWithSigner is Decide plus the interactive operator signature for exec
+// approvals. Non-exec approvals are unaffected by a nil signer; an approved
+// exec record fails closed without one (the HMAC is not a grant authority —
+// P0-3, 2026-10-28 adversarial audit).
+func (s *FileStore) DecideWithSigner(approvalID, approver string, approved bool, reason string, sign ExecSigner) (domain.Approval, error) {
 	var decided domain.Approval
-	// R1: a decision that changes an exec-stamped record's Status invalidates
-	// its HMAC (the MAC covers Status), so the record must be re-stamped. If
-	// the secret is unavailable the decision fails closed — an unverifiable
-	// record can never grant execution.
+	// A decision changes Status and (for exec records) the HMAC-covered
+	// fields, so the record is re-stamped. If the secret/signature is
+	// unavailable the decision fails closed and the record stays pending.
 	var stampErr error
 	var integrityErr error
 	err := s.mutate(func(approvals []domain.Approval) []domain.Approval {
 		for i := range approvals {
 			if approvals[i].ID == approvalID {
 				// Gate-1 attempt-2: refuse to decide an exec-stamped record
-				// whose integrity does not verify. Deciding would re-stamp
-				// and launder the tamper into a fully-valid grant, so a
-				// tampered pending record must never be decidable.
-				if mac := execApprovalStampFrom(approvals[i]); mac != "" && !execApprovalMACValid(approvals[i]) {
+				// whose HMAC does not verify. Deciding would re-stamp and
+				// launder the tamper into a fully-valid grant, so a tampered
+				// pending record must never be decidable.
+				rec := approvals[i]
+				if mac := execApprovalStampFrom(rec); mac != "" && !execApprovalMACValid(rec, s.rootID) {
 					integrityErr = fmt.Errorf("approval %s: integrity check failed (record was modified outside the approval workflow); refusing to decide", approvalID)
 					return approvals
 				}
+				isExec := execApprovalStampFrom(rec) != "" || rec.Signature != ""
+				candidate := rec
 				now := time.Now()
-				approvals[i].Approver = approver
-				approvals[i].DecidedAt = &now
+				candidate.Approver = approver
+				candidate.DecidedAt = &now
 				if reason != "" {
-					approvals[i].Reason = reason
+					candidate.Reason = reason
 				}
 				if approved {
-					approvals[i].Status = "approved"
+					candidate.Status = "approved"
 				} else {
-					approvals[i].Status = "rejected"
+					candidate.Status = "rejected"
 				}
-				// Exec-path integrity only: records carrying the exec HMAC
-				// marker are re-stamped over their new status; records from
-				// other features sharing this store are untouched.
-				if mac := execApprovalStampFrom(approvals[i]); mac != "" {
-					if re, rerr := execApprovalStamp(approvals[i]); rerr != nil {
-						stampErr = rerr
-					} else {
-						approvals[i].ArtifactID = re
+				if isExec {
+					// Both polarities are operator-signed: an unsigned
+					// rejection is as forgeable as an unsigned approval (a
+					// same-user process could mint a fake rejection and deny
+					// the command for the rejection TTL).
+					if sign == nil {
+						integrityErr = fmt.Errorf("approval %s: deciding a governed command requires the interactive operator signature — run kern approve from a terminal", approvalID)
+						return approvals
 					}
+					sig, serr := sign(candidate, s.rootID)
+					if serr != nil {
+						// The record stays pending: an unsigned decision is
+						// not authoritative, but leaving it pending is clearer
+						// for the operator (retry after fixing the passphrase).
+						integrityErr = fmt.Errorf("approval %s: operator signature failed — record left pending: %w", approvalID, serr)
+						return approvals
+					}
+					candidate.Signature = sig
+					// The HMAC still covers the mutable prefix-use counter;
+					// the Ed25519 signature covers the authorization.
+					re, rerr := execApprovalStamp(candidate, s.rootID)
+					if rerr != nil {
+						stampErr = rerr
+						return approvals
+					}
+					candidate.ArtifactID = re
 				}
-				decided = approvals[i]
+				approvals[i] = candidate
+				decided = candidate
 				break
 			}
 		}
@@ -371,7 +409,7 @@ func (s *FileStore) recordAudit(a domain.Approval, approver string, approved boo
 	if reason == "" {
 		reason = fmt.Sprintf("%s by %s", result, approver)
 	}
-	entry := AuditEntry{
+	entry := govaudit.AuditEntry{
 		AgentID:   approver,
 		TaskID:    a.TaskID,
 		Action:    action,
@@ -393,9 +431,9 @@ func (s *FileStore) recordAudit(a domain.Approval, approver string, approved boo
 
 // auditLog returns the project's shared tamper-evident audit log, rebuilt per
 // call so every store instance observes the true persisted chain head.
-func (s *FileStore) auditLog() *AuditLog {
+func (s *FileStore) auditLog() *govaudit.AuditLog {
 	auditDir := filepath.Join(filepath.Dir(filepath.Dir(s.path)), ".kern", "audit")
-	return NewAuditLog().
+	return govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock"))
 }
@@ -476,13 +514,13 @@ func (s *FileStore) mutate(fn func([]domain.Approval) []domain.Approval) error {
 	if err != nil {
 		return err
 	}
-	return s.saveLocked(pruneApprovals(fn(approvals)))
+	return s.saveLocked(pruneApprovals(fn(approvals), s.rootID))
 }
 
 // pruneApprovals keeps every pending approval and the newest
 // maxResolvedApprovals resolved (approved/rejected) approvals, so the file
 // stays bounded while recent decisions remain queryable.
-func pruneApprovals(approvals []domain.Approval) []domain.Approval {
+func pruneApprovals(approvals []domain.Approval, rootID string) []domain.Approval {
 	var pending []domain.Approval
 	var resolved []domain.Approval
 	for _, a := range approvals {
@@ -495,7 +533,7 @@ func pruneApprovals(approvals []domain.Approval) []domain.Approval {
 		// explicitly gave (and whose expiry/uses they can see in
 		// `kern approval list`). Keep them alongside pending records; dead
 		// grants (expired/capped/tampered) fall through to resolved history.
-		if livePrefixGrant(a) {
+		if livePrefixGrant(a, rootID) {
 			pending = append(pending, a)
 			continue
 		}

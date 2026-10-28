@@ -3,6 +3,7 @@ package index
 import (
 	"fmt"
 	"log"
+	"sort"
 	"time"
 )
 
@@ -133,14 +134,30 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 		TreeSitterEnabled: TreesitterEnabled(),
 		SQLite:            SQLiteEnabled(),
 	}
-	ix, err := Load(root)
-	if err != nil || ix == nil {
-		return status, nil // not built yet — not an error, just a fact
+	// Metadata-only first (audit P2-1): counts, identity and file hashes are
+	// enough for a status report. Full materialization of 17k symbols / 50k
+	// edges is only the fallback for legacy/nosqlite stores.
+	var ix *Index
+	if SQLiteEnabled() {
+		if m, merr := LoadMetadata(root); merr == nil && m != nil && m.Index.Version > 0 {
+			ix = m.Index
+			status.Built = true
+			status.Symbols = m.Symbols
+			status.Files = m.Files
+			status.Packages = m.Packages
+		}
 	}
-	status.Built = true
-	status.Symbols = len(ix.Symbols)
-	status.Files = len(ix.FileHashes)
-	status.Packages = len(ix.Pkgs)
+	if ix == nil {
+		loaded, err := Load(root)
+		if err != nil || loaded == nil {
+			return status, nil // not built yet — not an error, just a fact
+		}
+		ix = loaded
+		status.Built = true
+		status.Symbols = len(ix.Symbols)
+		status.Files = len(ix.FileHashes)
+		status.Packages = len(ix.Pkgs)
+	}
 	status.Version = ix.Version
 	status.CallResolution = ix.CallResolution
 	if ix.BuildStats.Kind != "" {
@@ -181,6 +198,16 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 	status.FreshnessProof = proof
 	status.Stale = len(ix.FileHashes) == 0 || proof.Stale()
 	status.Languages = ix.Languages()
+	if len(status.Languages) == 0 && len(ix.PrecisionByLang) > 0 {
+		// Metadata-only load carries no symbols; the precision map keys are
+		// exactly the languages the build recorded.
+		langs := make([]string, 0, len(ix.PrecisionByLang))
+		for lang := range ix.PrecisionByLang {
+			langs = append(langs, lang)
+		}
+		sort.Strings(langs)
+		status.Languages = langs
+	}
 	status.PrecisionByLang = ix.PrecisionByLang
 	if status.SQLite {
 		status.Store = SQLitePath(root)

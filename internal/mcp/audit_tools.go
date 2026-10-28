@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/storage"
@@ -25,7 +26,7 @@ import (
 // there. When the cwd is not a project, the log stays in-memory (entries are
 // still recorded for the process lifetime, just not persisted); an operator
 // who wants persistence from a non-project cwd sets KERN_MCP_AUDIT_DIR.
-func (s *Server) toolAudit() *governance.AuditLog {
+func (s *Server) toolAudit() *govaudit.AuditLog {
 	s.auditMu.Lock()
 	defer s.auditMu.Unlock()
 	if s.audit == nil {
@@ -33,17 +34,17 @@ func (s *Server) toolAudit() *governance.AuditLog {
 		if dir == "" {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return governance.NewAuditLog() // in-memory fallback
+				return govaudit.NewAuditLog() // in-memory fallback
 			}
 			if !root.PlausibleProject(cwd) {
-				return governance.NewAuditLog() // in-memory only — no scratch-cwd bootstrap
+				return govaudit.NewAuditLog() // in-memory only — no scratch-cwd bootstrap
 			}
 			dir = filepath.Join(cwd, ".kern", "audit")
 		}
-		s.audit = governance.NewAuditLog().
+		s.audit = govaudit.NewAuditLog().
 			WithStore(storage.NewLog(dir)).
 			WithLockPath(filepath.Join(dir, ".lock")).
-			WithMirror(governance.MirrorFor(dir))
+			WithMirror(govaudit.MirrorFor(dir))
 	}
 	return s.audit
 }
@@ -70,7 +71,7 @@ func (s *Server) auditToolCall(name string, args map[string]any, runErr error, e
 			// The audit trail must never take a tool call down — but the
 			// loss must not be silent either: mark the global sidecar so
 			// `kern doctor` surfaces the dropped entry.
-			governance.AppendDroppedAuditMarker("", "tool_call", name, fmt.Sprintf("panic: %v", r))
+			govaudit.AppendDroppedAuditMarker("", "tool_call", name, fmt.Sprintf("panic: %v", r))
 			log.Printf("kern mcp: auditToolCall panic for tool %q recovered (drop marked): %v", name, r)
 		}
 	}()
@@ -85,7 +86,7 @@ func (s *Server) auditToolCall(name string, args map[string]any, runErr error, e
 	case runErr != nil:
 		result = "error"
 	}
-	entry := governance.AuditEntry{
+	entry := govaudit.AuditEntry{
 		AgentID:  agent,
 		Action:   "tool_call",
 		Resource: name,

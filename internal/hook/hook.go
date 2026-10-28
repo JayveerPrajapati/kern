@@ -25,6 +25,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/setup"
 )
 
 // Threshold is the minimum output size (in characters) that triggers
@@ -191,6 +192,20 @@ func ClaudePrompt(root string, in []byte) error {
 	}
 	rememberPrompt(root, p.Prompt)
 	return nil
+}
+
+// ClaudeSessionStart handles a Claude Code SessionStart hook. Its stdout is
+// injected into the session context, so it is the one place kern can steer
+// BEFORE the model chooses its first tool — the missing piece that let agents
+// fall back to built-in read/grep/glob on hosts whose only kern surface was an
+// advisory rules file. Keep it short: every line costs context on every
+// session, and the tool descriptions carry the detail.
+func ClaudeSessionStart(in []byte) string {
+	var p struct {
+		Cwd string `json:"cwd"`
+	}
+	_ = json.Unmarshal(in, &p)
+	return setup.SteeringBrief(p.Cwd)
 }
 
 // --- Gemini CLI ------------------------------------------------------------

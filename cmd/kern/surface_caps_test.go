@@ -18,7 +18,13 @@ func TestCommandCountCap(t *testing.T) {
 	t.Parallel()
 	const (
 		capFloor = 40 // guards accidental truncation of the command table (pivot cut 2026-10-18 P5b: 194→48 core commands; floor follows each deliberate cut)
-		capCeil  = 72 // deliberate growth budget (2026-10-21 +10: restored `log`/`terse` thin wrappers and re-wired the 5 live plugin-invoked commands — remember, orchestrate, memory-ranked, evidence-anchor, health — that the pivot CLI slim dropped while the opencode plugin kept calling them)
+		// 2026-10-27 +1 (72→73): `daemon` (serve|status|stop) — the operator
+		// surface for the warm per-project index daemon. It cannot be folded
+		// into an existing command (it owns a process lifecycle the CLI has no
+		// other home for) and it is what makes the read-only commands fast
+		// (search 0.75s→0.05s, graph 1.05s→0.13s measured on this repo). The
+		// per-command flags stay minimal (--root).
+		capCeil = 73 // deliberate growth budget (2026-10-21 +10: restored `log`/`terse` thin wrappers and re-wired the 5 live plugin-invoked commands — remember, orchestrate, memory-ranked, evidence-anchor, health — that the pivot CLI slim dropped while the opencode plugin kept calling them)
 	)
 	n := commandCount()
 	if n < capFloor {

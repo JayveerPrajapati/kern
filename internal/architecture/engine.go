@@ -200,13 +200,44 @@ func collectEdges(ix *index.Index, files []string) []edge {
 		return edges
 	}
 	meta := map[string]index.Symbol{}
-	dirs := map[string]string{}
 	for _, s := range ix.Symbols {
 		if _, ok := meta[s.FullName()]; !ok {
 			meta[s.FullName()] = s
 		}
-		if _, ok := dirs[s.FullName()]; !ok {
-			dirs[s.FullName()] = filepath.ToSlash(filepath.Dir(s.File))
+	}
+	// Precompute both lookups once: resolveCallee used to scan all 17k
+	// symbols for every qualified callee that missed the exact fast path, and
+	// the import loop rebuilt the directory map per import (the pre-commit regression).
+	bySimple := map[string][]index.Symbol{}
+	for _, s := range ix.Symbols {
+		bySimple[s.Name] = append(bySimple[s.Name], s)
+	}
+	dirSet := indexDirs(ix)
+	// Per-file import qualifier -> package directory. This is the
+	// disambiguator the old resolver lacked: it picked the lexicographically
+	// smallest same-named symbol and ignored the qualifier entirely, so two
+	// packages sharing a basename could misattribute calls (the same-basename misattribution).
+	qualDirs := map[string]map[string]string{}
+	for file, imps := range ix.ImportsByFile {
+		m := map[string]string{}
+		for _, imp := range imps {
+			dir := importDir(imp.Path, dirSet)
+			if dir == "" {
+				continue
+			}
+			qual := imp.Alias
+			if qual == "" {
+				if p := ix.Pkgs[dir]; p != nil {
+					qual = p.Name
+				}
+			}
+			if qual == "" {
+				qual = filepath.Base(dir)
+			}
+			m[qual] = dir
+		}
+		if len(m) > 0 {
+			qualDirs[file] = m
 		}
 	}
 	seen := map[string]bool{}
@@ -232,26 +263,23 @@ func collectEdges(ix *index.Index, files []string) []edge {
 		for _, s := range ix.SymbolsByFile[f] {
 			full := s.FullName()
 			for _, ce := range ix.Calls[full] {
-				resolved := resolveCallee(meta, ce.Target)
-				if resolved == "" || resolved == full {
+				rs, ok := resolveCallee(meta, bySimple, qualDirs[f], ce.Target)
+				if !ok {
 					continue
 				}
-				if toDir := dirs[resolved]; toDir != "" {
-					cf := ""
-					if sf, ok := meta[resolved]; ok {
-						cf = sf.File
-					}
-					ln := 0
-					if sf, ok := meta[resolved]; ok {
-						ln = sf.Line
-					}
-					add(fromDir, toDir, f, cf, resolved, ln)
+				resolved := rs.FullName()
+				if resolved == full {
+					continue
+				}
+				toDir := filepath.ToSlash(filepath.Dir(rs.File))
+				if toDir != "" {
+					add(fromDir, toDir, f, rs.File, resolved, rs.Line)
 				}
 			}
 		}
 		if pkg := ix.Pkgs[fromDir]; pkg != nil {
 			for _, imp := range pkg.Imports {
-				for toDir := range indexDirs(ix) {
+				for toDir := range dirSet {
 					if toDir == "" || toDir == fromDir {
 						continue
 					}
@@ -370,15 +398,73 @@ func isTestFile(f string) bool {
 	return strings.HasSuffix(f, "_test.go")
 }
 
-func resolveCallee(meta map[string]index.Symbol, name string) string {
-	if _, ok := meta[name]; ok {
-		return name
+func resolveCallee(meta map[string]index.Symbol, bySimple map[string][]index.Symbol, qualDirs map[string]string, name string) (index.Symbol, bool) {
+	if s, ok := meta[name]; ok {
+		return s, true
 	}
-	simple := simpleName(name)
-	var best string
-	for full, s := range meta {
-		if s.Name == simple && (best == "" || full < best) {
-			best = full
+	i := strings.LastIndexByte(name, '.')
+	if i <= 0 {
+		return index.Symbol{}, false
+	}
+	qual, simple := name[:i], name[i+1:]
+	if qual == "" || simple == "" {
+		return index.Symbol{}, false
+	}
+	cands := bySimple[simple]
+	// Receiver-qualified method call (Type.method) wins over a package
+	// qualifier.
+	if s, ok := smallestNamed(cands, func(s index.Symbol) bool { return s.Receiver == qual }); ok {
+		return s, true
+	}
+	// Package-qualified call: when the caller imports a package under this
+	// qualifier, the callee must live in that package's directory. This is
+	// the only disambiguator that survives two packages sharing a basename.
+	if dir, ok := qualDirs[qual]; ok && dir != "" {
+		return smallestNamed(cands, func(s index.Symbol) bool {
+			return filepath.ToSlash(filepath.Dir(s.File)) == dir
+		})
+	}
+	// No import information (older index, non-Go language): keep the
+	// deterministic lexical fallback rather than fabricating a new one.
+	return smallestNamed(cands, func(index.Symbol) bool { return true })
+}
+
+// smallestNamed returns the lexicographically smallest FullName among the
+// candidates that satisfy want, matching the historical deterministic pick.
+func smallestNamed(cands []index.Symbol, want func(index.Symbol) bool) (index.Symbol, bool) {
+	var best index.Symbol
+	found := false
+	for _, s := range cands {
+		if !want(s) {
+			continue
+		}
+		if !found || s.FullName() < best.FullName() {
+			best = s
+			found = true
+		}
+	}
+	return best, found
+}
+
+// importDir maps an import path onto the most specific package directory in
+// dirSet. Exact/whole-suffix matches (score 2) beat the lenient basename
+// fallback (score 1) — without that rank, two packages named "util" both
+// "match" and the pick is arbitrary. Longest dir, then lexicographic, keeps
+// the result deterministic.
+func importDir(importPath string, dirSet map[string]bool) string {
+	best, bestScore := "", 0
+	for d := range dirSet {
+		score := 0
+		if importPath == d || strings.HasSuffix(importPath, "/"+d) {
+			score = 2
+		} else if importMatches(importPath, d) {
+			score = 1
+		}
+		if score == 0 {
+			continue
+		}
+		if score > bestScore || (score == bestScore && (len(d) > len(best) || (len(d) == len(best) && d < best))) {
+			best, bestScore = d, score
 		}
 	}
 	return best

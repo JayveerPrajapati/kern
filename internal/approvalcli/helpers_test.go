@@ -13,6 +13,7 @@ import (
 
 	kctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
@@ -180,10 +181,10 @@ func withNoTerminal(t *testing.T) {
 }
 
 // auditEntryFor returns the governance-chain entry for resource, or nil.
-func auditEntryFor(t *testing.T, root, resource string) *governance.AuditEntry {
+func auditEntryFor(t *testing.T, root, resource string) *govaudit.AuditEntry {
 	t.Helper()
 	auditDir := filepath.Join(root, ".kern", "audit")
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock"))
 	if _, err := l.Replay(); err != nil {
@@ -204,13 +205,13 @@ func auditEntryFor(t *testing.T, root, resource string) *governance.AuditEntry {
 func assertAuditEntry(t *testing.T, root, id, wantAct, wantRes string, wantAppr bool, wantAgent string) {
 	t.Helper()
 	auditDir := filepath.Join(root, ".kern", "audit")
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock"))
 	if _, err := l.Replay(); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	var found *governance.AuditEntry
+	var found *govaudit.AuditEntry
 	for i := range l.All() {
 		e := &l.All()[i]
 		if e.Resource == "approval:"+id {
@@ -282,7 +283,7 @@ func corruptAuditHash(t *testing.T, store storage.Store, key string) error {
 	if err != nil {
 		return err
 	}
-	var ent governance.AuditEntry
+	var ent govaudit.AuditEntry
 	if err := json.Unmarshal(raw, &ent); err != nil {
 		return err
 	}

@@ -86,6 +86,30 @@ jobs:
           comment: "false"
           fail-on-risk: "false"
 
+  claims:
+    name: claims gate
+    needs: [test, changelog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # `kern verify claims` proves the public product claims from the
+      # checkout (blast-radius reference evidence, guard gate corpus, tool
+      # catalog contract; the audit-chain claim skips on a fresh checkout
+      # because .kern/ is local state). A release whose artifact cannot prove
+      # its own claims must not publish.
+      - uses: ./.github/actions/go-env
+        with:
+          fetch-depth: 1
+          cache: true
+
+      - name: Build kern from checkout
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+
+      - name: Prove the public product claims
+        run: |
+          "$RUNNER_TEMP/kern" verify claims
+
   build:
     name: build ${{ matrix.target }}
     needs: [test, changelog, review]
@@ -156,7 +180,7 @@ jobs:
     # dry-run the test/review/build/build-native matrix against any ref and
     # must never create a release.
     if: github.event_name == 'push'
-    needs: [build, build-native]
+    needs: [build, build-native, claims]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

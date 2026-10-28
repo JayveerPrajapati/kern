@@ -3,6 +3,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"os"
 	"path/filepath"
 	"testing"
@@ -170,13 +171,13 @@ func TestSQLiteCallsKindColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()
-	if !storeHasColumn(store.db, "calls", "kind") {
+	if !indexdb.HasColumn(store.db, "calls", "kind") {
 		t.Fatal("calls table missing kind column")
 	}
-	if !storeHasColumn(store.db, "calls", "source_file") {
+	if !indexdb.HasColumn(store.db, "calls", "source_file") {
 		t.Fatal("calls table missing source_file column")
 	}
-	if !storeHasColumn(store.db, "communities", "symbol") {
+	if !indexdb.HasColumn(store.db, "communities", "symbol") {
 		t.Fatal("communities table missing symbol column")
 	}
 	var kinds int

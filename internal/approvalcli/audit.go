@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	kctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
@@ -31,6 +34,9 @@ func runAudit(rest []string) {
 		case "repair":
 			runAuditRepair(rest[1:])
 			return
+		case "rotate":
+			runAuditRotate(rest[1:])
+			return
 		}
 	}
 
@@ -44,6 +50,15 @@ func runAudit(rest []string) {
 		fatalUsage("--limit: invalid integer %d (0 shows all entries)", f.limit)
 	}
 
+	// `kern audit .` (and any positional directory) is a root, not a task ID:
+	// most kern commands accept a positional root, so treating "." as a task
+	// produced a misleading "no audit entries for task ." result.
+	if f.root == "" && len(args) > 0 {
+		if info, err := os.Stat(args[0]); err == nil && info.IsDir() {
+			root = args[0]
+			args = args[1:]
+		}
+	}
 	taskID := ""
 	if len(args) > 0 {
 		taskID = args[0]
@@ -83,10 +98,10 @@ func runAudit(rest []string) {
 	// refusal — `kern audit repair` and `kern evidence verify` remain the
 	// explicit remediation commands.
 	if auditDir := filepath.Join(root, ".kern", "audit"); isDir(auditDir) {
-		l := governance.NewAuditLog().
+		l := govaudit.NewAuditLog().
 			WithStore(storage.NewLog(auditDir)).
 			WithLockPath(filepath.Join(auditDir, ".lock")).
-			WithMirror(governance.MirrorFor(auditDir))
+			WithMirror(govaudit.MirrorFor(auditDir))
 		if _, err := l.Replay(); err == nil {
 			all := l.All()
 			if brk, verified := l.VerifyChainReport(); brk >= 0 {
@@ -96,7 +111,9 @@ func runAudit(rest []string) {
 				// environment-degraded write, not tampering — report it
 				// accurately instead of "FAILED".
 				if tiers.DowngradeExplainsBreak() {
-					fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1], brk+1)
+					if tiers.TailDowngraded > 0 {
+						fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.TailDowngraded, map[bool]string{true: "y", false: "ies"}[tiers.TailDowngraded == 1], tiers.FirstTailDowngraded+1)
+					}
 				} else if verified == 0 {
 					fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit repair / kern evidence verify)\n", len(all))
 				} else {
@@ -198,7 +215,7 @@ func runAudit(rest []string) {
 // hashing). This gives the same discrimination the text warnings provide,
 // machine-readable, so a script can tell a benign format downgrade apart
 // from genuine tampering without grepping stderr.
-func auditChainJSON(root string, entries []governance.AuditEntry) map[string]any {
+func auditChainJSON(root string, entries []govaudit.AuditEntry) map[string]any {
 	out := map[string]any{
 		"integrity_mode":   "unknown",
 		"entries_total":    len(entries),
@@ -210,10 +227,10 @@ func auditChainJSON(root string, entries []governance.AuditEntry) map[string]any
 	if !isDir(auditDir) {
 		return out
 	}
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock")).
-		WithMirror(governance.MirrorFor(auditDir))
+		WithMirror(govaudit.MirrorFor(auditDir))
 	if _, err := l.Replay(); err != nil {
 		out["replay_error"] = err.Error()
 		return out
@@ -263,6 +280,67 @@ func cellOrDash(s string) string {
 // skipped so a decision is never shown twice.
 
 // runAuditAppend links an external entry into the tamper-evident audit chain.
+// runAuditRotate archives the active audit store under .kern/audit and starts
+// a fresh chain, keeping the newest --keep archives (default 3). The audit
+// chain grows without bound otherwise (23 MB / 53k entries observed
+// 2026-10-26); rotation is the bounded-retention path that preserves history
+// on disk instead of truncating it.
+func runAuditRotate(rest []string) {
+	keep := 3
+	root := ""
+	jsonOut := false
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		switch {
+		case arg == "--keep" || arg == "--root":
+			if i+1 >= len(rest) {
+				fatalUsage("audit rotate: %s requires a value", arg)
+			}
+			i++
+			if arg == "--keep" {
+				n, err := strconv.Atoi(rest[i])
+				if err != nil || n < 0 {
+					fatalUsage("audit rotate: --keep must be a non-negative integer")
+				}
+				keep = n
+			} else {
+				root = rest[i]
+			}
+		case strings.HasPrefix(arg, "--keep="):
+			n, err := strconv.Atoi(strings.TrimPrefix(arg, "--keep="))
+			if err != nil || n < 0 {
+				fatalUsage("audit rotate: --keep must be a non-negative integer")
+			}
+			keep = n
+		case strings.HasPrefix(arg, "--root="):
+			root = strings.TrimPrefix(arg, "--root=")
+		case arg == "--json":
+			jsonOut = true
+		case strings.HasPrefix(arg, "-"):
+			fatalUsage("audit rotate: unknown flag %s", arg)
+		default:
+			root = arg
+		}
+	}
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			fatal("Audit rotate: %v", err)
+		}
+		root = wd
+	}
+	dest, err := govaudit.ArchiveAuditStore(root, keep)
+	if err != nil {
+		fatal("Audit rotate: %v", err)
+	}
+	if jsonOut {
+		b, _ := json.Marshal(map[string]any{"archived": dest, "keep": keep})
+		fmt.Println(string(b))
+		return
+	}
+	fmt.Printf("audit: archived to %s (keeping %d archive(s)); the chain restarts empty and keyed\n", dest, keep)
+}
+
 func runAuditAppend(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	if len(args) > 0 {
@@ -270,7 +348,7 @@ func runAuditAppend(rest []string) {
 	}
 	root := projectRoot(f)
 
-	var entry governance.AuditEntry
+	var entry govaudit.AuditEntry
 	var raw map[string]any
 	switch {
 	case f.file != "":
@@ -299,7 +377,7 @@ func runAuditAppend(rest []string) {
 
 	auditDir := filepath.Join(root, ".kern", "audit")
 	store := storage.NewLog(auditDir)
-	log := governance.NewAuditLog().WithStore(store).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(governance.MirrorFor(auditDir))
+	log := govaudit.NewAuditLog().WithStore(store).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(govaudit.MirrorFor(auditDir))
 	if _, err := log.Replay(); err != nil {
 		fatal("audit append: replay: %v", err)
 	}
@@ -331,7 +409,7 @@ func runAuditAppend(rest []string) {
 // commonly use onto the canonical AuditEntry fields, only filling fields the
 // entry does not already carry. Keys recognized: event → Action, by → AgentID,
 // note → Reason, resource → Resource, result → Result, task → TaskID.
-func applyAuditEntryAliases(e *governance.AuditEntry, raw map[string]any) {
+func applyAuditEntryAliases(e *govaudit.AuditEntry, raw map[string]any) {
 	if e == nil {
 		return
 	}
@@ -383,10 +461,10 @@ func runAuditRepair(rest []string) {
 		fatal("no audit store at %s", auditDir)
 	}
 
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock")).
-		WithMirror(governance.MirrorFor(auditDir))
+		WithMirror(govaudit.MirrorFor(auditDir))
 	if _, err := l.Replay(); err != nil {
 		fatal("audit repair: replay: %v", err)
 	}

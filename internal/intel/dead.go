@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/refscan"
 )
 
 // Confidence tiers for dead-code verdicts. Interface dispatch is invisible to
@@ -71,7 +72,7 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 	fileMap := buildFileMap(ix)
 	// Scan the indexed Go files once for non-call references. Hoisting this out
 	// of the loop keeps DeadCode linear in the number of files.
-	refs := newNonCallRefIndex(ix)
+	refs := refscan.NewNonCallIndex(ix)
 	// Package directories that declare interfaces: an exported method there may
 	// satisfy one of them and be invoked only via interface dispatch.
 	ifaceDirs := interfaceDirs(ix)
@@ -91,7 +92,7 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 		// A bare-identifier reference outside a call position means the symbol
 		// is in use even with no callers (e.g. `f := Foo; f()` or a method
 		// value). Don't list it as dead.
-		if refs.referencedOutsideCall(simpleName(full)) {
+		if refs.ReferencedOutsideCall(simpleName(full)) {
 			continue
 		}
 		callers := ix.CallersFor(s)

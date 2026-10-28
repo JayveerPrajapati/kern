@@ -15,9 +15,19 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/cliout"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
+
+// isSymbolLikeQuery reports whether a query looks like a symbol name rather
+// than a path or file argument. Path-like queries ("/dev/null",
+// "cmd/kern/main.go") produce pure-noise suggestions — doc symbols that
+// merely MENTION the path ("F1 — multiline `>/dev/null` misclassified…") —
+// so the token-ranked and wildcard-substring stages are skipped for them.
+func isSymbolLikeQuery(q string) bool {
+	return len(q) >= 4 && !strings.ContainsAny(q, "/\\ \t")
+}
 
 // Suggest returns up to 5 symbol names from ix that are similar to query
 // (case-insensitive substring or prefix match). Used to provide "did you
@@ -33,9 +43,11 @@ func Suggest(ix *index.Index, query string) []string {
 	// below misses scores strongly here (>= 150 = matches every query
 	// token). The bottom dedupe keeps the list at 5 unique full names.
 	var suggestions []index.Symbol
-	for _, h := range intel.RankedSearchScored(ix, query, 5) {
-		if h.Score >= 150 {
-			suggestions = append(suggestions, h.Symbol)
+	if isSymbolLikeQuery(query) {
+		for _, h := range intel.RankedSearchScored(ix, query, 5) {
+			if h.Score >= 150 {
+				suggestions = append(suggestions, h.Symbol)
+			}
 		}
 	}
 	// V10: share the MCP server's candidate logic (handlers_graph.go) so the
@@ -44,12 +56,15 @@ func Suggest(ix *index.Index, query string) []string {
 	if len(suggestions) == 0 {
 		suggestions = ix.Search(query, 10)
 	}
-	if len(suggestions) == 0 {
+	if len(suggestions) == 0 && isSymbolLikeQuery(query) {
 		suggestions = ix.Search("*"+query+"*", 10)
 	}
 	if len(suggestions) == 0 {
 		// Last resort: the legacy 3-char-prefix heuristic (typo tolerance)
-		// when even the substring search finds nothing.
+		// when even the substring search finds nothing. The candidate's
+		// length must stay within 4 of the query's: a bare 3-char prefix
+		// matched wildly different lengths ("Gone" suggesting
+		// "goNativeEntry"), which is noise, not a typo fix.
 		q := strings.ToLower(query)
 		seen := map[string]bool{}
 		for _, s := range ix.Symbols {
@@ -57,7 +72,8 @@ func Suggest(ix *index.Index, query string) []string {
 			if full == "" || seen[full] {
 				continue
 			}
-			if len(q) >= 3 && strings.HasPrefix(strings.ToLower(full), q[:3]) {
+			low := strings.ToLower(full)
+			if len(q) >= 3 && strings.HasPrefix(low, q[:3]) && len(low)-len(q) <= 4 && len(q)-len(low) <= 4 {
 				seen[full] = true
 				suggestions = append(suggestions, s)
 				if len(suggestions) >= 5 {
@@ -113,7 +129,7 @@ func NoSearchMatchMsg(query string, ix *index.Index) string {
 			msg += "\n\nclose candidates:"
 			for _, h := range cands {
 				c := h.Symbol
-				msg += fmt.Sprintf("\n  %-10s %-7s %-24s %s:%d", c.Kind, c.Lang, c.FullName(), c.File, c.Line)
+				msg += fmt.Sprintf("\n  %-10s %-7s %-24s %s:%d", c.Kind, c.Lang, c.FullName(), cliout.DisplayPath(c.File), c.Line)
 			}
 		} else if suggestions := Suggest(ix, query); len(suggestions) > 0 {
 			msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")

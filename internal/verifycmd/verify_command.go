@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/execshell"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -213,7 +215,7 @@ func runCommand(ctx context.Context, root, command string, timeout time.Duration
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "sh", "-c", command)
+	cmd := execshell.CommandContext(cctx, command)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb", "CI=1")
 	var out capBuffer
@@ -249,10 +251,10 @@ func recordCommandAudit(root, command string, res commandRun) {
 		command = command[:200] + "..."
 	}
 	auditDir := filepath.Join(root, ".kern", "audit")
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock"))
-	_ = l.AppendExternal(governance.AuditEntry{
+	_ = l.AppendExternal(govaudit.AuditEntry{
 		AgentID:   "kern_verify",
 		Action:    "exec",
 		Resource:  command,

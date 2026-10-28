@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
@@ -51,16 +51,16 @@ func PublicB() int { return 2 }
 func recordAuditEntries(t *testing.T, root string, n int) {
 	t.Helper()
 	store := storage.NewLocal(filepath.Join(root, ".kern", "audit"))
-	log := governance.NewAuditLog().WithStore(store)
+	log := govaudit.NewAuditLog().WithStore(store)
 	for i := 0; i < n; i++ {
-		e := governance.AuditEntry{
+		e := govaudit.AuditEntry{
 			AgentID:  "test-agent",
 			Action:   "read",
 			Resource: "public/a.go",
 			Result:   "allowed",
 		}
 		if i == 1 {
-			e.ValidationOutcome = &governance.ValidationOutcome{
+			e.ValidationOutcome = &govaudit.ValidationOutcome{
 				Status:        "PASS",
 				ExitCode:      0,
 				BlockedFiles:  []string{"public/a.go"},

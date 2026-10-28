@@ -58,7 +58,11 @@ func guardHookCommand() (string, error) {
 			return bin + " guard hook", nil
 		}
 	}
-	return "kern guard hook", nil
+	// `go run`/test builds live under a throwaway go-build directory, so the
+	// executable path is not stable. Fall back to the INSTALLED kern resolved
+	// through PATH and absolutized: a bare `kern` here would also fail in
+	// GUI-launched hosts, which do not inherit the shell PATH.
+	return LaunchCLICommand() + " guard hook", nil
 }
 
 // wireGuardHook registers a single kern-guard PreToolUse hook group at path

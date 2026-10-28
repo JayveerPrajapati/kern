@@ -271,6 +271,96 @@ func TestValidateStringArgs(t *testing.T) {
 	}
 }
 
+// TestValidateArgTypesUnionEdits pins W19 (2026-10-26 black-box audit):
+// kern_apply's edits is union-typed (string OR array) — the handler has
+// always accepted both, but the dispatch-boundary walk rejected array
+// callers because the schema said "string" while the description said
+// "Array of ...". Both forms now pass validation; other kinds still fail
+// loud with a clean error.
+func TestValidateArgTypesUnionEdits(t *testing.T) {
+	t.Parallel()
+	accept := []map[string]any{
+		{"edits": `[{"path":"a.go","content":"package a"}]`},
+		{"edits": []any{map[string]any{"path": "a.go", "content": "package a"}}},
+	}
+	for _, args := range accept {
+		if err := validateArgTypes("kern_apply", args); err != nil {
+			t.Errorf("validateArgTypes(kern_apply, %v) = %v, want nil", args, err)
+		}
+	}
+	for name, v := range map[string]any{
+		"object": map[string]any{"path": "a.go"},
+		"number": 3.0,
+		"null":   nil,
+		"bool":   true,
+	} {
+		err := validateArgTypes("kern_apply", map[string]any{"edits": v})
+		if err == nil {
+			t.Errorf("%s: validateArgTypes(kern_apply, edits=%v) = nil, want error", name, v)
+			continue
+		}
+		if !strings.Contains(err.Error(), `expected one of types string or array`) {
+			t.Errorf("%s: error %q does not name the union types", name, err)
+		}
+	}
+}
+
+// TestLargeOutputHint pins W21 (2026-10-26 black-box audit): a tool response
+// past the threshold earns the max_tokens bounding hint only when the tool
+// schema declares max_tokens, the caller did not pass one, and the result is
+// a successful text payload.
+func TestLargeOutputHint(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("token ", 4100) // > largeOutputHintThreshold tokens
+	small := strings.Repeat("token ", 100)
+	okRes := map[string]any{"isError": false}
+	if hint, ok := largeOutputHint("kern_explore", nil, big, okRes); !ok || !strings.Contains(hint, "max_tokens") {
+		t.Fatalf("expected bounding hint for large unbounded explore output, got %q ok=%v", hint, ok)
+	}
+	if _, ok := largeOutputHint("kern_explore", nil, small, okRes); ok {
+		t.Fatal("small output must not carry the hint")
+	}
+	if _, ok := largeOutputHint("kern_explore", map[string]any{"max_tokens": 2000}, big, okRes); ok {
+		t.Fatal("caller-bounded output must not carry the hint")
+	}
+	if _, ok := largeOutputHint("kern_explore", nil, big, map[string]any{"isError": true}); ok {
+		t.Fatal("error results must not carry the hint")
+	}
+	if _, ok := largeOutputHint("kern_explore", nil, big, map[string]any{"isError": false, "unchanged": true}); ok {
+		t.Fatal("unchanged (etag) results must not carry the hint")
+	}
+	if _, ok := largeOutputHint("kern_search", nil, big, okRes); ok {
+		t.Fatal("tools without a max_tokens parameter must not carry the hint")
+	}
+	if _, ok := largeOutputHint("kern_no_such_tool", nil, big, okRes); ok {
+		t.Fatal("unknown tools must not carry the hint")
+	}
+}
+
+// TestUnknownParamsHint pins W10 (2026-10-26 black-box audit): arguments the
+// tool's schema does not declare are named in a warning (with the declared
+// parameter set) so a 'roots'-vs-'root' typo is visible on the next call;
+// governance passthrough keys and declared keys stay silent.
+func TestUnknownParamsHint(t *testing.T) {
+	t.Parallel()
+	hint := unknownParamsHint("kern_search", map[string]any{"roots": "/some/path", "query": "Greet"})
+	if !strings.Contains(hint, "roots") || !strings.Contains(hint, "declared parameters") {
+		t.Fatalf("expected the unknown key and the declared set, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_search", map[string]any{"query": "Greet", "limit": 10}); hint != "" {
+		t.Fatalf("declared keys must stay silent, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_search", map[string]any{"agent_id": "a", "task": "t", "scope": map[string]any{}}); hint != "" {
+		t.Fatalf("governance passthrough keys must stay silent, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_no_such_tool", map[string]any{"x": 1}); hint != "" {
+		t.Fatalf("unknown tools must stay silent, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_search", nil); hint != "" {
+		t.Fatalf("absent args must stay silent, got %q", hint)
+	}
+}
+
 // TestValidateArgTypesNonStringScalars pins the D6 fail-loud contract for
 // schema-declared integer/number/boolean properties (validateNonStringScalar
 // via validateArgTypes): lenient forms (numbers, numeric strings, boolean

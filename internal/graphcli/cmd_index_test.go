@@ -317,3 +317,15 @@ func TestRunIndexWhere(t *testing.T) {
 		t.Fatalf("nested where output missing shadow warning: %q", out)
 	}
 }
+
+func TestCallResolutionLineUsesStaticDenominator(t *testing.T) {
+	got := callResolutionLine(index.CallResStats{Total: 10, Unresolved: 4, External: 4, Dynamic: 3, InRepo: 1})
+	want := "call resolution: 2/3 statically resolvable targets resolved (66%; 3 dynamic/untyped, 4 external skipped, 1 in-repo misses)"
+	if got != want {
+		t.Fatalf("callResolutionLine = %q, want %q", got, want)
+	}
+	clean := callResolutionLine(index.CallResStats{Total: 5, External: 3, Dynamic: 2})
+	if !strings.Contains(clean, "no statically resolvable targets") {
+		t.Fatalf("clean metric = %q, want the no-targets form", clean)
+	}
+}

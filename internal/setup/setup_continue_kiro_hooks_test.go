@@ -75,7 +75,7 @@ func TestWireContinueHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := wireContinueHooks()
+	st := wireContinueHooks("kern")
 	if !st.Installed {
 		t.Fatalf("wireContinueHooks failed: %s", st.Note)
 	}
@@ -125,7 +125,7 @@ func TestWireContinueHooks(t *testing.T) {
 	}
 
 	// Idempotent: a second run must not duplicate the kern group.
-	if st := wireContinueHooks(); !st.Installed {
+	if st := wireContinueHooks("kern"); !st.Installed {
 		t.Fatalf("second wireContinueHooks failed: %s", st.Note)
 	}
 	raw, err = os.ReadFile(settingsPath)

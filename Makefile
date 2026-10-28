@@ -16,7 +16,7 @@ RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapa
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-purego test test-touched test-race vet lint bench bench-gate install install-purego hooks plugin-sync pre-release release dist release-smoke mcpb clean clean-artifacts help
+.PHONY: all build build-purego test test-short test-fresh test-touched test-race vet lint bench bench-gate cover cover-floor cover-risky install install-purego hooks plugin-sync plugin-check pre-release release dist release-smoke mcpb clean clean-artifacts help
 
 all: build
 
@@ -49,6 +49,11 @@ test:
 # tests: resilience real-execution scenarios, long index builds).
 test-short:
 	go test -short ./...
+# test-fresh is test-short in a throwaway worktree with no .kern store: the
+# hermetic gate that catches tests depending on a warm local index (the
+# 2026-10-28 guard regression passed warm and failed in a clean checkout).
+test-fresh:
+	bash scripts/test-fresh.sh
 # test-touched runs ONLY the packages your current changes touch (working
 # tree vs HEAD, or the last commit when clean), plus the gate packages that
 # pin cross-package files — the plugin/AGENTS.md lesson (687ec36): those
@@ -68,6 +73,19 @@ test-touched:
 cover:
 	go test -short -coverprofile=coverage.out -covermode=atomic ./...
 	go tool cover -func=coverage.out | tail -1
+
+# cover-floor enforces the aggregate statement-coverage floor from
+# coverage.out (the enforceable gate; Codecov's status is advisory here).
+cover-floor:
+	@bash scripts/cover-floor.sh coverage.out
+
+# cover-risky is the SECURITY-SURFACE coverage gate: exec/sandbox, evidence,
+# memory, the external-MCP bridge, pipelines and the graph tool bodies must each
+# stay >= 70% (behaviour-level tests). Runs without -short because the sandbox,
+# validate and build paths are the point. Override the floor with
+# KERN_RISKY_COVER_MIN. Wired into CI's unit job.
+cover-risky:
+	@bash scripts/cover-risky.sh
 
 # test-race runs the test suite with the Go race detector. It is slower than
 # `test` but catches data races in the event bus, gateway, stores, and loop.
@@ -200,11 +218,15 @@ pre-release: build
 # Usage: make mcpb VERSION=v0.1.0
 # plugin-sync copies the canonical .opencode/plugins/kern.ts into the
 # embedded asset (go:embed in internal/agentwire/shared.go) so `kern setup`
-# deploys identical bytes everywhere. Run it after editing the plugin, then
-# append the new sha256 to internal/pluginhash's shipped registry (the
-# registry test prints it). --check verifies parity without writing, for CI.
+# deploys identical bytes everywhere, AND registers the new sha256 in
+# internal/pluginhash's shipped registry (idempotent). One command, after
+# editing the plugin. `make plugin-check` verifies byte-parity + registry
+# freshness without writing, for CI.
 plugin-sync: build
 	./$(BIN)/kern gen-plugin --root .
+
+plugin-check: build
+	./$(BIN)/kern gen-plugin --check --root .
 mcpb: build
 	@mkdir -p dist
 	@echo '{"manifest":{"name":"kern","version":"$(VERSION)","transport":{"type":"stdio"},"command":"kern","args":["mcp"]}}' > dist/manifest.json

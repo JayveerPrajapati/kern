@@ -3,6 +3,7 @@
 package index
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"os"
 	"strings"
 	"testing"
@@ -78,28 +79,28 @@ func TestSQLiteLookupSymbolDeterministic(t *testing.T) {
 
 // TestSQLiteCacheSizeSingleApplySite: cache_size must have exactly one value
 // with one authoritative apply site — the DSN must carry the formatted
-// sqliteCacheSize _pragma (applied by the driver at connection open), and the
+// indexdb.DefaultCacheSize _pragma (applied by the driver at connection open), and the
 // OpenSQLite Exec pragma list must NOT carry a second, conflicting cache_size
 // (oracle-gate: cache_size moved out of the Exec list into the DSN so the
 // single-conn pool cannot skip or reorder it). The applied value must equal
-// the shared sqliteCacheSize constant.
+// the shared indexdb.DefaultCacheSize constant.
 func TestSQLiteCacheSizeSingleApplySite(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	src, err := os.ReadFile("sqlite_store.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dsnHasCache := false
 	for _, line := range strings.Split(string(src), "\n") {
 		if strings.Contains(line, "PRAGMA cache_size") {
 			t.Errorf("OpenSQLite Exec pragma list still carries cache_size; the DSN _pragma must be the single apply site: %q", strings.TrimSpace(line))
 		}
-		if strings.Contains(line, "_pragma=cache_size") {
-			dsnHasCache = true
-		}
 	}
-	if !dsnHasCache {
-		t.Error("DSN must format sqliteCacheSize into _pragma=cache_size(...); no DSN apply site found")
+	dbSrc, err := os.ReadFile("../indexdb/indexdb.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dbSrc), "_pragma=cache_size(") {
+		t.Error("indexdb DSN must format the cache budget into _pragma=cache_size(...); no DSN apply site found")
 	}
 	store, err := OpenSQLite(t.TempDir())
 	if err != nil {
@@ -110,7 +111,7 @@ func TestSQLiteCacheSizeSingleApplySite(t *testing.T) {
 	if err := store.db.QueryRow("PRAGMA cache_size").Scan(&size); err != nil {
 		t.Fatal(err)
 	}
-	if size != sqliteCacheSize {
-		t.Errorf("PRAGMA cache_size = %d; want %d (sqliteCacheSize)", size, sqliteCacheSize)
+	if size != indexdb.DefaultCacheSize {
+		t.Errorf("PRAGMA cache_size = %d; want %d (indexdb.DefaultCacheSize)", size, indexdb.DefaultCacheSize)
 	}
 }

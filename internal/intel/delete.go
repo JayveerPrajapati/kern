@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/refscan"
 )
 
 // DeleteReport summarises whether a symbol can be safely deleted. "Safe" is
@@ -110,7 +111,7 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 	// invisible to the call graph. Scan the indexed Go files for the symbol's
 	// bare name outside a CallExpr position; any production hit makes the
 	// symbol unsafe to delete.
-	r.NonCallRefs = newNonCallRefIndex(ix).productionFiles(simpleName(sym))
+	r.NonCallRefs = refscan.NewNonCallIndex(ix).ProductionFiles(simpleName(sym))
 
 	// Closure check: the deletion set is {sym} ∪ TestCallers. Every test-only
 	// caller must itself be referenced ONLY from within that set — a helper

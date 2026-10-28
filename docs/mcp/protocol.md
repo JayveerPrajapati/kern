@@ -234,8 +234,30 @@ Errors use standard JSON-RPC error objects: `{"jsonrpc":"2.0","id":N,"error":{"c
 |---|---|
 | `-32601` | Method not found (`method not found: <method>`) |
 | `-32600` | Invalid request |
-| `-32700` | Parse error |
+| `-32700` | Parse error (HTTP transport answers `400 Bad Request` for bodies that are not JSON; well-formed JSON-RPC protocol errors keep HTTP 200) |
 | other | Tool-call failures (reported as `isError: true` in the result, or as JSON-RPC errors) |
+
+### 4.1 Decode leniency and transport notes
+
+- **Scalar coercion (lossy-proof contract):** for schema-declared string
+  properties, a JSON number or the string form of one is coerced to its
+  canonical string form, and for integer properties a numeric string is
+  coerced to its number — both directions are lossless round-trips, never
+  silent defaults. Any other shape (null, array, object where a scalar was
+  declared) fails loud as an `isError` naming the argument, tool and
+  expected type.
+- **Wrong-shape vs malformed:** valid JSON whose envelope is wrong (a bare
+  scalar, an array, a wrong-typed field) answers `-32600` invalid request
+  with a sanitized message; only bodies that are not JSON at all answer
+  `-32700`.
+- **Stateless HTTP:** the Streamable HTTP transport keeps no sessions
+  (`Mcp-Session-Id` is neither issued nor required); every request is
+  gated per-request by the `Mcp-Protocol-Version` header (412 when
+  missing/unknown after initialize).
+- **Cold-index cost tracks indexed files, not disk size:** a first-call
+  index build scales with the number of source files the walk indexes — a
+  27MB repo of many small files can cost more than a 10x larger
+  binary-heavy one. Warm (already-indexed) calls are unaffected.
 
 ## 5. Tool catalog configuration
 
@@ -250,8 +272,8 @@ sub-tool regardless.
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
 | `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 6-tool `highLevelTools` set (deprecated; prefer the full catalog) |
 | `KERN_MCP_CATEGORY=<family>` | Advertise only one functional family — one of `analyze`, `agent`, `arch`, `ast`, `context`, `doc`, `edit`, `evidence`, `exec`, `framework`, `graph`, `governance`, `incident`, `lock`, `memory`, `meta`, `mcpbridge`, `optimize`, `org`, `project`, `review`, `task`, `verify` (e.g. `kern_search` is `graph`); `kern_meta` always stays |
-| `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
-| `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |
+| `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); `mcp.roots` in `.kern/config.json` adds to these only behind the operator's `KERN_MCP_ALLOW_CONFIG_ROOTS=1` opt-in |
+| `KERN_MCP_PERMISSIVE=1` | Opt out of the governance gate layer (path confinement via the roots check may still deny; `KERN_MCP_NO_CONFINE=1` disables confinement entirely) |
 | `KERN_MCP_WATCH=0` | Disable the background index watcher |
 | `KERN_MCP_WATCH_INTERVAL` | Index watcher poll interval |
 | `KERN_MCP_TLS_CERT` / `KERN_MCP_TLS_KEY` | TLS material for the HTTP transport |

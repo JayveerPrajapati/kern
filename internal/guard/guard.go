@@ -298,6 +298,42 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 			meta[s.FullName()] = s
 		}
 	}
+	// Precompute both lookups ONCE. resolveCallee used to scan the entire
+	// meta map (17k symbols) for every qualified callee that missed the exact
+	// fast path (~28.8k edges on kern, ≈4.9e8 iterations), and the import loop
+	// rebuilt this directory map for every import edge. Both were the
+	// dominant cost of the 12 s architecture check (the pre-commit regression).
+	bySimple := map[string][]index.Symbol{}
+	for _, s := range ix.Symbols {
+		bySimple[s.Name] = append(bySimple[s.Name], s)
+	}
+	dirs := indexDirs(ix)
+	// Per-file import qualifier -> package directory, so a call through a
+	// package whose basename is shared (internal/a/util vs internal/b/util)
+	// follows the file's actual import instead of a lexicographic accident.
+	qualDirs := map[string]map[string]string{}
+	for file, imps := range ix.ImportsByFile {
+		m := map[string]string{}
+		for _, imp := range imps {
+			dir := guardImportDir(imp.Path, dirs)
+			if dir == "" {
+				continue
+			}
+			qual := imp.Alias
+			if qual == "" {
+				if p := ix.Pkgs[dir]; p != nil {
+					qual = p.Name
+				}
+			}
+			if qual == "" {
+				qual = filepath.Base(dir)
+			}
+			m[qual] = dir
+		}
+		if len(m) > 0 {
+			qualDirs[file] = m
+		}
+	}
 
 	// Bare-name collision set: the index keys call edges by the caller's
 	// FullName, which for package-level functions is the bare name (every
@@ -362,7 +398,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 						continue
 					}
 				}
-				resolved, ok := resolveCallee(ix, meta, colliding, c, s.File)
+				resolved, ok := resolveCallee(ix, meta, bySimple, qualDirs[s.File], colliding, c, s.File)
 				if !ok || resolved.FullName() == full {
 					continue
 				}
@@ -395,7 +431,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 			}
 		}
 		for _, imp := range fImports {
-			for toDir := range indexDirs(ix) {
+			for toDir := range dirs {
 				if toDir == "" || toDir == fromDir {
 					continue
 				}
@@ -479,7 +515,7 @@ func DirMatch(pattern, dir string) bool {
 // to nothing: attributing it to one arbitrary file would fabricate a
 // cross-package edge — the mirror image of the colliding-caller guard
 // above.
-func resolveCallee(ix *index.Index, meta map[string]index.Symbol, colliding map[string]bool, name, callerFile string) (index.Symbol, bool) {
+func resolveCallee(ix *index.Index, meta map[string]index.Symbol, bySimple map[string][]index.Symbol, qualDirs map[string]string, colliding map[string]bool, name, callerFile string) (index.Symbol, bool) {
 	if sym, ok := meta[name]; ok {
 		// Exact FullName hit. meta keeps the first-seen symbol, so when the
 		// name is defined in several files the winner may be a foreign one:
@@ -516,13 +552,37 @@ func resolveCallee(ix *index.Index, meta map[string]index.Symbol, colliding map[
 			return ls, true
 		}
 	}
-	var best *index.Symbol
-	for full, s := range meta {
-		if s.Name != simple {
-			continue
+	// Receiver-qualified method call (Type.method): a receiver match beats a
+	// package qualifier.
+	var recv *index.Symbol
+	for _, s := range bySimple[simple] {
+		if s.Receiver == qual && (recv == nil || s.FullName() < recv.FullName()) {
+			cp := s
+			recv = &cp
 		}
+	}
+	if recv != nil {
+		return *recv, true
+	}
+	// Package-qualified call: follow the caller file's actual import rather
+	// than the lexicographically smallest same-basename package.
+	if dir, ok := qualDirs[qual]; ok && dir != "" {
+		var best *index.Symbol
+		for _, s := range bySimple[simple] {
+			if filepath.ToSlash(filepath.Dir(s.File)) == dir && (best == nil || s.FullName() < best.FullName()) {
+				cp := s
+				best = &cp
+			}
+		}
+		if best == nil {
+			return index.Symbol{}, false
+		}
+		return *best, true
+	}
+	var best *index.Symbol
+	for _, s := range bySimple[simple] {
 		if s.Receiver == qual || filepath.Base(filepath.Dir(s.File)) == qual {
-			if best == nil || full < best.FullName() {
+			if best == nil || s.FullName() < best.FullName() {
 				cp := s
 				best = &cp
 			}
@@ -532,6 +592,21 @@ func resolveCallee(ix *index.Index, meta map[string]index.Symbol, colliding map[
 		return index.Symbol{}, false
 	}
 	return *best, true
+}
+
+// guardImportDir maps an import path onto the most specific package directory
+// in dirs (longest whole-suffix match; lexicographic tie-break).
+func guardImportDir(importPath string, dirs map[string]bool) string {
+	best := ""
+	for d := range dirs {
+		if !intel.ImportMatches(importPath, d) {
+			continue
+		}
+		if len(d) > len(best) || (len(d) == len(best) && d < best) {
+			best = d
+		}
+	}
+	return best
 }
 
 // indexDirs returns the distinct package directories present in the index.

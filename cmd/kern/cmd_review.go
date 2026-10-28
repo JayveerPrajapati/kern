@@ -269,7 +269,17 @@ func runImpact(rest []string) {
 	}
 	args = joinVerbPositionals(args)
 	change := args[0]
-	p, err := app.New(root)
+	// Index-only fast path: the default graph impact report needs the index
+	// and its code graph, never the twin extractors / memory / firewall /
+	// audit replay that app.New builds (~3 s). --risk and runtime evidence
+	// still need the full Platform.
+	var p *app.Platform
+	var err error
+	if f.risk || os.Getenv("KERN_IMPACT_RUNTIME") == "1" {
+		p, err = app.New(root)
+	} else {
+		p, err = app.NewIndexOnly(root)
+	}
 	if err != nil {
 		fatal("Impact: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/auditdiag"
 	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"sync/atomic"
 	"testing"
@@ -25,7 +26,7 @@ import (
 // fixture is a sparse file: truncation, not content, sets the size.
 func TestCheckAuditChainSize(t *testing.T) {
 	root := t.TempDir()
-	if f := checkAuditChainSize(root); f.Level != "ok" {
+	if f := auditdiag.AuditChainSize(root); f.Level != "ok" {
 		t.Fatalf("missing chain must be ok, got %+v", f)
 	}
 	auditDir := filepath.Join(root, ".kern", "audit")
@@ -36,13 +37,13 @@ func TestCheckAuditChainSize(t *testing.T) {
 	if err := os.WriteFile(chain, []byte("{\"k\":\"a\",\"v\":{}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if f := checkAuditChainSize(root); f.Level != "ok" || !strings.Contains(f.Detail, "MB") {
+	if f := auditdiag.AuditChainSize(root); f.Level != "ok" || !strings.Contains(f.Detail, "MB") {
 		t.Fatalf("small chain must be ok with its size, got %+v", f)
 	}
 	if err := os.Truncate(chain, 51<<20); err != nil {
 		t.Fatal(err)
 	}
-	f := checkAuditChainSize(root)
+	f := auditdiag.AuditChainSize(root)
 	if f.Level != "warn" || !strings.Contains(f.Detail, "archive") {
 		t.Fatalf("large chain must warn with archive guidance, got %+v", f)
 	}
@@ -327,7 +328,7 @@ func TestCheckPrecision_AllResolvedBuild(t *testing.T) {
 	if f.Level != "ok" {
 		t.Fatalf("all-resolved precision = %s, want ok: %+v", f.Level, f)
 	}
-	if !strings.Contains(f.Detail, "languages at") {
+	if !strings.Contains(f.Detail, "languages") {
 		t.Fatalf("detail missing precision claim: %q", f.Detail)
 	}
 }
@@ -1143,12 +1144,12 @@ func TestWiringFindingsNoCursorWarnAfterFreshSetup(t *testing.T) {
 }
 
 // TestCheckAuditDropped pins the `kern doctor` surface of the dropped-audit
-// contract (governance.AppendDroppedAuditMarker + AuditLog.persist): absent
+// contract (govaudit.AppendDroppedAuditMarker + AuditLog.persist): absent
 // or empty sidecar = ok; non-empty = warn with the count + last timestamp.
 func TestCheckAuditDropped(t *testing.T) {
 	t.Run("absent sidecar is ok", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
-		if f := checkAuditDropped(); f.Level != "ok" {
+		if f := auditdiag.AuditDropped(); f.Level != "ok" {
 			t.Fatalf("level = %q, want ok (no sidecar): %s", f.Level, f.Detail)
 		}
 	})
@@ -1162,7 +1163,7 @@ func TestCheckAuditDropped(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "dropped.jsonl"), []byte("\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if f := checkAuditDropped(); f.Level != "ok" {
+		if f := auditdiag.AuditDropped(); f.Level != "ok" {
 			t.Fatalf("level = %q, want ok (empty sidecar): %s", f.Level, f.Detail)
 		}
 	})
@@ -1178,7 +1179,7 @@ func TestCheckAuditDropped(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "dropped.jsonl"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		f := checkAuditDropped()
+		f := auditdiag.AuditDropped()
 		if f.Level != "warn" {
 			t.Fatalf("level = %q, want warn (non-empty sidecar): %s", f.Level, f.Detail)
 		}

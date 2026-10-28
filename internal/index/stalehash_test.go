@@ -68,16 +68,21 @@ func TestLoadOrBuildStaleHashesTreeOnce(t *testing.T) {
 	reads, restore := countReads()
 	defer restore()
 
+	// Keep the stat-gate window long enough for the second staleness check to
+	// be stat-only; this test asserts the read count, not the TTL.
+	t.Setenv("KERN_FRESHNESS_GATE_MS", "300000")
 	got, err := LoadOrBuild(root)
 	if err != nil {
 		t.Fatalf("LoadOrBuild: %v", err)
 	}
 
-	// Two staleness walks hash every file; Update re-reads only the changed
-	// ones. Before the fix Update re-read ALL of them (3N+... total).
-	want := 2*len(built.FileHashes) + changed
+	// One staleness walk hashes every file; the second check is stat-gated
+	// (the retained/persisted observation proves the tree unchanged since it),
+	// and Update re-reads only the changed files. Before the stat-gate fix
+	// Update re-read ALL of them (3N+... total).
+	want := len(built.FileHashes) + changed
 	if got := reads.Load(); got != int64(want) {
-		t.Fatalf("source files read %d times, want %d (two staleness walks + only the %d changed file(s) re-read by Update)", got, want, changed)
+		t.Fatalf("source files read %d times, want %d (one staleness walk + only the %d changed file(s) re-read by Update)", got, want, changed)
 	}
 
 	// Correctness: the reused-hash update must equal a full rebuild.

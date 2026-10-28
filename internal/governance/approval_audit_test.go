@@ -2,6 +2,7 @@ package governance
 
 import (
 	"context"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,16 +15,16 @@ import (
 
 // readAuditEntries reads every persisted entry from the audit store under
 // <root>/.kern/audit — the same store `kern audit` and the service layer read.
-func readAuditEntries(t *testing.T, root string) []AuditEntry {
+func readAuditEntries(t *testing.T, root string) []govaudit.AuditEntry {
 	t.Helper()
 	store := storage.NewLog(filepath.Join(root, ".kern", "audit"))
 	entries, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("audit store List: %v", err)
 	}
-	var out []AuditEntry
+	var out []govaudit.AuditEntry
 	for _, e := range entries {
-		var entry AuditEntry
+		var entry govaudit.AuditEntry
 		if err := storage.UnmarshalValue(e.Value, &entry); err != nil {
 			t.Fatalf("unmarshal audit entry: %v", err)
 		}
@@ -58,7 +59,7 @@ func TestFileStoreDecideRecordsApprovalDecision(t *testing.T) {
 
 	// The decision must be visible from the persisted chain, not just memory.
 	entries := readAuditEntries(t, root)
-	var found *AuditEntry
+	var found *govaudit.AuditEntry
 	for i := range entries {
 		if entries[i].Action == "approve" {
 			found = &entries[i]
@@ -91,7 +92,7 @@ func TestFileStoreDecideRecordsApprovalDecision(t *testing.T) {
 	}
 
 	// The chain must verify end-to-end (tamper-evident).
-	replayed := NewAuditLog().WithStore(storage.NewLog(filepath.Join(root, ".kern", "audit")))
+	replayed := govaudit.NewAuditLog().WithStore(storage.NewLog(filepath.Join(root, ".kern", "audit")))
 	if _, err := replayed.Replay(); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestFileStoreRejectRecordsApprovalDecision(t *testing.T) {
 	}
 
 	entries := readAuditEntries(t, root)
-	var found *AuditEntry
+	var found *govaudit.AuditEntry
 	for i := range entries {
 		if entries[i].Action == "reject" {
 			found = &entries[i]

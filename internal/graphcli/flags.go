@@ -27,6 +27,7 @@ type flags struct {
 	lines         int    // --lines/--line (line count)
 	max           int    // --max (maximum count/threshold)
 	maxTokens     int    // --max-tokens (token cap)
+	path          string // --path (search: scope results to a repo-relative file/dir)
 	mermaid       bool   // --mermaid (graph: Mermaid output)
 	minConfidence string // --min-confidence (minimum confidence)
 	once          bool   // --once (precache: single pass; default)
@@ -113,6 +114,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			p.SetBool(&f.once, "--once", inline, hasInline)
 		case "--one-line":
 			p.SetBool(&f.oneLine, "--one-line", inline, hasInline)
+		case "--path":
+			p.SetStr(&f.path, inline, hasInline)
 		case "--out":
 			p.SetStr(&f.out, inline, hasInline)
 		case "--range":

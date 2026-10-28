@@ -481,6 +481,11 @@ func TestToolCacheTTLExpiry(t *testing.T) {
 	if e := entries[len(entries)-1]; e["Policy"] == "tool-cache" {
 		t.Fatalf("expired entry must be a miss, entry: %+v", e)
 	}
+	// The miss above stored a fresh entry. Give it a long TTL before the
+	// third call: under a loaded machine the call itself can exceed the
+	// 50ms test TTL, which would make this assertion flaky (observed in the
+	// full-suite run of 2026-10-26).
+	t.Setenv("KERN_MCP_CACHE_TTL", "1h")
 	s.toolCallResponse(json.RawMessage(`"3"`), pa) // fresh entry → hit
 	entries = readAuditEntries(t)
 	if e := entries[len(entries)-1]; e["Policy"] != "tool-cache" {

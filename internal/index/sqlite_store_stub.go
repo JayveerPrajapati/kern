@@ -2,7 +2,10 @@
 
 package index
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // SQLiteEnabled reports whether the SQLite persistent store is available in
 // this build. SQLite is DEFAULT-ON: the real store (sqlite_store.go) is
@@ -47,6 +50,10 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	return nil, errSQLiteNotEnabled
 }
 
+// SaveSQLiteDelta is unavailable in the nosqlite stub build: the JSON cache is
+// the only format there, and every save is a full write.
+func SaveSQLiteDelta(root string, ix *Index, plan *deltaPlan) error { return errSQLiteNotEnabled }
+
 // SaveSQLite is unavailable in the nosqlite stub build.
 func SaveSQLite(root string, ix *Index) error { return errSQLiteNotEnabled }
 
@@ -57,6 +64,14 @@ func LoadSQLite(root string) (*Index, error) { return nil, errSQLiteNotEnabled }
 func FTS5Search(root, query string, limit int) ([]Symbol, error) {
 	return nil, errSQLiteNotEnabled
 }
+
+// SQLiteSnapshotValid is unavailable in the nosqlite stub build: there is no
+// SQLite store, so a snapshot can never be validated (Load rebuilds).
+func SQLiteSnapshotValid(root, token string, snapshotUpdated time.Time) bool { return false }
+
+// LoadMetadata is unavailable in the nosqlite stub build; callers fall back
+// to the full JSON load.
+func LoadMetadata(root string) (*Metadata, error) { return nil, errSQLiteNotEnabled }
 
 // errSQLiteNotEnabled is returned when a SQLite feature is used in a build
 // compiled with -tags nosqlite (the only build in which the store is absent).

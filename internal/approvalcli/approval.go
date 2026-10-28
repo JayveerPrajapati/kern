@@ -66,7 +66,7 @@ func runApprovalList(rest []string) int {
 			reason = reason[:57] + "..."
 		}
 		fmt.Printf("  %-20s %-8s %s\n", a.ID, a.RiskLevel, reason)
-		if !governance.ApprovalIntegrityOK(a) {
+		if !governance.ApprovalIntegrityOK(a, root) {
 			fmt.Printf("    !! INTEGRITY: record was modified outside the approval workflow — DO NOT APPROVE\n")
 		}
 	}
@@ -121,7 +121,7 @@ func runApprovalAsk(rest []string) int {
 	if rec.DecidedAt != nil || (rec.Status != "" && rec.Status != "pending") {
 		fatalPolicy("approval ask: approval %q already decided as %s — check kern audit %s for state", id, rec.Status, id)
 	}
-	if !governance.ApprovalIntegrityOK(rec) {
+	if !governance.ApprovalIntegrityOK(rec, root) {
 		fatalPolicy("approval ask: approval %q failed integrity verification — it was modified outside the approval workflow; DO NOT answer it", id)
 	}
 	tty, terr := approveTerminal()
@@ -173,9 +173,12 @@ func runApprovalAsk(rest []string) int {
 	if approver == "" {
 		approver = "cli-user"
 	}
+	// One signer per ask: the passphrase is prompted once and reused for the
+	// decision and the optional prefix widening (both are signed).
+	sign := newApprovalSigner()
 	switch choice {
 	case "1":
-		a, mem := decideApproval(root, "approve", id, approver, true, f.reason)
+		a, mem := decideApproval(root, "approve", id, approver, true, f.reason, sign)
 		fmt.Printf("accepted once: %s — authorizes exactly ONE execution; the retry must be byte-identical\n", a.ID)
 		if mem != nil {
 			recordPolicySignalsBounded(root, mem)
@@ -187,10 +190,10 @@ func runApprovalAsk(rest []string) int {
 			prefix = governance.SuggestedPrefix(rec.Command)
 		}
 		prefix = promptAskPrefix(tty, rec.Command, prefix)
-		if _, mem := decideApproval(root, "approve", id, approver, true, f.reason); mem != nil {
+		if _, mem := decideApproval(root, "approve", id, approver, true, f.reason, sign); mem != nil {
 			recordPolicySignalsBounded(root, mem)
 		}
-		grant, serr := governance.SetScopePrefix(root, id, prefix, approver)
+		grant, serr := governance.SetScopePrefixWithSigner(root, id, prefix, approver, sign)
 		if serr != nil {
 			fatal("approval ask: accept-prefix failed: %v (the once-decision stands — this command authorized exactly one execution)", serr)
 		}
@@ -198,7 +201,7 @@ func runApprovalAsk(rest []string) int {
 		fmt.Printf("  uses: %d/%d — expires %s\n", grant.Uses, grant.MaxUses, grant.ExpiresAt.Format(time.RFC3339))
 		return 0
 	default: // "3"
-		a, mem := decideApproval(root, "reject", id, approver, false, f.reason)
+		a, mem := decideApproval(root, "reject", id, approver, false, f.reason, sign)
 		fmt.Printf("rejected: %s (by %s)\n", a.ID, approver)
 		if mem != nil {
 			recordPolicySignalsBounded(root, mem)

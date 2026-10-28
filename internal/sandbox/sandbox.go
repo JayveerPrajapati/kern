@@ -707,6 +707,13 @@ type RunOptions struct {
 	// only. External egress stays denied. The zero value keeps the profile
 	// byte-identical.
 	AllowLoopbackBind bool
+	// WriteRoot opts into darwin filesystem WRITE confinement rooted at this
+	// path: with it set, writes outside the root, the temp dir and the Go
+	// build caches are DENIED by the seatbelt profile. Empty keeps
+	// `(allow default)` semantics (the pre-2026-10-27 behavior). The MCP
+	// kern_exec command path sets it to the resolved workdir so an
+	// untrusted child can no longer write $HOME, /etc or another repo.
+	WriteRoot string
 	// StripGovernanceBypass drops the operator's break-glass vars
 	// (KERN_BYPASS, KERN_ENFORCE) from the sandboxed child's environment.
 	// The trusted internal consumers (kern verify / execution worktrees /
@@ -742,6 +749,15 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 // verification engine) keeps the ungated Run.
 func RunGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
 	return runGuarded(parent, root, cmdName, args, timeout, force, RunOptions{StripGovernanceBypass: true})
+}
+
+// RunGuardedWithOptions is RunGuarded with per-run options. The untrusted-user
+// env stripping is forced on (the caller of the user-facing sandbox must never
+// hand arbitrary code the governance bypass), and the caller may add a write
+// contract (WriteRoot) or loopback relaxation.
+func RunGuardedWithOptions(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool, opts RunOptions) *Result {
+	opts.StripGovernanceBypass = true
+	return runGuarded(parent, root, cmdName, args, timeout, force, opts)
 }
 
 // sandboxChildEnv returns the sanitized environment for a sandboxed command
@@ -872,7 +888,7 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	// inherit note and the Inherited+Isolated stamp record the inherited
 	// posture instead.
 	if !netEscapeHatchSet() && !inheritedIsolation {
-		if prefix, ok := netIsolationPrefix(opts.AllowLoopbackBind); ok {
+		if prefix, ok := netIsolationPrefix(opts.AllowLoopbackBind, opts.WriteRoot); ok {
 			// Linux Stage-1 FS confinement (M3): when Landlock is available,
 			// re-exec this binary as a trampoline that applies the allowlist
 			// and then runs the SAME unshare -> sh -> target chain below.

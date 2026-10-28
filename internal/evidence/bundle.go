@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/storage"
@@ -69,6 +70,12 @@ type Bundle struct {
 
 	// Tamper-evidence:
 	BundleHash string `json:"bundle_hash"` // sha256 of everything above
+	// Machine-keyed seal over BundleHash (2026-10-28 campaign): the hex
+	// HMAC-SHA256 of the bundle hash under the machine secret (same
+	// out-of-workspace key as exec approvals, domain-separated). Absent for
+	// legacy digest-only bundles; when present, Verify requires it to
+	// validate on this machine.
+	MachineMAC string `json:"machine_mac,omitempty"`
 
 	// Key identity (C4): optional ed25519 signature over the canonical JSON
 	// of the bundle with the signature section cleared. Absent for
@@ -141,15 +148,15 @@ type EdgeAccess struct {
 // struct. ValidationOutcome is included so the bundle's own hash covers what
 // the audit chain's computeAuditHash does not (a documented gap).
 type AuditEntrySnapshot struct {
-	ID                string                        `json:"id"`
-	Timestamp         time.Time                     `json:"timestamp"`
-	AgentID           string                        `json:"agent_id"`
-	Action            string                        `json:"action"`
-	Resource          string                        `json:"resource"`
-	Result            string                        `json:"result"`
-	Hash              string                        `json:"hash"`
-	TaskID            string                        `json:"task_id,omitempty"`
-	ValidationOutcome *governance.ValidationOutcome `json:"validation_outcome,omitempty"`
+	ID                string                      `json:"id"`
+	Timestamp         time.Time                   `json:"timestamp"`
+	AgentID           string                      `json:"agent_id"`
+	Action            string                      `json:"action"`
+	Resource          string                      `json:"resource"`
+	Result            string                      `json:"result"`
+	Hash              string                      `json:"hash"`
+	TaskID            string                      `json:"task_id,omitempty"`
+	ValidationOutcome *govaudit.ValidationOutcome `json:"validation_outcome,omitempty"`
 }
 
 // defaultAgentPermissions mirrors the built-in default agent (governance.
@@ -251,9 +258,33 @@ func Generate(root, agentID, task string, ix *index.Index) (*Bundle, error) {
 		b.AuditChainHash = trail[len(trail)-1].Hash
 	}
 
-	// Seal the bundle: SHA-256 over canonical JSON of everything above.
+	// Seal the bundle: SHA-256 over canonical JSON of everything above...
 	b.BundleHash = computeBundleHash(b)
+	// ...then key the seal with the machine secret (2026-10-28 campaign):
+	// a bare digest is recomputable by a workspace-level attacker, so
+	// a forged self-consistent bundle was possible. The machine MAC is
+	// stamped over the bundle hash; an absent stamp is legacy (digest-only).
+	stampMachineMAC(b)
 	return b, nil
+}
+
+// Reseal re-computes the bundle hash and re-stamps the machine-keyed seal —
+// the ONE supported way to mutate a bundle after Generate (attaching a trust
+// chain, or any other legitimate post-export addition). Manually setting
+// BundleHash alone now fails Verify: the machine MAC covers the previous
+// hash and a recomputed digest without a fresh stamp reads as forgery.
+func (b *Bundle) Reseal() {
+	b.BundleHash = computeBundleHash(b)
+	stampMachineMAC(b)
+}
+
+// stampMachineMAC keys the current bundle hash with the machine secret.
+// Best-effort by design: when the secret is unavailable the bundle stays
+// digest-only (still tamper-evident, weaker than keyed — the CLI reports it).
+func stampMachineMAC(b *Bundle) {
+	if mac, err := governance.StampMachineMAC([]byte(b.BundleHash)); err == nil {
+		b.MachineMAC = mac
+	}
 }
 
 // lineageFromScope maps an authorized scope to the bundle's lineage records.
@@ -278,7 +309,7 @@ func lineageFromScope(scope governance.AuthorizedScope, task string) *LineageSec
 // absent trail is not an error (fresh repo with no governance events yet).
 func snapshotAuditTrail(root string) ([]AuditEntrySnapshot, error) {
 	store := storage.NewLog(filepath.Join(root, ".kern", "audit"))
-	log := governance.NewAuditLog().WithStore(store)
+	log := govaudit.NewAuditLog().WithStore(store)
 	if _, err := log.Replay(); err != nil {
 		return nil, fmt.Errorf("evidence: replay audit chain: %w", err)
 	}
@@ -321,6 +352,16 @@ func (b *Bundle) Verify() error {
 	}
 	if got := computeBundleHash(b); got != b.BundleHash {
 		return errors.New("evidence: bundle hash mismatch — content tampered or bundle_hash altered")
+	}
+	// Machine-keyed seal (2026-10-28 campaign): a PRESENT machine MAC must
+	// validate on this machine — a workspace-level forger cannot recompute
+	// it. An absent MAC is a legacy digest-only bundle (still verifies;
+	// the CLI surface reports the weaker seal). Cross-machine review of
+	// sealed bundles is the ed25519 signature's job (below): the machine
+	// MAC deliberately fails there, which is indistinguishable from
+	// forgery by design.
+	if b.MachineMAC != "" && !governance.MachineMACValid(b.MachineMAC, []byte(b.BundleHash)) {
+		return errors.New("evidence: machine-keyed seal mismatch — bundle was tampered with after export, or sealed on a different machine (for cross-machine review use a signed bundle: kern evidence sign)")
 	}
 	// Key identity (C4): when the bundle carries a signature, it must verify
 	// against the embedded public key over the canonical bundle bytes.
@@ -416,6 +457,7 @@ func computeBundleHash(b *Bundle) string {
 	cpy := *b
 	cpy.BundleHash = ""
 	cpy.Signature = nil
+	cpy.MachineMAC = ""
 	data, err := json.Marshal(&cpy)
 	if err != nil {
 		// Cannot happen for this type set (no unsupported values); fail the

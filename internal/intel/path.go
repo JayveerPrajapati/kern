@@ -283,6 +283,7 @@ func RenderPath(ix *index.Index, path []string) string {
 		return "no path found (symbols are not connected through project-local calls)"
 	}
 	var b strings.Builder
+	backward := false
 	for i, hop := range path {
 		var adjacent []string
 		if i > 0 {
@@ -296,7 +297,17 @@ func RenderPath(ix *index.Index, path []string) string {
 			b.WriteString(hop)
 		} else {
 			prev := path[i-1]
-			b.WriteString("\n   \u2192 ")
+			arrow := "\u2194"
+			switch edgeDirection(ix, prev, hop) {
+			case 1:
+				arrow = "\u2192"
+			case -1:
+				arrow = "\u2190"
+				backward = true
+			}
+			b.WriteString("\n   ")
+			b.WriteString(arrow)
+			b.WriteString(" ")
 			b.WriteString(hop)
 			if label := EdgeConfidenceLabel(ix, prev, hop); label != "" {
 				b.WriteString(" [" + label + "]")
@@ -310,5 +321,31 @@ func RenderPath(ix *index.Index, path []string) string {
 			b.WriteString(l)
 		}
 	}
+	if backward {
+		b.WriteString("\n   (\u2192 caller\u2192callee; \u2190 callee\u2192caller; \u2194 no recorded edge direction — the path search follows call edges in either direction)")
+	}
 	return b.String()
+}
+
+// edgeDirection reports the recorded call-edge direction between two adjacent
+// path hops: 1 when from calls to, -1 when to calls from, 0 when no directed
+// edge is recorded (the path may still have traversed it via a synthesized or
+// heuristic linkage).
+func edgeDirection(ix *index.Index, from, to string) int {
+	if ix == nil {
+		return 0
+	}
+	from = canonicalSimple(ix, from)
+	to = canonicalSimple(ix, to)
+	for _, e := range ix.Calls[from] {
+		if canonicalSimple(ix, e.Target) == to {
+			return 1
+		}
+	}
+	for _, e := range ix.Calls[to] {
+		if canonicalSimple(ix, e.Target) == from {
+			return -1
+		}
+	}
+	return 0
 }

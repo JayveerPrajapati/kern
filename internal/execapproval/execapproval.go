@@ -1,7 +1,9 @@
 // Package execapproval contains the pure integrity primitives for exec
-// approvals: injective HMAC framing, stamp creation/verification, and the
-// MAC-verified consumed-approval ledger. Callers own secret and ledger-path
-// resolution; this package never reads process-global configuration.
+// approvals: Ed25519 operator signatures (the grant authority — see sign.go
+// and keystore.go), injective HMAC framing for pending-record tamper detection
+// and the mutable prefix-use counter, and the MAC-verified consumed-approval
+// ledger. Callers own secret, signing-key and ledger-path resolution; this
+// package never reads process-global configuration.
 package execapproval
 
 import (
@@ -25,27 +27,34 @@ import (
 // integrity-stamped: ArtifactID = "exec-approval:<hex HMAC>".
 const StampPrefix = "exec-approval:"
 
-// macFormatVersion versions the MAC serialization: v3 adds the
-// Ask-Protocol grant fields (Scope, Prefix, Command, ExpiresAt, MaxUses,
-// Uses) to the MAC input. Records stamped by a v2 binary (no grant fields)
-// must keep validating — a legacy stamp is not a forgery — so MACValid
-// accepts the current AND the legacy framing; MAC/Stamp always stamp with
-// the current version only.
-const macFormatVersion = 3
-const macLegacyVersion = 2
+// macFormatVersion versions the MAC serialization: v4 binds the approval
+// to a canonical ROOT IDENTITY (first field after the version byte), so a
+// record copied to a different workspace (a copied .kern/approvals.json —
+// 2026-10-28 campaign) cannot grant there. v3 added the
+// Ask-Protocol grant fields; v2 was the pre-ask-protocol framing. Records
+// stamped by an older binary must keep validating — a legacy stamp is not
+// a forgery — so MACValid accepts the current AND both legacy framings;
+// MAC/Stamp always stamp with the current version only. Root identity
+// canonicalization is the caller's (governance) job; an empty rootID is a
+// distinct identity from every real root.
+const macFormatVersion = 4
+const macLegacyVersion = 3
+const macLegacyVersion2 = 2
 
 // MAC computes an HMAC-SHA256 over the full decision-relevant approval
-// record. Length-prefixed field and list framing makes the representation
-// injective, so field-boundary re-framing cannot preserve a valid stamp.
-func MAC(a domain.Approval, secret []byte) ([]byte, error) {
-	return macCompute(a, secret, macFormatVersion)
+// record, bound to the canonical root identity. Length-prefixed field and
+// list framing makes the representation injective, so field-boundary
+// re-framing cannot preserve a valid stamp.
+func MAC(a domain.Approval, secret []byte, rootID string) ([]byte, error) {
+	return macCompute(a, secret, macFormatVersion, rootID)
 }
 
-// macCompute computes the HMAC under a specific format version. v3 hashes
-// the grant fields after the evidence list; v2 (legacy) stops before them —
-// that is exactly the byte stream a pre-ask-protocol binary hashed, so its
-// stamps keep verifying.
-func macCompute(a domain.Approval, secret []byte, version byte) ([]byte, error) {
+// macCompute computes the HMAC under a specific format version. v4 hashes
+// the root identity first; v3 (legacy) hashes the ask-protocol grant fields
+// after the evidence list; v2 (legacy) stops before them — those are
+// exactly the byte streams pre-v4 binaries hashed, so their stamps keep
+// verifying.
+func macCompute(a domain.Approval, secret []byte, version byte, rootID string) ([]byte, error) {
 	if len(secret) != sha256.Size {
 		return nil, fmt.Errorf("exec approval secret is %d bytes, want %d", len(secret), sha256.Size)
 	}
@@ -67,6 +76,9 @@ func macCompute(a domain.Approval, secret []byte, version byte) ([]byte, error) 
 			_, _ = h.Write([]byte{1})
 		}
 		_, _ = h.Write([]byte{0})
+	}
+	if version >= 4 {
+		field(rootID)
 	}
 	field(a.ID)
 	field(a.TaskID)
@@ -104,9 +116,10 @@ func macCompute(a domain.Approval, secret []byte, version byte) ([]byte, error) 
 	return h.Sum(nil), nil
 }
 
-// Stamp builds the integrity stamp for an approval record.
-func Stamp(a domain.Approval, secret []byte) (string, error) {
-	mac, err := MAC(a, secret)
+// Stamp builds the integrity stamp for an approval record, bound to the
+// canonical root identity.
+func Stamp(a domain.Approval, secret []byte, rootID string) (string, error) {
+	mac, err := MAC(a, secret, rootID)
 	if err != nil {
 		return "", err
 	}
@@ -122,11 +135,14 @@ func StampFrom(a domain.Approval) string {
 	return ""
 }
 
-// MACValid verifies an exec-stamped record's HMAC. Missing stamps, malformed
-// stamps, wrong-length MACs, invalid secrets, and mismatches all return
-// false. A stamp made under ANY known format version (current or legacy)
-// validates — a legacy-stamped record is not a forgery.
-func MACValid(a domain.Approval, secret []byte) bool {
+// MACValid verifies an exec-stamped record's HMAC against the canonical
+// root identity the caller resolved. Missing stamps, malformed stamps,
+// wrong-length MACs, invalid secrets, and mismatches all return false. A
+// stamp made under ANY known format version (current or legacy) validates
+// — a legacy-stamped record is not a forgery — but only the CURRENT (v4,
+// root-bound) stamp validates at a DIFFERENT root identity than the record
+// was stamped for: a v4 record copied to another workspace fails here.
+func MACValid(a domain.Approval, secret []byte, rootID string) bool {
 	storedHex := StampFrom(a)
 	if storedHex == "" {
 		return false
@@ -135,8 +151,8 @@ func MACValid(a domain.Approval, secret []byte) bool {
 	if err != nil || len(stored) != sha256.Size {
 		return false
 	}
-	for _, version := range []byte{macFormatVersion, macLegacyVersion} {
-		want, err := macCompute(a, secret, version)
+	for _, version := range []byte{macFormatVersion, macLegacyVersion, macLegacyVersion2} {
+		want, err := macCompute(a, secret, version, rootID)
 		if err == nil && hmac.Equal(stored, want) {
 			return true
 		}

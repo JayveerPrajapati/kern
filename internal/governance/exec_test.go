@@ -345,12 +345,31 @@ func overrideExecApprovalSecret(t *testing.T) {
 	execConsumedLedgerPath = func() (string, error) {
 		return filepath.Join(ledgerDir, "exec-consumed.log"), nil
 	}
+	// P0-3: grants now require the operator Ed25519 signature. Redirect the
+	// signing-key envelope next to the other test secrets so tests never touch
+	// the real user config dir and can use a fixed test passphrase.
+	signingDir := t.TempDir()
+	origSigning := execApprovalSigningKeyPath
+	execApprovalSigningKeyPath = func() (string, error) {
+		return filepath.Join(signingDir, "exec-approval-signing.json"), nil
+	}
 	t.Cleanup(func() {
 		execApprovalSecretPath = orig
 		execApprovalSecretOnce = sync.Once{}
 		execApprovalSecretKey = nil
 		execApprovalSecretErr = nil
 		execConsumedLedgerPath = origLedger
+		execApprovalSigningKeyPath = origSigning
+	})
+}
+
+// testExecSigner is the operator signer used by governance tests: a fixed
+// passphrase over the redirected test key. It exercises the real Ed25519
+// path (including key creation/encryption), not a stub.
+func testExecSigner(t *testing.T) ExecSigner {
+	t.Helper()
+	return NewExecSigner(func(create bool) ([]byte, error) {
+		return []byte("test-approval-passphrase"), nil
 	})
 }
 
@@ -365,7 +384,7 @@ func TestExecApprovalMACFieldBoundaryInjective(t *testing.T) {
 	overrideExecApprovalSecret(t)
 	macOf := func(a domain.Approval) []byte {
 		t.Helper()
-		m, err := execApprovalMAC(a)
+		m, err := execApprovalMAC(a, "/test/root")
 		if err != nil {
 			t.Fatalf("execApprovalMAC: %v", err)
 		}
@@ -442,7 +461,7 @@ func TestCheckExecCommandApprovalLifecycle(t *testing.T) {
 	if len(a.EvidenceRefs) != 1 || a.EvidenceRefs[0] != "echo hello" {
 		t.Fatalf("approval should carry the command text as evidence, got %v", a.EvidenceRefs)
 	}
-	if !execApprovalMACValid(a) {
+	if !execApprovalMACValid(a, execRootIdentity(root)) {
 		t.Fatalf("persisted approval must carry a valid integrity stamp (R1), got %+v", a)
 	}
 
@@ -457,12 +476,12 @@ func TestCheckExecCommandApprovalLifecycle(t *testing.T) {
 
 	// 3. Approve id the way `kern approve <id>` does (shared store decision;
 	// the re-stamp over the new status happens inside Decide).
-	if _, derr := store.Decide(id, "oncall-human", true, ""); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", true, "", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 	if approved, gerr := store.Get(id); gerr != nil || approved.Status != "approved" {
 		t.Fatalf("approved record = %+v, err=%v", approved, gerr)
-	} else if !execApprovalMACValid(approved) {
+	} else if !execApprovalMACValid(approved, execRootIdentity(root)) {
 		t.Fatalf("approved record must be re-stamped over its new status (R1), got %+v", approved)
 	}
 
@@ -656,7 +675,7 @@ func TestCheckExecCommandReadonlyKeepsRejectionSticky(t *testing.T) {
 	}
 	id := approvalIDFromErr(t, err)
 	store := NewFileStore(root)
-	if _, derr := store.Decide(id, "oncall-human", false, "not this campaign"); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", false, "not this campaign", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 	// The readonly path shares checkExecCommandCore, so the sticky rejection
@@ -709,10 +728,10 @@ func TestExecApprovalTamperedReasonDenied(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("get: %v", gerr)
 	}
-	if ApprovalIntegrityOK(tampered) {
+	if ApprovalIntegrityOK(tampered, root) {
 		t.Fatal("tampered record must fail the integrity check")
 	}
-	if _, derr := store.Decide(id, "oncall-human", true, ""); derr == nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", true, "", testExecSigner(t)); derr == nil {
 		t.Fatal("Decide must refuse a tampered record")
 	} else if !strings.Contains(derr.Error(), "integrity check failed") {
 		t.Fatalf("Decide error should mention integrity, got: %v", derr)
@@ -735,7 +754,7 @@ func TestExecApprovalReplayDenied(t *testing.T) {
 	}
 	id := approvalIDFromErr(t, err)
 	store := NewFileStore(root)
-	if _, derr := store.Decide(id, "oncall-human", true, ""); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", true, "", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 	// Snapshot the approved record (what a governed client could keep).
@@ -831,7 +850,7 @@ func TestCheckExecDangerousClassLifecycle(t *testing.T) {
 	}
 	id := approvalIDFromErr(t, err)
 	store := NewFileStore(root)
-	if _, derr := store.Decide(id, "oncall-human", true, ""); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", true, "", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 	if err := CheckExecCommand("rm -rf /tmp/x", root, "kern_sandbox"); err != nil {
@@ -859,7 +878,7 @@ func TestCheckExecCommandRejectionSticky(t *testing.T) {
 	}
 	id := approvalIDFromErr(t, err)
 	store := NewFileStore(root)
-	if _, derr := store.Decide(id, "oncall-human", false, "not this campaign"); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", false, "not this campaign", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 
@@ -957,7 +976,7 @@ func TestExecRejectionTTLExpiry(t *testing.T) {
 		t.Fatal("dangerous command must be gated at default risk")
 	}
 	id := approvalIDFromErr(t, err)
-	if _, derr := NewFileStore(root).Decide(id, "oncall-human", false, "reprobe later"); derr != nil {
+	if _, derr := NewFileStore(root).DecideWithSigner(id, "oncall-human", false, "reprobe later", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 
@@ -994,7 +1013,7 @@ func TestExecRejectionClearReopensPath(t *testing.T) {
 	}
 	id := approvalIDFromErr(t, err)
 	store := NewFileStore(root)
-	if _, derr := store.Decide(id, "oncall-human", false, "not this campaign"); derr != nil {
+	if _, derr := store.DecideWithSigner(id, "oncall-human", false, "not this campaign", testExecSigner(t)); derr != nil {
 		t.Fatalf("Decide: %v", derr)
 	}
 

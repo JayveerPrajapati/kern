@@ -369,6 +369,15 @@ type Approval struct {
 	ExpiresAt time.Time // prefix grants lapse; zero = no expiry
 	MaxUses   int       // prefix grants: use cap (0 = engine default)
 	Uses      int       // prefix grants: uses consumed so far
+
+	// Signature is an Ed25519 signature over the decision-relevant record,
+	// produced only by the interactive operator approval path (the private
+	// key is unlocked by the operator passphrase; see internal/execapproval).
+	// It is the grant authority: an approved exec record is accepted only
+	// when this verifies against the operator's public key. The HMAC stamp is
+	// not included in the signed message and remains only for pending-record
+	// tamper detection and the mutable prefix-use counter.
+	Signature string
 }
 
 // Agent is an AI agent identity.
@@ -475,7 +484,20 @@ type ImpactReport struct {
 	ArchitectureRules     []string `json:"architecture_rules"`                 // which architecture rules apply
 	Risk                  string   `json:"risk"`                               // low | medium | high (from criticality)
 	RiskDetail            string   `json:"risk_detail,omitempty"`              // what drove the risk tier, e.g. "134 transitive dependents" (P2: differentiates a saturated "high" hub from a leaf)
-	Evidence              string   `json:"evidence"`                           // P2 anchor for the target (file:line + certificate)
+	// TypeExpanded is set when the target is a type and its blast radius was
+	// computed from the type's methods and constructors (call edges never
+	// attach to a Go/Java/TS type node itself). Empty for non-type targets.
+	TypeExpanded string `json:"type_expanded,omitempty"`
+	// ReferenceFiles / ReferenceCount / ReferenceConfidence are the
+	// TEXTUAL-reference safety net for symbols the call graph cannot cover
+	// (a type used only in declarations, a const, a var, an interface). When
+	// the call graph yields no signal for such a symbol, Risk is "unknown"
+	// (never "low") and these carry the word-boundary reference scan:
+	// confidence is always "textual" (comments/strings/other packages count).
+	ReferenceFiles      []string `json:"reference_files,omitempty"`
+	ReferenceCount      int      `json:"reference_count,omitempty"`
+	ReferenceConfidence string   `json:"reference_confidence,omitempty"`
+	Evidence            string   `json:"evidence"` // P2 anchor for the target (file:line + certificate)
 	// Entities are the twin entity nodes (API / DB table / service /
 	// deployment) implicated by the change's blast radius. Populated by the
 	// app layer which owns the twin graph; empty when no twin entities

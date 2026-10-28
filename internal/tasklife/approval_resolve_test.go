@@ -7,7 +7,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 )
 
 // workflowFixtureRoot writes a minimal Go fixture so the platform can analyze
@@ -23,7 +23,7 @@ func workflowFixtureRoot(t *testing.T) string {
 
 // transitionReasons collects the from -> to reasons of every task.transition
 // audit entry, in chain order.
-func transitionReasons(entries []governance.AuditEntry) []string {
+func transitionReasons(entries []govaudit.AuditEntry) []string {
 	var out []string
 	for _, e := range entries {
 		if e.Action == "task.transition" {
@@ -101,8 +101,8 @@ func TestResolveApprovalForTaskAdvancesGatedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
 	}
-	var crossed *governance.AuditEntry
-	var decision *governance.AuditEntry
+	var crossed *govaudit.AuditEntry
+	var decision *govaudit.AuditEntry
 	for i := range entries {
 		switch {
 		case entries[i].Action == "task.transition" &&
@@ -164,7 +164,7 @@ func TestResolveApprovalForTaskRejectMarksTaskRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
 	}
-	var decision *governance.AuditEntry
+	var decision *govaudit.AuditEntry
 	for i := range entries {
 		if entries[i].Action == "reject" && entries[i].TaskID == task.ID {
 			decision = &entries[i]

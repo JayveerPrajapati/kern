@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/clip"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -318,7 +319,7 @@ const fullMapBudget = 1 << 20
 // cannot push control runes or unbounded bytes into the digest).
 func renderProjectMap(p *code.Project, budget int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s (%d files", index.ClipReflect(p.Root, 160), len(p.Files))
+	fmt.Fprintf(&b, "Project: %s (%d files", clip.ClipReflect(p.Root, 160), len(p.Files))
 	if p.CacheHit > 0 {
 		fmt.Fprintf(&b, ", %d from cache", p.CacheHit)
 	}
@@ -348,7 +349,7 @@ func renderProjectMap(p *code.Project, budget int) string {
 // full map is one `kern buddy --map` (or `kern project_map`) away.
 func renderProjectOverview(p *code.Project) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s (%d files", index.ClipReflect(p.Root, 160), len(p.Files))
+	fmt.Fprintf(&b, "Project: %s (%d files", clip.ClipReflect(p.Root, 160), len(p.Files))
 	if p.CacheHit > 0 {
 		fmt.Fprintf(&b, ", %d from cache", p.CacheHit)
 	}

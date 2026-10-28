@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 )
 
 // captureStderr runs fn with os.Stderr redirected to a pipe and returns
@@ -45,8 +45,8 @@ func auditTestRoot(t *testing.T) string {
 func recordAuditEntries(t *testing.T, p *testPlatform) {
 	t.Helper()
 	log := p.Firewall().AuditLog()
-	log.Record(governance.AuditEntry{AgentID: "agent-a", Action: "write", Resource: "source", Result: "allowed"})
-	log.Record(governance.AuditEntry{AgentID: "agent-b", Action: "write", Resource: "source", Result: "blocked"})
+	log.Record(govaudit.AuditEntry{AgentID: "agent-a", Action: "write", Resource: "source", Result: "allowed"})
+	log.Record(govaudit.AuditEntry{AgentID: "agent-b", Action: "write", Resource: "source", Result: "blocked"})
 	if !log.VerifyChain() {
 		t.Fatal("chain should be intact after recording")
 	}
@@ -62,7 +62,7 @@ func tamperFirstAuditEntry(t *testing.T, root string) {
 	// Legacy format: one JSON document per key.
 	first := filepath.Join(auditDir, "audit-audit-1.json")
 	if data, err := os.ReadFile(first); err == nil {
-		var e governance.AuditEntry
+		var e govaudit.AuditEntry
 		if err := json.Unmarshal(data, &e); err != nil {
 			t.Fatalf("unmarshal persisted entry: %v", err)
 		}
@@ -93,7 +93,7 @@ func tamperFirstAuditEntry(t *testing.T, root string) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec.K != "audit-audit-1" {
 			continue
 		}
-		var e governance.AuditEntry
+		var e govaudit.AuditEntry
 		if err := json.Unmarshal(rec.V, &e); err != nil {
 			t.Fatalf("unmarshal persisted entry: %v", err)
 		}

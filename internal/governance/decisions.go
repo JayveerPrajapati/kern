@@ -5,6 +5,7 @@ package governance
 import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 )
 
 // PolicyDecision records the outcome of a single policy evaluation: which
@@ -20,8 +21,8 @@ type PolicyDecision struct {
 // allowed/pending, PolicyBlocked for denied/blocked — mirroring the existing
 // Check conventions). The audit entry carries Result=Decision and the new
 // Policy/Reason fields. Never fails (mirrors AuditLog.Record).
-func RecordDecision(l *AuditLog, bus *eventbus.Bus, agentID, resource, action string, d PolicyDecision, risk domain.Risk) {
-	l.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: d.Decision, Policy: d.Policy, Reason: d.Reason})
+func RecordDecision(l *govaudit.AuditLog, bus *eventbus.Bus, agentID, resource, action string, d PolicyDecision, risk domain.Risk) {
+	l.Record(govaudit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: d.Decision, Policy: d.Policy, Reason: d.Reason})
 	if bus == nil {
 		return
 	}

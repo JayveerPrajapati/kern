@@ -1,12 +1,14 @@
 package verification
 
 import (
-	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/licensescan"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // ---- License classifier unit tests ----
@@ -571,10 +573,31 @@ func TestKnownLicenseFallback(t *testing.T) {
 		{"github.com/mattn/go-pointer", "MIT"},
 		{"github.com/ncruces/go-strftime", "MIT"},
 		{"github.com/remyoudompheng/bigfft", "BSD-3-Clause"},
+		// Common service-stack modules (LICENSE text read from the module
+		// cache during the 2026-10-26 QA audit).
+		{"cel.dev/cel-go", "Apache-2.0"},
+		{"github.com/confluentinc/confluent-kafka-go", "Apache-2.0"},
+		{"github.com/quic-go/quic-go", "MIT"},
+		{"github.com/rs/zerolog", "MIT"},
+		{"github.com/clbanning/mxj", "MIT"},
+		{"github.com/swaggo/gin-swagger", "MIT"},
+		{"github.com/swaggo/files", "MIT"},
+		{"github.com/swaggo/swag", "MIT"},
+		{"github.com/yalp/jsonpath", "BSD-3-Clause"},
+		{"github.com/bytedance/sonic", "Apache-2.0"},
+		{"github.com/cloudwego/base64x", "Apache-2.0"},
+		{"github.com/go-openapi/spec", "Apache-2.0"},
+		{"github.com/gin-contrib/sse", "MIT"},
+		{"github.com/gabriel-vasile/mimetype", "MIT"},
+		{"github.com/antlr4-go/antlr/v4", "BSD-3-Clause"},
+		{"github.com/KyleBanks/depth", "MIT"},
+		{"github.com/davecgh/go-spew", "ISC"},
+		{"gopkg.in/natefinch/lumberjack.v2", "MIT"},
+		{"gopkg.in/xmlpath.v2", "LGPL-3.0"},
 	}
 	for _, tc := range cases {
-		if got := knownLicense(tc.path); got != tc.want {
-			t.Errorf("knownLicense(%q) = %q, want %q", tc.path, got, tc.want)
+		if got := licensescan.Known(tc.path); got != tc.want {
+			t.Errorf("licensescan.Known(%q) = %q, want %q", tc.path, got, tc.want)
 		}
 	}
 }

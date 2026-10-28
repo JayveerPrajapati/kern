@@ -31,17 +31,18 @@ var buildLockPoll = 250 * time.Millisecond
 // never wedges the lock. Any other failure (e.g. the .kern/locks directory
 // cannot be created) is treated as "no lock": callers fall back to rebuilding
 // directly, never hang.
-func tryBuildLock(root string) (release func(), acquired bool) {
+func tryBuildLock(root string) (release func(), acquired, contended bool) {
 	l, err := lock.Acquire(root, buildLockScope)
 	if err != nil {
 		if !errors.Is(err, lock.ErrLocked) {
 			// Lock weirdness (unwritable .kern, exotic fs): rebuild without
 			// the lock — conservative, never hang.
 			log.Printf("kern index: build lock unavailable for %s (%v); rebuilding without it", root, err)
+			return nil, false, false
 		}
-		return nil, false
+		return nil, false, true
 	}
-	return func() { _ = l.Release() }, true
+	return func() { _ = l.Release() }, true, false
 }
 
 // debouncedRebuild runs a stale-index rebuild under the exclusive
@@ -87,7 +88,7 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	release, acquired := tryBuildLock(root)
+	release, acquired, contended := tryBuildLock(root)
 	if acquired {
 		defer release()
 		ix, fresh := check()
@@ -95,6 +96,12 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 			return ix, nil
 		}
 		return rebuild(ix)
+	}
+	if !contended {
+		// The lock could not be created at all (e.g. an unwritable or
+		// nonexistent root): this is NOT contention, so waiting the full
+		// BuildLockWait budget would be a lie and a stall. Rebuild directly.
+		return rebuild(nil)
 	}
 	log.Printf("kern index: another process is rebuilding the index for %s; waiting (up to %s)", root, BuildLockWait)
 	deadline := time.Now().Add(BuildLockWait)
@@ -107,7 +114,7 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
-		release, acquired = tryBuildLock(root)
+		release, acquired, contended = tryBuildLock(root)
 		if acquired {
 			defer release()
 			ix, fresh := check()
@@ -116,6 +123,10 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 				return ix, nil
 			}
 			return rebuild(ix)
+		}
+		if !contended {
+			log.Printf("kern index: build lock became unavailable for %s; rebuilding without it", root)
+			return rebuild(nil)
 		}
 	}
 	// Bounded wait exhausted: the holder is either very slow or wedged. Fall

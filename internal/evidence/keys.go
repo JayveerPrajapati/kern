@@ -100,7 +100,10 @@ func LoadOrCreateKeys(root string) (*KeyPair, error) {
 		// again: if another process won the pub write (impossible when we
 		// won the priv write — the pub writer is the same winner), the
 		// re-read below validates whatever is on disk.
-		if err := writeKeyExcl(pubPath, pub, 0o644); err != nil && !errors.Is(err, fs.ErrExist) {
+		// The pub key is written atomically (temp + rename): a concurrent
+		// first-use reader must never observe a partial public key. The
+		// private key's O_EXCL write remains the arbiter of the pair.
+		if err := writeFileAtomic(pubPath, pub, 0o644); err != nil {
 			return nil, fmt.Errorf("evidence: write public key: %w", err)
 		}
 	}
@@ -138,10 +141,11 @@ func keyPairFromFileRetry(privPath, pubPath string) (*KeyPair, error) {
 			return kp, nil
 		}
 		lastErr = err
-		if !errors.Is(err, fs.ErrNotExist) {
-			// A real corruption/mismatch will not self-heal; fail fast.
-			return nil, err
-		}
+		// Retry every failure, not only ErrNotExist: a concurrent first-use
+		// winner may be mid-write, so a reader can briefly observe a
+		// zero-length/partial key (wrong length) or a stale pubkey before the
+		// atomic rename. A genuinely corrupt key still fails closed after
+		// the bounded retry window.
 		time.Sleep(20 * time.Millisecond)
 	}
 	return nil, lastErr
@@ -160,6 +164,29 @@ func writeKeyExcl(path string, data []byte, mode fs.FileMode) error {
 		return werr
 	}
 	return cerr
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory
+// and an atomic rename, so concurrent readers never see a partial file.
+func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".ed25519-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // keyPairFromFile loads and validates the stored keypair. On a first-use

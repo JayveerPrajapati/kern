@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/JayveerPrajapati/kern/internal/licensescan"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"os"
 	"os/exec"
@@ -186,7 +188,7 @@ var licenseSignatures = []struct {
 	{"ISC", []string{"permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted"}},
 	{"MIT", []string{"permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files"}},
 	{"Apache-2.0", []string{"apache license", "version 2.0"}},
-	{"MPL-2.0", []string{"mozilla public license version 2.0"}},
+	{"MPL-2.0", []string{"mozilla public license", "version 2.0"}},
 	{"LGPL-3.0", []string{"lesser general public license", "version 3"}},
 	{"LGPL-2.1", []string{"lesser general public license", "version 2.1"}},
 	{"GPL-3.0", []string{"general public license", "version 3"}},
@@ -246,81 +248,9 @@ func classifyLicense(text string) string {
 	return "unknown"
 }
 
-// knownLicenses is a deterministic best-effort fallback for modules whose
-// LICENSE text is NOT available locally (the common case: a go.mod without a
-// vendor/ tree, where every dependency would otherwise classify "unknown").
-// It maps famous module paths / path prefixes to their well-known license.
-// Deterministic and false-positive-averse: anything not in the map stays
-// "unknown" rather than guessed (F7).
-var knownLicenses = []struct {
-	prefix string
-	lic    string
-}{
-	{"golang.org/x/", "BSD-3-Clause"},
-	{"google.golang.org/", "Apache-2.0"},
-	{"github.com/aws/", "Apache-2.0"},
-	{"github.com/docker/", "Apache-2.0"},
-	{"github.com/google/uuid", "BSD-3-Clause"},
-	{"github.com/stretchr/testify", "MIT"},
-	{"github.com/sirupsen/logrus", "MIT"},
-	{"github.com/spf13/cobra", "Apache-2.0"},
-	{"github.com/spf13/pflag", "BSD-3-Clause"},
-	{"github.com/spf13/viper", "MIT"},
-	{"github.com/pkg/errors", "BSD-2-Clause"},
-	{"github.com/prometheus/client_golang", "Apache-2.0"},
-	{"github.com/gorilla/mux", "BSD-3-Clause"},
-	{"github.com/golang/protobuf", "BSD-3-Clause"},
-	{"github.com/gin-gonic/gin", "MIT"},
-	{"github.com/labstack/echo", "MIT"},
-	{"gopkg.in/yaml.v3", "MIT"},
-	{"gopkg.in/yaml.v2", "Apache-2.0"},
-	// tree-sitter grammar family — MIT per the LICENSE files in the Go
-	// module cache (each repo ships the standard MIT text; longest-prefix
-	// first so e.g. tree-sitter-javascript/tree-sitter-css are not shadowed
-	// by tree-sitter-java/tree-sitter-c).
-	{"github.com/UserNobody14/tree-sitter-dart", "MIT"},
-	{"github.com/tree-sitter/go-tree-sitter", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-typescript", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-javascript", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-java", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-python", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-rust", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-ruby", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-php", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-css", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-cpp", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-c", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-go", "MIT"},
-	{"github.com/tree-sitter/tree-sitter-bash", "MIT"},
-	// modernc.org family — BSD-3-Clause per the module-cache LICENSE files
-	// (modernc.org/token and ledongthuc/pdf carry the Go Authors BSD text).
-	{"github.com/ledongthuc/pdf", "BSD-3-Clause"},
-	{"modernc.org/sqlite", "BSD-3-Clause"},
-	{"modernc.org/gc/v3", "BSD-3-Clause"},
-	{"modernc.org/libc", "BSD-3-Clause"},
-	{"modernc.org/mathutil", "BSD-3-Clause"},
-	{"modernc.org/memory", "BSD-3-Clause"},
-	{"modernc.org/strutil", "BSD-3-Clause"},
-	{"modernc.org/token", "BSD-3-Clause"},
-	// Miscellaneous well-known modules read from the module cache.
-	{"github.com/dustin/go-humanize", "MIT"},
-	{"github.com/hashicorp/golang-lru/v2", "MPL-2.0"},
-	{"github.com/mattn/go-isatty", "MIT"},
-	{"github.com/mattn/go-pointer", "MIT"},
-	{"github.com/ncruces/go-strftime", "MIT"},
-	{"github.com/remyoudompheng/bigfft", "BSD-3-Clause"},
-}
-
-// knownLicense resolves a module path against the known-license map: the
-// first matching entry (longest-prefix sensitive via ordering) or "".
-func knownLicense(path string) string {
-	for _, k := range knownLicenses {
-		if strings.HasPrefix(path, k.prefix) {
-			return k.lic
-		}
-	}
-	return ""
-}
+// Module-license fallbacks (known-module table and local module-cache read)
+// live in internal/licensescan; this file owns only the vendor/LICENSE text
+// classifier and the per-module verdict assembly.
 
 // VerifyLicense parses go.mod (module list) and, when present,
 // vendor/modules.txt, then classifies each module's LICENSE text from the
@@ -332,8 +262,8 @@ func knownLicense(path string) string {
 // to the known-license map for famous module paths (F7).
 func (e *Engine) VerifyLicense() *verdict.LicenseResult {
 	res := &verdict.LicenseResult{OK: true}
-	gomod := filepath.Join(e.root, "go.mod")
-	vendorDir := filepath.Join(e.root, "vendor")
+	gomod := filepath.Join(e.goRoot(), "go.mod")
+	vendorDir := filepath.Join(e.goRoot(), "vendor")
 	modulesTxt := filepath.Join(vendorDir, "modules.txt")
 
 	var mods []licenseModule
@@ -373,7 +303,7 @@ func (e *Engine) VerifyLicense() *verdict.LicenseResult {
 		var licDir string
 		switch {
 		case m.Main:
-			licDir = e.root
+			licDir = e.goRoot()
 		case hasVendor:
 			licDir = filepath.Join(vendorDir, m.Path)
 		}
@@ -381,10 +311,19 @@ func (e *Engine) VerifyLicense() *verdict.LicenseResult {
 			lic = classifyLicense(findLicenseText(licDir))
 		}
 		if lic == "" || lic == "unknown" {
-			// No local LICENSE text matched a signature. Fall back to the
-			// known-license map before declaring "unknown" — a go.mod-only
-			// project would otherwise flag every dependency.
-			if k := knownLicense(m.Path); k != "" {
+			// No vendor/LICENSE text matched. Read the dependency's own
+			// LICENSE from the local Go module cache (offline, no go tool),
+			// then fall back to the known-license map before declaring
+			// "unknown" — a go.mod-only project would otherwise flag every
+			// dependency.
+			if text, ok := licensescan.ReadModuleLicense(m.Path); ok {
+				if c := classifyLicense(string(text)); c != "unknown" {
+					lic = c
+				}
+			}
+		}
+		if lic == "" || lic == "unknown" {
+			if k := licensescan.Known(m.Path); k != "" {
 				lic = k
 			}
 		}

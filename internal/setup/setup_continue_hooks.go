@@ -23,13 +23,29 @@ func continueSettingsPath() string {
 	return filepath.Join(home, ".continue", "settings.json")
 }
 
-// wireContinueHooks registers a PreToolUse hook in the Continue settings.json
-// that blocks built-in Read/Grep/Glob/Bash calls via the shared kern-guard
-// script (hard block + suggest; Continue treats hook exit code 2 as a tool
-// block). The hooks shape matches Continue's settings.hooks.<event>[] — the
-// same matcher+hooks group shape Claude/Qwen/Qoder use — so mergeHookGroups
-// preserves unrelated keys and never duplicates the kern group on re-run.
-func wireContinueHooks() Status {
-	return wireGuardHook("continue-hooks", "PreToolUse", "Bash|Read|Grep|Glob",
-		continueSettingsPath(), "continue PreToolUse hook registered")
+// wireContinueHooks registers Continue's PreToolUse guard plus its SessionStart
+// steering hook. Continue treats hook exit code 2 as a tool block; the hooks
+// shape matches settings.hooks.<event>[] (the same shape Claude/Qwen/Qoder
+// use), so mergeHookGroups preserves unrelated keys and never duplicates the
+// kern groups on re-run. Passing bin lets the session hook use the same
+// absolute command as every other host.
+func wireContinueHooks(bin string) Status {
+	path := continueSettingsPath()
+	st := wireGuardHook("continue-hooks", "PreToolUse", "Bash|Read|Grep|Glob",
+		path, "continue PreToolUse hook registered")
+	if !st.Installed {
+		return st
+	}
+	if err := mergeHookGroups(path, map[string]any{
+		"SessionStart": []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{"type": "command", "command": bin + ` hook session-brief "$CONTINUE_PROJECT_DIR"`},
+				},
+			},
+		},
+	}); err != nil {
+		return Status{Agent: "continue-hooks", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "continue-hooks", Installed: true, Path: path, Note: "continue PreToolUse + SessionStart hooks registered"}
 }
