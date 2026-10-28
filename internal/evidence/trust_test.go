@@ -116,14 +116,15 @@ func TestBundleVerify_TrustChain(t *testing.T) {
 	}
 	// A valid chain, re-sealed, must verify.
 	b.TrustChain = BuildTrustChain(sampleClaims())
-	b.BundleHash = computeBundleHash(b)
+	b.Reseal()
 	if err := b.Verify(); err != nil {
 		t.Fatalf("bundle with valid TrustChain must verify: %v", err)
 	}
-	// A tampered chain, re-sealed, must fail Verify.
+	// A tampered chain, re-sealed (including a FRESH machine MAC — a forger
+	// with sealing rights), must fail Verify on the chain rule itself.
 	b.TrustChain = BuildTrustChain(sampleClaims())
 	b.TrustChain.Links[0].From = Digest("not a listed claim")
-	b.BundleHash = computeBundleHash(b)
+	b.Reseal()
 	if err := b.Verify(); err == nil {
 		t.Fatal("bundle with invalid TrustChain must fail Verify")
 	}

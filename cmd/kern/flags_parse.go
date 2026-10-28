@@ -422,6 +422,12 @@ func (p *flagParser) parseCoreFlag(name, inline string, hasInline bool, i *int, 
 		p.setStr(i, args, &p.f.severity, inline, hasInline)
 	case "--engine":
 		p.setStr(i, args, &p.f.engine, inline, hasInline)
+	case "--namespace":
+		p.setStr(i, args, &p.f.namespace, inline, hasInline)
+	case "--a":
+		p.setStr(i, args, &p.f.textA, inline, hasInline)
+	case "--b":
+		p.setStr(i, args, &p.f.textB, inline, hasInline)
 	case "--lang":
 		p.setStr(i, args, &p.f.lang, inline, hasInline)
 	case "--stdin":

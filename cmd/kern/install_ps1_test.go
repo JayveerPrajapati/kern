@@ -91,3 +91,52 @@ func TestInstallPS1WiringStructure(t *testing.T) {
 		t.Error("stale per-repo trailer still present")
 	}
 }
+
+// TestInstallPS1UninstallRemovesMachineSecrets pins the uninstall contract:
+// %APPDATA%\kern (os.UserConfigDir on Windows: audit-chain key, approval
+// signing key/HMAC, consumed ledger) and %LOCALAPPDATA%\kern must be removed
+// with -Machine — and, since F4 (release audit 2026-10-28), ONLY with it: the
+// default uninstall is prefix-scoped so a scratch-prefix smoke cannot
+// destroy another install's machine state.
+func TestInstallPS1UninstallRemovesMachineSecrets(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "install.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := psFunc(t, string(b), "Uninstall-Kern")
+	for _, want := range []string{"APPDATA", "LOCALAPPDATA", `Join-Path $env:APPDATA "kern"`, "machine secrets"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Uninstall-Kern must remove machine secrets, missing %q", want)
+		}
+	}
+	for _, want := range []string{"$Machine", "KERN_UNINSTALL_MACHINE", "prefix-scoped"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Uninstall-Kern must gate machine cleanup behind -Machine (F4), missing %q", want)
+		}
+	}
+}
+
+// TestInstallPS1NoRemovedKernServer pins P0-5 (2026-10-28 adversarial audit):
+// cmd/kern-server does not exist, so the go-install fallback must not install
+// it and must not gate the surviving copies on its presence.
+func TestInstallPS1NoRemovedKernServer(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "install.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, banned := range []string{"cmd/kern-server", "kern-server.exe"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("install.ps1 still references removed binary %q", banned)
+		}
+	}
+	goInstall := psFunc(t, src, "Install-Go")
+	if strings.Contains(goInstall, `-and (Test-Path (Join-Path $goBin "kern-mcp.exe"))`) {
+		t.Error("the old all-three existence gate must be gone")
+	}
+	for _, want := range []string{`@("kern.exe", "kern-mcp.exe")`, `Test-Path (Join-Path $Prefix "kern.exe")`} {
+		if !strings.Contains(goInstall, want) {
+			t.Errorf("Install-Go must copy each binary independently, missing %q", want)
+		}
+	}
+}

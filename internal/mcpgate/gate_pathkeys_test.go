@@ -16,13 +16,15 @@ import (
 // confine. Every entry needs a reason; a tool-scoped key ("tool.arg") is
 // preferred over a bare arg name.
 var nonPathArgs = map[string]string{
-	"profile":                "a named compaction/analysis profile, not a file (the name merely contains \"file\")",
-	"max_files":              "an integer cap on how many files to list",
-	"kern_explain.target":    "a symbol or finding name to explain, not a filesystem path",
-	"kern_policy_dsl.policy": "inline policy YAML/JSON text (the default .kern/policy.yaml is read under the already-confined root)",
-	"kern_semantic.base":     "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
-	"kern_semantic.local":    "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
-	"kern_semantic.remote":   "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
+	"profile":                 "a named compaction/analysis profile, not a file (the name merely contains \"file\")",
+	"max_files":               "an integer cap on how many files to list",
+	"kern_explain.target":     "a symbol or finding name to explain, not a filesystem path",
+	"kern_policy_dsl.policy":  "inline policy YAML/JSON text (the default .kern/policy.yaml is read under the already-confined root)",
+	"kern_semantic.base":      "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
+	"kern_semantic.local":     "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
+	"kern_semantic.remote":    "inline source text or a path; the handler confines any path via fsutil.ConfinePath before reading",
+	"kern_explore.start_line": "an integer 1-based line number selecting a verbatim line window of an already-confined file (declared in the catalog 2026-10-26)",
+	"kern_explore.end_line":   "an integer 1-based line number selecting a verbatim line window of an already-confined file (declared in the catalog 2026-10-26)",
 }
 
 func TestGateConfinesDiffFilesArgsPerTool(t *testing.T) {

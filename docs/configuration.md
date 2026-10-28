@@ -57,18 +57,22 @@ counts. `KERN_CACHE_ARCHIVE_DAYS` (default 7) and `KERN_CACHE_TTL_DAYS`
 (default 30) drive the cache garbage collector: entries untouched past
 the archive age are gzip-compressed in place, and past the TTL they are
 evicted (`kern cache [root] [--dry-run]` runs it on demand; it also
-runs automatically, at most once an hour). `KERN_MCP_AUDIT_DIR` overrides
+runs automatically, at most once an hour). `KERN_CACHE_DIR` relocates the
+whole cache root (default `$XDG_CACHE_HOME/kern` or `~/.cache/kern`) for
+sandboxes that cannot write `~/.cache`; `KERN_CACHE_READONLY=1` keeps reads
+working while skipping cache writes. `KERN_MCP_AUDIT_DIR` overrides
 where the MCP server persists its tool-call audit chain (default
 `<project>/.kern/audit`). `KERN_MCP_ROOTS` (comma-separated directories;
-the `mcp.roots` config key and the historical `KERN_ROOTS` alias also
-apply) widens the tool workspace of the **single-root stdio MCP server**
+the historical `KERN_ROOTS` alias also applies) widens the tool workspace
+of the **single-root stdio MCP server**
 (`kern-mcp`): every tool root/dir/path argument is confined to these
-roots, falling back to the startup directory when unset. **Per-App tool
-servers ignore it:** the root-aware servers that back each web-console
-`/v1/tools/{name}` passthrough (single-project `kern serve` and every
-enterprise-mode project) confine to their App root ONLY — a
-`KERN_MCP_ROOTS` value naming another project's tree can never widen one
-project's console. `KERN_MCP_FULL=1` / `KERN_MCP_PHASE` / `KERN_MCP_CATEGORY` /
+roots, falling back to the startup directory when unset. The `mcp.roots`
+config key in `.kern/config.json` is honored only behind the operator's
+`KERN_MCP_ALLOW_CONFIG_ROOTS=1` opt-in — project-supplied config cannot
+widen server confinement by itself. (The former per-App web-console and
+enterprise tool servers were removed in the platform pivot; `kern-mcp` is
+the only server that honors these roots.)
+`KERN_MCP_FULL=1` / `KERN_MCP_PHASE` / `KERN_MCP_CATEGORY` /
 `KERN_MCP_SINGLE_TOOL` / `KERN_MCP_HIGH_LEVEL_ONLY` shape only what `tools/list`
 **advertises** — a named `tools/call` always dispatches through the full catalog.
 The full 32-tool catalog is the default surface (standing mandate 2026-10-23);
@@ -76,6 +80,10 @@ The full 32-tool catalog is the default surface (standing mandate 2026-10-23);
 agent phase plus the always-on meta/cross tools; `KERN_MCP_CATEGORY=<family>`
 keeps one tool family (e.g. `graph`, `verify`) with `kern_meta` always present;
 `KERN_MCP_SINGLE_TOOL=1` collapses the advertised surface to `kern_meta` alone;
+`KERN_MCP_SLIM=1` advertises the 8-tool core surface (meta, search, explore,
+context, impact, graph, verify, memory) with first-sentence descriptions and no
+schema prose — 5.7 KB instead of 36.8 KB, every other tool still reachable
+through `kern_meta`;
 `KERN_MCP_HIGH_LEVEL_ONLY=1` is the legacy 6-tool middle set, deprecated in
 favor of the default surface or `KERN_MCP_FULL=1`.
 - **`.kern/config.json`** (optional) — one config path for operator knobs,
@@ -110,7 +118,7 @@ favor of the default surface or `KERN_MCP_FULL=1`.
   open; unset keeps the default owner-only unix-socket / loopback behavior),
   `KERN_GITHUB_TOKEN`, `KERN_K8S_TOKEN`, OpenAI/Anthropic/Gemini keys,
   `KERN_ALLOW_*`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_NO_CONFINE`, `KERN_TOOLS`,
-  `KERN_MCP_FULL/PHASE/SINGLE_TOOL/HIGH_LEVEL_ONLY/AUDIT_DIR`,
+  `KERN_MCP_FULL/PHASE/SINGLE_TOOL/SLIM/HIGH_LEVEL_ONLY/AUDIT_DIR`,
   `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` (optional TLS for the HTTP MCP transport),
 `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
 isolation knobs, and installer vars.

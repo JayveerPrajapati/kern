@@ -24,6 +24,13 @@ export interface IncidentInvestigation {
   affected_service: string;
 }
 
+/**
+ * DEPRECATED: typed client for the removed kern-server REST API.
+ *
+ * The server was retired in the platform pivot; these `/v1/*` routes do not
+ * exist in a current install. Kept for source/contract compatibility — use
+ * `KernEngine` (local) or MCP (`kern mcp`) instead.
+ */
 export class Client {
   private base: string;
   private timeout: number;

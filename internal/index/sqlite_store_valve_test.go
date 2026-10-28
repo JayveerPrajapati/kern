@@ -4,13 +4,14 @@ package index
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"testing"
 )
 
 // WAL valve tests: exercise the valve added in sqlite_store.go
 // (wal_autocheckpoint=0 + maybeCheckpoint at the end of every Save).
 // The live (uncheckpointed) WAL size is measured with the package-internal
-// walLiveFrames helper (WAL-index header in the -shm file), since
+// indexdb.WalLiveFrames helper (WAL-index header in the -shm file), since
 // modernc.org/sqlite does not expose PRAGMA wal_pages.
 
 // valveTestIndex returns an index with n symbols, each row wide enough to be
@@ -43,15 +44,15 @@ func valvePageSize(t *testing.T, s *SQLiteStore) int64 {
 
 func valveLiveWALBytes(t *testing.T, s *SQLiteStore, pageSize int64) int64 {
 	t.Helper()
-	frames := walLiveFrames(s.path)
+	frames := indexdb.WalLiveFrames(s.path)
 	if frames < 0 {
-		t.Fatalf("walLiveFrames(%s) unreadable after save", s.path)
+		t.Fatalf("indexdb.WalLiveFrames(%s) unreadable after save", s.path)
 	}
 	return frames * pageSize
 }
 
-// TestWALValveBoundedGrowth writes enough rows to cross walTrigger (2 x
-// walSoftCap = 16 MiB of WAL) several times over, and asserts the live WAL
+// TestWALValveBoundedGrowth writes enough rows to cross indexdb.WalTrigger (2 x
+// indexdb.WalSoftCap = 16 MiB of WAL) several times over, and asserts the live WAL
 // stays below the trigger (with page-size slack) after every save. The valve
 // checkpoints at the end of the save that crosses the trigger, so a live WAL
 // of zero after a save is the observable proof the valve fired.
@@ -69,7 +70,7 @@ func TestWALValveBoundedGrowth(t *testing.T) {
 
 	peak := int64(0)
 	fired := false
-	const saves = 12
+	const saves = 24
 	for i := 0; i < saves; i++ {
 		if err := s.Save(ix); err != nil {
 			t.Fatalf("Save %d: %v", i+1, err)
@@ -81,17 +82,17 @@ func TestWALValveBoundedGrowth(t *testing.T) {
 		if live == 0 {
 			fired = true // a save reset the WAL: the valve checkpointed it
 		}
-		if live > walTrigger+pageSize {
-			t.Errorf("after save %d: live WAL = %d bytes, exceeds walTrigger %d + page-size slack",
-				i+1, live, walTrigger)
+		if live > indexdb.WalTrigger+pageSize {
+			t.Errorf("after save %d: live WAL = %d bytes, exceeds indexdb.WalTrigger %d + page-size slack",
+				i+1, live, indexdb.WalTrigger)
 		}
 	}
 	if !fired {
-		t.Fatalf("valve never checkpointed: cumulative writes never crossed walTrigger (%d bytes); peak live WAL = %d — test not exercising the valve",
-			walTrigger, peak)
+		t.Fatalf("valve never checkpointed: cumulative writes never crossed indexdb.WalTrigger (%d bytes); peak live WAL = %d — test not exercising the valve",
+			indexdb.WalTrigger, peak)
 	}
-	if peak < walSoftCap {
-		t.Errorf("peak live WAL %d bytes below walSoftCap %d: writes too small to be representative", peak, walSoftCap)
+	if peak < indexdb.WalSoftCap {
+		t.Errorf("peak live WAL %d bytes below indexdb.WalSoftCap %d: writes too small to be representative", peak, indexdb.WalSoftCap)
 	}
 }
 
@@ -109,16 +110,26 @@ func TestWALValveDataIntegrity(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	ix := valveTestIndex(dir, 6000)
-	const saves = 12
+	const saves = 24
+	page := valvePageSize(t, s)
+	fired := false
 	for i := 0; i < saves; i++ {
 		if err := s.Save(ix); err != nil {
 			t.Fatalf("Save %d: %v", i+1, err)
 		}
+		if valveLiveWALBytes(t, s, page) == 0 {
+			fired = true
+		}
 	}
-	// The write volume must have crossed the trigger, else the valve never
-	// ran and this test proves nothing about post-checkpoint integrity.
-	if live := valveLiveWALBytes(t, s, valvePageSize(t, s)); live != 0 {
-		t.Fatalf("live WAL %d bytes after %d saves: valve never checkpointed, test not meaningful", live, saves)
+	// The write sequence must have crossed the trigger at least once, else the
+	// valve never ran and this test proves nothing about post-checkpoint
+	// integrity. The FINAL save need not land exactly on a checkpoint: the WAL
+	// is bounded by the trigger, not reset to zero on every save.
+	if !fired {
+		t.Fatalf("valve never checkpointed across %d saves: the sequence did not cross indexdb.WalTrigger (%d bytes)", saves, indexdb.WalTrigger)
+	}
+	if live := valveLiveWALBytes(t, s, page); live > indexdb.WalTrigger+page {
+		t.Fatalf("live WAL %d bytes after %d saves exceeds indexdb.WalTrigger %d — WAL growth is unbounded", live, saves, indexdb.WalTrigger)
 	}
 
 	got, err := s.Load()
@@ -160,7 +171,7 @@ func TestWALValveDataIntegrity(t *testing.T) {
 
 // TestWALValveSmallWritesNoGrowth verifies the valve stays silent for the
 // incremental pattern it targets: a few small writes leave the live WAL tiny
-// (never near walSoftCap), fire no checkpoint, and produce no errors.
+// (never near indexdb.WalSoftCap), fire no checkpoint, and produce no errors.
 func TestWALValveSmallWritesNoGrowth(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
@@ -180,11 +191,11 @@ func TestWALValveSmallWritesNoGrowth(t *testing.T) {
 		if i == 0 && live == 0 {
 			t.Error("first small save produced no WAL frames: writes not landing in the WAL")
 		}
-		if live >= walTrigger {
-			t.Errorf("after small save %d: live WAL = %d bytes (>= walTrigger %d): checkpoint fired for tiny writes", i+1, live, walTrigger)
+		if live >= indexdb.WalTrigger {
+			t.Errorf("after small save %d: live WAL = %d bytes (>= indexdb.WalTrigger %d): checkpoint fired for tiny writes", i+1, live, indexdb.WalTrigger)
 		}
-		if live > walSoftCap {
-			t.Errorf("after small save %d: live WAL = %d bytes, want tiny (<= walSoftCap %d)", i+1, live, walSoftCap)
+		if live > indexdb.WalSoftCap {
+			t.Errorf("after small save %d: live WAL = %d bytes, want tiny (<= indexdb.WalSoftCap %d)", i+1, live, indexdb.WalSoftCap)
 		}
 	}
 }

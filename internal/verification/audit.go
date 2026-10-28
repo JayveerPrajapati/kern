@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/auditdiag"
 )
 
 const (
@@ -53,8 +55,16 @@ func captureOutput(root string, now time.Time, check, output string, ok bool) (c
 	}
 	rel := filepath.Join(".kern", "audit", runID(now), "verify-"+check+".log")
 	abs := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	runDir := filepath.Dir(abs)
+	_, statErr := os.Stat(runDir)
+	newRun := os.IsNotExist(statErr)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return tail(output, lim), ""
+	}
+	if newRun {
+		// A new verification run prunes the oldest run directories, bounding
+		// .kern/audit growth (the 1,921-run accumulation from 2026-10-28).
+		auditdiag.PruneRunDirs(filepath.Join(root, ".kern", "audit"), auditdiag.VerifyLogKeep())
 	}
 	if err := os.WriteFile(abs, []byte(output), 0o644); err != nil {
 		return tail(output, lim), ""

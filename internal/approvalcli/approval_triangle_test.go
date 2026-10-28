@@ -56,6 +56,13 @@ func TestApprovalTriangleDenyApproveWaitRetry(t *testing.T) {
 	// exec secret + consumed ledger land under this test's temp dirs.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// P0-3: approving an exec grant now requires the operator signing
+	// passphrase. The real implementation prompts on the TTY; tests inject a
+	// fixed passphrase (the signing-key envelope lands under the redirected
+	// HOME/XDG_CONFIG_HOME above).
+	oldPass := approvalPassphrase
+	approvalPassphrase = func(bool) ([]byte, error) { return []byte("test-approval-passphrase"), nil }
+	t.Cleanup(func() { approvalPassphrase = oldPass })
 	root := newRoot(t) // XDG_CACHE_HOME redirected, isolated fixture root
 
 	const cmd = "make install"

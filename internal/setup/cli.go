@@ -242,6 +242,14 @@ func runSetup(rest []string) {
 	if derr != nil {
 		fatalUsage("%v", derr)
 	}
+	// A non-interactive apply is a silent mutation an agent can trigger (a
+	// global MCP client starting kern setup in a scratch cwd rewrites managed
+	// files). --check/--verify/--remove and the explicit machine modes
+	// (--json/--yes) are deliberate intents; anything else previews instead.
+	if !f.dryRun && !f.yes && !f.json && !f.check && !f.verify && !f.remove && !IsTTY(os.Stdin) {
+		f.dryRun = true
+		fmt.Fprintln(os.Stderr, "kern setup: no interactive terminal — previewing (dry-run, nothing written). Re-run with --yes to apply, or run setup interactively.")
+	}
 	if f.detect && len(f.agents) == 0 {
 		detected = DetectAgents(root)
 	}

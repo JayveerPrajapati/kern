@@ -179,8 +179,11 @@ func maskForCache(prompt, attachedLog string, opts Options) (string, string) {
 	if !maskEnabled(opts) {
 		return prompt, attachedLog
 	}
-	return pii.MaskNames(prompt, opts.MaskNames).Text,
-		pii.MaskNames(attachedLog, opts.MaskNames).Text
+	// MaskAll* (not Mask*): --mask exists to protect text sent to a REMOTE
+	// LLM, where a private IP is still PII. Mask* deliberately leaves
+	// private/loopback IPs alone for local code contexts.
+	return pii.MaskAllNames(prompt, opts.MaskNames).Text,
+		pii.MaskAllNames(attachedLog, opts.MaskNames).Text
 }
 
 // Prompt optimizes a raw user prompt, optionally compressing attached log text.
@@ -266,7 +269,7 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 	mask := maskEnabled(opts)
 	var masked pii.Result
 	if mask {
-		masked = pii.MaskNames(prompt, opts.MaskNames)
+		masked = pii.MaskAllNames(prompt, opts.MaskNames)
 		prompt = masked.Text
 	}
 	if opts.FewShot {
@@ -423,7 +426,7 @@ func Log(text string, opts Options) (Result, error) {
 	// derived key — is stable across runs (QA 2026-10-19: --kind log --mask
 	// emitted every secret verbatim because the log path never masked).
 	if opts.Mask {
-		text = pii.MaskNames(text, opts.MaskNames).Text
+		text = pii.MaskAllNames(text, opts.MaskNames).Text
 	}
 
 	var truncateRules []compress.TruncateRule

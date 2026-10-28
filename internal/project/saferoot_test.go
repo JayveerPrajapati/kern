@@ -35,6 +35,33 @@ func TestSessionRefusesAutoIndexOfHome(t *testing.T) {
 	}
 }
 
+// The audit also reproduced the broad auto-index from $HOME/Documents. The
+// documents-folder rail must refuse an automatic first build there too (an
+// explicit `kern index <dir>` remains the operator's deliberate choice).
+func TestSessionRefusesAutoIndexOfDocuments(t *testing.T) {
+	t.Setenv("KERN_ALLOW_BROAD_INDEX", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	docs := filepath.Join(home, "Documents")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "scratch.go"), []byte("package s\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(docs, "")
+	defer s.Close()
+	_, err := s.Index()
+	var ue *index.UnsafeRootError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected UnsafeRootError from Session.Index on $HOME/Documents, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(docs, ".kern")); statErr == nil {
+		t.Error("a refused first build must not create .kern under Documents")
+	}
+}
+
 func TestSessionStillIndexesAnOrdinaryProject(t *testing.T) {
 	t.Setenv("KERN_ALLOW_BROAD_INDEX", "")
 	home := t.TempDir()

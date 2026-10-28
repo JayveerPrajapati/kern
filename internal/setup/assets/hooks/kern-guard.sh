@@ -756,6 +756,7 @@ class_verdict="governed"
 class_tier=0
 class_head=""
 class_pattern=""
+class_scope=""
 class_file=""
 class_hash=""
 if [ -n "$cmd" ]; then
@@ -767,10 +768,11 @@ if [ -n "$class_json" ]; then
     class_tier=$(printf '%s' "$class_json" | jq -r '.tier // 0' 2>/dev/null)
     class_head=$(printf '%s' "$class_json" | jq -r '.head // ""' 2>/dev/null)
     class_pattern=$(printf '%s' "$class_json" | jq -r '.pattern // ""' 2>/dev/null)
+    class_scope=$(printf '%s' "$class_json" | jq -r '.scope // ""' 2>/dev/null)
     class_file=$(printf '%s' "$class_json" | jq -r '.file // ""' 2>/dev/null)
     class_hash=$(printf '%s' "$class_json" | jq -r '.hash // ""' 2>/dev/null)
   elif command -v python3 >/dev/null 2>&1; then
-    eval "$(printf '%s' "$class_json" | python3 -c 'import json, sys; m=json.load(sys.stdin); print("class_verdict=%s\nclass_tier=%s\nclass_head=%s\nclass_pattern=%s\nclass_file=%s\nclass_hash=%s" % (repr(str(m.get("verdict") or "governed")), repr(str(m.get("tier") or 0)), repr(str(m.get("head") or "")), repr(str(m.get("pattern") or "")), repr(str(m.get("file") or "")), repr(str(m.get("hash") or ""))))' 2>/dev/null)"
+    eval "$(printf '%s' "$class_json" | python3 -c 'import json, sys; m=json.load(sys.stdin); print("class_verdict=%s\nclass_tier=%s\nclass_head=%s\nclass_pattern=%s\nclass_scope=%s\nclass_file=%s\nclass_hash=%s" % (repr(str(m.get("verdict") or "governed")), repr(str(m.get("tier") or 0)), repr(str(m.get("head") or "")), repr(str(m.get("pattern") or "")), repr(str(m.get("scope") or "")), repr(str(m.get("file") or "")), repr(str(m.get("hash") or ""))))' 2>/dev/null)"
   fi
 fi
 case "$class_verdict" in
@@ -778,6 +780,47 @@ allow|gate|serve|governed) ;;
 *) class_verdict="governed" ;;
 esac
 [ -n "$class_hash" ] && subj_hash="$class_hash"
+# serve_read_tier3 executes a pure-read command in the readonly sandbox and
+# prints the answer. Tier-1/2 serve plans fall back here when the index-backed
+# answer is unavailable (fresh project, stale index) so a READ is still served
+# instead of being denied. The command runs from the hook's CWD ($PWD), exactly
+# where the agent's shell would run it — never from the project root, which
+# would resolve a subdirectory-relative path against the wrong directory.
+# Returns 0 when served (or fail-open allowed), 1 when a governance denial must
+# fall through to the deny below.
+serve_read_tier3() {
+  # KERN_DAEMON=0: the sandbox hides .git/.kern, so a daemon started from in
+  # there would key its socket on the subdirectory and outlive the read.
+  tier3_out=$(cd "${PWD}" 2>/dev/null && KERN_DAEMON=0 "$kbin" exec --readonly --lang sh "cd '${PWD}' && $cmd" 2>&1; printf '\nKERN_T3_EXIT=%s' "$?")
+  # The marker is the LAST line (a leading \n guards against a missing
+  # trailing newline in the kern output); the code is the marker's suffix,
+  # the body is everything before the marker line.
+  tier3_code=$(printf '%s\n' "$tier3_out" | tail -1 | sed 's/.*KERN_T3_EXIT=//')
+  tier3_body=$(printf '%s\n' "$tier3_out" | sed '$d')
+  if [ "$tier3_code" = "0" ] || [ "$tier3_code" = "1" ]; then
+    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "exec --readonly" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
+    printf '%s\n' "$tier3_body"
+    return 0
+  fi
+  # Governance denial (exit 3 / a denied-by-governance message) — the read
+  # firewall refused: fall through to the deny below (fail-closed).
+  case "$tier3_body" in
+  *"denied by governance"*|*"blocked by governance"*|*"approval required"*)
+    return 1
+    ;;
+  *)
+    # Any other failure is a read that kern cannot serve — fail open so the
+    # host runs the pure read raw. A PreToolUse host must receive its JSON
+    # decision; a plain non-JSON host just needs exit 0.
+    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "exec --readonly (fallback raw)" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
+    if [ -n "$has_tool_call" ]; then
+      printf '{"decision":"allow"}\n'
+    fi
+    printf '%s\n' "[kern] index unavailable/stale — raw read served (pure-read pipeline)" >&2
+    return 0
+    ;;
+  esac
+}
 gate_denied=0
 [ "$class_verdict" = "gate" ] && gate_denied=1
 # GATE commands are denied; simple content-free commands are allowed; pure
@@ -824,7 +867,15 @@ case "$tier" in
     ;;
   grep|egrep|rg|ag)
     pat="$class_pattern"
-    if [ -n "$pat" ] && out=$("$kbin" ast "$pat" 2>&1); then
+    if [ -n "$pat" ] && [ -n "$class_scope" ]; then
+      # A scoped grep must stay scoped: the repo-wide symbol answer would be a
+      # fidelity regression (the caller named a file/dir).
+      if out=$("$kbin" search "$pat" --path "$class_scope" 2>&1); then
+        mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "search $pat --path $class_scope" "$pat" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
+        printf '%s\n' "$out"
+        exit 0
+      fi
+    elif [ -n "$pat" ] && out=$("$kbin" ast "$pat" 2>&1); then
       mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "ast $pat" "$pat" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
       printf '%s\n' "$out"
       exit 0
@@ -832,17 +883,30 @@ case "$tier" in
     ;;
   cat|head|tail|less|more)
     f="$class_file"
-    if [ -n "$f" ] && out=$("$kbin" compact "$f" 2>&1); then
+    # --root "$PWD": the hook receives the command exactly as the agent's shell
+    # would run it, so a relative path is CWD-relative. Without this, kern
+    # resolves it against the project root and a fresh project (no index) turns
+    # a legitimate read into a deny.
+    if [ -n "$f" ] && out=$("$kbin" compact --root "${PWD}" "$f" 2>&1); then
       mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "compact $f" "$f" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
       printf '%s\n' "$out"
       exit 0
     fi
     ;;
   esac
+  # Index-backed serve unavailable (fresh project / stale index): fall back to
+  # the readonly sandbox rather than denying a pure read.
+  serve_read_tier3 && exit 0
   ;;
 2)
   hpat="$class_pattern"
-  if [ -n "$hpat" ] && headout=$("$kbin" ast "$hpat" 2>&1); then
+  headout=""
+  if [ -n "$hpat" ] && [ -n "$class_scope" ]; then
+    headout=$("$kbin" search "$hpat" --path "$class_scope" 2>&1) || headout=""
+  elif [ -n "$hpat" ]; then
+    headout=$("$kbin" ast "$hpat" 2>&1) || headout=""
+  fi
+  if [ -n "$headout" ]; then
     # Apply the simple tail in-process (bounded: wc -l / head N / tail N /
     # grep -v P / grep P) — the COMPUTED answer is the result.
     tailpart=$(printf '%s' "$cmd" | sed 's/.*|//')
@@ -868,47 +932,18 @@ case "$tier" in
       ;;
     *) result=$(printf '%s\n' "$headout") ;;
     esac
-    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "ast $hpat | tail" "$hpat" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
+    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "search/ast $hpat | tail" "$hpat" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
     printf '%s\n' "$result"
     exit 0
   fi
+  # Index-backed serve unavailable: fall back to the readonly sandbox.
+  serve_read_tier3 && exit 0
   ;;
 3)
   # Tier 3: untranslatable pure read → kern exec --readonly (sandboxed,
   # PII-masked). The readonly path skips the KERN_TOOLS/KERN_ALLOW_EXEC gate
-  # but keeps the risk firewall + rejection stickiness (P3b). Serve on exit
-  # 0 (success) or 1 (a no-match read — grep found nothing, still an answer).
-  # A GOVERNANCE denial (the readonly firewall refused the read) falls
-  # through to the governed deny below; any other failure (stale kern
-  # binary, missing index) is a READ — fail-open serve raw with a note
-  # (P4: reads serve raw when kern cannot; only writes/exec stay
-  # fail-closed).
-  tier3_out=$(cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null && "$kbin" exec --readonly --lang sh "cd '${CLAUDE_PROJECT_DIR:-$PWD}' && $cmd" 2>&1; printf '\nKERN_T3_EXIT=%s' "$?")
-  # The marker is the LAST line (a leading \n guards against a missing
-  # trailing newline in the kern output); the code is the marker's suffix,
-  # the body is everything before the marker line.
-  tier3_code=$(printf '%s\n' "$tier3_out" | tail -1 | sed 's/.*KERN_T3_EXIT=//')
-  tier3_body=$(printf '%s\n' "$tier3_out" | sed '$d')
-  if [ "$tier3_code" = "0" ] || [ "$tier3_code" = "1" ]; then
-    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "exec --readonly" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
-    printf '%s\n' "$tier3_body"
-    exit 0
-  fi
-  # Governance denial (exit 3 / a denied-by-governance message) — the read
-  # firewall refused: fall through to the deny below (fail-closed).
-  case "$tier3_body" in
-  *"denied by governance"*|*"blocked by governance"*|*"approval required"*)
-    ;;
-  *)
-    # Any other failure is a read that kern cannot serve — serve raw with a
-    # note (P4 fail-open reads). The raw run is the command itself (a pure
-    # read, no write/network/destructive surface).
-    mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "exec --readonly (fallback raw)" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
-    printf '%s\n' "$cmd"
-    printf '%s\n' "[kern] index unavailable/stale — raw read served (pure-read pipeline)"
-    exit 0
-    ;;
-  esac
+  # but keeps the risk firewall + rejection stickiness (P3b).
+  serve_read_tier3 && exit 0
   ;;
 esac
 fi

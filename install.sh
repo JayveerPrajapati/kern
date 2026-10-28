@@ -7,7 +7,10 @@
 #   install.sh [install]   download + verify + install (fail-loud per step)
 #   install.sh upgrade      compare installed vs target, swap if older
 #   install.sh update       alias of upgrade
-#   install.sh uninstall    remove binaries (+ optional config), --yes skips prompt
+#   install.sh uninstall    remove binaries (+ prefix-scoped PATH lines);
+#                           --machine also removes ~/AGENTS.md kern block,
+#                           machine secrets (<UserConfigDir>/kern), and
+#                           ~/.cache/kern; --yes skips prompt
 #   install.sh status       installed version, path, platform
 #
 # Every step prints a "✔ ..." line as it succeeds, so a `curl | sh` run
@@ -80,10 +83,12 @@ API_URL="${KERN_API_URL:-https://api.github.com/repos/${REPO}}"
 
 OP="install"
 ASSUME_YES=0
+MACHINE="${KERN_UNINSTALL_MACHINE:-0}"
 for arg in "$@"; do
   case "$arg" in
     install|upgrade|update|uninstall|status) OP="$arg" ;;
     --yes|-y) ASSUME_YES=1 ;;
+    --machine) MACHINE=1 ;;
     *) echo "kern: unknown argument '$arg' (operations: install | upgrade | update | uninstall | status)" >&2; exit 1 ;;
   esac
 done
@@ -852,6 +857,10 @@ cmd_status() {
 }
 
 cmd_uninstall() {
+  # Call-time env re-read: sourcing harnesses invoke `KERN_UNINSTALL_MACHINE=1
+  # cmd_uninstall` the same way they use ASSUME_YES (the arg parser only runs
+  # when the script is dispatched, not sourced).
+  if [ "${KERN_UNINSTALL_MACHINE:-0}" = "1" ]; then MACHINE=1; fi
   platform="$(os_arch 2>/dev/null)" || platform=""
   os="${platform%-*}"
   if [ "$os" = "windows" ]; then
@@ -863,9 +872,15 @@ cmd_uninstall() {
   for b in kern kern-mcp; do
     [ -f "$PREFIX/$b${exe}" ] && echo "  $PREFIX/$b${exe}"
   done
-  [ -f "$HOME/AGENTS.md" ] && grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-managed block in ~/AGENTS.md"
-  [ -d "$HOME/.config/kern" ] && echo "  ~/.config/kern"
-  [ -d "$HOME/.cache/kern" ] && echo "  ~/.cache/kern"
+  if [ "$MACHINE" = "1" ]; then
+    [ -f "$HOME/AGENTS.md" ] && grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-managed block in ~/AGENTS.md"
+    [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/kern" ] && echo "  ${XDG_CONFIG_HOME:-$HOME/.config}/kern"
+    [ -d "$HOME/.cache/kern" ] && echo "  ~/.cache/kern"
+    [ -d "$HOME/Library/Application Support/kern" ] && echo "  ~/Library/Application Support/kern (machine secrets)"
+  else
+    echo "  (prefix-scoped: PATH rc lines for this prefix only — pass --machine to also"
+    echo "   remove ~/AGENTS.md, machine secrets, and ~/.cache/kern)"
+  fi
   if [ "$ASSUME_YES" != "1" ]; then
     printf 'Proceed? [y/N] '
     read -r answer
@@ -877,44 +892,75 @@ cmd_uninstall() {
   for b in kern kern-mcp; do
     rm -f "$PREFIX/$b${exe}" && step "removed $PREFIX/$b${exe}"
   done
-  # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
-  # (both formats), preserving every non-kern byte. Messages are honest: the
-  # file is only deleted when it contained nothing but the kern block, and
-  # the backup path is always reported.
-  if [ -f "$HOME/AGENTS.md" ]; then
-    if grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null; then
-      if ! cp "$HOME/AGENTS.md" "$HOME/AGENTS.md.kern-uninstall.bak"; then
-        die "could not back up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak — aborting the AGENTS.md edit (the file was left untouched)"
-      fi
-      step "backed up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak"
-      cleaned="$(remove_kern_section "$HOME/AGENTS.md")" || die "could not excise the kern-managed block from ~/AGENTS.md — the file was left untouched; original backup at ~/AGENTS.md.kern-uninstall.bak"
-      if [ -n "$(printf '%s' "$cleaned" | tr -d '[:space:]')" ]; then
-        printf '%s\n' "$cleaned" > "$HOME/AGENTS.md"
-        step "removed kern-managed block from ~/AGENTS.md (other content preserved; backup at ~/AGENTS.md.kern-uninstall.bak)"
+  if [ "$MACHINE" = "1" ]; then
+    # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
+    # (both formats), preserving every non-kern byte. Messages are honest: the
+    # file is only deleted when it contained nothing but the kern block, and
+    # the backup path is always reported.
+    if [ -f "$HOME/AGENTS.md" ]; then
+      if grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null; then
+        if ! cp "$HOME/AGENTS.md" "$HOME/AGENTS.md.kern-uninstall.bak"; then
+          die "could not back up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak — aborting the AGENTS.md edit (the file was left untouched)"
+        fi
+        step "backed up ~/AGENTS.md to ~/AGENTS.md.kern-uninstall.bak"
+        cleaned="$(remove_kern_section "$HOME/AGENTS.md")" || die "could not excise the kern-managed block from ~/AGENTS.md — the file was left untouched; original backup at ~/AGENTS.md.kern-uninstall.bak"
+        if [ -n "$(printf '%s' "$cleaned" | tr -d '[:space:]')" ]; then
+          printf '%s\n' "$cleaned" > "$HOME/AGENTS.md"
+          step "removed kern-managed block from ~/AGENTS.md (other content preserved; backup at ~/AGENTS.md.kern-uninstall.bak)"
+        else
+          rm -f "$HOME/AGENTS.md"
+          step "removed ~/AGENTS.md (it contained only the kern-managed block; backup at ~/AGENTS.md.kern-uninstall.bak)"
+        fi
       else
-        rm -f "$HOME/AGENTS.md"
-        step "removed ~/AGENTS.md (it contained only the kern-managed block; backup at ~/AGENTS.md.kern-uninstall.bak)"
+        step "no kern-managed block in ~/AGENTS.md — left untouched"
       fi
     else
-      step "no kern-managed block in ~/AGENTS.md — left untouched"
+      step "no ~/AGENTS.md — nothing to remove"
     fi
-  else
-    step "no ~/AGENTS.md — nothing to remove"
+    # Machine secrets live under os.UserConfigDir(), which is NOT ~/.config on
+    # macOS (it is ~/Library/Application Support) and can be relocated by
+    # XDG_CONFIG_HOME on Linux. Remove every location: the audit-chain key, the
+    # approval signing key/HMAC, and the consumed-approval ledger all live here.
+    for cfg in "${XDG_CONFIG_HOME:-$HOME/.config}/kern" "$HOME/Library/Application Support/kern"; do
+      if [ -d "$cfg" ]; then
+        rm -rf "$cfg" && step "removed $cfg (machine secrets)"
+      fi
+    done
+    if [ -d "$HOME/.cache/kern" ]; then
+      rm -rf "$HOME/.cache/kern" && step "removed ~/.cache/kern"
+    fi
   fi
-  if [ -d "$HOME/.config/kern" ]; then
-    rm -rf "$HOME/.config/kern" && step "removed ~/.config/kern"
-  fi
-  if [ -d "$HOME/.cache/kern" ]; then
-    rm -rf "$HOME/.cache/kern" && step "removed ~/.cache/kern"
-  fi
-  # PATH rc lines (marker + export) — best-effort, idempotent. grep -vF into
-  # a temp file keeps this portable across GNU/BSD sed.
+  # PATH rc lines — best-effort, idempotent. F4 (2026-10-28): a prefix-scoped
+  # uninstall must only remove the marker/export pair that names THIS prefix
+  # (a scratch KERN_INSTALL_DIR uninstall previously stripped marker lines
+  # belonging to the real install, orphaning its exports). --machine keeps
+  # the historical sweep: every kern-installer marker plus this prefix's
+  # exports.
+  pfx_line_prefix="export PATH=\"$PREFIX:"
   for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
     [ -f "$rc" ] || continue
-    if grep -qF "# added by kern installer" "$rc" 2>/dev/null; then
-      grep -vF "# added by kern installer" "$rc" | grep -vF "export PATH=\"$PREFIX:" > "$rc.kern-new" 2>/dev/null \
-        && mv "$rc.kern-new" "$rc" \
-        && step "removed kern PATH lines from $rc"
+    if [ "$MACHINE" = "1" ]; then
+      if grep -qF "# added by kern installer" "$rc" 2>/dev/null; then
+        grep -vF "# added by kern installer" "$rc" | grep -vF "$pfx_line_prefix" > "$rc.kern-new" 2>/dev/null \
+          && mv "$rc.kern-new" "$rc" \
+          && step "removed kern PATH lines from $rc"
+      fi
+    else
+      # Scoped: only rewrite an rc that actually references this prefix, and
+      # drop a marker line only when its adjacent export names this prefix.
+      if grep -qF "$pfx_line_prefix" "$rc" 2>/dev/null; then
+        awk -v pfx="$pfx_line_prefix" '
+          { L[NR] = $0 }
+          END {
+            for (i = 1; i <= NR; i++) {
+              if (substr(L[i], 1, length(pfx)) == pfx) continue
+              if (L[i] == "# added by kern installer" && substr(L[i+1], 1, length(pfx)) == pfx) continue
+              print L[i]
+            }
+          }' "$rc" > "$rc.kern-new" 2>/dev/null \
+          && mv "$rc.kern-new" "$rc" \
+          && step "removed kern PATH lines for $PREFIX from $rc"
+      fi
     fi
   done
   echo "kern uninstalled. (Per-project wiring: delete .mcp.json / AGENTS.md in each project root.)"

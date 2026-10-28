@@ -243,6 +243,42 @@ func TestRunBuildRejectsCommandSubstitution(t *testing.T) {
 	}
 }
 
+// TestRunBuildAllowsLiteralSubstitutionText pins the false-positive fix: sh
+// does not expand $(...) or backticks inside single quotes, inside a
+// quoted-delimiter heredoc body, or after a backslash. Those are literal text
+// (markdown tables, commit messages, docs) and must stay usable; an EXPANDING
+// construct must still be denied.
+func TestRunBuildAllowsLiteralSubstitutionText(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_ALLOW_EXEC", "1") // benign control commands may run
+
+	allowed := []string{
+		"echo 'literal $(whoami) and `date`'",
+		"cat <<'EOF'\n| `x` | $(y) |\nEOF",
+	}
+	for _, cmd := range allowed {
+		stderr, code := cliCaptureStderrExit(t, func() int {
+			return RunBuild([]string{cmd})
+		})
+		if code != 0 {
+			t.Fatalf("RunBuild(%q) exit = %d, want 0 (literal text is not a substitution); stderr: %.300s", cmd, code, stderr)
+		}
+	}
+
+	denied := []string{
+		"cat <<EOF\n$(whoami)\nEOF",
+		"cat <<EOF\n`date`\nEOF",
+	}
+	for _, cmd := range denied {
+		_, code := cliCaptureStderrExit(t, func() int {
+			return RunBuild([]string{cmd})
+		})
+		if code != 3 {
+			t.Fatalf("RunBuild(%q) exit = %d, want 3 (expanding heredoc body must be denied)", cmd, code)
+		}
+	}
+}
+
 // TestRunBuildPropagatesChildExitCode locks the wrapper-fidelity fix: a
 // non-zero CHILD exit must propagate as the wrapper's exit code (the make /
 // sh -c convention), not flatten to 1. Observed live: `kern build kern twin`

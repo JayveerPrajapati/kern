@@ -23,21 +23,10 @@ var announceBuild = !strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 // inside a .test binary).
 var buildAnnounceOverride bool
 
-// LoadOrBuild returns the project's symbol index: the persisted
-// <root>/.kern/index.json when fresh, or a freshly built one (saved back
-// for the next caller) when missing or stale. It is the canonical
-// load-or-build shared by the CLI (cmd/kern) and the LSP server —
-// previously two byte-identical private copies (blueprint duplication
-// debt). project.Session.Index wraps the same reuse-while-fresh
-// contract with session-level caching, a stale cooldown, and SQLite
-// preference on top.
-//
-// Stale indexes are refreshed incrementally via Update whenever a previous
-// index loads cleanly (Update re-parses only changed files); any failure
-// falls back to a full Build. The explicit `kern index` command skips a
-// rebuild when its fresh-skip check proves the persisted index current and
-// only calls Build directly when the index is missing/stale or --force is
-// given (cmd_index.go).
+// LoadOrBuild returns the project's symbol index: the persisted store when
+// fresh, or a freshly built one (saved back) when missing or stale. Shared by
+// the CLI and the LSP server. Stale indexes refresh incrementally via Update
+// when a previous index loads cleanly; any failure falls back to Build.
 //
 // The stale/missing path is debounced across processes (M3): concurrent kern
 // invocations that detect the same staleness share ONE rebuild instead of
@@ -98,6 +87,7 @@ func LoadOrBuildContext(ctx context.Context, root string) (*Index, error) {
 			}
 			if prev != nil {
 				if ix, err := UpdateWithSnapshot(root, prev); err == nil && ix != nil {
+					ix.NoteFreshness(FreshnessFresh)
 					saveOrWarn(ix)
 					return ix, nil
 				}
@@ -123,6 +113,7 @@ func LoadOrBuildContext(ctx context.Context, root string) (*Index, error) {
 			if err != nil {
 				return nil, err
 			}
+			ix.NoteFreshness(FreshnessFresh)
 			if absent && (announceBuild || buildAnnounceOverride) {
 				fmt.Fprintf(os.Stderr, "[kern] indexed %d symbols in %d files (%d packages) in %s\n",
 					len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), time.Since(started).Round(time.Millisecond))

@@ -12,7 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type rule struct {
@@ -30,9 +34,21 @@ type scopedRule struct {
 }
 
 // Matcher is a compiled set of ignore rules from every directory in the tree.
+// A Matcher is immutable once built, so Ignored results are memoized: the
+// freshness-proof stat walk re-asks the same cached matcher about every file
+// on every proof, and rule matching dominated that walk (~70 ms of ~140 ms
+// measured on this repo, 2026-10-28). The memo is safe for concurrent use;
+// callers constructing a Matcher by hand (tests) get an empty cache for free.
 type Matcher struct {
-	rules []scopedRule
+	rules    []scopedRule
+	memo     sync.Map // normalized rel -> bool
+	memoSize atomic.Int64
 }
+
+// maxIgnoredMemo bounds the per-matcher memo. Every path a real walk asks
+// about is kept; the cap only prevents unbounded growth on a pathological
+// tree. Past it, results are still correct — they just pay the match cost.
+const maxIgnoredMemo = 200_000
 
 // maxRules bounds a pathological repository full of ignore files.
 const maxRules = 2000
@@ -44,12 +60,132 @@ const maxRules = 2000
 // cannot be read are skipped; the returned matcher ignores nothing when no
 // rules were found.
 func Load(root string) *Matcher {
-	m := &Matcher{}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return m
+		return &Matcher{}
 	}
-	_ = filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
+	c := loadWithStats(abs)
+	return c.matcher
+}
+
+// ignoreFileStat fingerprints one ignore file so a cached load can tell
+// whether the rule set it compiled is still current without re-walking.
+type ignoreFileStat struct {
+	path   string
+	mtime  int64
+	size   int64
+	exists bool
+}
+
+func statIgnoreFile(path string) ignoreFileStat {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ignoreFileStat{path: path}
+	}
+	return ignoreFileStat{path: path, mtime: info.ModTime().UnixNano(), size: info.Size(), exists: true}
+}
+
+func (s ignoreFileStat) current() bool {
+	cur := statIgnoreFile(s.path)
+	return cur.exists == s.exists && cur.mtime == s.mtime && cur.size == s.size
+}
+
+// cachedMatcher is one cached tree load: the compiled matcher plus the stat
+// fingerprint of every ignore file the walk observed (including absent
+// root-level ignore files, so creating one invalidates the entry).
+type cachedMatcher struct {
+	matcher *Matcher
+	files   []ignoreFileStat
+	loaded  time.Time
+}
+
+func (c *cachedMatcher) stillCurrent() bool {
+	for _, s := range c.files {
+		if !s.current() {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	loadCacheMu sync.Mutex
+	loadCache   = map[string]*cachedMatcher{}
+)
+
+// maxCachedRoots bounds the per-process cache; a daemon serves a handful of
+// projects, so the oldest entry is evicted beyond this.
+const maxCachedRoots = 32
+
+// loadCacheTTL bounds how long a cached rule set may be re-served before a
+// fresh walk discovers newly created nested ignore files. Edits to any ignore
+// file the load observed (and creation/removal of the root pair) invalidate
+// immediately via stat; only the appearance of a NEW nested file waits for the
+// TTL. KERN_IGNORE_CACHE_MS overrides (0 disables the cache).
+func loadCacheTTL() time.Duration {
+	if v := os.Getenv("KERN_IGNORE_CACHE_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			if ms <= 0 {
+				return 0
+			}
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return 5 * time.Minute
+}
+
+// LoadCached is Load with a per-root memo: the compiled matcher is reused
+// while every ignore file it observed is stat-identical and the entry is
+// younger than loadCacheTTL(). It exists for the freshness-proof hot path,
+// which re-loads ignore rules on every proof and was paying a full tree walk
+// each time (~34 ms measured, more on a cold page cache). Build and scan paths
+// keep using Load so they always see the live rule set; here the verdict is
+// advisory and the staleness window is bounded by the same 5 min as gateTTL.
+func LoadCached(root string) *Matcher {
+	if loadCacheTTL() <= 0 {
+		return Load(root)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return Load(root)
+	}
+	loadCacheMu.Lock()
+	c := loadCache[abs]
+	loadCacheMu.Unlock()
+	if c != nil && time.Since(c.loaded) < loadCacheTTL() && c.stillCurrent() {
+		return c.matcher
+	}
+	fresh := loadWithStats(abs)
+	if fresh.loaded.IsZero() {
+		// The walk failed (unreadable/missing root): do not cache a partial
+		// rule set under a key that may become valid later.
+		return fresh.matcher
+	}
+	loadCacheMu.Lock()
+	if _, ok := loadCache[abs]; !ok && len(loadCache) >= maxCachedRoots {
+		var oldestKey string
+		var oldest time.Time
+		for k, v := range loadCache {
+			if oldestKey == "" || v.loaded.Before(oldest) {
+				oldestKey, oldest = k, v.loaded
+			}
+		}
+		delete(loadCache, oldestKey)
+	}
+	loadCache[abs] = fresh
+	loadCacheMu.Unlock()
+	return fresh.matcher
+}
+
+// loadWithStats walks abs once, compiling the matcher and fingerprinting every
+// ignore file it reads. The root .gitignore and .kernignore are always
+// fingerprinted even when absent, so creating either invalidates a cached
+// entry without waiting for the TTL. loaded is zero when the walk failed.
+func loadWithStats(abs string) *cachedMatcher {
+	m := &Matcher{}
+	stamps := make([]ignoreFileStat, 0, 8)
+	seen := make(map[string]bool, 8)
+	walkErr := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -73,6 +209,10 @@ func Load(root string) *Matcher {
 		if rerr != nil {
 			return nil
 		}
+		if !seen[path] {
+			seen[path] = true
+			stamps = append(stamps, statIgnoreFile(path))
+		}
 		dir := ""
 		if d := filepath.Dir(path); d != abs {
 			if rel, rerr := filepath.Rel(abs, d); rerr == nil {
@@ -86,7 +226,20 @@ func Load(root string) *Matcher {
 		}
 		return nil
 	})
-	return m
+	c := &cachedMatcher{matcher: m}
+	if walkErr != nil {
+		return c
+	}
+	for _, name := range []string{".gitignore", ".kernignore"} {
+		p := filepath.Join(abs, name)
+		if !seen[p] {
+			seen[p] = true
+			stamps = append(stamps, statIgnoreFile(p))
+		}
+	}
+	c.files = stamps
+	c.loaded = time.Now()
+	return c
 }
 
 // vcsDirs are never descended into, matching kern's hardcoded defaults.
@@ -233,6 +386,20 @@ func (m *Matcher) Ignored(rel string) bool {
 	if rel == "" {
 		return false
 	}
+	if v, ok := m.memo.Load(rel); ok {
+		return v.(bool)
+	}
+	ignored := m.match(rel)
+	if m.memoSize.Load() < maxIgnoredMemo {
+		if _, loaded := m.memo.LoadOrStore(rel, ignored); !loaded {
+			m.memoSize.Add(1)
+		}
+	}
+	return ignored
+}
+
+// match is the uncached rule evaluation behind Ignored.
+func (m *Matcher) match(rel string) bool {
 	ignored := false
 	for _, sr := range m.rules {
 		sub, ok := under(sr.dir, rel)

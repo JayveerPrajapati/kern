@@ -127,6 +127,16 @@ func MintGateApproval(command, root string) (string, error) {
 	return a.ID, nil
 }
 
+// gateRejectionError returns the rejection-stickiness error for a command
+// key, or nil when the human has not rejected it.
+func gateRejectionError(root, key string) error {
+	rejected := execRejectedFor(root, key)
+	if rejected == nil {
+		return nil
+	}
+	return fmt.Errorf("governance: this exact command was previously rejected by a human (approval %s) — rejections stop blocking %s after the decision; clear it with: kern approval clear %s --root %s, or modify the command", rejected.ID, execRejectionTTLText(), rejected.ID, root)
+}
+
 // CheckGateGrant answers whether a GATE-class command is ALREADY authorized
 // by the Ask Protocol, consuming the authorization exactly like an
 // execution would:
@@ -137,17 +147,18 @@ func MintGateApproval(command, root string) (string, error) {
 //
 // nil return means the command may proceed. errNoPrefixGrant (or a
 // consumed-record error) means the human must be asked; any other error is
-// fail-closed (the caller denies rather than guessing).
+// fail-closed (the caller denies rather than guessing). Consumers are the
+// surfaces that EXECUTE immediately after: the guard bash arm
+// (`kern guard grant --check`, then runRaw) and the exec firewall.
 func CheckGateGrant(command, root string) error {
 	if strings.TrimSpace(command) == "" || root == "" {
 		return errNoPrefixGrant
 	}
 	key := execCommandKey(command)
 	// Rejection stickiness outranks grants: a human's explicit "no" to this
-	// exact command must not be bypassed by an older prefix grant (the
-	// denial message teaches the clear/modify escapes as usual).
-	if rejected := execRejectedFor(root, key); rejected != nil {
-		return fmt.Errorf("governance: this exact command was previously rejected by a human (approval %s) — rejections stop blocking %s after the decision; clear it with: kern approval clear %s --root %s, or modify the command", rejected.ID, execRejectionTTLText(), rejected.ID, root)
+	// exact command must not be bypassed by an older prefix grant.
+	if err := gateRejectionError(root, key); err != nil {
+		return err
 	}
 	if granted := execApprovedFor(root, key); granted != nil {
 		claimed, err := claimExecApproval(root, granted.ID)
@@ -162,6 +173,36 @@ func CheckGateGrant(command, root string) error {
 	return consumePrefixGrantUse(root, command)
 }
 
+// PeekGateGrant reports whether a GATE-class command WOULD be authorized,
+// consuming nothing — the read-only consult behind `kern guard grant`'s
+// mint form. The claim happens exactly once, at execution time (the host
+// guard's --check form or the exec firewall); a consuming CLI here would
+// double-claim on every hook host and re-mint on the taught retry — an
+// operator re-approval loop (the 2026-10-28 red-team campaign). Same return
+// shapes as CheckGateGrant.
+func PeekGateGrant(command, root string) error {
+	if strings.TrimSpace(command) == "" || root == "" {
+		return errNoPrefixGrant
+	}
+	key := execCommandKey(command)
+	if err := gateRejectionError(root, key); err != nil {
+		return err
+	}
+	if granted := execApprovedFor(root, key); granted != nil {
+		return nil
+	}
+	records, err := NewFileStore(root).Load()
+	if err != nil {
+		return err
+	}
+	for _, a := range records {
+		if livePrefixGrant(a, execRootIdentity(root)) && PrefixMatches(command, a.Prefix) {
+			return nil
+		}
+	}
+	return errNoPrefixGrant
+}
+
 // consumePrefixGrantUse finds a live prefix grant covering command and
 // consumes one use under the store's flock'd mutation: re-verifies the
 // record (MAC, status, scope, expiry, cap), increments Uses, re-stamps and
@@ -170,13 +211,14 @@ func CheckGateGrant(command, root string) error {
 // closed).
 func consumePrefixGrantUse(root, command string) error {
 	store := NewFileStore(root)
+	rid := store.RootID()
 	records, err := store.Load()
 	if err != nil {
 		return err
 	}
 	match := ""
 	for _, a := range records {
-		if !livePrefixGrant(a) || !PrefixMatches(command, a.Prefix) {
+		if !livePrefixGrant(a, rid) || !PrefixMatches(command, a.Prefix) {
 			continue
 		}
 		match = a.ID
@@ -194,12 +236,12 @@ func consumePrefixGrantUse(root, command string) error {
 				continue
 			}
 			a := list[i]
-			if !livePrefixGrant(a) || !PrefixMatches(command, a.Prefix) {
+			if !livePrefixGrant(a, rid) || !PrefixMatches(command, a.Prefix) {
 				outcome = errNoPrefixGrant // lapsed/expired between scan and claim
 				return list
 			}
 			a.Uses++
-			stamp, serr := execApprovalStamp(a)
+			stamp, serr := execApprovalStamp(a, rid)
 			if serr != nil {
 				outcome = fmt.Errorf("governance: prefix grant %s could not be re-stamped after use (failing closed): %w", a.ID, serr)
 				return list
@@ -224,13 +266,16 @@ func consumePrefixGrantUse(root, command string) error {
 	return outcome
 }
 
-// livePrefixGrant reports whether a record is an approved, MAC-valid,
-// unexpired prefix grant under its use cap.
-func livePrefixGrant(a domain.Approval) bool {
+// livePrefixGrant reports whether a record is an approved, MAC-valid (at
+// the given canonical root identity), unexpired prefix grant under its use
+// cap.
+func livePrefixGrant(a domain.Approval, rootID string) bool {
 	if a.Kind != ApprovalKindExecCommand || a.Status != "approved" || a.Scope != "prefix" {
 		return false
 	}
-	if !execApprovalMACValid(a) {
+	// The operator signature authorizes the grant; the HMAC protects the
+	// mutable use counter (Uses is excluded from the signed message).
+	if !execApprovalSignatureValid(a, rootID) || !execApprovalMACValid(a, rootID) {
 		return false
 	}
 	if !a.ExpiresAt.IsZero() && time.Now().After(a.ExpiresAt) {
@@ -243,8 +288,8 @@ func livePrefixGrant(a domain.Approval) bool {
 	return a.Uses < max
 }
 
-// SetScopePrefix converts an APPROVED, MAC-valid exec-command approval into
-// a session-scoped prefix grant (the "[2] accept prefix" answer). prefix ""
+// SetScopePrefix converts an APPROVED, operator-signed exec-command approval
+// into a session-scoped prefix grant (the "[2] accept prefix" answer). prefix ""
 // defaults to the first two tokens of the bound command; a custom prefix
 // must be a token-boundary prefix of that command (the human may narrow,
 // never widen). CRITICAL-risk records are refused — they are never
@@ -252,7 +297,15 @@ func livePrefixGrant(a domain.Approval) bool {
 // The mutation is flock'd and re-stamped, so the widened record stays
 // tamper-evident.
 func SetScopePrefix(root, id, prefix, actor string) (domain.Approval, error) {
+	return SetScopePrefixWithSigner(root, id, prefix, actor, nil)
+}
+
+// SetScopePrefixWithSigner is SetScopePrefix plus the interactive operator
+// signature. Widening a grant changes signed fields (Scope/Prefix/MaxUses/
+// ExpiresAt), so an exec record cannot be widened without a signer.
+func SetScopePrefixWithSigner(root, id, prefix, actor string, sign ExecSigner) (domain.Approval, error) {
 	store := NewFileStore(root)
+	rid := store.RootID()
 	var out domain.Approval
 	var outcome error
 	if err := store.mutate(func(list []domain.Approval) []domain.Approval {
@@ -269,8 +322,8 @@ func SetScopePrefix(root, id, prefix, actor string) (domain.Approval, error) {
 				outcome = fmt.Errorf("governance: approval %s is %s, not approved — decide it first, then grant the prefix", id, a.Status)
 				return list
 			}
-			if !execApprovalMACValid(a) {
-				outcome = fmt.Errorf("governance: approval %s failed integrity verification — decide it again", id)
+			if !execApprovalSignatureValid(a, rid) || !execApprovalMACValid(a, rid) {
+				outcome = fmt.Errorf("governance: approval %s failed operator-signature/integrity verification — decide it again", id)
 				return list
 			}
 			if a.RiskLevel == domain.RiskCritical {
@@ -292,7 +345,17 @@ func SetScopePrefix(root, id, prefix, actor string) (domain.Approval, error) {
 			a.Prefix = prefix
 			a.MaxUses = max
 			a.ExpiresAt = time.Now().Add(prefixGrantTTL)
-			stamp, serr := execApprovalStamp(a)
+			if sign == nil {
+				outcome = errors.New("governance: widening an approval to a prefix grant requires the interactive operator signature")
+				return list
+			}
+			sig, serr := sign(a, rid)
+			if serr != nil {
+				outcome = fmt.Errorf("governance: approval %s could not be signed (failing closed): %w", id, serr)
+				return list
+			}
+			a.Signature = sig
+			stamp, serr := execApprovalStamp(a, rid)
 			if serr != nil {
 				outcome = fmt.Errorf("governance: approval %s could not be re-stamped (failing closed): %w", id, serr)
 				return list
@@ -323,7 +386,7 @@ func LivePrefixGrants(root string) ([]domain.Approval, error) {
 	}
 	var out []domain.Approval
 	for _, a := range records {
-		if livePrefixGrant(a) {
+		if livePrefixGrant(a, execRootIdentity(root)) {
 			out = append(out, a)
 		}
 	}

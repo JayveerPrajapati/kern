@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,11 @@ var supportedProtocolVersions = map[string]bool{
 	"2024-11-05": true,
 	"2025-03-26": true,
 	"2025-06-18": true,
+	// 2025-11-25 is the current revision. Clients (opencode 1.19.4 among
+	// them) that advertise only this version fail the whole session when
+	// the server answers with an older one, even though the tools surface is
+	// unchanged — so negotiate it rather than silently downgrading.
+	"2025-11-25": true,
 }
 
 // ServeHTTP runs the MCP server over HTTP using the Streamable HTTP transport:
@@ -205,18 +211,26 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Parse-level failures are reported BEFORE the protocol-version gate
 	// (F10): a body that cannot parse has no version to negotiate, so it
-	// must answer -32700 parse/batch error, not a misleading 412 (live
+	// must answer -32700 parse error, not a misleading 412 (live
 	// probe: a header-less malformed body answered "unsupported MCP
 	// protocol version"). The batch check reads the raw body prefix;
 	// everything after it can rely on the body being a JSON object.
 	// Batch requests were removed from the spec (2025-06-18); reject arrays.
 	if strings.HasPrefix(strings.TrimLeft(string(body), " \t\r\n"), "[") {
-		writeHTTPError(w, errorResponse(nil, -32700, "batch requests are not supported"))
+		writeHTTPError(w, errorResponse(nil, -32600, "batch requests are not supported"))
 		return
 	}
 	var req rpcRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeHTTPError(w, errorResponse(nil, -32700, "parse error"))
+		// Valid JSON with a wrong-typed envelope (a bare scalar) is an
+		// invalid REQUEST, not a parse error: -32600, mirroring the stdio
+		// loop (W1+W7, 2026-10-26 black-box audit).
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			writeHTTPError(w, errorResponse(nil, -32600, "invalid request: a JSON-RPC request must be a JSON object"))
+			return
+		}
+		writeHTTPErrorStatus(w, http.StatusBadRequest, errorResponse(nil, -32700, "parse error"))
 		return
 	}
 	// JSON-RPC 2.0 envelope: a body that parses but does not carry
@@ -243,7 +257,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if ver == "" {
 			w.Header().Set("MCP-Protocol-Version", protocolVersion)
 			if r.Header.Get("MCP-Protocol-Version") == "" {
-				http.Error(w, "missing MCP-Protocol-Version header; send it on every request after initialization (supported: 2024-11-05, 2025-03-26, 2025-06-18)", http.StatusPreconditionFailed)
+				http.Error(w, "missing MCP-Protocol-Version header; send it on every request after initialization (supported: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25)", http.StatusPreconditionFailed)
 				return
 			}
 			http.Error(w, "unsupported MCP protocol version", http.StatusPreconditionFailed)
@@ -295,6 +309,17 @@ func negotiateProtocolVersion(body []byte) string {
 
 func writeHTTPError(w http.ResponseWriter, resp any) {
 	w.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(resp)
+	_, _ = w.Write(append(data, '\n'))
+}
+
+// writeHTTPErrorStatus is writeHTTPError with an explicit HTTP status.
+// Transport-level failures (a body that is not even JSON) answer 400;
+// well-formed JSON-RPC protocol errors keep the 200 convention
+// (N3, 2026-10-26 black-box audit).
+func writeHTTPErrorStatus(w http.ResponseWriter, status int, resp any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	data, _ := json.Marshal(resp)
 	_, _ = w.Write(append(data, '\n'))
 }

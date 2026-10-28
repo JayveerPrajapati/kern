@@ -41,7 +41,7 @@ func testSecret(t *testing.T) []byte {
 func TestMACRoundTrip(t *testing.T) {
 	a := testApproval()
 	secret := testSecret(t)
-	stamp, err := Stamp(a, secret)
+	stamp, err := Stamp(a, secret, "/test/root")
 	if err != nil {
 		t.Fatalf("Stamp: %v", err)
 	}
@@ -49,12 +49,12 @@ func TestMACRoundTrip(t *testing.T) {
 		t.Fatalf("stamp %q lacks prefix %q", stamp, StampPrefix)
 	}
 	a.ArtifactID = stamp
-	if !MACValid(a, secret) {
+	if !MACValid(a, secret, "/test/root") {
 		t.Fatal("MACValid rejected a record stamped with the same secret")
 	}
 	wrong := testSecret(t)
 	wrong[0] ^= 0xff
-	if MACValid(a, wrong) {
+	if MACValid(a, wrong, "/test/root") {
 		t.Fatal("MACValid accepted a record with the wrong secret")
 	}
 }
@@ -64,7 +64,7 @@ func TestMACRoundTrip(t *testing.T) {
 func TestMACTamperProof(t *testing.T) {
 	secret := testSecret(t)
 	base := testApproval()
-	stamp, err := Stamp(base, secret)
+	stamp, err := Stamp(base, secret, "/test/root")
 	if err != nil {
 		t.Fatalf("Stamp: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMACTamperProof(t *testing.T) {
 	for name, mutate := range cases {
 		a := base
 		mutate(&a)
-		if MACValid(a, secret) {
+		if MACValid(a, secret, "/test/root") {
 			t.Errorf("tampered %s still validated", name)
 		}
 	}
@@ -91,7 +91,7 @@ func TestMACFramingInjective(t *testing.T) {
 	a := testApproval()
 	a.Requester = "ab"
 	a.Approver = "c"
-	stamp, err := Stamp(a, secret)
+	stamp, err := Stamp(a, secret, "/test/root")
 	if err != nil {
 		t.Fatalf("Stamp: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestMACFramingInjective(t *testing.T) {
 	b := testApproval()
 	b.Requester = "a"
 	b.Approver = "bc"
-	if MACValid(b, secret) {
+	if MACValid(b, secret, "/test/root") {
 		t.Fatal("re-framed record (ab|c vs a|bc) verified — framing is not injective")
 	}
 }
@@ -107,7 +107,7 @@ func TestMACFramingInjective(t *testing.T) {
 func TestStampFrom(t *testing.T) {
 	secret := testSecret(t)
 	a := testApproval()
-	stamp, err := Stamp(a, secret)
+	stamp, err := Stamp(a, secret, "/test/root")
 	if err != nil {
 		t.Fatalf("Stamp: %v", err)
 	}
@@ -123,10 +123,10 @@ func TestStampFrom(t *testing.T) {
 
 func TestSecretSizeEnforced(t *testing.T) {
 	a := testApproval()
-	if _, err := MAC(a, make([]byte, 31)); err == nil {
+	if _, err := MAC(a, make([]byte, 31), "/test/root"); err == nil {
 		t.Fatal("MAC accepted an undersized secret")
 	}
-	if _, err := Stamp(a, make([]byte, 16)); err == nil {
+	if _, err := Stamp(a, make([]byte, 16), "/test/root"); err == nil {
 		t.Fatal("Stamp accepted an undersized secret")
 	}
 }
@@ -186,26 +186,26 @@ func TestConsumedLedgerFailsClosed(t *testing.T) {
 func TestLegacyV2StampStillValidates(t *testing.T) {
 	a := testApproval()
 	secret := testSecret(t)
-	legacy, err := macCompute(a, secret, macLegacyVersion)
+	legacy, err := macCompute(a, secret, macLegacyVersion, "")
 	if err != nil {
 		t.Fatalf("macCompute v2: %v", err)
 	}
 	a.ArtifactID = StampPrefix + hex.EncodeToString(legacy)
-	if !MACValid(a, secret) {
+	if !MACValid(a, secret, "/test/root") {
 		t.Fatal("MACValid rejected a legacy v2-stamped record")
 	}
 	tampered := a
 	tampered.Reason = a.Reason + " tampered"
-	if MACValid(tampered, secret) {
+	if MACValid(tampered, secret, "/test/root") {
 		t.Fatal("MACValid accepted a tampered legacy record")
 	}
 	// New stamps are v3: current-format stamps validate too (round trip).
-	fresh, err := Stamp(a, secret)
+	fresh, err := Stamp(a, secret, "/test/root")
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.ArtifactID = fresh
-	if !MACValid(a, secret) {
+	if !MACValid(a, secret, "/test/root") {
 		t.Fatal("MACValid rejected a current v3-stamped record")
 	}
 }

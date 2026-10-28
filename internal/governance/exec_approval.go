@@ -1,20 +1,30 @@
-// Exec-approval integrity (R1): the exec approval records in
+// Exec-approval integrity. The exec approval records in
 // <root>/.kern/approvals.json live inside the client-governed workspace, so a
-// governed client can write to the file directly. Every record the exec path
-// persists carries an HMAC over its full decision-relevant record (ID, task,
-// requester, approver, status, reason, timestamps, risk level, policies,
-// evidence — everything a human sees when deciding), keyed
-// by a random 32-byte secret stored OUTSIDE the workspace at
-// <UserConfigDir>/kern/exec-approval.key (dir 0700, file 0600). Grant
-// verification (execApprovedFor / execApprovalMACValid) denies any record
-// whose HMAC is missing, malformed, or stale — forged and legacy records can
-// never self-approve. The shared FileStore format is untouched: the stamp
-// lives in the record's ArtifactID under an exec-only marker prefix, and the
-// store's Decide only re-stamps records that already carry the marker.
+// governed client can write to the file directly. Two layers protect them:
+//
+//   - GRANT AUTHORITY (P0-3, 2026-10-28 adversarial audit): a decision is
+//     signed with an Ed25519 key whose private seed is encrypted at rest with
+//     an operator passphrase entered only at the interactive approval prompt
+//     (<UserConfigDir>/kern/exec-approval-signing.json). Exec verification
+//     uses the public key, so a same-user process that can read every file on
+//     the machine still cannot forge an approval or a rejection.
+//   - TAMPER DETECTION / COUNTER INTEGRITY: every exec record also carries an
+//     HMAC over its full decision-relevant record, keyed by
+//     <UserConfigDir>/kern/exec-approval.key. The HMAC still detects naive
+//     edits, binds the pending record a human is about to decide, and covers
+//     the mutable prefix-use counter (Uses is excluded from the signed
+//     message because it is incremented non-interactively at exec time).
+//     The HMAC key is same-user readable and is NOT a grant authority.
+//
+// The shared FileStore format is untouched: the HMAC stamp lives in the
+// record's ArtifactID under an exec-only marker prefix, the signature lives in
+// Approval.Signature, and the store's Decide re-stamps/re-signs only records
+// that already carry the exec marker.
 
 package governance
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -25,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/approvalsign"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/execapproval"
 )
@@ -44,6 +55,59 @@ var execApprovalSecretPath = func() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "kern", "exec-approval.key"), nil
+}
+
+// ExecSigner produces the interactive operator signature over one approval.
+// It is a closure so the signing passphrase can be prompted once per command
+// and never held in a global.
+type ExecSigner func(a domain.Approval, rootID string) (string, error)
+
+// execApprovalSigningKeyPath returns the encrypted Ed25519 signing key
+// envelope. Package-level so tests can redirect it.
+var execApprovalSigningKeyPath = func() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "kern", "exec-approval-signing.json"), nil
+}
+
+// ExecApprovalSigningKeyPath exposes the operator signing-key path (doctor,
+// docs, tests).
+func ExecApprovalSigningKeyPath() (string, error) { return execApprovalSigningKeyPath() }
+
+// NewExecSigner returns an ExecSigner backed by the operator key at the
+// default path. pass is invoked only when an exec record is actually signed;
+// non-exec approvals never prompt.
+func NewExecSigner(pass approvalsign.PassphraseFunc) ExecSigner {
+	return func(a domain.Approval, rootID string) (string, error) {
+		p, err := execApprovalSigningKeyPath()
+		if err != nil {
+			return "", err
+		}
+		return approvalsign.SignApproval(p, a, rootID, pass)
+	}
+}
+
+// execApprovalPublicKey loads the operator public key. Verification at exec
+// time needs no passphrase and no private material.
+func execApprovalPublicKey() (ed25519.PublicKey, error) {
+	p, err := execApprovalSigningKeyPath()
+	if err != nil {
+		return nil, err
+	}
+	return approvalsign.PublicKey(p)
+}
+
+// execApprovalSignatureValid is the GRANT check: the record must carry an
+// Ed25519 signature made by the operator key over this exact decision-relevant
+// content and root identity.
+func execApprovalSignatureValid(a domain.Approval, rootID string) bool {
+	pub, err := execApprovalPublicKey()
+	if err != nil {
+		return false
+	}
+	return approvalsign.SignatureValid(a, pub, rootID)
 }
 
 // The exec secret is generated once per process and cached; the file
@@ -137,22 +201,41 @@ func execApprovalSecret() ([]byte, error) {
 // length-prefixed framing (v1 was NUL-separated). Stamping it into the MAC
 // input makes a future framing change distinguishable from tampering by
 // construction (gate-7 nit).
-func execApprovalMAC(a domain.Approval) ([]byte, error) {
+// execApprovalMAC computes the raw HMAC over a record (root-bound, current
+// framing).
+func execApprovalMAC(a domain.Approval, rootID string) ([]byte, error) {
 	key, err := execApprovalSecret()
 	if err != nil {
 		return nil, err
 	}
-	return execapproval.MAC(a, key)
+	return execapproval.MAC(a, key, rootID)
 }
 
-// execApprovalStamp builds the integrity stamp for a record: the marker
-// prefix plus the hex HMAC over its exact (TaskID, Status, ID).
-func execApprovalStamp(a domain.Approval) (string, error) {
+// execRootIdentity canonicalizes a root for the exec-approval MAC (v4,
+// from the 2026-10-28 campaign): symlink-resolved absolute path — same directory,
+// one identity; a copied workspace, another. Empty root keeps "".
+func execRootIdentity(root string) string {
+	if root == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return filepath.Clean(root)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
+}
+
+// execApprovalStamp builds the root-bound integrity stamp: marker prefix
+// plus the hex HMAC over the full decision-relevant content.
+func execApprovalStamp(a domain.Approval, rootID string) (string, error) {
 	key, err := execApprovalSecret()
 	if err != nil {
 		return "", err
 	}
-	return execapproval.Stamp(a, key)
+	return execapproval.Stamp(a, key, rootID)
 }
 
 // execApprovalStampFrom returns the stored hex HMAC of an exec-stamped
@@ -161,26 +244,28 @@ func execApprovalStampFrom(a domain.Approval) string {
 	return execapproval.StampFrom(a)
 }
 
-// execApprovalMACValid verifies an exec-stamped record's HMAC over its exact
-// (TaskID, Status, ID). A missing stamp, malformed stamp, wrong-length MAC,
-// unavailable secret, or mismatch all deny (fail closed) — forged and legacy
-// records can never grant execution.
-func execApprovalMACValid(a domain.Approval) bool {
+// execApprovalMACValid verifies an exec-stamped record's HMAC against the
+// canonical root identity: missing/malformed stamps, wrong keys, and
+// foreign-root v4 stamps all deny (fail closed); legacy v2/v3 stamps still
+// validate so an upgrade never orphans an in-flight approval. This is NOT a
+// grant check: the HMAC key is same-user readable. Grants require
+// execApprovalSignatureValid (P0-3).
+func execApprovalMACValid(a domain.Approval, rootID string) bool {
 	key, err := execApprovalSecret()
 	if err != nil {
 		return false
 	}
-	return execapproval.MACValid(a, key)
+	return execapproval.MACValid(a, key, rootID)
 }
 
 // stampExecApproval binds a freshly created approval to the exec secret: it
-// sets the HMAC stamp over (TaskID, Status, ID) and upserts the stamped
-// record into <root>/.kern/approvals.json, so the persisted record is
-// unforgeable by a client who only controls the workspace (R1). An empty
-// root means the approval is in-memory only (nothing persisted to forge) and
-// the stamp is skipped. Any secret/persistence failure fails closed.
+// sets the root-bound HMAC stamp and upserts the record into
+// <root>/.kern/approvals.json, so the persisted record is unforgeable by a
+// client who only controls the workspace (R1) and unportable to another
+// workspace. Empty root = in-memory only (nothing to forge); any
+// secret/persistence failure fails closed.
 func stampExecApproval(root string, a *domain.Approval) error {
-	stamp, err := execApprovalStamp(*a)
+	stamp, err := execApprovalStamp(*a, execRootIdentity(root))
 	if err != nil {
 		return fmt.Errorf("governance: exec approval %s could not be integrity-stamped: %w", a.ID, err)
 	}
@@ -193,13 +278,13 @@ func stampExecApproval(root string, a *domain.Approval) error {
 	return nil
 }
 
-// execApprovedFor returns the MAC-verified approved approval bound to the
-// given command key, or nil. Only records carrying a valid HMAC over their
-// full decision-relevant content can grant execution; forged/legacy records
-// are denied (R1), and records whose ID is in the consumed ledger are denied
-// too (R2d replay resistance: a client that snapshots an approved record and
-// re-inserts it cannot reauthorize it). An empty root has no persisted store
-// to grant from.
+// execApprovedFor returns the operator-signed approved approval bound to the
+// given command key, or nil. Only records carrying a valid Ed25519 operator
+// signature can grant execution; HMAC-only (pre-P0-3) and forged records are
+// denied, and records whose ID is in the consumed ledger are denied too (R2d
+// replay resistance: a client that snapshots an approved record and re-inserts
+// it cannot reauthorize it). An empty root has no persisted store to grant
+// from.
 func execApprovedFor(root, key string) *domain.Approval {
 	if root == "" {
 		return nil
@@ -208,6 +293,7 @@ func execApprovedFor(root, key string) *domain.Approval {
 	if err != nil {
 		return nil
 	}
+	rid := execRootIdentity(root)
 	consumed, cerr := execConsumedIDs()
 	if cerr != nil {
 		// Fail closed: an unverifiable consumed ledger must not silently
@@ -222,7 +308,10 @@ func execApprovedFor(root, key string) *domain.Approval {
 		// revoking the "rest of session" answer a human gave. Prefix grants
 		// are claimed only by consumePrefixGrantUse, which counts uses
 		// instead of removing the record.
-		if a.TaskID == key && a.Status == "approved" && a.Scope != "prefix" && !consumed[a.ID] && execApprovalMACValid(a) {
+		// The signature is the grant authority (P0-3): a readable HMAC key
+		// must never be enough to forge an approval. Prefix grants also need
+		// the HMAC because it protects the mutable use counter.
+		if a.TaskID == key && a.Status == "approved" && a.Scope != "prefix" && !consumed[a.ID] && execApprovalSignatureValid(a, rid) {
 			return &a
 		}
 	}
@@ -269,9 +358,9 @@ func execRejectionTTLText() string {
 // execRejectedFor returns the most recent persisted, MAC-verified approval
 // record for the given command key that was REJECTED by a human within the
 // rejection TTL (rejection stickiness), or nil when no unexpired rejection
-// blocks the key. Only records carrying a valid HMAC over their
-// decision-relevant content count, so a forged rejection cannot deny
-// execution. An unreadable store returns nil — the normal mint path below
+// blocks the key. Only records carrying a valid operator signature count, so
+// a forged rejection cannot deny execution (P0-3). An unreadable store returns
+// nil — the normal mint path below
 // still gates the command. A rejection older than the TTL is skipped
 // (auto-expiry): the deny side never outlives the human's decision by more
 // than the configured window, and the newest rejection wins when several
@@ -286,9 +375,13 @@ func execRejectedFor(root, key string) *domain.Approval {
 	}
 	ttl := execRejectionTTL()
 	var match *domain.Approval
+	rid := execRootIdentity(root)
 	for i := range approvals {
 		a := approvals[i]
-		if a.TaskID != key || a.Status != "rejected" || !execApprovalMACValid(a) {
+		// A rejection blocks execution for its TTL, so it must be
+		// operator-signed too: a forged HMAC-only rejection would be a
+		// denial-of-service primitive (P0-3).
+		if a.TaskID != key || a.Status != "rejected" || !execApprovalSignatureValid(a, rid) {
 			continue
 		}
 		decided := resolvedAt(a)
@@ -373,16 +466,27 @@ func claimExecApproval(root, id string) (bool, error) {
 }
 
 // ApprovalIntegrityOK reports whether an approval record's integrity is
-// verifiable. Records without an exec stamp (other features sharing the
-// approvals file) are OK by definition — they do not participate in the exec
-// integrity layer. Exec-stamped records must carry a valid HMAC over their
-// full decision-relevant content. `kern approve` listings flag records
+// verifiable at the given project root. Records without an exec stamp
+// (other features sharing the approvals file) are OK by definition — they
+// do not participate in the exec integrity layer. Exec-stamped records
+// must carry a valid HMAC over their full decision-relevant content,
+// bound to the root's canonical identity (v4): a record copied from
+// another workspace fails here. `kern approve` listings flag records
 // failing this check, and FileStore.Decide refuses to decide them, so a
 // governed client cannot tamper a pending record into misleading a human
 // approver (gate-1 attempt-2).
-func ApprovalIntegrityOK(a domain.Approval) bool {
+func ApprovalIntegrityOK(a domain.Approval, root string) bool {
+	rid := execRootIdentity(root)
+	if a.Signature != "" || a.Status == "approved" {
+		// An approved exec record is a grant only when the operator signature
+		// verifies. A v4 HMAC-only approved record (pre-P0-3) is no longer a
+		// grant: the HMAC key is same-user-readable and forgeable.
+		return execApprovalSignatureValid(a, rid)
+	}
 	if execApprovalStampFrom(a) == "" {
 		return true
 	}
-	return execApprovalMACValid(a)
+	// Pending records still carry the HMAC so a tampered record is flagged
+	// before a human decides it (the HMAC is not a grant authority).
+	return execApprovalMACValid(a, rid)
 }

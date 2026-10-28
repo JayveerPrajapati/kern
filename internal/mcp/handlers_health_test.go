@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
@@ -25,8 +25,8 @@ func TestHandleHealthTool(t *testing.T) {
 
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{t.TempDir()}
-	s.audit = governance.NewAuditLog()
-	s.audit.Record(governance.AuditEntry{
+	s.audit = govaudit.NewAuditLog()
+	s.audit.Record(govaudit.AuditEntry{
 		Action: "test_action",
 	})
 

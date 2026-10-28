@@ -60,7 +60,13 @@ func newGate(extraRoots []string, fromEnv bool) *Gate {
 		g.roots = append(g.roots, abs)
 	}
 	if fromEnv {
-		for _, r := range config.Strings("", "KERN_MCP_ROOTS", "mcp.roots", nil) {
+		// F-CRIT (2026-10-26 black-box audit): mcp.roots from the project's
+		// .kern/config.json is attacker-controlled data when the server starts
+		// in an untrusted repo — it is honored only behind the operator's
+		// KERN_MCP_ALLOW_CONFIG_ROOTS=1 opt-in; otherwise env roots only
+		// (config.EnvConfinementRoots prints the one-time stderr warning).
+		envRoots, _ := config.EnvConfinementRoots()
+		for _, r := range envRoots {
 			add(r)
 		}
 	}
@@ -342,14 +348,16 @@ func (g *Gate) gatePath(key, p string) error {
 	}
 	// The denial names the denied key, the allowed roots and the escape
 	// hatches so the caller can actually resolve it (F1): KERN_MCP_ROOTS
-	// widens the allowed set, KERN_MCP_PERMISSIVE=1 relaxes governance, and
-	// KERN_MCP_NO_CONFINE=1 (server-level) disables confinement entirely.
+	// widens the allowed set, KERN_MCP_NO_CONFINE=1 disables confinement
+	// entirely — and KERN_MCP_PERMISSIVE=1 only relaxes the governance gate
+	// layer, so path confinement may still deny (W17, 2026-10-26 black-box
+	// audit: the old wording implied either env lifted a path denial).
 	// Roots are server configuration, but an operator debugging a denied
 	// call learns more from the actionable message than from a bare denial.
 	// The env vars are framed as OPERATOR-set-at-server-start (F2): they are
 	// fixed when the process launches, so the hint addresses the human who
 	// owns the terminal, not the calling agent (which cannot change them).
-	return fmt.Errorf("path outside allowed roots for key %q (allowed roots: %s; to widen, an operator sets KERN_MCP_ROOTS at server start, or relaxes governance with KERN_MCP_PERMISSIVE=1 / KERN_MCP_NO_CONFINE=1 — the server environment is fixed at process start, a tool call cannot change it)", key, strings.Join(g.roots, ", "))
+	return fmt.Errorf("path outside allowed roots for key %q (allowed roots: %s; to widen, an operator sets KERN_MCP_ROOTS at server start, or disables confinement entirely with KERN_MCP_NO_CONFINE=1 — KERN_MCP_PERMISSIVE=1 only relaxes the governance gate layer, path confinement may still deny. The server environment is fixed at process start, a tool call cannot change it)", key, strings.Join(g.roots, ", "))
 }
 
 // resolvePartialPath resolves a (possibly not-yet-existing) absolute path to

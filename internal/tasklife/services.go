@@ -16,6 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
@@ -187,7 +188,7 @@ type Deployment interface {
 // Implemented by *TaskService.
 type Audit interface {
 	// AuditLog returns the shared governance audit log.
-	AuditLog() *governance.AuditLog
+	AuditLog() *govaudit.AuditLog
 }
 
 // Compile-time assertions: the existing concrete services satisfy the 15

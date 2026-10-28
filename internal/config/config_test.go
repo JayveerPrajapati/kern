@@ -438,3 +438,93 @@ func TestEffectiveModelRoles(t *testing.T) {
 		t.Fatalf("default tier: got %v (%s)", m, src)
 	}
 }
+
+// chdir changes the process working directory for the duration of the
+// closure and restores it after. EnvConfinementRoots reads .kern/config.json
+// from the process cwd, so its tests must run inside a fixture root.
+func chdir(t *testing.T, dir string) func() {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFileStrings pins the file-tier-only strings reader behind the F-CRIT
+// policy: it reads .kern/config.json with no env fallback and reports ok=false
+// for absent keys, absent files and non-array values.
+func TestFileStrings(t *testing.T) {
+	root := t.TempDir()
+	writeConfig(t, root, `{"mcp": {"roots": ["/a", " /b "], "bad": "not-an-array"}}`)
+	if got, ok := FileStrings(root, "mcp.roots"); !ok || len(got) != 2 || got[0] != "/a" || got[1] != "/b" {
+		t.Fatalf("mcp.roots: got %v ok=%v", got, ok)
+	}
+	if _, ok := FileStrings(root, "mcp.absent"); ok {
+		t.Fatal("absent key must report ok=false")
+	}
+	if _, ok := FileStrings(root, "mcp.bad"); ok {
+		t.Fatal("non-array value must report ok=false")
+	}
+	clean := t.TempDir()
+	if _, ok := FileStrings(clean, "mcp.roots"); ok {
+		t.Fatal("missing file must report ok=false")
+	}
+}
+
+// TestEnvConfinementRoots pins the F-CRIT policy (2026-10-26 black-box audit):
+// project-supplied mcp.roots in .kern/config.json is IGNORED unless the
+// operator opted in with KERN_MCP_ALLOW_CONFIG_ROOTS=1; env roots always
+// apply. The ignored case returns a non-empty notice naming the roots.
+func TestEnvConfinementRoots(t *testing.T) {
+	root := t.TempDir()
+	victim := t.TempDir()
+	writeConfig(t, root, `{"mcp": {"roots": ["`+victim+`"]}}`)
+	t.Setenv("KERN_MCP_ROOTS", "")
+	t.Setenv("KERN_ROOTS", "")
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "")
+	Reset()
+	defer chdir(t, root)()
+
+	roots, notice := EnvConfinementRoots()
+	if len(roots) != 0 {
+		t.Fatalf("config roots without opt-in must be ignored, got %v", roots)
+	}
+	if notice == "" || !strings.Contains(notice, victim) {
+		t.Fatalf("notice must name the ignored roots, got %q", notice)
+	}
+
+	// Env roots apply regardless of the ignored config.
+	t.Setenv("KERN_MCP_ROOTS", "/env/root")
+	roots, notice = EnvConfinementRoots()
+	if len(roots) != 1 || roots[0] != "/env/root" {
+		t.Fatalf("env roots must apply despite ignored config, got %v", roots)
+	}
+	if notice == "" {
+		t.Fatal("notice must still be set while config roots are ignored")
+	}
+
+	// The operator opt-in restores the config roots (merged with env).
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "1")
+	roots, notice = EnvConfinementRoots()
+	if len(roots) != 2 {
+		t.Fatalf("opt-in must merge config roots with env roots, got %v", roots)
+	}
+	seen := map[string]bool{}
+	for _, r := range roots {
+		seen[r] = true
+	}
+	if !seen["/env/root"] || !seen[filepath.Clean(victim)] {
+		t.Fatalf("opt-in must include both env and config roots, got %v", roots)
+	}
+	if notice != "" {
+		t.Fatalf("opt-in must not produce a notice, got %q", notice)
+	}
+}

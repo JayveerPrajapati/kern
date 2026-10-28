@@ -138,9 +138,13 @@ runs.
 - **`Gate` / `NewGateFromEnv()`** — `internal/mcp/gate.go`. The pre-tool-use
   confinement gate (`srv.preTool = srv.gate.Check`, `internal/mcp/http.go`).
   Confines every tool call's `root`, `dir`, and `*path*` arguments to the
-  `KERN_MCP_ROOTS` (or `mcp.roots`) list; **fails closed to the process
+  `KERN_MCP_ROOTS` list; **fails closed to the process
   working directory when unset**, so zero-config deployments are confined to
-  the workspace. Roots are symlink-resolved once (`symlinkOrSelf`). Opt-outs
+  the workspace. Roots are symlink-resolved once (`symlinkOrSelf`). The
+  `mcp.roots` key in `.kern/config.json` is project-supplied data and is
+  honored only behind the operator's `KERN_MCP_ALLOW_CONFIG_ROOTS=1` opt-in
+  (2026-10-26 black-box audit, F-CRIT: without the opt-in a repo shipping
+  that key could not widen — or replace — the confinement). Opt-outs
   are explicit and documented: `KERN_MCP_PERMISSIVE=1` (gate) and
   `KERN_MCP_NO_CONFINE=1` (`confinementGate()`, `internal/mcp/server.go:477`).
 - **`Escape(root, p)`** — `internal/sandbox/sandbox.go:613`; used by the

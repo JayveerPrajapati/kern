@@ -22,8 +22,12 @@ import (
 // wording tweaks stay under the wire. Re-measured 2026-09-25 (R1 per-surface
 // root wording: the ~106 `root` parameter descriptions now state the stdio
 // vs web console/SDK confinement surfaces explicitly): 20,904 tokens ->
-// cap 20,904 x 1.15 = 24,039 -> 24,100.
-const maxCatalogAdvertisedTokens = 24100
+// cap 20,904 x 1.15 = 24,039 -> 24,100. Re-measured 2026-10-27 after the
+// shared-property constructor refactor + the P4.1 wording diet (telegraphic
+// param descriptions across the 12 largest schemas): 6,815 tokens — the
+// constructors already state shared guidance once in source with a terse
+// wire form — cap 6,815 x 1.15 = 7,837 -> 7,900.
+const maxCatalogAdvertisedTokens = 7900
 
 // maxToolDescriptionBytes guards against a single bloated description
 // sneaking back in: any one tool's description must stay under 300 bytes.

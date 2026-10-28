@@ -184,7 +184,9 @@ kern probe "<natural language task>"     # map prose to anchor symbols
 
 **What to look for:**
 
-- Plain `kern search` is sub-millisecond and deterministic — start here.
+- Plain `kern search` is sub-millisecond once the index is warm **in-process**
+  (a fresh CLI process adds roughly 0.2–0.4 s of index load) and deterministic —
+  start here; the resident daemon removes the per-command reload.
 - `--semantic` broadens recall when the name isn't obvious; it needs a local
   Ollama (the command warns and falls back to ranked search without one).
 - `kern docs` searches only indexed repo docs — repos without a docs tree

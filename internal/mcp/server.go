@@ -11,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/fsutil"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -214,7 +215,7 @@ type Server struct {
 	// audit records every executed (and pre-dispatch-rejected) MCP tool
 	// call into the project's tamper-evident audit chain; auditMu
 	// guards toolAudit's lazy initialization.
-	audit   *governance.AuditLog
+	audit   *govaudit.AuditLog
 	auditMu sync.Mutex
 	// preTool is an optional hook invoked before every tools/call execution.
 	// It receives the tool name and its arguments and returns nil to allow the
@@ -553,9 +554,38 @@ type rpcRequest struct {
 }
 
 // isNotification reports whether the request is a JSON-RPC notification: it
-// has no id, so the client expects no response.
+// has no id, so the client expects no response. An EXPLICIT "id":null is
+// tolerated as a notification only on the notifications/ namespace (some
+// hosts serialize notifications that way); anywhere else a null id is an
+// invalid request — see hasExplicitNullID (W9, 2026-10-26 black-box audit).
 func (r rpcRequest) isNotification() bool {
-	return len(r.ID) == 0 || string(r.ID) == "null"
+	if len(r.ID) == 0 {
+		return true
+	}
+	return string(r.ID) == "null" && strings.HasPrefix(r.Method, "notifications/")
+}
+
+// hasExplicitNullID reports whether the frame carried "id": null. JSON-RPC
+// 2.0: a request id, when present, MUST NOT be null — only an absent id makes
+// a notification.
+func (r rpcRequest) hasExplicitNullID() bool {
+	return string(r.ID) == "null"
+}
+
+// hasExplicitCursor reports whether the request params carry a non-null,
+// non-empty "cursor" member (MCP list pagination). kern's catalog fits one
+// page and never emits a cursor, so any client-supplied cursor is unknown.
+func (r rpcRequest) hasExplicitCursor() bool {
+	if len(r.Params) == 0 {
+		return false
+	}
+	var p struct {
+		Cursor *string `json:"cursor"`
+	}
+	if err := json.Unmarshal(r.Params, &p); err != nil {
+		return false
+	}
+	return p.Cursor != nil && *p.Cursor != ""
 }
 
 func (s *Server) write(v any) error {
@@ -1066,7 +1096,15 @@ func (s *Server) Serve() error {
 	for {
 		line, err := readLineLimit(rd, 16<<20)
 		if err == errLineTooLong {
+			// Answer the client instead of only skipping silently: a naive
+			// client would otherwise wait forever for a response that never
+			// comes (W13, 2026-10-26 black-box audit; the HTTP transport
+			// already answers 413). The frame is too large to have an
+			// extractable id, so the error response carries id null.
 			fmt.Fprintf(os.Stderr, "kern-mcp: skipping oversized input line (> %d bytes); continuing\n", 16<<20)
+			if werr := s.write(errorResponse(nil, -32600, fmt.Sprintf("message too large: input line exceeds %d bytes", 16<<20))); werr != nil {
+				return werr
+			}
 			continue
 		}
 		if err != nil {
@@ -1080,6 +1118,22 @@ func (s *Server) Serve() error {
 		}
 		var req rpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if errors.As(err, &typeErr) {
+				// Valid JSON with a wrong-typed envelope (an array, a bare
+				// scalar) or a wrong-typed field is an invalid REQUEST, not
+				// a parse error: answer -32600 with a sanitized message —
+				// never the raw Go error, which leaks internal type names
+				// like mcp.rpcRequest (W1+W7, 2026-10-26 black-box audit).
+				msg := "invalid request: a JSON-RPC request must be a JSON object"
+				if typeErr.Field != "" {
+					msg = fmt.Sprintf("invalid request: wrong JSON type for field %q", typeErr.Field)
+				}
+				if err := s.write(errorResponse(nil, -32600, msg)); err != nil {
+					return err
+				}
+				continue
+			}
 			// A malformed line is a protocol error, not a silent drop.
 			if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
 				return err
@@ -1237,6 +1291,17 @@ func (s *Server) dispatch(req rpcRequest) any {
 	// exactly once (the gate previously re-unmarshalled what
 	// toolCallResponse had already decoded). A malformed params body is not
 	// a gate matter — the old gate decode silently skipped it and
+	// JSON-RPC 2.0: a request id, when present, MUST NOT be null — only an
+	// absent id makes a notification. An explicit "id":null on a request is
+	// rejected as invalid so a client waiting on the response is answered
+	// (-32600) instead of hanging forever (W9, 2026-10-26 black-box audit).
+	// The notifications/ namespace is exempt: some hosts serialize
+	// notifications with an explicit null id. Runs before the init gate: the
+	// frame is protocol-invalid regardless of session state. Responses to
+	// server-initiated requests (no method) are not affected.
+	if req.Method != "" && req.hasExplicitNullID() && !strings.HasPrefix(req.Method, "notifications/") {
+		return errorResponse(nil, -32600, "invalid request: id must not be null (send no id for notifications)")
+	}
 	// MCP initialization contract: the client must send initialize before
 	// any other request. Requests arriving before that are rejected with
 	// -32002; initialize itself is the entry point and exempt. LOW-10: this
@@ -1367,7 +1432,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 				"capabilities":    caps,
 				"serverInfo":      map[string]any{"name": serverName, "version": currentServerVersion()},
 				"schemaVersion":   schemaVersion,
-				"instructions":    instructions,
+				"instructions":    serverInstructions(),
 			},
 		}
 	case "notifications/initialized":
@@ -1375,6 +1440,17 @@ func (s *Server) dispatch(req rpcRequest) any {
 	case "ping":
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
 	case "tools/list":
+		// The catalog fits one page, so pagination is not implemented and no
+		// cursor is ever emitted. A cursor supplied by the client is
+		// therefore always unknown: reject it with -32602 instead of
+		// silently ignoring it, so a buggy client cannot believe it is
+		// paging when it is re-reading page one (W2, 2026-10-26 black-box
+		// audit). nextCursor is OMITTED when there is no next page: the MCP
+		// schema types it as an optional string, and strict clients (opencode
+		// 1.19.4) reject an explicit null with "Failed to get tools".
+		if req.hasExplicitCursor() {
+			return errorResponse(req.ID, -32602, "invalid params: unknown or unsupported pagination cursor")
+		}
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": s.filteredTools(), "schemaVersion": s.schemaVersionFor()}}
 	case "tools/call":
 		if !callParamsOK {

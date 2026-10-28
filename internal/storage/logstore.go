@@ -271,10 +271,16 @@ func (s *LogStore) List(ctx context.Context) ([]Entry, error) {
 			continue // an older write of the same key
 		}
 		seen[e.Key] = true
+		e.WriteOrder = i + 1
 		out = append(out, e)
 	}
 	return out, nil
 }
+
+// WriteOrdered reports that List preserves append order for chain-backed
+// entries (via Entry.WriteOrder). Legacy per-key files are reported with
+// WriteOrder 0 and must be ordered by the consumer's own logical sequence.
+func (s *LogStore) WriteOrdered() bool { return true }
 
 // listLegacy returns the per-key .json files (LocalStore format), sorted by
 // key. In-progress .tmp files and chain.jsonl itself are excluded.

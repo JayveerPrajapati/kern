@@ -59,15 +59,19 @@ func PortableMCPCommand() string {
 }
 
 // GlobalMCPCommand returns the command that GLOBAL agent configs should run to
-// start kern-mcp. Global configs must survive an upgrade or a change of install
-// location, so an absolute os.Executable()-derived path is fragile: if the user
-// later installs a new release elsewhere (or the binary that ran setup lives in
-// a temp/versioned dir like a brew Cellar), the stale absolute path breaks the
-// agent's MCP server. Prefer a PATH-resolved bare "kern-mcp" command — the agent
-// resolves it against PATH at launch time, so it always points at whatever kern
-// is currently installed. Only fall back to the sibling absolute path when
-// kern-mcp is not on PATH at all.
-func GlobalMCPCommand() string { return PortableMCPCommand() }
+// start kern-mcp. Global configs are machine-specific (never committed), and
+// GUI-launched hosts (Claude Code, Cursor, Gemini, Qwen, Codex, Zed on macOS)
+// do NOT inherit the shell PATH — a bare "kern-mcp" written by a setup run from
+// a terminal is unresolvable at host launch, so the MCP server silently never
+// starts and agents fall back to built-in tools. Use an absolute command for
+// global configs; the install directory is stable across kernel updates.
+// Project configs keep the portable bare command (see PortableMCPCommand).
+func GlobalMCPCommand() string { return agentwire.LaunchMCPCommand() }
+
+// LaunchCLICommand returns the absolute `kern` command for machine-global hook
+// settings. Hooks run in GUI-launched hosts with a minimal PATH too, so a bare
+// `kern` there fails open silently and kern-first steering is lost.
+func LaunchCLICommand() string { return agentwire.LaunchCLICommand() }
 
 // PortableCLICommand returns the portable kern CLI command for agent hooks.
 // Prefer a PATH-resolved bare "kern"; fall back to the sibling absolute path
@@ -114,9 +118,12 @@ func stdioEntry(bin string) map[string]any {
 		"type":    "stdio",
 		"command": bin,
 		"args":    []string{},
-		"env": map[string]string{
-			"KERN_ALLOW_EXEC": "1",
-		},
+		// No KERN_ALLOW_EXEC default (C1): exec is opt-in per host. Writing it
+		// here silently enabled ungoverned host command execution for every
+		// agent that opened the repo — the exact opposite of the documented
+		// fail-closed contract. MergeJSON replaces the kern entry wholesale, so
+		// re-running setup also strips a stale KERN_ALLOW_EXEC from prior runs.
+		"env": map[string]string{},
 	}
 }
 
@@ -124,9 +131,7 @@ func cmdEntry(bin string) map[string]any {
 	return map[string]any{
 		"command": bin,
 		"args":    []string{},
-		"env": map[string]string{
-			"KERN_ALLOW_EXEC": "1",
-		},
+		"env":     map[string]string{},
 	}
 }
 
@@ -471,11 +476,11 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			out = append(out, agentwire.WireGlobalPlugin())
 		}
 		if globalEnabled("claude") {
-			out = append(out, wireClaude(bin))
-			out = append(out, wireClaudeHooks(PortableCLICommand()))
+			out = append(out, wireClaude(GlobalMCPCommand()))
+			out = append(out, wireClaudeHooks(LaunchCLICommand()))
 		}
 		if globalEnabled("codex") {
-			out = append(out, wireCodex(bin))
+			out = append(out, wireCodex(GlobalMCPCommand()))
 			out = append(out, wireCodexHooks(root))
 		}
 	}
@@ -495,7 +500,13 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			gate = globalEnabled
 		}
 		if gate(a.name) {
-			out = append(out, wireAdapter(a, root, bin))
+			// Machine-global configs must carry the absolute command (GUI hosts
+			// do not inherit the shell PATH); project configs stay portable.
+			cmd := bin
+			if a.scope == "global" {
+				cmd = GlobalMCPCommand()
+			}
+			out = append(out, wireAdapter(a, root, cmd))
 		}
 		// Instruction files are per-repo; only wire for present/detected
 		// agents, independent of the adapter's config scope.
@@ -518,7 +529,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	}
 	if global {
 		if globalEnabled("gemini") {
-			out = append(out, wireGeminiHooks(PortableCLICommand()))
+			out = append(out, wireGeminiHooks(LaunchCLICommand()))
 		}
 		if globalEnabled("antigravity") {
 			out = append(out, wireAntigravityHooks())
@@ -536,7 +547,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			out = append(out, wireQoderHooks(root))
 		}
 		if globalEnabled("continue") {
-			out = append(out, wireContinueHooks())
+			out = append(out, wireContinueHooks(LaunchCLICommand()))
 		}
 		if globalEnabled("kiro") {
 			out = append(out, wireKiroHooks())

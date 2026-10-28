@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/calleefilter"
 	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,17 @@ func UpdateWithSnapshot(root string, prev *Index) (*Index, error) {
 		return update(root, prev, nil)
 	}
 	return update(root, prev, prev.retainedSnapshot())
+}
+
+func hasNoiseEdges(ix *Index) bool {
+	for _, edges := range ix.Calls {
+		for _, ce := range edges {
+			if calleefilter.IsNoiseCalleeFor(ce.Target, false, ce.SourceFile) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
@@ -129,6 +141,15 @@ func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	reusedCount, err := mergeUpdateJobs(ix, prev, snap, jobs, callsByFile, inheritsByFile, t, recordCopied)
 	if err != nil {
 		return nil, err
+	}
+
+	// No-op fast path (identical content): skip finalize and the rewrite.
+	if int(reusedCount) == len(jobs) && sameHashes(prev.FileHashes, ix.FileHashes) && !hasNoiseEdges(prev) {
+		clone := *prev
+		clone.skipPersist = true
+		clone.reusedResults = int(reusedCount)
+		clone.BuildStats = BuildStats{Kind: "update", Ms: time.Since(start).Milliseconds(), Workers: 1, Reused: int(reusedCount)}
+		return &clone, nil
 	}
 
 	// Phase 4: unattributable-owner merge, dangling-edge cleanup and the

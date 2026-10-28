@@ -10,7 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -247,6 +247,14 @@ func runEvidenceVerify(rest []string) int {
 	default:
 		fmt.Println("signature: unsigned (digest-only seal)")
 	}
+	// Machine-keyed seal (2026-10-28 campaign): report the seal's strength —
+	// a machine MAC makes the bundle unforgeable by a workspace-level
+	// attacker on this machine; a bare digest is recomputable.
+	if b.MachineMAC != "" {
+		fmt.Println("machine-keyed seal: valid on this machine (unforgeable by a workspace-level attacker)")
+	} else {
+		fmt.Println("machine-keyed seal: ABSENT (digest-only — forgeable by a workspace-level attacker who recomputes the hash; re-export for a keyed seal)")
+	}
 
 	// Verify the audit chain the bundle claims, against the on-disk trail.
 	repoRoot := b.RepoRoot
@@ -261,7 +269,7 @@ func runEvidenceVerify(rest []string) int {
 		return 0
 	}
 	store := storage.NewLog(filepath.Join(repoRoot, ".kern", "audit"))
-	log := governance.NewAuditLog().WithStore(store)
+	log := govaudit.NewAuditLog().WithStore(store)
 	if _, err := log.Replay(); err != nil {
 		fmt.Fprintf(os.Stderr, "kern evidence verify: replay audit chain at %s: %v\n", repoRoot, err)
 		return 1

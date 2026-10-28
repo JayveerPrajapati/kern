@@ -69,6 +69,7 @@ pass.
 | `internal/llm` | Outbound LLM provider clients (OpenAI/Anthropic/Google/Ollama). |
 | `internal/mcp` | MCP loopback HTTP server (covers `internal/mcp/transport` TLS loopback listener and `internal/mcp/doc`, which uses `internal/fetch`). |
 | `internal/mcpclient` | Outbound MCP client. |
+| `internal/daemon` | **Local unix-domain socket only** (`net.Listen("unix")` / `net.DialTimeout("unix")`): IPC between kern processes in one checkout (the warm read-only index daemon). No TCP/IP, no DNS, no outbound egress; a socket path outside the repo is a hashed name in `os.TempDir()`, never a host. |
 | `internal/prprovider` | PR-provider API clients (GitHub). |
 | `internal/relay` | Peer relay networking. |
 | `internal/resilience` | Chaos/injection scenarios spin up **local loopback** HTTP servers to simulate network failures; no outbound egress. |

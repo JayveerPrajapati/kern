@@ -154,3 +154,36 @@ func TestNoSearchMatchMsgNilIndex(t *testing.T) {
 		t.Fatalf("NoSearchMatchMsg(nil) = %q, want the bare line", got)
 	}
 }
+
+// TestSuggestPathLikeQueryNoNoise pins the 2026-10-28 campaign fix: a
+// path-like query ("/dev/null", "cmd/kern/main.go") must produce NO
+// suggestions — the token-ranked and wildcard stages matched doc symbols
+// that merely mention the path, which is noise, not a hint.
+func TestSuggestPathLikeQueryNoNoise(t *testing.T) {
+	ix := hintsFixture(t, `// F1 — multiline redirection to >/dev/null misclassified as a fixture doc.
+func DevNullMention() {}
+`)
+	for _, q := range []string{"/dev/null", "cmd/kern/main.go", "a b c"} {
+		if got := Suggest(ix, q); len(got) != 0 {
+			t.Fatalf("Suggest(%q) = %v, want no suggestions for a path-like query", q, got)
+		}
+	}
+}
+
+// TestSuggestPrefixFallbackLengthGuard pins the length-spread guard on the
+// 3-char-prefix fallback: a short query must not suggest a wildly longer
+// symbol ("Gone" suggesting "goNativeEntry") — typo tolerance, not noise.
+func TestSuggestPrefixFallbackLengthGuard(t *testing.T) {
+	ix := hintsFixture(t, `func goNativeEntry() {}
+func Gone() {}
+`)
+	got := Suggest(ix, "Gone")
+	for _, name := range got {
+		if name == "goNativeEntry" {
+			t.Fatalf("Suggest(Gone) = %v — the length-spread guard must drop goNativeEntry", got)
+		}
+	}
+	if len(got) == 0 || !strings.HasSuffix(got[0], "Gone") {
+		t.Fatalf("Suggest(Gone) = %v — the exact symbol should rank first", got)
+	}
+}

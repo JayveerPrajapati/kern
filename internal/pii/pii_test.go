@@ -159,6 +159,31 @@ func TestMaskPhoneDigitRunFilter(t *testing.T) {
 	}
 }
 
+// A digit run inside a path is a path component, not a phone number. The
+// 2026-10-26 audit found macOS temp dirs rendered as
+// ".../kern-exec-[MASKED_PHONE_1]/.ssh", which breaks copy/paste and hides the
+// actual directory from the reader.
+func TestMaskPhoneSkipsPathComponents(t *testing.T) {
+	in := "/var/folders/xy/2v9q3x/T/kern-exec-4155552671/.ssh and ./out/4155552671/x.go"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_PHONE_") {
+		t.Errorf("path components must not be masked as phones: %q", res.Text)
+	}
+	if res.Text != in {
+		t.Errorf("path text mutated: %q", res.Text)
+	}
+}
+
+// The path exemption must not become a phone-masking loophole: prose numbers
+// stay masked.
+func TestMaskPhoneStillMasksProseNumbers(t *testing.T) {
+	in := "call 4155552671 now"
+	res := Mask(in)
+	if !strings.Contains(res.Text, "[MASKED_PHONE_1]") {
+		t.Errorf("prose phone not masked: %q", res.Text)
+	}
+}
+
 func TestMaskNames(t *testing.T) {
 	res := MaskNames("deploy for Acme Corp at 10.1.1.1", []string{"Acme Corp"})
 	if !strings.Contains(res.Text, "[MASKED_NAME_1]") {

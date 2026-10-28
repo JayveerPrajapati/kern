@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -277,6 +278,33 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 			}
 		}
 	}
+	// W10/W21 hints, appended to the content text AFTER the handler ran:
+	// W10 names arguments the tool's schema does not declare (a 'roots'-vs-
+	// 'root' typo used to run against the default root with isError:false —
+	// the caller never learned the argument was dropped); W21 bounds large
+	// responses from max_tokens-capable tools.
+	extra := ""
+	if result["isError"] != true {
+		if warn := unknownParamsHint(p.Name, p.Arguments); warn != "" {
+			extra = warn
+		}
+	}
+	if hint, ok := largeOutputHint(p.Name, p.Arguments, out, result); ok {
+		if extra != "" {
+			extra += "\n"
+		}
+		extra += hint
+	}
+	if extra != "" {
+		out += "\n" + extra
+		if content, ok := result["content"].([]any); ok && len(content) > 0 {
+			if first, ok := content[0].(map[string]any); ok {
+				if _, isText := first["text"].(string); isText {
+					first["text"] = out
+				}
+			}
+		}
+	}
 	tokensOut := tokenize.Count(out)
 	// Per-tool token ledger: one entry per executed tool call (never for
 	// pre-tool denials — they return before this point). The same final
@@ -294,6 +322,81 @@ func (s *Server) clientNameFor() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.clientName
+}
+
+// largeOutputHintThreshold is the returned-token count above which an
+// unbounded default view from a max_tokens-capable tool earns the bounding
+// hint (W21, 2026-10-26 black-box audit): ~4000 tokens is where a single
+// call starts costing a meaningful slice of an agent's context window.
+const largeOutputHintThreshold = 4000
+
+// largeOutputHint decides whether a large tool response should carry the
+// bounding hint. It fires only when the tool's schema declares a max_tokens
+// parameter, the caller did not supply one, the response is a successful
+// (non-error, non-unchanged) text payload, and the payload exceeds the
+// threshold. The hint names the argument so the very next call can be
+// cheaper — without it the cost shows up in the response metadata but the
+// fix stays invisible (W21 finding: kern_explore's default on a 2GB repo
+// returned ~8.7k tokens with no in-band guidance).
+func largeOutputHint(name string, args map[string]any, out string, result map[string]any) (string, bool) {
+	if result["isError"] == true || result["unchanged"] == true {
+		return "", false
+	}
+	if tokenize.Count(out) < largeOutputHintThreshold {
+		return "", false
+	}
+	t, ok := toolByName[name]
+	if !ok {
+		return "", false
+	}
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	if _, ok := props["max_tokens"]; !ok {
+		return "", false
+	}
+	if v, ok := args["max_tokens"]; ok && v != nil {
+		if s, isStr := v.(string); !isStr || strings.TrimSpace(s) != "" {
+			return "", false // the caller already bounded (or chose) the size
+		}
+	}
+	return fmt.Sprintf("[kern hint: this response is ~%d tokens; pass max_tokens (e.g. max_tokens: 2000) to bound future %s responses]", tokenize.Count(out), name), true
+}
+
+// governancePassthroughParams are the governance-injection argument keys a
+// governed client may legitimately attach to ANY tool call (kern_context
+// governed mode): they are never flagged as unknown by unknownParamsHint.
+var governancePassthroughParams = map[string]bool{
+	"agent_id": true, "agent_token": true, "task": true, "scope": true,
+}
+
+// unknownParamsHint names arguments the tool's schema does not declare
+// (W10, 2026-10-26 black-box audit): a typo like 'roots' for 'root' used to
+// run against the default root with isError:false — the argument was silently
+// dropped and the caller never learned. The hint lists the ignored keys and
+// the declared parameter names so the fix is visible on the very next call.
+// It fires only for non-error results (an error response already has the
+// caller's attention) and never for governance passthrough keys.
+func unknownParamsHint(name string, args map[string]any) string {
+	t, ok := toolByName[name]
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	var unknown []string
+	for k := range args {
+		if _, declared := props[k]; !declared && !governancePassthroughParams[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return ""
+	}
+	sort.Strings(unknown)
+	declared := make([]string, 0, len(props))
+	for k := range props {
+		declared = append(declared, k)
+	}
+	sort.Strings(declared)
+	return fmt.Sprintf("[kern warning: %s has no parameter(s) %v — ignored; declared parameters: %v]", name, unknown, declared)
 }
 
 func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) any {
@@ -500,6 +603,21 @@ func validateArgTypes(name string, args map[string]any) error {
 		if !ok {
 			continue // absent optional argument: nothing to coerce
 		}
+		if ptype == "" {
+			// Union-typed property (W19, 2026-10-26 black-box audit):
+			// e.g. kern_apply's edits accepts the array itself or its
+			// JSON encoding as a string — the handlers are tolerant,
+			// but this walk used to reject array callers before the
+			// handler ever ran because the schema said "string" while
+			// the description said "Array of ...". Accept any listed
+			// type (integer and number match each other).
+			if union, isUnion := prop["type"].([]any); isUnion {
+				if err := validateUnionType(name, key, union, v); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if ptype != "string" {
 			if err := validateNonStringScalar(name, key, ptype, v); err != nil {
 				return err
@@ -545,6 +663,48 @@ func validateArgTypes(name string, args map[string]any) error {
 	return validateRootFallback(name, props, args, cwd)
 }
 
+// validateUnionType enforces a JSON-Schema union-typed property: the value's
+// JSON kind must be one of the listed types (integer and number match each
+// other, mirroring the D6 lenience).
+func validateUnionType(name, key string, union []any, v any) error {
+	kind := jsonValueKind(v)
+	for _, t := range union {
+		s, _ := t.(string)
+		if s == kind {
+			return nil
+		}
+		if (s == "number" || s == "integer") && (kind == "number" || kind == "integer") {
+			return nil
+		}
+	}
+	var names []string
+	for _, t := range union {
+		if s, ok := t.(string); ok {
+			names = append(names, s)
+		}
+	}
+	return fmt.Errorf("argument %q for tool %s: expected one of types %s, got %s", key, name, strings.Join(names, " or "), kind)
+}
+
+// jsonValueKind reports the JSON kind of a decoded (or Go-API) argument value.
+func jsonValueKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "string"
+	case bool:
+		return "boolean"
+	case float64, int, int64:
+		return "number"
+	case []any, []string:
+		return "array"
+	case map[string]any:
+		return "object"
+	}
+	return "unknown"
+}
+
 // validateRootFallback enforces the guarded cwd fallback for tools that
 // declare a "root" argument. The fallback fires only when the caller omitted
 // root or passed an explicit cwd form ("", ".", "./"); an explicit project
@@ -566,7 +726,7 @@ func validateRootFallback(name string, props map[string]any, args map[string]any
 	if root.PlausibleProject(cwd) {
 		return nil
 	}
-	return fmt.Errorf("argument %q for tool %s: root is required — the server working directory %q is not a project (no .git, no kern index); pass the project path", "root", name, cwd)
+	return fmt.Errorf("argument %q for tool %s: root is required — the server working directory %q is not a project (no .git and no populated kern index: .kern/index.json or .kern/index.sqlite); pass the project path", "root", name, cwd)
 }
 
 // capProvenanceSymbolsToFit trims the structured Symbols listing so the serialized

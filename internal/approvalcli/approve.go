@@ -12,6 +12,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/storage"
@@ -54,7 +55,7 @@ func runApprove(rest []string) {
 				reason = reason[:37] + "..."
 			}
 			fmt.Printf("%-20s %-12s %-20s %s\n", a.ID, a.TaskID, a.Requester, reason)
-			if !governance.ApprovalIntegrityOK(a) {
+			if !governance.ApprovalIntegrityOK(a, root) {
 				fmt.Printf("%54s !! INTEGRITY: record was modified outside the approval workflow — DO NOT APPROVE\n", "")
 			}
 			for _, ref := range a.EvidenceRefs {
@@ -91,7 +92,8 @@ func runApprove(rest []string) {
 	// guard (rc=3) and the store order are shared with `kern reject`, so a
 	// single command surface can decide every approval `kern approve`
 	// resolves.
-	a, mem := decideApproval(root, "approve", id, approver, !f.reject, f.reason)
+	sign := newApprovalSigner()
+	a, mem := decideApproval(root, "approve", id, approver, !f.reject, f.reason, sign)
 	if f.reject {
 		fmt.Printf("rejected: %s (by %s)\n", a.ID, approver)
 		if a.TaskID != "" {
@@ -121,7 +123,7 @@ func runApprove(rest []string) {
 			if f.scope != "prefix" {
 				fatalUsage("approve: --scope must be once or prefix (got %q)", f.scope)
 			}
-			grant, gerr := governance.SetScopePrefix(root, id, f.prefix, approver)
+			grant, gerr := governance.SetScopePrefixWithSigner(root, id, f.prefix, approver, sign)
 			if gerr != nil {
 				fatal("approve --scope prefix: %v (the once-decision stands — this command authorized exactly one execution)", gerr)
 			}
@@ -258,7 +260,7 @@ func recordApprovalAttemptAudit(root, id, approver, result, reason string) {
 // action verb (approve|reject) explicit, so a rejected attempt is recorded
 // as Action reject in the chain.
 func recordApprovalAttemptAuditVerb(root, verb, id, approver, result, reason string) {
-	entry := governance.AuditEntry{
+	entry := govaudit.AuditEntry{
 		AgentID:   approver,
 		Action:    verb,
 		Resource:  "approval:" + id,
@@ -269,10 +271,10 @@ func recordApprovalAttemptAuditVerb(root, verb, id, approver, result, reason str
 		Timestamp: time.Now(),
 	}
 	auditDir := filepath.Join(root, ".kern", "audit")
-	l := governance.NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(auditDir)).
 		WithLockPath(filepath.Join(auditDir, ".lock")).
-		WithMirror(governance.MirrorFor(auditDir))
+		WithMirror(govaudit.MirrorFor(auditDir))
 	if err := l.AppendExternal(entry); err != nil {
 		stdlog.Printf("kern approve: aborted attempt for %s NOT recorded in audit chain: %v", id, err)
 	}
@@ -305,7 +307,7 @@ func recordApprovalAttemptAuditVerb(root, verb, id, approver, result, reason str
 // only when the governance store decided: the caller runs the policy-signal
 // learning pass (recordPolicySignalsBounded) AFTER printing the confirmation,
 // so learning can never delay the visible outcome.
-func decideApproval(root, verb, id, approver string, approve bool, reason string) (domain.Approval, *memory.MemoryStore) {
+func decideApproval(root, verb, id, approver string, approve bool, reason string, sign governance.ExecSigner) (domain.Approval, *memory.MemoryStore) {
 	// Decided-state guard: an approval that already has a decision must not
 	// be re-decided (exitcode convention rc=3). Read-only pre-check; the
 	// engine flows keep their idempotent Decide semantics.
@@ -323,7 +325,7 @@ func decideApproval(root, verb, id, approver string, approve bool, reason string
 		fatal("%s: could not load project: %v — run kern index first", verb, err)
 	}
 	ts := tasklife.NewTaskService(p, nil).WithAgentID(approver)
-	a, err := ts.ResolveApprovalForTask(id, approver, approve, reason)
+	a, err := ts.ResolveApprovalForTaskWithSigner(id, approver, approve, reason, sign)
 	if err != nil {
 		// Governance store miss: fail loudly (rc=1) — never silently
 		// succeed. An approval `kern approve` lists must never be

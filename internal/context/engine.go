@@ -723,9 +723,13 @@ func (e *Engine) buildFacts(scope string, roots []domain.Symbol, pkt domain.Cont
 		}
 	}
 
-	// 3. Test-coverage facts: tests that exercise the affected symbols.
+	// 3. Test-coverage facts: only tests with a real relevance signal
+	// (file-paired, name-matched, or a direct call edge). The same-package
+	// remainder is deliberately excluded: on a hub symbol it flooded the
+	// packet with hundreds of unrelated tests (QA 2026-10-26).
 	for _, r := range roots {
-		for _, t := range e.graph.WhatTestsCover(r.Qualified) {
+		ranked, _ := e.graph.WhatTestsCoverRanked(r.Qualified, false)
+		for _, t := range ranked {
 			if t.Symbol == nil {
 				continue
 			}
@@ -784,11 +788,30 @@ func testCoverageClaim(testName, target string) domain.Claim {
 		Build()
 }
 
+// testDisplayNames renders test nodes by their human name (Node.Label or the
+// underlying symbol name), never by the decl:<sha> identity. Plan output with
+// hashes is unreadable and gives the agent no test to target.
+func testDisplayNames(nodes []domain.Node) []string {
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		name := n.Label
+		if name == "" && n.Symbol != nil {
+			name = n.Symbol.Name
+		}
+		if name == "" {
+			name = n.ID
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 // requiredValidation derives the verification steps needed for the change.
 func (e *Engine) requiredValidation(scope string, roots []domain.Symbol) []string {
 	var steps []string
 	for _, r := range roots {
-		tests := nodeIDs(e.graph.WhatTestsCover(r.Qualified))
+		ranked, _ := e.graph.WhatTestsCoverRanked(r.Qualified, false)
+		tests := testDisplayNames(ranked)
 		if len(tests) > 0 {
 			steps = append(steps, fmt.Sprintf("run unit tests covering %s (%s)", r.Qualified, strings.Join(tests, ", ")))
 		} else {

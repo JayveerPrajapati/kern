@@ -29,7 +29,7 @@ func TestCheckPrecision_TreeSitterBuild(t *testing.T) {
 	if f.Level != "ok" {
 		t.Fatalf("tree-sitter precision = %s, want ok: %+v", f.Level, f)
 	}
-	if !strings.Contains(f.Detail, "AST-or-better precision") || !strings.Contains(f.Detail, "tree-sitter build") {
-		t.Fatalf("detail missing tree-sitter claim: %q", f.Detail)
+	if !strings.Contains(f.Detail, "tree-sitter extraction") || !strings.Contains(f.Detail, "best-effort") {
+		t.Fatalf("detail missing the honest tree-sitter claim: %q", f.Detail)
 	}
 }

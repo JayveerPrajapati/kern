@@ -82,9 +82,9 @@ var DefaultPatterns = []Pattern{
 	// there the value must contain a digit or a special character, the shape
 	// of an actual secret, not an adjective. "password is hunter2safe"
 	// (digit) masks; "password is required" (no digit/special) does not.
-	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
+	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?\s*[=:]\s*(?:"[^"]{6,}"|'[^']{6,}'|[A-Za-z0-9_/\-+=@!#$%^*~.?]*[0-9][A-Za-z0-9_/\-+=@!#$%^*~.?]*|[A-Za-z0-9_/\-+=@!#$%^*~.?]{2,}[-!@#$%^*+=?][A-Za-z0-9_/\-+=@!#$%^*~.?]{2,}|[A-Za-z0-9_/\-+=@!#$%^*~.?]{10,})`)},
 	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9_]+[_\-])?(?:password|passwd|pwd)["']?(?:\s+is\s+|\s+)["']?[A-Za-z0-9_/\-+=@!#$^*~]*[0-9#@!$^*~][A-Za-z0-9_/\-+=@!#$^*~]*`)},
-	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
+	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=.]{16,}["']|[A-Za-z0-9_/\-+=.]*[0-9][A-Za-z0-9_/\-+=.]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
 	// URL_CRED (scheme-less): DSN/userinfo forms without a scheme, e.g.
 	// "root:supersecret@tcp(db.internal.example.com:3306)" or
@@ -246,6 +246,12 @@ func MaskAll(text string) Result {
 	return MaskAllCustom(text, DefaultPatterns, nil)
 }
 
+// MaskAllNames is MaskAll with an additional set of known client/project
+// names to mask — the MaskNames equivalent for remote-LLM callers.
+func MaskAllNames(text string, names []string) Result {
+	return MaskAllCustom(text, DefaultPatterns, names)
+}
+
 // MaskAllCustom is like MaskCustom but does not suppress private IPs.
 func MaskAllCustom(text string, patterns []Pattern, names []string) Result {
 	return maskCustom(text, patterns, names, false)
@@ -289,6 +295,14 @@ func maskCustom(text string, patterns []Pattern, names []string, suppressNonSecr
 			// cannot precede "(" or "+"), so a longer digit run would match
 			// mid-number. Reject any PHONE hit that starts inside a digit.
 			if p.Label == "PHONE" && m[0] > 0 && text[m[0]-1] >= '0' && text[m[0]-1] <= '9' {
+				continue
+			}
+			// A digit run inside a path is a path component, not a phone
+			// number: macOS temp dirs (kern-exec-<digits>), request ids and
+			// build hashes would otherwise be masked mid-path and break
+			// copy/paste and debugging (2026-10-26 audit: .../kern-exec-
+			// [MASKED_PHONE_1]/.ssh).
+			if p.Label == "PHONE" && insidePathToken(text, m[0], m[1]) {
 				continue
 			}
 			hits = append(hits, hit{m[0], m[1], p.Label})
@@ -529,4 +543,45 @@ func labelOf(ph string) string {
 	start := strings.IndexByte(ph, '_') + 1 // after "MASKED_"
 	rel := strings.IndexByte(ph[start:], '_')
 	return ph[start : start+rel]
+}
+
+// insidePathToken reports whether text[start:end] sits inside a path-like
+// token: a separator-delimited run that contains a path separator and at least
+// one ASCII letter. A digit run in such a run is a path component (a temp dir
+// id, a build hash, a request id), not a phone number — masking it mangles the
+// path and breaks copy/paste. A digit run in prose ("call 07911 123456") has no
+// separator+letters around it and stays maskable.
+func insidePathToken(text string, start, end int) bool {
+	l := start
+	for l > 0 && !isPIIBoundary(text[l-1]) {
+		l--
+	}
+	r := end
+	for r < len(text) && !isPIIBoundary(text[r]) {
+		r++
+	}
+	tok := text[l:r]
+	if !strings.ContainsAny(tok, `/\`) {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// isPIIBoundary reports whether b ends a mask candidate's surrounding token.
+// Quotes and brackets are boundaries so a quoted path ("/a/b/1234") is still
+// recognised as one token; ":" is deliberately NOT a boundary, keeping
+// scheme-prefixed URLs (file:///…) in one token.
+func isPIIBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '"', '\'', '`', '(', ')', '[', ']', '{', '}',
+		'<', '>', ',', ';', '|', '=':
+		return true
+	}
+	return false
 }

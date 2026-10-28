@@ -67,7 +67,7 @@ kern audit [flags] | kern audit append | kern audit repair   governance audit lo
 kern sec [root] [--engine internal|gosec|all|none] [--json] [--max N] [--severity ...]   security scan (exit 1 on error findings)
 
 # verification
-kern verify [<types>|<file|->] [flags]       unified verification engine (types: build,test,security,architecture,dependency,reuse,e2e,static-analysis,performance,cve,license,secrets,ci,arch; --types T);
+kern verify [<types>|<file|->] [flags]       unified verification engine (types: build,test,security,architecture,dependency,reuse,e2e,static-analysis,performance,cve,license,secrets,ci,arch,claims; --types T);
                                              --command CMD --output summary|failures|tail:N|lines:A-B|full; --anchor ID re-slices a kept run;
                                              --short/--fast/--changed/--changed-since/--staged/--full; compliance: --cve --license --secrets
 kern heal "<task>" [--llm MODEL] [--force] [--yes] [--task]   self-correct failing files (snapshot-based)
@@ -78,6 +78,7 @@ kern docs <query> [root] | kern docs fetch <url> [name] [root] | kern docs index
 # search
 kern index [root] [--force] [--json] [--status] [--strict] [--update]   (re)build the symbol index
 kern ast <pattern> [root] [--all]            AST symbol search (wildcards, kind prefixes)
+kern fts "<query>" [root] [--limit N] [--json]   direct SQLite FTS5 symbol search (no full index load)
 kern search <query> [root] [--limit N] [--repos] [--json] [--semantic] [--etag E]   ranked free-text symbol search
 
 # graph
@@ -87,6 +88,7 @@ kern explore <symbol> [root] [--depth N] [--max N] [--max-tokens N] [--explain] 
 kern path <from-symbol> <to-symbol> [root] (or --from S --to S)   shortest call path
 kern probe "<task text>" [root] [--max N] [--json]   task-driven context bundle
 kern why <symbol> [root] [--json] [--etag E]   rationale: doc comment + dependents
+kern refs <symbol> [root] [--json]   AST-verified references (types/consts/vars/fields included)
 kern arch [flags]                            architecture overview
 kern project [root]                          compact project map
 
@@ -105,13 +107,13 @@ kern remember <lesson> [--auto]              store a lesson ('memory add' alias)
 kern memory-ranked <prompt> [--k 5] [--half-life 7.0] [--root ROOT]   decay-weighted memory retrieval
 
 # evidence
-kern evidence [flags]                        evidence store: export/verify/explain signed bundles, full-state dump (--full-state, --restore)
+kern evidence [flags]                        evidence store: export/verify/explain bundles (--sign for a signature), full-state dump (--full-state, --restore)
 kern evidence-anchor [--claim TEXT] [--file F] [--line N] [--symbol NAME] [--root ROOT]   verify citations and cryptographic proof
 kern anchor <anchor-id>                      fetch raw uncompressed anchor content
 kern health [--root ROOT] [--json]           read-only JSON health snapshot (version, index, catalog)
 
 # locks
-kern guard <check|init|allow|classify|hook|grant|pause|paused|resume> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]
+kern guard <check|init|allow|classify|parity|hook|grant|pause|paused|resume> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]
                                              architecture guardrails (reject boundary violations, exit 3 when count > threshold); classify <cmd> [--json] prints the risk-axis verdict (allow|gate|serve|governed + tier) for one command — the Go source the plugin's bash arm shells out to; grant [--check] [--root R] <command> is the Ask-Protocol bridge for GATE commands: exit 0 when an active approval covers the command (consumed; retry byte-identical), exit 3 with --check when not granted (nothing minted), otherwise mints approval appr-<id> and prints the ask-wait-retry instructions the operator answers via kern approval ask
 kern fingerprint [root] [--file f1,f2] [--json]   repo fingerprint
 
@@ -122,12 +124,13 @@ kern commit [--all] [--dry-run] [--message M]   stage+commit
 # servers
 kern mcp [tools [category] [--json] [--category X]] [flags]   run the MCP server ('kern mcp tools' lists the catalog)
 kern mcp-client <add|list|rm|call> [args...]   manage external MCP servers and call their tools (config: .kern/mcp-servers.json; see docs/mcp-client.md)
+kern daemon [serve|status|stop] [--root ROOT]  warm per-project index daemon (auto-started for read-only commands: search/context/compact/explore/graph/impact/dependencies/why; KERN_DAEMON=0 disables)
 
 # docgen
 kern gen-catalog [--root ROOT] [--check]     regenerate (or verify without writing) docs/tool-catalog.md
 kern gen-contracts [--root ROOT] [--check]   regenerate (or verify without writing) docs/mcp/tool-contracts.md
 kern gen-docs --doc catalog|contracts|schemas|site|selection [--root ROOT] [--check]   regenerate or verify docs (tool catalog, contracts, schemas, tool-selection guide, or the mechanical file-tree block of docs/index.md)
-kern gen-plugin [--root ROOT] [--check]   sync the opencode plugin's canonical .opencode/plugins/kern.ts into the embedded asset (byte-identical; --check verifies parity without writing)
+kern gen-plugin [--root ROOT] [--check]   sync the opencode plugin's canonical .opencode/plugins/kern.ts into the embedded asset AND register its sha256 in internal/pluginhash (idempotent); --check verifies both without writing
 ```
 
 ## Conditional fetch: `--etag`
@@ -165,20 +168,38 @@ silently degrading to full network egress. A local operator can explicitly
 opt out of the isolation requirement per-machine with
 `export KERN_ALLOW_UNISOLATED=1` (alias: `KERN_ALLOW_NET=1`).
 
-Filesystem confinement is platform-split and honest about it: sensitive-path
+Filesystem confinement is platform-split but consistent: sensitive-path
 reads (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.netrc, cloud credentials) are
-blocked on both macOS (Seatbelt deny-list) and Linux (Landlock), but
-**filesystem writes are not contained on macOS** — the profile is a deny-list
-over `(allow default)`, so a script can still write outside its temp dir.
-On Linux with Landlock (kernel ≥ 5.13) writes are confined to the workspace,
-temp and cache dirs (`KERN_SANDBOX_WRITE_CONFINEMENT`, default on); where
-Landlock is unavailable the behavior degrades safely to the macOS-equivalent
-posture. Set expectations accordingly: `kern exec` is a network isolation
-boundary, not a full filesystem sandbox.
+blocked on both macOS (Seatbelt deny-list) and Linux (Landlock), and every
+write outside the ephemeral run directory is blocked too — on macOS the
+Seatbelt profile denies `file-write*` and re-allows only the run dir plus
+`/dev/null`-class sinks; on Linux Landlock confines writes to the workspace,
+temp and cache dirs (`KERN_SANDBOX_WRITE_CONFINEMENT`, default on). The run
+directory is discarded after the call, so use `kern apply` or the edit tool
+to change real files. `kern exec` is a network+write isolation boundary for
+ephemeral runs, not a durable shell.
 
 Host command execution is gated by a governance firewall (fail-closed): set
 `KERN_ALLOW_EXEC=1` or allowlist tools via `KERN_TOOLS` to opt in. `kern build`
 shares the same gate.
+
+## Evidence signatures and anchors
+
+`kern evidence export` produces a tamper-evident (SHA-256 seal + audit-chain
+replay) bundle by default; the signature is **opt-in** (`--sign`, or the MCP
+`kern_evidence` export `sign` flag). A self-signed bundle verifies as
+`signature valid (SELF-ATTESTED)` — use `--expect-fingerprint` with the
+reviewed key fingerprint when you need non-repudiation.
+
+There are three distinct "anchor" surfaces; they are not interchangeable:
+
+- `kern verify --anchor <id>` / MCP `kern_verify anchor=<id>` re-slices a
+  kept build/test/lint run without re-executing it.
+- `kern anchor <id>` / `kern_fetch_raw_anchor` hydrate a text segment from
+  the optimize-family anchor store (or the in-memory retained-output store).
+- MCP tools that truncate output emit `[kern: Truncated … Anchor: anchor-…]`;
+  recover those by re-calling the **same** tool with `slice=<anchor>:tail:N`
+  (or `lines:A-B`), not with `kern_fetch_raw_anchor`.
 
 ## Exit codes
 

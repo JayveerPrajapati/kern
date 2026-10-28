@@ -378,7 +378,7 @@ func runBashArm(p *payload, root string, stdout, stderr io.Writer) int {
 		if _, paused, perr := guardpause.ActiveScoped(root, guardpause.ScopeBashSteering); perr == nil && paused {
 			return 0
 		}
-		if code, ok := servePipeline(cmd, classified, root, stdout); ok {
+		if code, ok := servePipeline(cmd, classified, root, stdout, p.hasToolCall); ok {
 			return code
 		}
 	}

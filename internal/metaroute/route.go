@@ -333,8 +333,6 @@ func ClassifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 		return "kern_search", map[string]any{"query": request}, true
 	case HasWord(low, "verify"):
 		return "kern_verify", map[string]any{}, true
-	case strings.Contains(low, "architecture narrat") || strings.Contains(low, "narrat") || (HasWord(low, "explain") && HasWord(low, "architecture")):
-		return "kern_explore", map[string]any{"symbol": ExtractSymbol(request, low)}, true
 	case strings.Contains(low, "cross repo") || strings.Contains(low, "multi repo"):
 		return "kern_impact", map[string]any{"change": ExtractSymbol(request, low)}, true
 	case strings.Contains(low, "ranked memor") || strings.Contains(low, "decay memor"):

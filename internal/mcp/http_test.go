@@ -78,8 +78,11 @@ func TestHandleHTTPParseError(t *testing.T) {
 	t.Parallel()
 	body := "not json"
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 (JSON-RPC error in body), got %d", rr.Code)
+	// N3 (2026-10-26 black-box audit): a body that is not even JSON is a
+	// transport-level failure — HTTP 400 with the JSON-RPC parse error in
+	// the body. Well-formed JSON-RPC protocol errors keep the 200 convention.
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (JSON-RPC error in body), got %d", rr.Code)
 	}
 	var errResp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
@@ -92,27 +95,32 @@ func TestHandleHTTPParseError(t *testing.T) {
 }
 
 // TestHandleHTTPParseErrorBeforeVersionGate pins the F10 ordering: a
-// malformed body (or batch array) sent WITHOUT the MCP-Protocol-Version
-// header must answer -32700, not a misleading 412 — the body cannot parse,
-// so there is no version to negotiate.
+// malformed body sent WITHOUT the MCP-Protocol-Version header must answer
+// -32700, not a misleading 412 — the body cannot parse, so there is no
+// version to negotiate. (A batch array — valid JSON, wrong shape — answers
+// -32600 here, the same precedence.)
 func TestHandleHTTPParseErrorBeforeVersionGate(t *testing.T) {
 	t.Parallel()
 	s := newHTTPServer()
-	for name, body := range map[string]string{
-		"malformed": "not json",
-		"batch":     `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`,
+	for name, tc := range map[string]struct {
+		body  string
+		code  int // JSON-RPC error code expected in the body
+		httpS int // HTTP status expected
+	}{
+		"malformed": {"not json", -32700, http.StatusBadRequest}, // N3: not even JSON
+		"batch":     {`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, -32600, http.StatusOK},
 	} {
-		rr := doHTTP(t, s, http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("%s: expected 200 (JSON-RPC error in body), got %d", name, rr.Code)
+		rr := doHTTP(t, s, http.MethodPost, "application/json", tc.body, map[string]string{"MCP-Protocol-Version": ""})
+		if rr.Code != tc.httpS {
+			t.Fatalf("%s: expected HTTP %d, got %d", name, tc.httpS, rr.Code)
 		}
 		var resp map[string]any
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("%s: unmarshal: %v", name, err)
 		}
 		e := resp["error"].(map[string]any)
-		if int(e["code"].(float64)) != -32700 {
-			t.Fatalf("%s: expected -32700, got %+v", name, resp)
+		if int(e["code"].(float64)) != tc.code {
+			t.Fatalf("%s: expected %d, got %+v", name, tc.code, resp)
 		}
 	}
 }
@@ -149,8 +157,38 @@ func TestHandleHTTPBatchRequestRejected(t *testing.T) {
 		t.Fatalf("unmarshal batch error: %v", err)
 	}
 	e := resp["error"].(map[string]any)
-	if int(e["code"].(float64)) != -32700 {
-		t.Fatalf("expected -32700 for batch, got %+v", resp)
+	// A batch array is valid JSON with a wrong-typed envelope — an invalid
+	// request (-32600), not a parse error (W1+W7, 2026-10-26 black-box audit).
+	if int(e["code"].(float64)) != -32600 {
+		t.Fatalf("expected -32600 for batch, got %+v", resp)
+	}
+}
+
+// TestHandleHTTPWrongShapeIsInvalidRequest pins W1+W7 (2026-10-26 black-box
+// audit): a body of valid JSON whose top level is not an object answers
+// -32600 with a sanitized message — never a -32700 parse error.
+func TestHandleHTTPWrongShapeIsInvalidRequest(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"number": `42`,
+		"bool":   `true`,
+		"string": `"hello"`,
+	} {
+		rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 (JSON-RPC error in body), got %d", name, rr.Code)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		e := resp["error"].(map[string]any)
+		if int(e["code"].(float64)) != -32600 {
+			t.Fatalf("%s: expected -32600 for wrong-shape body, got %+v", name, resp)
+		}
+		if msg, _ := e["message"].(string); strings.Contains(msg, "rpcRequest") || strings.Contains(msg, "Go value") {
+			t.Fatalf("%s: message leaks Go type names: %s", name, msg)
+		}
 	}
 }
 

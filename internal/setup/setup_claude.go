@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -21,7 +22,15 @@ func wireClaude(bin string) Status {
 	// registration deterministically from the local config file and skip the
 	// add instead of letting claude error.
 	if claudeHasKern() {
-		return Status{Agent: "claude", Installed: true, Path: path, Note: "kern MCP already registered in claude config"}
+		// Repair, don't just skip: an older setup (or `claude mcp add` from a
+		// terminal) wrote a bare "kern-mcp", which a GUI-launched Claude cannot
+		// resolve (minimal launchd PATH) and silently never starts. Repair the
+		// user-global entry AND every project-scoped entry Claude recorded in
+		// the same file — those are machine-local too.
+		if err := repairClaudeKernCommands(bin); err != nil {
+			return Status{Agent: "claude", Path: path, Note: "already registered, but command repair failed: " + err.Error()}
+		}
+		return Status{Agent: "claude", Installed: true, Path: path, Note: "kern MCP already registered — launch command repaired to " + bin}
 	}
 	cmd := exec.Command(path, "mcp", "add", "kern", "--", bin)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -30,7 +39,59 @@ func wireClaude(bin string) Status {
 	return Status{Agent: "claude", Installed: true, Path: path, Note: "claude mcp add ok"}
 }
 
-// claudeHasKern reports whether the kern MCP server is already registered in
+// repairClaudeKernCommands rewrites every kern MCP entry in ~/.claude.json to
+// the absolute launch command: the user-global mcpServers.kern entry and each
+// projects.<path>.mcpServers.kern entry Claude recorded for a repo. Both are
+// machine-local (unlike a committed project .mcp.json), and both are executed
+// by GUI-launched Claude with the minimal PATH. A stale KERN_ALLOW_EXEC is
+// dropped at the same time (exec stays opt-in per host). Other servers, project
+// keys and user settings are preserved verbatim.
+func repairClaudeKernCommands(bin string) error {
+	path := claudeConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	entry := stdioEntry(bin)
+	repaired := false
+	if servers, ok := m["mcpServers"].(map[string]any); ok {
+		if _, has := servers["kern"]; has {
+			servers["kern"] = entry
+			repaired = true
+		}
+	}
+	if projects, ok := m["projects"].(map[string]any); ok {
+		for _, raw := range projects {
+			pm, _ := raw.(map[string]any)
+			if pm == nil {
+				continue
+			}
+			servers, _ := pm["mcpServers"].(map[string]any)
+			if _, has := servers["kern"]; has {
+				servers["kern"] = entry
+				repaired = true
+			}
+		}
+	}
+	if !repaired {
+		return nil
+	}
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	_ = os.WriteFile(path+".bak", data, mode)
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), mode)
+}
+
 // the local claude config (~/.claude.json). This is the deterministic local
 // check that keeps claude wiring idempotent: `claude mcp add` errors on a
 // duplicate registration, so setup must detect it first and skip instead.
@@ -53,20 +114,33 @@ func claudeStatus() Status {
 	return Status{Agent: "claude", Path: path, Note: "claude available — run kern setup to add kern MCP"}
 }
 
-// hookCommand builds the shell command for a kern hook event. Agent hook
-// shells expand the per-agent project-dir env var ($CLAUDE_PROJECT_DIR /
-// $GEMINI_PROJECT_DIR), keeping the command free of machine-specific paths.
+// hookCommand builds the shell command for a kern hook event.
 func hookCommand(bin, sub string) string {
+	return hookCommandFor(runtime.GOOS, bin, sub)
+}
+
+// hookCommandFor builds the hook command for a target GOOS. POSIX hook shells
+// expand $CLAUDE_PROJECT_DIR, keeping the command free of machine-specific
+// paths. Windows hook shells are not consistent (cmd.exe vs PowerShell vs Git
+// Bash), and the POSIX form does not expand under cmd/PowerShell, so pass "."
+// and let the hook resolve the project from the payload's cwd — no shell
+// expansion or quoting of a machine path is needed.
+func hookCommandFor(goos, bin, sub string) string {
+	if goos == "windows" {
+		return `"` + bin + `" hook ` + sub + ` "."`
+	}
 	return bin + ` hook ` + sub + ` "$CLAUDE_PROJECT_DIR"`
 }
 
-// wireClaudeHooks registers kern's PreToolUse, PostToolUse and UserPromptSubmit
-// hooks in ~/.claude/settings.json (global user scope). The PreToolUse hook
-// blocks built-in Read/Grep/Glob/Bash calls via the kern-guard script (hard
-// block + suggest); the PostToolUse hook compresses oversized Bash/Read/Grep
-// results and records edits + failures into project memory; the
-// UserPromptSubmit hook captures substantive user prompts. Global scope means
-// hooks fire in EVERY project without per-repo setup. Existing hooks are
+// wireClaudeHooks registers kern's PreToolUse, PostToolUse, UserPromptSubmit
+// and SessionStart hooks in ~/.claude/settings.json (global user scope). The
+// PreToolUse hook blocks built-in Read/Grep/Glob/Bash calls via the kern-guard
+// script (hard block + suggest); the PostToolUse hook compresses oversized
+// Bash/Read/Grep results and records edits + failures into project memory; the
+// UserPromptSubmit hook captures substantive user prompts; the SessionStart
+// hook injects a short "use kern first" brief into the session context — the
+// only steering that lands before the model picks its first tool. Global scope
+// means hooks fire in EVERY project without per-repo setup. Existing hooks are
 // preserved; stale kern hooks are replaced on re-run (overwrite-always).
 func wireClaudeHooks(bin string) Status {
 	guardCmd, err := guardHookCommand()
@@ -80,6 +154,13 @@ func wireClaudeHooks(bin string) Status {
 				"matcher": "Read|Grep|Glob|Bash",
 				"hooks": []any{
 					map[string]any{"type": "command", "command": guardCmd},
+				},
+			},
+		},
+		"SessionStart": []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{"type": "command", "command": hookCommand(bin, "claude-session")},
 				},
 			},
 		},
@@ -102,7 +183,7 @@ func wireClaudeHooks(bin string) Status {
 	if err := mergeHookGroups(path, groups); err != nil {
 		return Status{Agent: "claude-hooks", Path: path, Note: err.Error()}
 	}
-	return Status{Agent: "claude-hooks", Installed: true, Path: path, Note: "claude PreToolUse/PostToolUse/UserPromptSubmit hooks registered"}
+	return Status{Agent: "claude-hooks", Installed: true, Path: path, Note: "claude PreToolUse/PostToolUse/UserPromptSubmit/SessionStart hooks registered"}
 }
 
 // mergeHookGroups merges hook event groups into a settings JSON file (Claude

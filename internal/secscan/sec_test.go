@@ -129,6 +129,53 @@ func TestScanFileCommandInjection(t *testing.T) {
 	}
 }
 
+// TestSQLExecIsNotCommandInjection pins the 2026-10-27 self-scan false
+// positive: the command-injection rule's generic `exec(` alternative also
+// matched the method call in `tx.Exec("DELETE FROM "+table)`, so one dynamic
+// SQL statement produced TWO criticals — the real sql-injection plus a bogus
+// command-injection. A shell is the defining signal.
+func TestSQLExecIsNotCommandInjection(t *testing.T) {
+	src := []byte(`func apply(tx *sql.Tx, table string) error {
+	_, err := tx.Exec("DELETE FROM "+table, 1)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Prepare("INSERT INTO " + table + "(a) VALUES(?)")
+	return err
+}
+`)
+	findings := ScanFile("db.go", src)
+	var rules []string
+	for _, f := range findings {
+		rules = append(rules, f.Rule)
+	}
+	for _, f := range findings {
+		if f.Rule == "command-injection" {
+			t.Fatalf("a SQL Exec must not be reported as command-injection: %+v", findings)
+		}
+	}
+	// The real dynamic-SQL signal must survive.
+	if strings.Join(rules, ",") == "" || !strings.Contains(strings.Join(rules, ","), "sql-injection") {
+		t.Fatalf("expected sql-injection for dynamic SQL, got %+v", findings)
+	}
+}
+
+// TestUnsafeExecIsInformational pins the severity ratchet: exec.Command passes
+// an argv to execve (no shell), so a computed argument is an inventory note,
+// not a blocking warning. When the rule was SeverityWarning it fired on every
+// legitimate process spawn (9 hits on kern's own tree) and drowned the gate.
+func TestUnsafeExecIsInformational(t *testing.T) {
+	for _, r := range rules {
+		if r.ID == "unsafe-exec" {
+			if r.Severity != SeverityInfo {
+				t.Fatalf("unsafe-exec severity = %q, want info (argv has no shell surface)", r.Severity)
+			}
+			return
+		}
+	}
+	t.Fatal("unsafe-exec rule missing from the rule set")
+}
+
 func TestScanFileWeakCryptoAndRandom(t *testing.T) {
 	src := []byte(`func hash(data []byte) string {
 	h := md5.New()
@@ -893,5 +940,47 @@ const apiKey = "9f3c71a4d8e2b605c1a7f9d3e5b2c8046a1f9d7e"
 	}
 	if !caught {
 		t.Fatalf("random 40-hex literal must still be flagged, got %+v", findings)
+	}
+}
+
+// TestScanDetectsPrivateKeyInCredentialFiles pins P0-2 (2026-10-28
+// adversarial audit): a private key stored as .pem/.key/.crt/.p12/.txt was
+// invisible because the walk only admitted source/config extensions. The most
+// natural place to store a key must not be a blind spot.
+func TestScanDetectsPrivateKeyInCredentialFiles(t *testing.T) {
+	dir := t.TempDir()
+	const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0auditfixturebody\n-----END RSA PRIVATE KEY-----\n"
+	names := []string{"server.pem", "tls.key", "cert.crt", "store.p12", "notes.txt"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(pem), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			seen[filepath.Base(f.File)] = true
+		}
+	}
+	for _, name := range names {
+		if !seen[name] {
+			t.Errorf("private key in %s was not detected (findings: %+v)", name, findings)
+		}
+	}
+}
+
+// TestScanSecretFileRunsOnlySecretRules keeps the credential-file pass
+// precise: a .txt containing source-shaped text must not report code rules
+// (sql/eval/etc.) — only hardcoded-secret findings belong there.
+func TestScanSecretFileRunsOnlySecretRules(t *testing.T) {
+	src := []byte("eval(\"1+1\")\n" + "-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA0auditfixturebody\n-----END PRIVATE KEY-----\n")
+	for _, f := range ScanSecretFile("notes.txt", src) {
+		if f.Rule != "hardcoded-secret" {
+			t.Fatalf("credential-file pass reported a non-secret rule: %+v", f)
+		}
 	}
 }

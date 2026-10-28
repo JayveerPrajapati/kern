@@ -137,7 +137,10 @@ Server configuration knobs are part of the contract:
   `KERN_MCP_ROOTS`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_WATCH`,
   `KERN_MCP_WATCH_INTERVAL`, `KERN_MCP_TLS_CERT`, `KERN_MCP_TLS_KEY`,
   `KERN_ALLOW_EXEC`, `KERN_TOOLS`) are stable once documented in `protocol.md`.
-- The `mcp.roots` config key in `.kern/config.json` mirrors `KERN_MCP_ROOTS`.
+- The `mcp.roots` config key in `.kern/config.json` mirrors `KERN_MCP_ROOTS`
+  but is honored only when the operator opted in with
+  `KERN_MCP_ALLOW_CONFIG_ROOTS=1` (project-supplied config cannot widen server
+  confinement by itself; 2026-10-26 black-box audit, F-CRIT).
 - Adding a new variable is additive; renaming or removing a documented variable is a
   breaking change requiring a major release.
 

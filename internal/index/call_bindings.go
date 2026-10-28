@@ -24,6 +24,17 @@ func (ix *Index) CallBindings() GraphResult {
 }
 
 func (ix *Index) CallersFor(symbol Symbol) []string {
+	identity := symbol.DeclarationID()
+	if ix != nil && ix.Adjacency != nil {
+		if callers, ok := ix.Adjacency[identity]; ok {
+			return callers
+		}
+	}
+	return ix.callersViaCatalog(symbol)
+}
+
+// callersViaCatalog is the binding-aware caller resolution (catalog path).
+func (ix *Index) callersViaCatalog(symbol Symbol) []string {
 	catalog := newExportCatalog(ix)
 	identity := symbol.DeclarationID()
 	var callers []string

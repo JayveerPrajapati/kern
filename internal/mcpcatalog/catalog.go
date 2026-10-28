@@ -58,6 +58,55 @@ type Tool struct {
 	// server.go): slow tools emit 0%/keep-alive/100% progress so agents see
 	// liveness, fast lookups stay silent.
 	Slow bool `json:"slow,omitempty"`
+	// Annotations carries the standard MCP tool annotations
+	// (readOnlyHint/destructiveHint/idempotentHint/openWorldHint). It is
+	// DERIVED from RiskLevel at advertisement time (see
+	// WithDerivedAnnotations), never hand-set per registration, so it can
+	// never drift from the risk metadata (W5, 2026-10-26 black-box audit).
+	Annotations map[string]bool `json:"annotations,omitempty"`
+}
+
+// WithDerivedAnnotations returns a copy of the tool carrying the standard
+// MCP tool annotations derived from the catalog's own risk metadata, so every
+// advertised tool exposes its safety semantics in the standard shape MCP
+// hosts already render in their confirmation UX (W5, 2026-10-26 black-box
+// audit). Mapping: riskLevel low (read-only) -> readOnlyHint; high
+// (security-sensitive or destructive) -> destructiveHint; critical
+// (arbitrary command execution or deployment — the tool reaches systems
+// beyond the project) -> destructiveHint + openWorldHint. idempotentHint is
+// intentionally omitted: the catalog does not track idempotence.
+func (t Tool) WithDerivedAnnotations() Tool {
+	switch t.RiskLevel {
+	case RiskLow:
+		if t.Annotations == nil {
+			t.Annotations = map[string]bool{}
+		}
+		t.Annotations["readOnlyHint"] = true
+	case RiskHigh:
+		if t.Annotations == nil {
+			t.Annotations = map[string]bool{}
+		}
+		t.Annotations["readOnlyHint"] = false
+		t.Annotations["destructiveHint"] = true
+	case RiskCritical:
+		if t.Annotations == nil {
+			t.Annotations = map[string]bool{}
+		}
+		t.Annotations["readOnlyHint"] = false
+		t.Annotations["destructiveHint"] = true
+		t.Annotations["openWorldHint"] = true
+	default:
+		// Medium-risk (contained mutation) and untagged tools are NOT
+		// read-only, and hosts use the hint to decide whether to ask before
+		// calling. Leaving them annotation-free made 8 live tools render
+		// without any hint (2026-10-26 audit); state the negative explicitly.
+		if t.Annotations == nil {
+			t.Annotations = map[string]bool{}
+		}
+		t.Annotations["readOnlyHint"] = false
+		t.Annotations["destructiveHint"] = false
+	}
+	return t
 }
 
 // Agent phases for phase-aware tool routing (P1.2). Each phase exposes a
@@ -238,6 +287,44 @@ func strProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
 }
 
+// Shared property constructors. Every MCP client pays the serialized
+// tools/list payload before its first call (measured 40,459 bytes on
+// 2026-10-27 — ~11k tokens for 32 tools), and the bulk of it was the same
+// property descriptions repeated verbatim in twenty schemas. These
+// constructors keep the guidance but state it once in source, with a terse
+// wire form, so the catalog cannot re-inflate by hand.
+func rootProp() map[string]any {
+	return strProp("Project root (default: cwd; stdio: workspace-confined)")
+}
+
+func etagProp() map[string]any {
+	return strProp("Conditional-fetch etag from a previous response")
+}
+
+func noCacheProp() map[string]any {
+	return boolProp("Bypass the session dedup/response cache")
+}
+
+func maxOutputProp() map[string]any {
+	return intProp("Output cap in bytes (0 disables)")
+}
+
+func agentIDProp() map[string]any {
+	return strProp("Governed mode: agent identity (omit for raw mode)")
+}
+
+func agentTokenProp() map[string]any {
+	return strProp("Governed mode: signed agent_id token")
+}
+
+func taskProp() map[string]any {
+	return strProp("Governed mode: task ID (with agent_id)")
+}
+
+func scopeProp() map[string]any {
+	return map[string]any{"type": "object", "description": "Governed mode: task scope {paths, denied_paths, services, envs, artifacts}"}
+}
+
 // intProp is an integer property with a description. Accepted call forms
 // mirror the D6 lenience: JSON numbers and numeric strings both work
 // (ArgString canonicalizes, atoiArg parses), so stringly-typed clients keep
@@ -293,10 +380,10 @@ func outputProps(props map[string]any) map[string]any {
 		out[k] = v
 	}
 	if _, ok := out["slice"]; !ok {
-		out["slice"] = strProp("re-read a truncated result: '<anchor>:lines:A-B' or '<anchor>:tail:N'")
+		out["slice"] = strProp("Re-read truncated output (<anchor>:lines:A-B | <anchor>:tail:N)")
 	}
 	if _, ok := out["max_output"]; !ok {
-		out["max_output"] = intProp("output budget in bytes for this call (0 disables)")
+		out["max_output"] = maxOutputProp()
 	}
 	return out
 }

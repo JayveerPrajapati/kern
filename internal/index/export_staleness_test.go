@@ -31,14 +31,11 @@ func TestGraphHTMLStaleBannerFresh(t *testing.T) {
 	if strings.Contains(html, `id="stale"`) {
 		t.Error("fresh index rendered the #stale div in GraphHTML")
 	}
-	if m := ix.Mermaid("greet"); strings.Contains(m, "%% ") {
-		t.Errorf("fresh index rendered a stale banner in Mermaid:\n%s", m)
-	}
 }
 
 // TestGraphHTMLStaleBannerStale: mutating a cited file's recorded hash (no
 // disk rewrite) must surface the banner in neighborhood GraphHTML, whole-graph
-// GraphHTML, and the Mermaid output.
+// GraphHTML). Mermaid is covered in internal/mermaid.
 func TestGraphHTMLStaleBannerStale(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"main.go": srcMain,
@@ -65,11 +62,6 @@ func TestGraphHTMLStaleBannerStale(t *testing.T) {
 	}
 	if !strings.Contains(html, `id="stale"`) {
 		t.Error("stale index: GraphHTML missing the #stale div")
-	}
-
-	m := ix.Mermaid("greet")
-	if !strings.Contains(m, "%% ") {
-		t.Errorf("stale index: Mermaid missing '%% ' banner line:\n%s", m)
 	}
 
 	wg := ix.WholeGraph(0)

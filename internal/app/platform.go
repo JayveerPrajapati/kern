@@ -34,6 +34,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -110,6 +111,26 @@ func NewWithIndex(root string, ix *index.Index) (*Platform, error) {
 	return NewWithGraph(root, ix, &g)
 }
 
+// NewIndexOnly builds a Platform carrying only the index and its code graph.
+// It deliberately skips the farm of one-shot graph queries does not need:
+// twin extractors (filesystem walks), memory store, governance firewall, and
+// audit-chain replay. Use it for read-only graph questions (kern impact's
+// default path); callers that need entities/runtime/governance use New.
+func NewIndexOnly(root string) (*Platform, error) {
+	ix, err := index.LoadOrBuild(root)
+	if err != nil {
+		return nil, fmt.Errorf("app: index: %w", err)
+	}
+	if MemoizePlatform {
+		// Warm process: reuse the graph built for this exact *Index (see
+		// platform_memo.go). A rebuild replaces the pointer, so this can never
+		// serve a graph from a previous index generation.
+		return memoizedIndexOnly(root, ix), nil
+	}
+	g := intel.FromIndex(ix)
+	return &Platform{root: root, ix: ix, graph: &g}, nil
+}
+
 // NewWithGraph is the server constructor for callers that own their own graph
 // pointer (e.g. web.App, which swaps the graph value in place when the index
 // goes stale). The caller's *intel.Graph must outlive the Platform;
@@ -169,7 +190,7 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 	// one). The CLI only ever reads these files; the running firewall writes them.
 	auditDir := filepath.Join(root, ".kern", "audit")
 	_ = os.MkdirAll(auditDir, 0o700)
-	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(governance.MirrorFor(auditDir))
+	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock")).WithMirror(govaudit.MirrorFor(auditDir))
 	// Replay persisted entries into memory, then verify the tamper-evident
 	// chain. A broken chain is evidence to investigate — not a reason to refuse
 	// to start: warn loudly on stderr and continue. When NOTHING verifies —
@@ -189,7 +210,12 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 			// steer to repair, instead of crying "FAILED" on every start.
 			tiers := fw.AuditLog().ChainTierReport()
 			if tiers.DowngradeExplainsBreak() {
-				fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.Downgraded, map[bool]string{true: "y", false: "ies"}[tiers.Downgraded == 1], brk+1)
+				if tiers.TailDowngraded > 0 {
+					fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.TailDowngraded, map[bool]string{true: "y", false: "ies"}[tiers.TailDowngraded == 1], tiers.FirstTailDowngraded+1)
+				}
+				// A downgrade with a later keyed entry is already attested
+				// through that entry's Prev hash: ordering AND authenticity
+				// are anchored, so warning on every command is noise.
 			} else if verified == 0 {
 				fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit)\n", n)
 			} else {

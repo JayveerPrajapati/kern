@@ -650,7 +650,7 @@ func (s Snapshot) Report() string {
 // --- Governance metrics from external sources ---
 
 // GovernanceData holds raw governance data collected from external subsystems.
-// Callers populate this from governance.AuditLog, agent.Registry, incident.Store,
+// Callers populate this from govaudit.AuditLog, agent.Registry, incident.Store,
 // architecture.ValidateProject, etc., then pass it to SnapshotWithGovernance.
 type GovernanceData struct {
 	AgentCount      int

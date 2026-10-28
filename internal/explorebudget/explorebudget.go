@@ -54,6 +54,13 @@ func Render(r *intel.ExploreReport, maxTokens int) string {
 		newListSec(fmt.Sprintf("== blast radius (%d symbols, %d files) ==\n", len(r.BlastRadius), len(r.BlastFiles)), r.BlastRadius, nil, nil, nil),
 		newListSec("== affected files ==\n", r.BlastFiles, nil, nil, nil),
 	}
+	// The textual-reference safety net is part of the answer, not an optional
+	// panel: budget it like the other lists so a tight budget trims it with an
+	// explicit marker instead of silently deleting the only evidence that a
+	// non-callable symbol is referenced.
+	if r.ReferenceConfidence != "" {
+		lists = append(lists, newListSec(fmt.Sprintf("== references (%d files, %s confidence) ==\n", len(r.ReferenceFiles), r.ReferenceConfidence), r.ReferenceFiles, nil, nil, nil))
+	}
 	var optionals []string
 	if r.StaleBanner != "" {
 		optionals = append(optionals, r.StaleBanner+"\n\n")

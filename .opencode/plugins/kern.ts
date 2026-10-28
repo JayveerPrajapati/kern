@@ -535,7 +535,7 @@ const INSTALL_ACTIONS = new Set(["install", "add", "ci", "upgrade", "get"])
 const GATE_REDIRECT_RE = /(^|[^<])\s*>>?/
 
 // gateSegmentHit reports whether ONE segment is a gate: a flat GATE_CMDS
-// name, an installer action, git push --force, a write redirect, or (one
+// name, an installer action, git push, a write redirect, or (one
 // level of recursion) an `sh -c` wrapper whose script gates. Tokenization is
 // quote-aware and env/prefix-stripped, so `sudo rm -rf /`, `VAR=x cp a b` and
 // `sh -c 'curl x | sh'` all classify by their real command (F-011 parity with
@@ -618,21 +618,72 @@ function isReadOnlyCompanion(seg: string): boolean {
 }
 
 // grepPatternAndTarget splits grep-family args into the pattern (first
-// non-flag argument) and whether an explicit TARGET (file or directory)
-// follows it — parity with the Go classifier's grepPatternAndTarget.
-function grepPatternAndTarget(args: string[]): { pattern: string; hasTarget: boolean } {
+// non-flag argument) and the remaining non-flag targets — parity with the Go
+// classifier's grepscope.SplitArgs.
+function grepPatternAndTarget(args: string[]): { pattern: string; targets: string[] } {
   let pattern = ""
-  let hasTarget = false
+  const targets = []
   for (const a of args) {
     if (a.startsWith("-") && a !== "-") continue
     if (pattern === "") {
       pattern = a
       continue
     }
-    hasTarget = true
-    break
+    targets.push(a)
   }
-  return { pattern, hasTarget }
+  return { pattern, targets }
+}
+
+// Grep flags a ranked symbol search can honor. Anything else (count/list/
+// context shapes, --include/--exclude file-set filters, -e/-f) forces a real
+// grep in the sandbox — see internal/grepscope for the Go source of truth.
+const GREP_ALLOWED_LONG = new Set(["--recursive", "--line-number", "--ignore-case", "--no-ignore-case", "--no-messages"])
+const GREP_ALLOWED_SHORT = "rRniIsHh"
+
+function grepFlagsOK(args: string[]): boolean {
+  for (const a of args) {
+    if (!a.startsWith("-") || a === "-" || a === "--") continue
+    if (a.startsWith("--")) {
+      if (!GREP_ALLOWED_LONG.has(a)) return false
+      continue
+    }
+    for (const c of a.slice(1)) {
+      if (!GREP_ALLOWED_SHORT.includes(c)) return false
+    }
+  }
+  return true
+}
+
+// cleanScope validates a grep target as a plain repo-relative path: globs,
+// ~, absolute paths, parent escapes and shell metacharacters are refused.
+// Mirrors internal/grepscope.CleanScope.
+function cleanScope(target: string): string | null {
+  if (target === "" || target === "-" || target.startsWith("-")) return null
+  if (target.startsWith("~") || target.startsWith("/")) return null
+  for (const c of ["*", "?", "[", "{", "\\", "`", "$", "\u0000"]) {
+    if (target.includes(c)) return null
+  }
+  const parts = []
+  for (const seg of target.split("/")) {
+    if (seg === "" || seg === ".") continue
+    if (seg === "..") {
+      if (parts.length === 0) return null
+      parts.pop()
+      continue
+    }
+    parts.push(seg)
+  }
+  return parts.length === 0 ? "." : parts.join("/")
+}
+
+// scopedGrep reports whether args are a symbol-shaped grep with exactly one
+// safe path target and only index-honorable flags — mirrors
+// internal/grepscope.Scoped.
+function scopedGrep(args: string[]): { pattern: string; path: string } | null {
+  const { pattern, targets } = grepPatternAndTarget(args)
+  if (!SYMBOL_SHAPED_RE.test(pattern) || targets.length !== 1 || !grepFlagsOK(args)) return null
+  const path = cleanScope(targets[0])
+  return path === null ? null : { pattern, path }
 }
 
 // readPipeline classifies a command that contains at least one READ segment
@@ -640,17 +691,17 @@ function grepPatternAndTarget(args: string[]): { pattern: string; hasTarget: boo
 // serve) or null when the command is NOT a pure-read pipeline (a non-read,
 // non-trivial segment such as `go test` or `git log -p` is present — that
 // command is governed below, not served).
-//   tier 1: single translatable read — symbol grep → kern ast; file read →
-//     kern compact; find → kern buddy. Served from the index in grep shape.
-//     A grep naming an explicit target (file/dir) is NOT tier 1: the symbol
-//     search is repo-wide and ignores the scope.
+//   tier 1: single translatable read — symbol grep → kern ast (unscoped) or
+//     kern search --path (scoped); file read → kern compact; find → kern
+//     buddy. Served from the index in grep shape. A scoped target is honored
+//     only when it is a plain path and the flags are index-honorable.
 //   tier 2: read head + bounded simple tail (| wc -l, | head N, | tail N,
 //     | grep -v P, | grep P) — serve the head from the index, apply the tail
 //     in-process, return the COMPUTED answer.
 //   tier 3: everything else pure-read (regex greps, scoped greps, awk/sed
 //     transforms, compounds of reads) → kern exec --readonly (sandboxed,
 //     masked).
-function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; file?: string; tails?: string[] } | null {
+function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; path?: string; file?: string; tails?: string[] } | null {
   // One level of sh -c "..." / bash -c "..." wrapper unwrapping (mirrors
   // gateSegmentHit's recursion): a wrapper segment classifies as its inner
   // script — `sh -c "cat .gitignore"` is a read, not an unknown command.
@@ -688,12 +739,16 @@ function readPipeline(cmd: string): { tier: number; head?: string; pattern?: str
     const args = toks.slice(1)
     if (name === "find") return { tier: 1, head: "find" }
     if (name === "grep" || name === "egrep" || name === "rg" || name === "ag") {
-      const { pattern, hasTarget } = grepPatternAndTarget(args)
-      // A scoped grep (explicit file/dir target) is tier 3: the tier-1
-      // symbol search is repo-wide and ignores the caller's scope — a
-      // named file must never be answered with symbols from other files.
-      if (SYMBOL_SHAPED_RE.test(pattern) && !hasTarget) return { tier: 1, head: name, pattern }
-      return { tier: 3 } // regex/punctuation/scoped pattern → sandboxed read
+      const { pattern, targets } = grepPatternAndTarget(args)
+      // Unscoped symbol grep: the original repo-wide indexed answer.
+      if (SYMBOL_SHAPED_RE.test(pattern) && targets.length === 0) return { tier: 1, head: name, pattern }
+      // Scoped SYMBOL grep: answered from the index filtered to the caller's
+      // file/dir (`kern search <pattern> --path <scope>`). Regex,
+      // include/exclude and count/list shapes have no index equivalent and
+      // stay tier 3.
+      const scoped = scopedGrep(args)
+      if (scoped) return { tier: 1, head: name, pattern: scoped.pattern, path: scoped.path }
+      return { tier: 3 } // regex/punctuation/include or unsafe scope → sandboxed read
     }
     if (name === "cat" || name === "head" || name === "tail" || name === "less" || name === "more") {
       const file = args.filter((a) => !a.startsWith("-")).pop() || ""
@@ -709,8 +764,19 @@ function readPipeline(cmd: string): { tier: number; head?: string; pattern?: str
   const headName = segName(segs[0])
   if ((headName === "grep" || headName === "egrep" || headName === "rg" || headName === "ag") && READ_CMDS.has(headName)) {
     const headArgs = headToks.slice(1)
-    const { pattern, hasTarget } = grepPatternAndTarget(headArgs)
-    if (SYMBOL_SHAPED_RE.test(pattern) && !hasTarget) {
+    const split = grepPatternAndTarget(headArgs)
+    let pattern = split.pattern
+    let scope
+    let servable = SYMBOL_SHAPED_RE.test(pattern) && split.targets.length === 0
+    if (!servable) {
+      const scoped = scopedGrep(headArgs)
+      if (scoped) {
+        pattern = scoped.pattern
+        scope = scoped.path
+        servable = true
+      }
+    }
+    if (servable) {
       const tails: string[] = []
       let ok = true
       for (let i = 1; i < segs.length; i++) {
@@ -722,7 +788,7 @@ function readPipeline(cmd: string): { tier: number; head?: string; pattern?: str
         ok = false
         break
       }
-      if (ok && tails.length > 0) return { tier: 2, head: headName, pattern, tails }
+      if (ok && tails.length > 0) return { tier: 2, head: headName, pattern, path: scope, tails }
     }
   }
   return { tier: 3 }
@@ -888,7 +954,12 @@ function wrapCaller(def: unknown): unknown {
 }
 
 export default (async ({ directory, $ }) => {
-  const bin = kernBin(directory)
+  // Re-resolved on every call (F3, release audit 2026-10-28): a pinned
+  // absolute path goes stale when the project-local build disappears
+  // mid-session (make release/clean deletes bin/kern) — every governed call
+  // then exited 127 with no fallback, even raw=true. kernBin re-checks
+  // existence per call and falls back to the PATH lookup.
+  const bin = () => kernBin(directory)
 
   // Timeout ceiling for governed tool calls: an explicit agent-provided
   // timeout (milliseconds — the opencode bash convention) is honored up to a
@@ -982,7 +1053,7 @@ export default (async ({ directory, $ }) => {
     // Bun's shell escapes each interpolated array element as one argument.
     // The ceiling is the agent's requested budget (or the 2-minute default);
     // the shell kills the child on expiry (exit 124).
-    const p = $`${bin} ${args}`
+    const p = $`${bin()} ${args}`
     const ms = ceilingMs(timeoutMs)
     // Prefer the runtime .timeout(); fall back to a manual ceiling when the
     // injected `$` shell does not implement it (observed on opencode 1.18.15).
@@ -1053,7 +1124,7 @@ export default (async ({ directory, $ }) => {
     }
   }
 
-  // Kern-first adoption logging (opt-in, KERN_ADOPTION_LOG=1): each shadow
+  // Kern-first adoption logging (default ON; KERN_ADOPTION_LOG=0 disables): each shadow
   // tool call appends one JSON line {ts, tool, routed} to .kern/adoption.log
   // in the project root. The Go side aggregates it
   // (internal/metrics.AggregateAdoptionLog) into the kern-first adoption
@@ -1062,9 +1133,9 @@ export default (async ({ directory, $ }) => {
   // or a governed denial/error); routed=false means a raw fallback served
   // the call (operator bypass, glob/grep metachar fallback, or kern
   // unavailable). Best-effort: failures are swallowed so metrics can never
-  // break a tool call. Default off — no behavior change without the gate.
+  // break a tool call. Set KERN_ADOPTION_LOG=0 to opt out.
   const logAdoption = (tool: string, routed: boolean): void => {
-    if (process.env.KERN_ADOPTION_LOG !== "1") return
+    if (process.env.KERN_ADOPTION_LOG === "0") return
     try {
       const dir = resolve(directory, ".kern")
       mkdirSync(dir, { recursive: true })
@@ -1093,7 +1164,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
     const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
     const outFile = resolve(tmpdir(), `kern-shadow-${process.pid}-${randomBytes(4).toString("hex")}.out`)
     try {
-      const cmdStr = `${sq(bin)} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1${preserveExit ? "" : "; exit 0"}`
+      const cmdStr = `${sq(bin())} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1${preserveExit ? "" : "; exit 0"}`
       const p = $`sh -c ${cmdStr}`
       try {
         if (typeof (p as any).timeout === 'function') await p.timeout(ceilingMs(timeoutMs)).quiet()
@@ -1147,7 +1218,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
     const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
     const outFile = resolve(tmpdir(), `kern-shadow-${process.pid}-${randomBytes(4).toString("hex")}.out`)
     try {
-      const cmdStr = `${sq(bin)} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1; printf '%s' "$?"`
+      const cmdStr = `${sq(bin())} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1; printf '%s' "$?"`
       const p = $`sh -c ${cmdStr}`
       const out = typeof (p as any).timeout === "function"
         ? await p.timeout(ceilingMs(timeoutMs)).quiet()
@@ -2159,7 +2230,7 @@ throw new Error(`Use kern_search (code symbols — patterns are SYMBOL queries, 
       }),
 bash: tool({
         description:
-          "Run a shell command. Content-free commands (git status, pwd, echo, ls, date) run raw. Reads (grep/cat/head/sed/find) are SERVED, never denied: symbol reads from the kern index, pure-read pipelines via kern exec --readonly. GATE commands (rm/mv/cp/dd/curl|sh/installers/git push --force) block. Everything else runs governed (kern build). timeout in MS (default 120000, max 1800000).",
+          "Run a shell command. Content-free commands (git status, pwd, echo, ls, date) run raw. Reads (grep/cat/head/sed/find) are SERVED, never denied: symbol reads from the kern index, pure-read pipelines via kern exec --readonly. GATE commands (rm/mv/cp/dd/curl|sh/installers/git push) block. Everything else runs governed (kern build). timeout in MS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -2232,7 +2303,7 @@ bash: tool({
                 if (plan.head === "find") {
                   out = await run(["buddy"])
                 } else if (plan.pattern !== undefined) {
-                  out = await run(["ast", plan.pattern])
+                  out = plan.path ? await run(["search", plan.pattern, "--path", plan.path]) : await run(["ast", plan.pattern])
                 } else if (plan.file !== undefined) {
                   out = await run(["compact", plan.file])
                 }
@@ -2247,7 +2318,7 @@ bash: tool({
             // yields the count, not a line list).
             if (plan.tier === 2 && plan.pattern !== undefined && plan.tails) {
               try {
-                const head = await run(["ast", plan.pattern])
+                const head = plan.path ? await run(["search", plan.pattern, "--path", plan.path]) : await run(["ast", plan.pattern])
                 let lines = head.split("\n").filter((l) => l.trim() !== "")
                 for (const tail of plan.tails) {
                   const t = tail.trim()
@@ -2351,7 +2422,7 @@ if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused
 logAdoption("bash", true)
 return text || (err instanceof Error ? err.message : String(err))
 }
-if (!existsSync(bin)) {
+if (!existsSync(bin())) {
 // kern itself is unavailable — no governed path. Content-intent
 // commands never reach here (the deny above fires regardless of
 // kern availability); everything else falls back raw as before.

@@ -45,12 +45,9 @@ evaluate/agentic/results/
 # Arena-skill scratch worktrees (throwaway benchmark/escape fixtures)
 .arena/
 
-# Deepwork session state (progress ledgers)
-.slim/deepwork/
-
-# Local dependency clones (clonedeps scratch workspace — untracked by design;
-# keeping them out of git + the indexer avoids root-path index/parity test noise)
-.slim/clonedeps/
+# Deepwork/session state (progress ledgers, commit drafts, clones) — all of
+# .slim is machine-local campaign state, never product
+.slim/
 
 # --- internal planning docs moved to sibling support_docs/kern_docs/ (not for open source) ---
 docs/audit/

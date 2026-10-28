@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -98,6 +100,11 @@ func runBench(rest []string) {
 		})
 	}
 
+	// ---- Fresh-process CLI latencies: one subprocess per run, so these include
+	// process start + index load (the cost an agent's shell pays), not just the
+	// warm in-memory query above.
+	cliResults := measureCLI(root, cliSymbol(ix), heavyTypeSymbol(ix))
+
 	// ---- Machine context (honest-reporting envelope). ----
 	res := benchResult{
 		Suite:          "kern-bench",
@@ -110,6 +117,7 @@ func runBench(rest []string) {
 		WarmLoadMS:     warm,
 		ColdVsWarm:     speedup(cold, warm.MedianMS),
 		Queries:        queryResults,
+		CLIQueries:     cliResults,
 		MethodologyRef: "docs/benchmarks/graph-latency.md (cold-vs-warm, median/min over repeated runs)",
 	}
 
@@ -164,6 +172,19 @@ func runBench(rest []string) {
 // cmd/kern/testdata/bench.json (pinned by
 // TestBenchResultRoundTripGoldenFixture — a renamed field here silently
 // zeroes the /benchmarks page).
+// cliQuery is one fresh-process CLI measurement: the command run in a new
+// kern process (what an agent's shell actually pays, including index load)
+// and its median/min wall time over repeated runs.
+type cliQuery struct {
+	Name     string   `json:"name"`
+	Args     []string `json:"args"`
+	MedianMS float64  `json:"median_ms"`
+	MinMS    float64  `json:"min_ms"`
+	Runs     int      `json:"runs"`
+	OK       bool     `json:"ok"`
+	Err      string   `json:"err,omitempty"`
+}
+
 type benchResult struct {
 	Suite          string        `json:"suite"`
 	Date           string        `json:"date"`
@@ -175,6 +196,7 @@ type benchResult struct {
 	WarmLoadMS     sample        `json:"warm_load_ms"`
 	ColdVsWarm     float64       `json:"cold_vs_warm_speedup"`
 	Queries        []queryResult `json:"queries"`
+	CLIQueries     []cliQuery    `json:"cli_queries,omitempty"`
 	MethodologyRef string        `json:"methodology_ref"`
 }
 
@@ -207,6 +229,140 @@ type machineInfo struct {
 	GOARCH    string `json:"goarch"`
 	GoVersion string `json:"go_version"`
 	NumCPU    int    `json:"num_cpu"`
+}
+
+// cliSymbol picks a real, defined hub for the CLI measurements: the symbol
+// with the most callers in the callers table. topHub's key is a CALLEE name
+// (often a stdlib method such as "strings.Contains") which is not a
+// definition, so context/explore would exit 1 on it.
+func cliSymbol(ix *index.Index) string {
+	best, bestN := "main", -1
+	for _, s := range ix.Symbols {
+		if n := len(ix.Callers[s.FullName()]); n > bestN {
+			best, bestN = s.FullName(), n
+		}
+	}
+	return best
+}
+
+// heavyTypeSymbol picks the worst query shape for the impact-hub CLI probe:
+// the defined TYPE with the most receiver-bearing methods. Types aggregate
+// their methods and constructors in the impact surface, so a heavily-used
+// type's blast radius dwarfs any single function's — exactly the class of
+// query whose latency a leaf-symbol gate cannot see. Falls back to
+// cliSymbol's choice when the index has no methods at all.
+func heavyTypeSymbol(ix *index.Index) string {
+	counts := make(map[string]int)
+	for _, s := range ix.Symbols {
+		if s.Receiver != "" && s.Kind == "method" {
+			counts[s.Receiver]++
+		}
+	}
+	best, bestN := "", -1
+	for name, n := range counts {
+		if n > bestN {
+			best, bestN = name, n
+		}
+	}
+	if best == "" {
+		return cliSymbol(ix)
+	}
+	// Prefer the type's own definition (a struct/type symbol named best) so
+	// impact resolves it directly rather than via a method's receiver.
+	for _, s := range ix.Symbols {
+		if s.Kind == "struct" || s.Kind == "type" || s.Kind == "interface" {
+			if s.Name == best {
+				return s.FullName()
+			}
+		}
+	}
+	return best
+}
+
+// measureCLI runs the audit's one-shot CLI commands in fresh processes
+// against the persisted store and returns their latency samples. A non-zero
+// exit is recorded, never fatal: the bench reports it so --check can fail on
+// a broken command rather than a number.
+//
+// Two validity rules (2026-10-27 audit):
+//
+//  1. Every command gets one UNTIMED warm-up invocation first. The CLI
+//     auto-starts the per-project daemon on first use and pays a one-time
+//     lazy-table build inside it; without the warm-up, whether a sample
+//     measures the cold spawn or the warm daemon would depend on ambient
+//     machine state (a daemon left running by an earlier command), making
+//     the gate flaky. The warm-up pins the intended measurement: warm
+//     daemon, fresh client process.
+//  2. The impact probe runs twice: once on the same leaf-ish symbol as the
+//     other commands, and once on the index's heaviest TYPE (impact-hub).
+//     A type aggregates its methods and constructors, so its blast radius
+//     is the worst query shape the surface serves; gating only a cheap
+//     function symbol let real p95s regress invisibly.
+func measureCLI(root, symbol, heavyType string) []cliQuery {
+	// Under a test binary os.Executable() is the suite itself; spawning it
+	// would re-run tests instead of a kern command. CLI rows are for real
+	// binaries only.
+	if strings.HasSuffix(os.Args[0], ".test") {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	// context/explore/impact resolve a definition name; the hub may be a
+	// qualified method ("strings.Contains"), so run them on the bare name.
+	simple := symbol
+	if i := strings.LastIndexByte(simple, '.'); i >= 0 {
+		simple = simple[i+1:]
+	}
+	heavySimple := heavyType
+	if i := strings.LastIndexByte(heavySimple, '.'); i >= 0 {
+		heavySimple = heavySimple[i+1:]
+	}
+	queries := []struct {
+		name string
+		args []string
+	}{
+		{"search", []string{"search", symbol, "--limit", "20", "--json"}},
+		{"context", []string{"context", simple}},
+		{"explore", []string{"explore", simple}},
+		{"impact", []string{"impact", simple}},
+		{"impact-hub", []string{"impact", heavySimple}},
+	}
+	out := make([]cliQuery, 0, len(queries))
+	for _, q := range queries {
+		args := append(append([]string{}, q.args...), "--root", root)
+		res := cliQuery{Name: q.name, Args: q.args, Runs: 3, OK: true}
+		// Untimed warm-up: absorbs daemon spawn, index hydration and lazy
+		// table builds so the timed samples measure the steady state.
+		if err := exec.Command(exe, args...).Run(); err != nil {
+			// A command that cannot even warm up is a broken command, not
+			// a latency: report it the same way a timed failure would.
+			res.OK = false
+			res.Err = err.Error()
+			out = append(out, res)
+			continue
+		}
+		var times []float64
+		for i := 0; i < res.Runs; i++ {
+			cmd := exec.Command(exe, args...)
+			start := time.Now()
+			err := cmd.Run()
+			times = append(times, float64(time.Since(start).Microseconds())/1000)
+			if err != nil {
+				res.OK = false
+				res.Err = err.Error()
+				break
+			}
+		}
+		if len(times) > 0 {
+			sort.Float64s(times)
+			res.MedianMS = times[len(times)/2]
+			res.MinMS = times[0]
+		}
+		out = append(out, res)
+	}
+	return out
 }
 
 func machineContext() machineInfo {
@@ -295,6 +451,17 @@ func printBenchTable(res benchResult) {
 	for _, q := range res.Queries {
 		fmt.Printf("%-20s %-22s %-8s %s %s %5d %7d\n", q.Name, q.Kind, q.Target, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs, q.Results)
 	}
+	if len(res.CLIQueries) > 0 {
+		fmt.Println()
+		fmt.Println("cli (fresh process)  args (truncated)                  median    min    runs  ok")
+		for _, q := range res.CLIQueries {
+			a := strings.Join(q.Args, " ")
+			if len(a) > 32 {
+				a = a[:32]
+			}
+			fmt.Printf("%-20s %-32s %s %s %5d  %v\n", q.Name, a, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs, q.OK)
+		}
+	}
 	fmt.Println()
 	fmt.Println("methodology: " + res.MethodologyRef)
 }
@@ -313,11 +480,12 @@ var benchThresholdsRaw []byte
 // minimum result count every query must return (0 disables the
 // zero-result check).
 type benchThresholds struct {
-	WarmLoadMSMax float64 `json:"warm_load_ms_max"`
-	QueryMSMax    float64 `json:"query_ms_max"`
-	ColdVsWarmMin float64 `json:"cold_vs_warm_min"`
-	WarnFactor    float64 `json:"warn_factor"`
-	MinResults    int     `json:"min_results"`
+	WarmLoadMSMax float64            `json:"warm_load_ms_max"`
+	QueryMSMax    float64            `json:"query_ms_max"`
+	ColdVsWarmMin float64            `json:"cold_vs_warm_min"`
+	WarnFactor    float64            `json:"warn_factor"`
+	MinResults    int                `json:"min_results"`
+	CLIMaxMS      map[string]float64 `json:"cli_ms_max"`
 }
 
 // loadBenchThresholds decodes the versioned gate config. A malformed file
@@ -376,6 +544,13 @@ func checkBenchThresholds(res benchResult, th benchThresholds) []benchViolation 
 			out = append(out, benchViolation{Check: q.Name + "_results", Level: "fail",
 				Detail: fmt.Sprintf("%d results (min %d) — the query wiring regressed, this is not a latency finding", q.Results, th.MinResults)})
 		}
+	}
+	for _, q := range res.CLIQueries {
+		if !q.OK {
+			out = append(out, benchViolation{Check: "cli_" + q.Name + "_exit", Level: "fail",
+				Detail: fmt.Sprintf("fresh-process `kern %s` failed: %s", strings.Join(q.Args, " "), q.Err)})
+		}
+		check("cli_"+q.Name+"_ms", q.MedianMS, th.CLIMaxMS[q.Name], " ms")
 	}
 	if th.ColdVsWarmMin > 0 && res.ColdVsWarm < th.ColdVsWarmMin {
 		out = append(out, benchViolation{Check: "cold_vs_warm_speedup", Level: "fail",

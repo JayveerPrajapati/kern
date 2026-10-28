@@ -53,6 +53,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/testfixture"
@@ -375,8 +376,8 @@ func TestAcceptanceMatrix(t *testing.T) {
 		}
 
 		// Auditable: the routing decision is recorded and retrievable.
-		alog := governance.NewAuditLog()
-		alog.Record(governance.AuditEntry{
+		alog := govaudit.NewAuditLog()
+		alog.Record(govaudit.AuditEntry{
 			AgentID: "router", Action: "route", Resource: wf.ID,
 			Result: "routed",
 		})

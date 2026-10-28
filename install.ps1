@@ -20,6 +20,9 @@
 #     repo. A repo initializes itself when an agent first works in it.
 #     Set $env:KERN_AUTO_WIRE="0" to install the binaries only.
 #   * Supports actions: install (default), upgrade, status, uninstall.
+#   * uninstall is prefix-scoped by default (binaries + this prefix's User
+#     PATH entry); -Machine (or KERN_UNINSTALL_MACHINE=1) also removes the
+#     ~/AGENTS.md kern block, machine secrets (%APPDATA%\kern), and caches.
 #   * upgrade re-runs the install path; a running kern.exe/kern-mcp.exe
 #     is moved aside (unique .old name) before the copy — Windows cannot
 #     overwrite a running binary, but it can rename it. If the copy fails,
@@ -29,7 +32,8 @@
 # (or run scripts/retarget.sh which rewrites this file for you).
 
 param(
-    [string]$Action = "install"
+    [string]$Action = "install",
+    [switch]$Machine
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,7 +157,6 @@ function Install-Go {
         Write-Host "kern: KERN_PUREGO=1 — installing the pure-Go build (-tags notreesitter, no C toolchain)" -ForegroundColor Yellow
         go install -tags notreesitter "github.com/$Repo/cmd/kern@$Tag"
         go install -tags notreesitter "github.com/$Repo/cmd/kern-mcp@$Tag"
-        go install -tags notreesitter "github.com/$Repo/cmd/kern-server@$Tag"
     } else {
         Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Tag'" -ForegroundColor Yellow
         # Default go-install build compiles tree-sitter in (hard CGO). On
@@ -161,24 +164,27 @@ function Install-Go {
         # the pure-Go -tags notreesitter build instead.
         go install "github.com/$Repo/cmd/kern@$Tag"
         go install "github.com/$Repo/cmd/kern-mcp@$Tag"
-        go install "github.com/$Repo/cmd/kern-server@$Tag"
     }
-    # go install drops all three binaries into $(go env GOPATH)/bin, which is
-    # often NOT on PATH and never reaches $Prefix. Copy them to the canonical
-    # install dir so the PATH step and auto-wire below see them exactly like a
-    # prebuilt install. Mirrors install.sh's go_install behaviour.
+    # go install drops the binaries into $(go env GOPATH)/bin, which is often
+    # NOT on PATH and never reaches $Prefix. Copy each binary independently:
+    # kern.exe is required, kern-mcp.exe is copied when present. The old
+    # all-three check (the third binary was retired in the platform pivot)
+    # blocked both copies even when they had built successfully (P0-5).
     $goBin = Join-Path (& go env GOPATH) "bin"
-    $ok = $false
-    if ((Test-Path (Join-Path $goBin "kern.exe")) -and (Test-Path (Join-Path $goBin "kern-mcp.exe")) -and (Test-Path (Join-Path $goBin "kern-server.exe"))) {
-        New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
-        Copy-Item (Join-Path $goBin "kern.exe") (Join-Path $Prefix "kern.exe") -Force
-        Copy-Item (Join-Path $goBin "kern-mcp.exe") (Join-Path $Prefix "kern-mcp.exe") -Force
-        Copy-Item (Join-Path $goBin "kern-server.exe") (Join-Path $Prefix "kern-server.exe") -Force
-        $ok = $true
-        Write-Host "kern: copied binaries to $Prefix from $goBin." -ForegroundColor Green
+    New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+    $copied = @()
+    foreach ($b in @("kern.exe", "kern-mcp.exe")) {
+        $src = Join-Path $goBin $b
+        if (Test-Path $src) {
+            Copy-Item $src (Join-Path $Prefix $b) -Force
+            $copied += $b
+        }
     }
-    if (-not $ok) {
-        Write-Host "kern: installed via go install, but could not find kern.exe/kern-mcp.exe/kern-server.exe in $goBin."
+    $ok = Test-Path (Join-Path $Prefix "kern.exe")
+    if ($ok) {
+        Write-Host "kern: copied $($copied -join ', ') to $Prefix from $goBin." -ForegroundColor Green
+    } else {
+        Write-Host "kern: installed via go install, but could not find kern.exe in $goBin."
         Write-Host "kern: ensure `$(go env GOPATH)/bin is on your PATH and run 'kern setup' in your project."
     }
     return $ok
@@ -345,13 +351,33 @@ function Remove-KernSection {
 }
 
 function Uninstall-Kern {
+    # Env fallback mirrors install.sh (KERN_UNINSTALL_MACHINE=1), so
+    # scripted uninstalls and test harnesses can opt in without the switch.
+    if ($env:KERN_UNINSTALL_MACHINE -eq "1") { $Machine = $true }
     Write-Host "kern: uninstalling from $Prefix..."
-    foreach ($b in @("kern.exe", "kern-mcp.exe", "kern-server.exe")) {
+    foreach ($b in @("kern.exe", "kern-mcp.exe")) {
         $p = Join-Path $Prefix $b
         if (Test-Path $p) {
             Remove-Item -Force $p -ErrorAction SilentlyContinue
             Write-Host "  removed $p"
         }
+    }
+    if (-not $Machine) {
+        # F4 (2026-10-28): a default uninstall is prefix-scoped — machine
+        # state belonging to another install must survive a scratch-prefix
+        # uninstall. Mirrors install.sh's scoped mode.
+        Write-Host "  (prefix-scoped: this prefix's User PATH entry only — pass -Machine to also"
+        Write-Host "   remove ~/AGENTS.md, machine secrets, and caches)"
+    } else {
+    # Machine secrets live under os.UserConfigDir() (%APPDATA%\kern on
+    # Windows): audit-chain key, approval signing key/HMAC, consumed ledger.
+    # The cache dir (%LOCALAPPDATA%\kern) is removed with it.
+    foreach ($d in @((Join-Path $env:APPDATA "kern"), (Join-Path $env:LOCALAPPDATA "kern"))) {
+        if ($d -and (Test-Path $d)) {
+            Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+            Write-Host "  removed $d (machine secrets)"
+        }
+    }
     }
     $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($oldPath -like "*$Prefix*") {
@@ -359,6 +385,7 @@ function Uninstall-Kern {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "  removed $Prefix from User PATH"
     }
+    if ($Machine) {
     # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
     # (both formats), preserving every non-kern byte. Messages are honest:
     # the file is only deleted when it contained nothing but the kern block,
@@ -395,6 +422,7 @@ function Uninstall-Kern {
             Remove-Item -Recurse -Force $d
             Write-Host "  removed $d"
         }
+    }
     }
     Write-Host "kern: uninstalled successfully." -ForegroundColor Green
 }
@@ -543,12 +571,10 @@ try {
     if (-not $extract) { throw "kern.exe not found in archive" }
     Copy-Binary -Source $extract.FullName -Dest (Join-Path $Prefix "kern.exe")
 
-    # kern-mcp.exe and kern-server.exe are co-located; copy if present.
-    # Copy-Binary renames a running binary aside (kern update path).
+    # kern-mcp.exe is co-located with kern.exe; copy it independently when
+    # present. Copy-Binary renames a running binary aside (kern update path).
     $mcp = Get-ChildItem -Path $tmp -Recurse -Filter "kern-mcp.exe" | Select-Object -First 1
     if ($mcp) { Copy-Binary -Source $mcp.FullName -Dest (Join-Path $Prefix "kern-mcp.exe") }
-    $server = Get-ChildItem -Path $tmp -Recurse -Filter "kern-server.exe" | Select-Object -First 1
-    if ($server) { Copy-Binary -Source $server.FullName -Dest (Join-Path $Prefix "kern-server.exe") }
 
     # Best-effort cleanup of binaries renamed aside by a previous update.
     # (A .old moved aside by THIS update may still be locked by the old

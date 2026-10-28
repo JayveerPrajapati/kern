@@ -1,6 +1,7 @@
 package context
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ func fakeIndex() *index.Index {
 			sym("func", "Baz", "baz.go", 1),
 			{Kind: "func", Name: "HandleUsers", File: "svc/handlers.go", Line: 1, Lang: "go", Entry: true, Framework: "net-http", Route: "/users"},
 			sym("func", "TestFoo", "svc/foo_test.go", 1),
+			sym("func", "TestUnrelated", "svc/other_test.go", 1),
 		},
 		Calls: map[string][]index.CallEdge{
 			"Foo":         {index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
@@ -171,6 +173,36 @@ func TestAnalyzeChangeRequiresValidationSuggestsTests(t *testing.T) {
 	}
 	if !containsStr(pkt.RequiredValidation, "build verification") {
 		t.Errorf("RequiredValidation missing build verification: %v", pkt.RequiredValidation)
+	}
+
+	// HandleUsers is covered by TestFoo: the step must name the test, not its
+	// decl:<sha> declaration identity.
+	pkt, err = e.AnalyzeChange("HandleUsers")
+	if err != nil {
+		t.Fatalf("AnalyzeChange(HandleUsers) error: %v", err)
+	}
+	joined := strings.Join(pkt.RequiredValidation, "\n")
+	if !strings.Contains(joined, "TestFoo") {
+		t.Errorf("RequiredValidation does not name the covering test: %v", pkt.RequiredValidation)
+	}
+	if strings.Contains(joined, "decl:") {
+		t.Errorf("RequiredValidation leaks declaration hashes: %v", pkt.RequiredValidation)
+	}
+
+	foundFoo, foundNoise := false, false
+	for _, claim := range pkt.Facts {
+		if strings.Contains(claim.Statement, "TestFoo") {
+			foundFoo = true
+		}
+		if strings.Contains(claim.Statement, "TestUnrelated") {
+			foundNoise = true
+		}
+	}
+	if !foundFoo {
+		t.Errorf("coverage fact for the direct-calling test is missing: %+v", pkt.Facts)
+	}
+	if foundNoise {
+		t.Errorf("unrelated same-package test leaked into coverage facts: %+v", pkt.Facts)
 	}
 }
 

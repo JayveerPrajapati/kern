@@ -135,6 +135,11 @@ func (r *SuppressionRegistry) Match(f secscan.Finding) (reason string, ok bool) 
 // the finding.
 var defaultSuppressions = []Suppression{
 	{
+		File:   "cmd/kern/cmd_bench.go",
+		Rule:   "unsafe-exec",
+		Reason: "benchmark harness: re-executes the kern binary (exe from os.Executable()) with the fixed argument vectors declared in the harness's own query table plus the operator's --root — argv only, no shell, no user-controlled command string.",
+	},
+	{
 		File:   ".github/workflows/ci.yml",
 		Rule:   "hardcoded-secret",
 		Label:  "EMAIL",
@@ -223,6 +228,19 @@ var defaultSuppressions = []Suppression{
 		Reason: "kern commit's git wrappers (gitDiff/gitOutput/gitCommit/shortHash): fixed literal argv (diff --cached, add -A, commit -F -...) with no shell interpolation — the only inputs are the operator's own repo and the generated message fed over stdin; the operator CLI is the trusted principal (same class as cmd/kern/helpers.go:571).",
 	},
 
+	{
+		File:   "internal/mcp/server.go",
+		Func:   "commit",
+		Rule:   "unsafe-exec",
+		Reason: "fixed-argv git plumbing: the server resolves the short HEAD with literal args (git -C <root> rev-parse --short HEAD); the only variable is the trusted project root, with no shell and no user-controlled command string.",
+	},
+	{
+		File:   "internal/setup/setup_claude.go",
+		Func:   "wireClaude",
+		Rule:   "unsafe-exec",
+		Reason: "`claude mcp add kern -- <absolute kern-mcp path>` is a fixed literal argv (mcp/add/kern/--); path comes from exec.LookPath(\"claude\") and bin is the install-resolved absolute binary — no shell, no user-controlled command string. Func-scoped so line drift does not un-suppress the class.",
+	},
+
 	// 2026-10-21 dogfood triage: the remaining 67 unsafe-exec / unsafe-http
 	// findings in kern's own tree, triaged class by class (fixed-argv git
 	// plumbing, scanner probes, operator-configured LLM/SDK/webhook
@@ -291,21 +309,8 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/index/identity.go",
-		Line:   324,
 		Rule:   "unsafe-exec",
-		Reason: "index identity: git add -A with fixed literal argv (the :(exclude).blueprint pathspec is a constant) — trusted repo root.",
-	},
-	{
-		File:   "internal/index/identity.go",
-		Line:   330,
-		Rule:   "unsafe-exec",
-		Reason: "index identity: git write-tree, fixed argv, no variables beyond the trusted repo root.",
-	},
-	{
-		File:   "internal/index/identity.go",
-		Line:   346,
-		Rule:   "unsafe-exec",
-		Reason: "the runGit helper: assembles git argv from internal callers with literal subcommands — the trusted repo root is the only variable of note.",
+		Reason: "index identity: git plumbing (add -A with a constant pathspec, write-tree, and the runGit helper) called with fixed literal subcommands — the trusted repo root is the only variable, no shell. File-wide so edits in the identity code cannot un-suppress the class.",
 	},
 	{
 		File:   "internal/intel/churn.go",
@@ -417,7 +422,7 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/mcp/provenance/provenance.go",
-		Line:   289,
+		Line:   291,
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
@@ -426,12 +431,6 @@ var defaultSuppressions = []Suppression{
 		Line:   201,
 		Rule:   "unsafe-exec",
 		Reason: "runHostSamplerCommand: the sampler command is operator configuration, executed behind governance.CheckExecCommand at the MCP boundary (2026-10-05 exec-firewall audit).",
-	},
-	{
-		File:   "internal/mcp/server.go",
-		Line:   1923,
-		Rule:   "unsafe-exec",
-		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
 		File:   "internal/mcpclient/client.go",
@@ -489,63 +488,25 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/sandbox/network.go",
-		Line:   278,
 		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/sandbox/network.go",
-		Line:   290,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
+		Reason: "sandbox/script runtime: runs the isolation availability probe and the seatbelt/unshare wrap with fixed argv behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose. File-wide so probe edits cannot un-suppress the class.",
 	},
 	{
 		File:   "internal/sandbox/sandbox.go",
-		Line:   866,
 		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/sandbox/sandbox.go",
-		Line:   891,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/sandbox/sandbox.go",
-		Line:   900,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
+		Reason: "sandbox/script runtime: spawns the child with a fixed argv inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard. File-wide so line edits in the run path cannot un-suppress the class.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   218,
+		Func:   "networkNSFor",
 		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
+		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard. Func-scoped so profile edits above the call sites cannot un-suppress it.",
 	},
 	{
 		File:   "internal/script/script.go",
-		Line:   230,
+		Func:   "RunScript",
 		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/script/script.go",
-		Line:   511,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/script/script.go",
-		Line:   523,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
-	},
-	{
-		File:   "internal/script/script.go",
-		Line:   531,
-		Rule:   "unsafe-exec",
-		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard.",
+		Reason: "sandbox/script runtime: executes code inside the isolated sandbox (seatbelt profile / unshare netns) behind the governance gate (KERN_ALLOW_EXEC / KERN_TOOLS) — governed execution is the product's purpose, not a hazard. Func-scoped so profile edits above the call sites cannot un-suppress it.",
 	},
 	{
 		File:   "internal/sdk/client.go",
@@ -583,12 +544,6 @@ var defaultSuppressions = []Suppression{
 		Reason: "uninstall probe: fixed binary path with internally derived args — operator-invoked teardown surface.",
 	},
 	{
-		File:   "internal/setup/setup_claude.go",
-		Line:   26,
-		Rule:   "unsafe-exec",
-		Reason: "claude mcp add kern -- <bin>: fixed argv with kern's own binary path — operator-invoked setup.",
-	},
-	{
 		File:   "internal/setup/setup_wrappers.go",
 		Line:   15,
 		Rule:   "unsafe-exec",
@@ -608,7 +563,7 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/verification/compliance.go",
-		Line:   56,
+		Line:   58,
 		Rule:   "unsafe-exec",
 		Reason: "govulncheck -json: fixed argv scanner invocation.",
 	},

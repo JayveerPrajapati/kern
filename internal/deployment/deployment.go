@@ -11,11 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/config"
+	"github.com/JayveerPrajapati/kern/internal/execshell"
 )
 
 // maxOutputBytes caps captured command output (8 KiB) so a chatty deploy tool
@@ -108,7 +108,7 @@ func (d *ShellDeployer) Deploy(ctx context.Context, req DeployRequest) (DeployRe
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", d.Command)
+	cmd := execshell.CommandContext(ctx, d.Command)
 	cmd.Env = append(os.Environ(),
 		"KERN_SERVICE="+req.Service,
 		"KERN_VERSION="+req.Version,

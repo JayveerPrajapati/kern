@@ -61,12 +61,23 @@ KERN_ALLOW_EXEC=1            # enable governed isolated execution
 KERN_TOOLS=kern_exec,kern_run
 ```
 
-Network access remains isolated by default. Do not enable unisolated execution
-unless you understand the blast radius:
+### What counts as destructive
 
-```bash
-KERN_ALLOW_UNISOLATED=1      # also accepts KERN_ALLOW_NET=1
-```
+Both classifiers — the shell guard (`kern guard classify`, enforced by the host
+hook and the plugin) and the governed-exec gate (`kern_exec`, `kern build`) —
+share one destructive list, so routing a command through either surface cannot
+bypass it. `kern guard parity` and `kern verify claims` fail if they ever
+disagree. Gated forms include:
+
+| Family | Gated | Stays governed (not gated) |
+|---|---|---|
+| Files | `rm -rf`, `rm -r … -f`, `find … -delete`/`-exec rm`, `dd of=/dev/…`, `mkfs*`, `chmod -R /` | `rm build/output`, in-project `mv`/`cp` |
+| Writes by side effect | `echo x > file`, `: > file`, `>> file`, `truncate`, `shred` | `> /dev/null`, `2>/dev/null`, `2>&1` |
+| Home/system state | `mv ~ …`, `mv /etc/…`, `mv /Users/…` | in-project moves |
+| Remote history | `git push -f`, `--force`, `--force-with-lease`, `--mirror`, `origin +main` | `git push`, `git push origin main` |
+| Local work | `git checkout -- .`, `git restore .`, `git clean -fdx` | `git checkout -- <file>`, `git restore --staged .` |
+| Cluster/cloud/data | `kubectl delete namespace\|pv\|pvc\|secret`, `delete -f`, `--all`; `terraform destroy`; `aws s3 rm --recursive`; `docker … prune`, `compose down -v`; `psql -c 'drop …'` | `kubectl get`, `docker ps`, `psql -c 'select …'` |
+| Network | `curl … \| sh`, plain `curl`/`wget` fetch, installers | loopback-only fetch with `KERN_ALLOW_LOOPBACK=1` |
 
 If a command is denied by the approval workflow, the denial includes an approval
 ID. Resolve it without changing the command (a different command creates a new

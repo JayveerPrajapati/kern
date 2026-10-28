@@ -17,7 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/fsutil"
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	rootpkg "github.com/JayveerPrajapati/kern/internal/mcp/root"
@@ -328,7 +328,7 @@ func Verify(ctx context.Context, args map[string]any) (string, error) {
 	}
 
 	store := storage.NewLog(filepath.Join(repoRoot, ".kern", "audit"))
-	log := governance.NewAuditLog().WithStore(store)
+	log := govaudit.NewAuditLog().WithStore(store)
 	if _, err := log.Replay(); err != nil {
 		return "", fmt.Errorf("evidence verify: replay audit chain at %s: %w", repoRoot, err)
 	}

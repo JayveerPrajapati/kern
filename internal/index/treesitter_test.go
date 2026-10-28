@@ -885,3 +885,37 @@ func TestTreeSitterCSSReselectionDeduped(t *testing.T) {
 		t.Errorf("custom property must survive, got %v", syms)
 	}
 }
+
+// TestTreeSitterDartMethodsNotDuplicated pins the Dart double-extraction fix:
+// Dart nests function_signature inside method_signature, and both node kinds
+// map to a symbol, so every method was minted twice (1,875 symbols for 12
+// files in the 2026-10-28 audit).
+func TestTreeSitterDartMethodsNotDuplicated(t *testing.T) {
+	src := `class Greeter {
+  void greet() { print('hi'); }
+  String get label => 'x';
+  set label(String v) {}
+}
+
+void standalone() {}
+`
+	syms, _, _, _, err := tsExtract("lib/a.dart", []byte(src), "dart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type key struct {
+		kind, name string
+		line       int
+	}
+	seen := map[key]bool{}
+	for _, s := range syms {
+		k := key{s.Kind, s.Name, s.Line}
+		if seen[k] {
+			t.Errorf("duplicate Dart symbol %+v", k)
+		}
+		seen[k] = true
+	}
+	if err := checkFileSymbolConflicts("lib/a.dart", syms); err != nil {
+		t.Fatalf("Dart symbols must pass the duplicate gate: %v", err)
+	}
+}

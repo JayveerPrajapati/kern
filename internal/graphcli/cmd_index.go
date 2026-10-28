@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/clietag"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/grepscope"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
@@ -113,6 +114,7 @@ func runPrecache(rest []string) {
 // when the index is stale and did not converge after a rebuild (fail-closed);
 // the JSON is still printed so callers can inspect the proof.
 func runEnsureFresh(jsonOut bool, root string) {
+	requireIndexRoot(root)
 	res, err := index.EnsureFresh(root)
 	if err != nil {
 		fatal("Index: %v", err)
@@ -123,15 +125,7 @@ func runEnsureFresh(jsonOut bool, root string) {
 		fmt.Printf("index: %s (%d symbols, %d files, %d packages, version %d)\n",
 			res.Freshness, res.Symbols, res.Files, res.Packages, res.Version)
 		if res.CallResolution.Total > 0 {
-			cr := res.CallResolution
-			pct := 100 * cr.Unresolved / cr.Total
-			if cr.External+cr.InRepo == cr.Unresolved {
-				fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved: %d external stdlib/vendor, %d in-repo/untyped)\n",
-					cr.Total-cr.Unresolved, cr.Total, pct, cr.External, cr.InRepo)
-			} else {
-				fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved)\n",
-					cr.Total-cr.Unresolved, cr.Total, pct)
-			}
+			fmt.Printf("  %s\n", callResolutionLine(res.CallResolution))
 		}
 	}
 	if res.Freshness == "stale" {
@@ -174,6 +168,24 @@ func indexStoreDisplay(root string) string {
 // symbol count. Shared by `kern index where` and the doctor's index checks.
 func indexWhere(root string) indexWhereResult {
 	res := indexWhereResult{Root: root, Store: indexStoreDisplay(root), Freshness: "not-built"}
+	// Metadata-only answer (audit P2-1): counts + identity + file hashes are
+	// enough; materializing every symbol and call edge just to print three
+	// integers was ~1.2 s.
+	if index.SQLiteEnabled() {
+		if m, err := index.LoadMetadata(root); err == nil && m != nil && m.Index.Version > 0 {
+			res.Built = true
+			res.Symbols = m.Symbols
+			res.Files = m.Files
+			res.Packages = m.Packages
+			if indexIsFresh(root, m.Index) {
+				res.Freshness = "fresh"
+			} else {
+				res.Freshness = "stale"
+			}
+			res.Parent = doctor.ParentIndexDir(root)
+			return res
+		}
+	}
 	if ix, err := index.Load(root); err == nil && ix != nil {
 		res.Built = true
 		res.Symbols = len(ix.Symbols)
@@ -194,6 +206,7 @@ func indexWhere(root string) indexWhereResult {
 // symbol count — plus a warning when a parent directory also holds an index
 // (nested .kern shadowing a parent index, F5c). Read-only, never builds.
 func runIndexWhere(jsonOut bool, root string) {
+	requireIndexRoot(root)
 	res := indexWhere(root)
 	if jsonOut {
 		printJSON(res)
@@ -208,6 +221,21 @@ func runIndexWhere(jsonOut bool, root string) {
 	}
 	if res.Parent != "" {
 		fmt.Printf("  warning: nested index shadows a parent index at %s/.kern — pass the parent root to serve the full index\n", res.Parent)
+	}
+}
+
+// requireIndexRoot rejects a root that is missing or not a directory BEFORE
+// any build/lock work starts. Without it `kern index /nonexistent` burned the
+// full 60s BuildLockWait budget (the unwritable .kern was misreported as
+// contention) and then reported a fabricated "another process is rebuilding"
+// message (2026-10-26 audit).
+func requireIndexRoot(root string) {
+	info, err := os.Stat(root)
+	if err != nil {
+		fatal("index: root %q: %v", root, err)
+	}
+	if !info.IsDir() {
+		fatal("index: root %q is not a directory", root)
 	}
 }
 
@@ -261,6 +289,7 @@ func runIndex(rest []string) {
 	if f.root == "" && len(args) > 0 {
 		root = args[0]
 	}
+	requireIndexRoot(root)
 	// `kern index --status [--json]` is read-only: it reports the cached
 	// index's health without rebuilding anything, so CI and agents can gate
 	// on freshness cheaply.
@@ -280,15 +309,7 @@ func runIndex(rest []string) {
 			fmt.Printf("  stale: %v\n", status.Stale)
 			fmt.Printf("  store: %s\n", status.Store)
 			if status.CallResolution.Total > 0 {
-				cr := status.CallResolution
-				pct := 100 * cr.Unresolved / cr.Total
-				if cr.External+cr.InRepo == cr.Unresolved {
-					fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved: %d external stdlib/vendor, %d in-repo/untyped)\n",
-						cr.Total-cr.Unresolved, cr.Total, pct, cr.External, cr.InRepo)
-				} else {
-					fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved)\n",
-						cr.Total-cr.Unresolved, cr.Total, pct)
-				}
+				fmt.Printf("  %s\n", callResolutionLine(status.CallResolution))
 			}
 			if status.Build.Kind != "" {
 				fmt.Printf("  build: %s in %d ms (%d workers, %d file results reused)\n",
@@ -299,6 +320,11 @@ func runIndex(rest []string) {
 		}
 		return
 	}
+	// Retention migration (audit P2-3): once this command writes the SQLite
+	// store, drop the frozen legacy JSON cache. Deferred so it runs only on
+	// the update/build paths below — `--status` stays strictly read-only.
+	defer index.PruneLegacyJSON(root)
+
 	// `kern index --update [root]` incrementally refreshes the persisted
 	// index: load the cached index, and when it is stale run index.Update
 	// (re-parses ONLY changed/new files; symbols and edges of unchanged files
@@ -815,6 +841,25 @@ func runSearch(rest []string) {
 	if limit <= 0 {
 		limit = 20
 	}
+	// --path scopes the ranked results to one repo-relative file/directory
+	// (the plugin's served scoped-grep path). The filter applies after
+	// ranking, so the candidate pool is widened to avoid returning fewer
+	// than --limit hits ranked below the unscoped top-N.
+	scope := ""
+	if f.path != "" {
+		if f.repos {
+			fatalUsage("search: --path cannot be combined with --repos")
+		}
+		s, ok := grepscope.CleanScope(f.path)
+		if !ok {
+			fatalUsage("search: --path must be a repo-relative file or directory (no globs, ~, absolute or .. paths)")
+		}
+		scope = s
+	}
+	searchLimit := limit
+	if scope != "" && searchLimit < 500 {
+		searchLimit = 500
+	}
 	if f.repos {
 		var hits []intel.RepoHit
 		if f.semantic {
@@ -873,13 +918,14 @@ func runSearch(rest []string) {
 		if _, err := client.EmbedText("probe"); err != nil {
 			fmt.Fprintf(os.Stderr, "kern: --semantic: embedding server unreachable — using ranked search; enable: start ollama with model %s (run: ollama pull %s)\n", llm.EmbedModel(), llm.EmbedModel())
 			f.semantic = false
-			matches = intel.RankedSearch(ix, query, limit)
+			matches = intel.RankedSearch(ix, query, searchLimit)
 		} else {
-			matches = intel.SemanticSearch(ix, query, limit, client)
+			matches = intel.SemanticSearch(ix, query, searchLimit, client)
 		}
 	} else {
-		matches = intel.RankedSearch(ix, query, limit)
+		matches = intel.RankedSearch(ix, query, searchLimit)
 	}
+	matches = scopeMatches(matches, scope, limit)
 	if f.json {
 		if matches == nil {
 			matches = []index.Symbol{}
@@ -895,10 +941,16 @@ func runSearch(rest []string) {
 				Score      int  `json:"score"`
 				MatchedAll bool `json:"matched_all"`
 			}
-			hits := intel.RankedSearchScored(ix, query, limit)
+			hits := intel.RankedSearchScored(ix, query, searchLimit)
 			scored := make([]scoredSymbol, 0, len(hits))
 			for _, h := range hits {
+				if !grepscope.Matches(h.Symbol.File, scope) {
+					continue
+				}
 				scored = append(scored, scoredSymbol{Symbol: h.Symbol, Score: h.Score, MatchedAll: h.MatchedAll})
+				if len(scored) >= limit {
+					break
+				}
 			}
 			printJSON(map[string]any{
 				"version": version,
@@ -979,4 +1031,48 @@ func runFts(rest []string) {
 		fmt.Printf("%s %s %s:%d\n", m.Kind, m.FullName(), m.File, m.Line)
 	}
 
+}
+
+// callResolutionLine renders the honest resolution metric: the denominator is
+// statically resolvable targets (resolved + genuine in-repo misses). Dynamic
+// variable/interface/chained receivers and external stdlib/vendor callees are
+// reported separately so they never look like resolution failures.
+func callResolutionLine(cr index.CallResStats) string {
+	staticTotal := cr.Total - cr.External - cr.Dynamic
+	if staticTotal < 0 {
+		staticTotal = 0
+	}
+	if staticTotal == 0 {
+		return fmt.Sprintf("call resolution: no statically resolvable targets (%d dynamic/untyped, %d external skipped)",
+			cr.Dynamic, cr.External)
+	}
+	resolved := staticTotal - cr.InRepo
+	if resolved < 0 {
+		resolved = 0
+	}
+	pct := 100 * resolved / staticTotal
+	return fmt.Sprintf("call resolution: %d/%d statically resolvable targets resolved (%d%%; %d dynamic/untyped, %d external skipped, %d in-repo misses)",
+		resolved, staticTotal, pct, cr.Dynamic, cr.External, cr.InRepo)
+}
+
+// scopeMatches filters ranked symbols to a --path scope (empty = unscoped)
+// and caps the result at limit. The candidate pool was widened by the caller
+// because a scoped search can rank matches below the unscoped top-N.
+func scopeMatches(in []index.Symbol, scope string, limit int) []index.Symbol {
+	if scope == "" {
+		if len(in) > limit {
+			return in[:limit]
+		}
+		return in
+	}
+	out := make([]index.Symbol, 0, len(in))
+	for _, s := range in {
+		if grepscope.Matches(s.File, scope) {
+			out = append(out, s)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }

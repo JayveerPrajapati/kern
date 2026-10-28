@@ -128,7 +128,7 @@ func runContextCLI(rest []string) {
 	// one this slice came from so a wrong-package resolve is spotted
 	// immediately instead of silently reading the wrong package.
 	if def, ok := ix.ResolveName(symbol); ok {
-		ctxText = fmt.Sprintf("# resolved %s -> %s:%d\n%s", symbol, def.File, def.Line, ctxText)
+		ctxText = fmt.Sprintf("# resolved %s -> %s:%d\n%s", symbol, cliout.DisplayPath(def.File), def.Line, ctxText)
 	}
 	if f.terseCode {
 		path := symbol + ".go"

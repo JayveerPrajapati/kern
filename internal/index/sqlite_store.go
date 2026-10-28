@@ -4,17 +4,19 @@ package index
 
 import (
 	"database/sql"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/JayveerPrajapati/kern/internal/indexdb"
 )
 
 // sqliteEnabled reports whether the SQLite store is compiled in.
@@ -30,10 +32,11 @@ func SQLiteEnabled() bool { return sqliteEnabled() }
 // WAL journal mode. It mirrors the JSON cache but adds true multi-process
 // read/write concurrency and an FTS5 full-text index over symbols.
 type SQLiteStore struct {
-	db     *sql.DB
-	root   string
-	path   string
-	closed bool // set by Close; makes the WAL valve a no-op afterwards
+	db       *sql.DB
+	root     string
+	path     string
+	closed   bool // set by Close; makes the WAL valve a no-op afterwards
+	vacuumed bool // one bounded VACUUM per open store
 }
 
 // sqliteDBPath returns the on-disk location for the SQLite store of root.
@@ -58,28 +61,25 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	if err == nil {
 		return s, nil
 	}
-	// Self-heal (QA Pick #14, F-IX1): a corrupt store file previously broke
-	// `kern index` permanently — `--update` AND a full rebuild both exited 1
-	// with the raw driver error ("file is not a database (26)") and the
-	// corrupt file was never recreated. The index is a derived artifact
-	// (rebuildable from source), so on a corruption-class open failure the
-	// store files are quarantined (renamed, not deleted, so the corruption is
-	// inspectable) and the open is retried exactly once on a fresh file.
-	if isCorruptSQLiteErr(err) {
+	// Self-heal: the index is derived, so a corruption-class open failure
+	// quarantines the store (rename, never delete — inspectable) and retries
+	// once on a fresh file instead of failing every future index command.
+	if indexdb.IsCorrupt(err) {
 		p := sqliteDBPath(root)
 		quarantine := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
 		if rerr := os.Rename(p, quarantine); rerr == nil {
-			// Tell the user WHY the store vanished and where the corrupt
-			// original went: the load path that follows reports "no index
-			// found — building" (LoadOrBuild), and the quarantine used to be
-			// silent — a corrupt store looked like a fresh repo. Same
-			// announce gate as the build announcement (real CLI binaries
-			// only; tests force it via buildAnnounceOverride).
-			if announceBuild || buildAnnounceOverride {
-				fmt.Fprintf(os.Stderr, "[kern] corrupt index store quarantined to %s — rebuilding from source\n", quarantine)
-			}
-			// Sidecars of the corrupt store are worthless without their main
-			// db; remove them so the fresh store does not adopt stale frames.
+			// Say WHY the store vanished (the quarantine used to be silent,
+			// looking like a fresh repo); corruption is rare and always
+			// actionable, so unlike routine build announcements this is NOT
+			// gated — an operator must never miss it.
+			fmt.Fprintf(os.Stderr, "[kern] corrupt index store quarantined to %s — rebuilding from source\n", quarantine)
+			// Bound the quarantine's accumulation: each file is a full
+			// multi-megabyte copy of the index, and a flapping corruption
+			// could otherwise fill .kern/ with stale copies. Keep recent
+			// ones (inspectable, per the never-delete-at-quarantine rule);
+			// remove ones older than a week when a NEW quarantine succeeds.
+			gcQuarantinedStores(p, quarantine, 7*24*time.Hour)
+			// Drop sidecars so the fresh store adopts no stale frames.
 			_ = os.Remove(p + "-wal")
 			_ = os.Remove(p + "-shm")
 			if s2, err2 := openSQLite(root); err2 == nil {
@@ -90,61 +90,32 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	return nil, err
 }
 
-// isCorruptSQLiteErr reports whether err is a corruption-class SQLite error
-// (NOTADB / malformed database / malformed WAL), the failures that mean the
-// file itself is garbage rather than merely locked or missing.
-func isCorruptSQLiteErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "file is not a database") ||
-		strings.Contains(msg, "notadb") ||
-		strings.Contains(msg, "malformed")
-}
-
-func openSQLite(root string) (*SQLiteStore, error) {
-	p := sqliteDBPath(root)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return nil, err
-	}
-	ensureGitExclude(root)
-	// Every pragma is formatted INTO the DSN (_pragma=...) so it is applied
-	// by the driver at connection open — on EVERY pooled connection. A
-	// pragma set via db.Exec on a pooled *sql.DB would apply only to the
-	// one connection that executed it, leaving the rest of the read pool
-	// without busy_timeout / WAL (SQLITE_BUSY under concurrency). The DSN
-	// apply site is robust against connection re-creation and cannot be
-	// skipped by a reordered pragma list (oracle-gate hardening).
-	// busy_timeout comes first so a connection that opens while another
-	// holds a lock waits instead of failing.
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=wal_autocheckpoint(0)&_pragma=cache_size(%d)", p, sqliteCacheSize)
-	db, err := sql.Open("sqlite", dsn)
+// gcQuarantinedStores removes quarantined index-store copies older than ttl,
+// keeping the just-created one (and anything newer, still within its
+// inspection window). Removal failures are ignored — GC is best-effort and
+// must never block the rebuild.
+func gcQuarantinedStores(dbPath, justCreated string, ttl time.Duration) {
+	dir := filepath.Dir(dbPath)
+	base := filepath.Base(dbPath)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return
 	}
-	// WAL for concurrent access; busy_timeout so writers wait instead of
-	// failing when another process holds the write lock momentarily.
-	//
-	// wal_autocheckpoint=0 defers SQLite's default autocheckpoint (1000
-	// pages) so WAL growth is managed by the valve below. Bulk builds write
-	// inside a single transaction and are checkpointed by the valve at the
-	// transaction boundary; the valve targets the incremental
-	// watch-daemon/MCP write pattern, where the coarse 1000-page default
-	// would otherwise checkpoint on every commit of a long-lived process.
-	//
-	// Small read pool: reads parallelize across up to 4 connections while
-	// SQLite's single-writer still serializes Save (one tx). Under WAL,
-	// readers and the writer never block each other; writer-vs-writer
-	// contention is resolved by the DSN busy_timeout.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
-	s := &SQLiteStore{db: db, root: root, path: p}
-	if err := s.applySchema(); err != nil {
-		_ = db.Close()
-		return nil, err
+	cutoff := time.Now().Add(-ttl)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, base+".corrupt-") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if full == justCreated {
+			continue
+		}
+		if fi, ferr := e.Info(); ferr != nil || fi.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(full)
 	}
-	return s, nil
 }
 
 // Close closes the underlying database.
@@ -156,7 +127,52 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-// Path returns the database file location.
+func openSQLite(root string) (*SQLiteStore, error) {
+	p := sqliteDBPath(root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, err
+	}
+	ensureGitExclude(root)
+	db, err := indexdb.OpenReadWrite(p, indexdb.CacheKiB(p, -indexdb.DefaultCacheSize))
+	if err != nil {
+		return nil, err
+	}
+	s := &SQLiteStore{db: db, root: root, path: p}
+	if err := indexdb.ApplySchema(s.db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// openSQLiteReadOnly opens an EXISTING store without creating directories,
+// running DDL/migrations, creating WAL files, or writing .git/info/exclude.
+// Every read path uses it so a read-only checkout or mount works.
+func openSQLiteReadOnly(root string) (*SQLiteStore, error) {
+	p := sqliteDBPath(root)
+	if _, err := os.Stat(p); err != nil {
+		return nil, err
+	}
+	db, err := indexdb.OpenReadOnlyPreferred(p, indexdb.CacheKiB(p, -indexdb.DefaultCacheSize), indexdb.ReadOnlyEnv())
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteStore{db: db, root: root, path: p}, nil
+}
+
+// openSQLiteForRead prefers the read-only open and falls back to the
+// read-write open only when the caller has not demanded read-only access.
+func openSQLiteForRead(root string) (*SQLiteStore, error) {
+	s, err := openSQLiteReadOnly(root)
+	if err == nil {
+		return s, nil
+	}
+	if indexdb.ReadOnlyEnv() {
+		return nil, err
+	}
+	return openSQLite(root)
+}
+
 func (s *SQLiteStore) Path() string { return s.path }
 
 func (s *SQLiteStore) SetMeta(key, value string) error {
@@ -166,293 +182,27 @@ func (s *SQLiteStore) SetMeta(key, value string) error {
 	return err
 }
 
-func (s *SQLiteStore) applySchema() error {
-	_, err := s.db.Exec(`
-CREATE TABLE IF NOT EXISTS meta (
-	key   TEXT PRIMARY KEY,
-	value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS symbols (
-	rowid    INTEGER PRIMARY KEY,
-	kind     TEXT NOT NULL,
-	name     TEXT NOT NULL,
-	receiver TEXT NOT NULL DEFAULT '',
-	file     TEXT NOT NULL,
-	line     INTEGER NOT NULL,
-	"end"    INTEGER NOT NULL DEFAULT 0,
-	lang     TEXT NOT NULL DEFAULT '',
-	entry    INTEGER NOT NULL DEFAULT 0,
-	framework TEXT NOT NULL DEFAULT '',
-	route    TEXT NOT NULL DEFAULT '',
-	params   TEXT NOT NULL DEFAULT '',
-	returns  TEXT NOT NULL DEFAULT '[]',
-	confidence TEXT NOT NULL DEFAULT '',
-	outer_name TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
-CREATE TABLE IF NOT EXISTS calls (
-	caller     TEXT NOT NULL,
-	callee     TEXT NOT NULL,
-	kind       TEXT NOT NULL DEFAULT '',
-	confidence TEXT NOT NULL DEFAULT '',
-	synth      TEXT NOT NULL DEFAULT '',
-	source_file TEXT NOT NULL DEFAULT '',
-	dynamic INTEGER NOT NULL DEFAULT 0,
-	from_id TEXT NOT NULL DEFAULT '',
-	to_id TEXT NOT NULL DEFAULT '',
-	binding TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
-CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller);
-CREATE TABLE IF NOT EXISTS callers (
-	callee TEXT NOT NULL,
-	caller TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_callers_callee ON callers(callee);
-CREATE TABLE IF NOT EXISTS communities (
-	symbol    TEXT PRIMARY KEY,
-	community TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_communities_label ON communities(community);
-CREATE TABLE IF NOT EXISTS inherits (
-	subtype  TEXT NOT NULL,
-	base     TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_inherits_base ON inherits(base);
-CREATE TABLE IF NOT EXISTS packages (
-	path    TEXT PRIMARY KEY,
-	name    TEXT NOT NULL DEFAULT '',
-	lang    TEXT NOT NULL DEFAULT '',
-	imports TEXT NOT NULL DEFAULT '[]',
-	files   TEXT NOT NULL DEFAULT '[]',
-	struct_fields TEXT NOT NULL DEFAULT '{}',
-constructors TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS file_imports (
-	file    TEXT PRIMARY KEY,
-	imports TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS file_exports (
-	file    TEXT PRIMARY KEY,
-	exports TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS files (
-	path      TEXT PRIMARY KEY,
-	hash      TEXT NOT NULL DEFAULT '',
-	generated INTEGER NOT NULL DEFAULT 0
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
-	kind, name, receiver, file, params, tokenize='unicode61'
-);
-`)
-	if err != nil {
-		return err
+// WAL valve: autocheckpoint is off at open, so this checkpoints only once the
+// WAL crosses walTrigger (PASSIVE never blocks readers/writers). Bulk builds
+// checkpoint at their transaction boundary; the valve targets long-lived
+// incremental writers.
+
+// maybeVacuum reclaims free pages after a commit, only when waste is large
+// and the store big enough to justify the rewrite.
+func (s *SQLiteStore) maybeVacuum() {
+	if s == nil || s.db == nil || s.closed || s.vacuumed {
+		return
 	}
-	// v8 migration: the calls table gained a kind column and the communities
-	// table was added. Fresh databases get both from the schema above; stores
-	// written by v7 need the column added (legal with a constant default).
-	if !storeHasColumn(s.db, "calls", "kind") {
-		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
+	if indexdb.MaybeVacuum(s.db, s.path) {
+		s.vacuumed = true
 	}
-	// v13 migration: call edges carry a confidence score. Older stores lack
-	// the column; rows then default to MEDIUM on load (parseConfidence).
-	if !storeHasColumn(s.db, "calls", "confidence") {
-		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	// v14 migration: call edges carry a synthesized-dispatch marker (Synth,
-	// "router:net-http" etc). The JSON cache has persisted it since the
-	// synthesizer feature; SQLite-primary stores written before the column
-	// existed default to '' — a syntactic edge — exactly the pre-column
-	// behavior, matching the struct_fields/constructors precedent.
-	if !storeHasColumn(s.db, "calls", "synth") {
-		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN synth TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !storeHasColumn(s.db, "calls", "source_file") {
-		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !storeHasColumn(s.db, "calls", "dynamic") {
-		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN dynamic INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
-	}
-	for _, migration := range []struct{ column, ddl string }{
-		{"from_id", "ALTER TABLE calls ADD COLUMN from_id TEXT NOT NULL DEFAULT ''"},
-		{"to_id", "ALTER TABLE calls ADD COLUMN to_id TEXT NOT NULL DEFAULT ''"},
-		{"binding", "ALTER TABLE calls ADD COLUMN binding TEXT NOT NULL DEFAULT ''"},
-	} {
-		if !storeHasColumn(s.db, "calls", migration.column) {
-			if _, err := s.db.Exec(migration.ddl); err != nil {
-				return err
-			}
-		}
-	}
-	// v14 migration: symbols carry their declared return types and parser
-	// confidence (the JSON cache has always persisted both). Older stores
-	// default to '[]' / '' — the pre-column behavior — which degrades
-	// update-reconstruction and confidence reporting until the next rebuild.
-	if !storeHasColumn(s.db, "symbols", "returns") {
-		if _, err := s.db.Exec("ALTER TABLE symbols ADD COLUMN returns TEXT NOT NULL DEFAULT '[]'"); err != nil {
-			return err
-		}
-	}
-	if !storeHasColumn(s.db, "symbols", "confidence") {
-		if _, err := s.db.Exec("ALTER TABLE symbols ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !storeHasColumn(s.db, "symbols", "outer_name") {
-		if _, err := s.db.Exec("ALTER TABLE symbols ADD COLUMN outer_name TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	// v13 migration: packages carry StructFields, needed so a load-time
-	// computeCallers reproduces the build-time rewriteConstructorCallees
-	// results (receiver-field call chains). Older stores lack the column;
-	// rows then default to no struct fields, exactly the pre-column behavior.
-	if !storeHasColumn(s.db, "packages", "struct_fields") {
-		if _, err := s.db.Exec("ALTER TABLE packages ADD COLUMN struct_fields TEXT NOT NULL DEFAULT '{}'"); err != nil {
-			return err
-		}
-	}
-	// v13 migration: packages carry Constructors, needed so a load-time
-	// computeCallers reproduces the build-time rewriteConstructorCallees
-	// results (cross-package constructor-assigned receiver chains). Older
-	// stores lack the column; rows then default to no constructors, exactly
-	// the pre-column behavior.
-	if !storeHasColumn(s.db, "packages", "constructors") {
-		if _, err := s.db.Exec("ALTER TABLE packages ADD COLUMN constructors TEXT NOT NULL DEFAULT '{}'"); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
-// storeHasColumn reports whether table has a column named col (PRAGMA
-// table_info is the portable way to inspect SQLite's live schema).
-func storeHasColumn(db *sql.DB, table, col string) bool {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, typ string
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			return false
-		}
-		if name == col {
-			return true
-		}
-	}
-	return false
-}
-
-// WAL valve: bounds the write-ahead log for the incremental
-// watch-daemon/MCP write pattern (many small writes over a long-lived
-// process). wal_autocheckpoint is disabled at open, so SQLite's default
-// 1000-page autocheckpoint never fires on its own; the valve below
-// checkpoints only once the WAL crosses walTrigger, and PASSIVE never
-// blocks readers or writers. Bulk builds wrap the whole index in one
-// transaction and are checkpointed by the valve at that transaction
-// boundary; the valve targets the incremental pattern, where the coarse
-// default would otherwise checkpoint on every commit.
-// sqliteCacheSize is the SQLite page-cache budget in KiB (negative values are
-// KiB, positive are pages): 64 MiB. It is the single authoritative cache_size:
-// it is formatted INTO the DSN (_pragma=cache_size(...)) and applied by the
-// driver at connection open, so the OpenSQLite Exec pragma list carries no
-// cache_size and there is exactly one value and one apply site (a DSN pragma
-// plus an Exec pragma with different values used to fight each other).
-const sqliteCacheSize = -64000
-
-const (
-	// walSoftCap is the target ceiling for the WAL: 8 MiB. That is far
-	// below the 100 MiB sandbox snapshot cap and the JSON index scale, so
-	// the WAL stays a small fraction of the store.
-	walSoftCap = 8 << 20 // 8 MiB
-	// walTrigger is the size at which maybeCheckpoint fires a passive
-	// checkpoint: 2 x walSoftCap. Crossing it is rare (only after a burst
-	// of incremental writes), which is what keeps the per-write check cheap.
-	walTrigger = 2 * walSoftCap // 16 MiB
-)
-
-// walLiveFrames returns the number of uncheckpointed WAL frames by reading
-// the WAL-index header in the -shm file (mxFrame at offset 16 minus
-// nBackfill at offset 96; layout per https://www.sqlite.org/walformat.html,
-// frozen since SQLite 3.7.0). modernc.org/sqlite does not expose
-// PRAGMA wal_pages/wal_size, so this is the only side-effect-free live-WAL
-// probe the store has. It returns a negative value when the file is missing
-// or unreadable, which callers treat as "checkpoint to be safe".
-func walLiveFrames(storePath string) int64 {
-	f, err := os.Open(storePath + "-shm")
-	if err != nil {
-		return -1
-	}
-	defer func() { _ = f.Close() }()
-	var hdr [100]byte
-	if _, err := f.ReadAt(hdr[:], 0); err != nil {
-		return -1
-	}
-	mx := int64(binary.LittleEndian.Uint32(hdr[16:20]))
-	nb := int64(binary.LittleEndian.Uint32(hdr[96:100]))
-	if mx < nb {
-		return -1 // torn read (concurrent checkpoint): treat as unreadable
-	}
-	return mx - nb
-}
-
-// maybeCheckpoint runs a passive WAL checkpoint once the write-ahead log
-// exceeds walTrigger (2 x walSoftCap). It is called at the end of every
-// mutating operation, after the write commits.
-//
-// PASSIVE checkpoints as much as it can without blocking readers or
-// writers; when another connection (e.g. a separate watch-daemon or MCP
-// process) holds a read lock it returns busy and defers the flush to the
-// next write — that is the backpressure mechanism, and the threshold
-// guarantees the check itself is rare. A nil or already-closed store is a
-// no-op.
 func (s *SQLiteStore) maybeCheckpoint() error {
-	if s == nil || s.db == nil || s.closed {
+	if s == nil {
 		return nil
 	}
-	// Cheap disk gate: the live WAL can exceed walTrigger only once the WAL
-	// file's high-water size reaches it (SQLite never truncates the -wal
-	// file while the store is open), so a small file proves the WAL is
-	// small too — no shm read, no DB round trip on the common path.
-	st, err := os.Stat(s.path + "-wal")
-	if err != nil {
-		return nil // no WAL file yet (fresh store)
-	}
-	if st.Size() < walTrigger {
-		return nil
-	}
-	// The file is big, but it may be a high-water mark with a small live
-	// WAL (all frames already backfilled). Measure before checkpointing so
-	// the flush stays rare.
-	if frames := walLiveFrames(s.path); frames >= 0 {
-		var pageSize int64
-		if err := s.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
-			return err
-		}
-		if frames*pageSize <= walTrigger {
-			return nil
-		}
-	}
-	// Live WAL crossed the trigger (or could not be measured — fail safe
-	// toward a bounded WAL). PASSIVE never blocks; a busy result means
-	// another connection holds the WAL and the next write re-checks.
-	_, err = s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
-	return err
+	return indexdb.Checkpoint(s.db, s.path, s.closed)
 }
 
 // Save persists the index to SQLite in one transaction. It is safe to call
@@ -464,34 +214,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// meta: root, version, updated_at, max_mtime, identity
-	meta := map[string]string{
-		"root":           ix.Root,
-		"version":        fmt.Sprintf("%d", ix.Version),
-		"updated_at":     ix.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"max_mtime":      fmt.Sprintf("%d", ix.MaxMtime),
-		"index_kind":     "symbols",
-		"go_types":       fmt.Sprintf("%t", ix.GoTypes),
-		"java_compiler":  fmt.Sprintf("%t", ix.JavaCompiler),
-		"java_classpath": ix.JavaClasspath,
-		// Reconciliation counters (CG-P0-5): persisted so a SQLite-loaded
-		// index reports the same promoteLowEdges outcome as the build that
-		// produced it (kern_health surfaces these).
-		"promoted_low_edges":   fmt.Sprintf("%d", ix.PromotedLowEdges),
-		"unresolved_low_edges": fmt.Sprintf("%d", ix.UnresolvedLowEdges),
-	}
-	// Persist the content-addressed identity (best-effort) so SQLite-loaded
-	// indexes get the same freshness proof as JSON-loaded ones.
-	if ix.Identity != nil {
-		if idData, err := json.Marshal(ix.Identity); err == nil {
-			meta["identity"] = string(idData)
-		}
-	}
-	// Build stats (kind/duration/workers/reused) for `kern index --status`,
-	// mirroring the JSON store's build_stats field.
-	if bs, err := json.Marshal(ix.BuildStats); err == nil {
-		meta["build_stats"] = string(bs)
-	}
+	meta := sqliteMeta(ix)
 	for k, v := range meta {
 		if _, err := tx.Exec(
 			"INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -535,9 +258,6 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM calls"); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM callers"); err != nil {
-		return err
-	}
 	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind,confidence,synth,source_file,dynamic,from_id,to_id,binding) VALUES(?,?,?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return err
@@ -546,18 +266,6 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
 			if _, err := stmtCalls.Exec(caller, ce.Target, "call", string(ce.Confidence), ce.Synth, ce.SourceFile, ce.Dynamic, ce.FromID, ce.ToID, ce.Binding); err != nil {
-				return err
-			}
-		}
-	}
-	stmtCallers, err := tx.Prepare("INSERT INTO callers(callee,caller) VALUES(?,?)")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmtCallers.Close() }()
-	for callee, callers := range ix.Callers {
-		for _, c := range callers {
-			if _, err := stmtCallers.Exec(callee, c); err != nil {
 				return err
 			}
 		}
@@ -692,6 +400,10 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	// Bounded vacuum policy: the DELETE+INSERT write cycle leaves free pages
+	// behind (measured 32% of the file). Reclaim only when the waste is large,
+	// and never on a small store where VACUUM's rewrite is pure overhead.
+	s.maybeVacuum()
 	// WAL valve: the write committed; checkpoint once the WAL has crossed
 	// walTrigger. This is the single post-write valve point — Save is the
 	// store's only mutating operation, so nothing is missed and the check
@@ -721,7 +433,17 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='root'").Scan(&root)
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='updated_at'").Scan(&updated)
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='max_mtime'").Scan(&maxMtime)
-	ix.Root = root
+	// The persisted root can go stale when the whole tree (including .kern)
+	// is copied or moved to a new path: the meta row still names the ORIGINAL
+	// absolute path while the content itself is root-relative. The store was
+	// opened at s.root — that is the authoritative location — so mirror the
+	// JSON loader's reRootIndex and serve the label the load root, never the
+	// stale one (2026-10-28 campaign, copied-.kern probe).
+	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != filepath.Clean(s.root) {
+		ix.Root = s.root
+	} else {
+		ix.Root = root
+	}
 	var goTypes string
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='go_types'").Scan(&goTypes)
 	ix.GoTypes = goTypes == "true"
@@ -1085,6 +807,134 @@ ORDER BY rank LIMIT ?`, q, limit)
 	return out, rows.Err()
 }
 
+// SQLiteSnapshotValid reports whether a derived snapshot still describes the store.
+func SQLiteSnapshotValid(root, token string, snapshotUpdated time.Time) bool {
+	if token == "" {
+		return false
+	}
+	s, err := openSQLiteForRead(root)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = s.Close() }()
+	return indexdb.SnapshotValid(s.db, token, snapshotUpdated)
+}
+
+// SQLiteCounts returns the persisted symbol/file/package counts with one
+// metadata query instead of materializing the whole index. It is the fast path
+// for `kern index where` / `kern index --status` (audit P2-1).
+func SQLiteCounts(root string) (symbols, files, packages int, err error) {
+	s, err := openSQLiteForRead(root)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer func() { _ = s.Close() }()
+	return indexdb.Counts(s.db)
+}
+
+// LoadMetadata reads the store's meta table, file hashes, and counts without
+// materializing symbols/calls. It is the fast path for `kern index where` and
+// `kern index --status` (audit P2-1): the returned Index carries Identity,
+// FileHashes and the small derived maps, so FreshnessProof and status fields
+// work unchanged.
+func LoadMetadata(root string) (*Metadata, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	s, err := openSQLiteForRead(abs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = s.Close() }()
+
+	meta := map[string]string{}
+	rows, err := s.db.Query("SELECT key, value FROM meta")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		meta[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	ix := &Index{
+		Root:            abs,
+		FileHashes:      map[string]string{},
+		GeneratedFiles:  map[string]bool{},
+		PrecisionByLang: map[string]string{},
+		Calls:           map[string][]CallEdge{},
+		Callers:         map[string][]string{},
+		Pkgs:            map[string]*Pkg{},
+	}
+	if v, err := strconv.Atoi(meta["version"]); err == nil {
+		ix.Version = v
+	}
+	if t, err := time.Parse(time.RFC3339Nano, meta["updated_at"]); err == nil {
+		ix.UpdatedAt = t
+	}
+	if v, err := strconv.ParseInt(meta["max_mtime"], 10, 64); err == nil {
+		ix.MaxMtime = v
+	}
+	if v := meta["identity"]; v != "" {
+		var id IndexIdentity
+		if err := json.Unmarshal([]byte(v), &id); err == nil {
+			ix.Identity = &id
+		}
+	}
+	if v := meta["precision_by_lang"]; v != "" {
+		_ = json.Unmarshal([]byte(v), &ix.PrecisionByLang)
+	}
+	if v := meta["call_resolution"]; v != "" {
+		_ = json.Unmarshal([]byte(v), &ix.CallResolution)
+	}
+	if v := meta["build_stats"]; v != "" {
+		_ = json.Unmarshal([]byte(v), &ix.BuildStats)
+	}
+	ix.GoTypes = meta["go_types"] == "true"
+	ix.JavaCompiler = meta["java_compiler"] == "true"
+	ix.JavaClasspath = meta["java_classpath"]
+
+	frows, err := s.db.Query("SELECT path, hash, generated FROM files")
+	if err != nil {
+		return nil, err
+	}
+	for frows.Next() {
+		var path, hash string
+		var generated int
+		if err := frows.Scan(&path, &hash, &generated); err != nil {
+			_ = frows.Close()
+			return nil, err
+		}
+		ix.FileHashes[path] = hash
+		if generated != 0 {
+			ix.GeneratedFiles[path] = true
+		}
+	}
+	if err := frows.Err(); err != nil {
+		_ = frows.Close()
+		return nil, err
+	}
+	_ = frows.Close()
+
+	m := &Metadata{Index: ix}
+	if err := s.db.QueryRow("SELECT (SELECT count(*) FROM symbols), (SELECT count(*) FROM files), (SELECT count(*) FROM packages)").Scan(&m.Symbols, &m.Files, &m.Packages); err != nil {
+		return nil, err
+	}
+	ix.initMaps()
+	ix.loadPersistedFreshness()
+	return m, nil
+}
+
 // SaveSQLite opens the store for root and persists ix.
 func SaveSQLite(root string, ix *Index) error {
 	s, err := OpenSQLite(root)
@@ -1096,9 +946,16 @@ func SaveSQLite(root string, ix *Index) error {
 }
 
 // LoadSQLite opens the store for root and reads the index back. Returns
-// (nil, nil) when the store does not exist yet.
+// (nil, nil) when the store does not exist yet. The open is READ-ONLY
+// (mode=ro/query_only, no DDL, no git writes) so a read-only checkout works.
 func LoadSQLite(root string) (*Index, error) {
-	s, err := OpenSQLite(root)
+	if _, err := os.Stat(sqliteDBPath(root)); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	s, err := openSQLiteForRead(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,12 +967,12 @@ func LoadSQLite(root string) (*Index, error) {
 // symbols. Returns an error when sqlite is not compiled in or the store does
 // not exist.
 func FTS5Search(root, query string, limit int) ([]Symbol, error) {
-	s, err := OpenSQLite(root)
+	s, err := openSQLiteForRead(root)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = s.Close() }()
-	exists, err := storeExists(s)
+	exists, err := indexdb.Exists(s.db)
 	if err != nil || !exists {
 		return nil, fmt.Errorf("no sqlite index for %q (run the CLI index command; sqlite is the default build and is disabled only with -tags nosqlite)", root)
 	}
@@ -1196,7 +1053,7 @@ LIMIT 1`, name, name, recvPart, namePart, name, name)
 
 // LookupCallers performs a direct B-Tree point-query for in-project callers of callee.
 func (s *SQLiteStore) LookupCallers(callee string) ([]string, error) {
-	rows, err := s.db.Query("SELECT DISTINCT caller FROM calls WHERE callee = ? UNION SELECT caller FROM callers WHERE callee = ?", callee, callee)
+	rows, err := s.db.Query("SELECT DISTINCT caller FROM calls WHERE callee = ?", callee)
 	if err != nil {
 		return nil, err
 	}
@@ -1289,15 +1146,4 @@ func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) {
 		}
 	}
 	return bases, rows.Err()
-}
-
-// storeExists reports whether the store has a committed index (non-empty
-// symbols table) for the root.
-func storeExists(s *SQLiteStore) (bool, error) {
-	var n int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&n)
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
 }

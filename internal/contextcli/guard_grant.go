@@ -1,15 +1,18 @@
 // guard_grant.go implements `kern guard grant [--check] [--root R]
 // <command>` — the Ask Protocol's agent-side bridge for GATE-class commands
-// (guard-consent campaign P1). The GATE deny teaches the agent this command;
-// running it does exactly one of three things:
+// (guard-consent campaign P1). The GATE deny teaches the agent the no-check
+// form; running it does exactly one of three things:
 //
 //   - an active grant covers the command (single-use approved record, or a
-//     live prefix grant) → consume it exactly like an execution would and
-//     print "granted" (exit 0) — the agent retries the byte-identical
-//     command immediately;
+//     live prefix grant) → PEEK, consuming nothing (exit 0): the claim
+//     happens once, at execution time — the guard hook/script/plugin's
+//     --check form or the exec firewall claims when the command actually
+//     runs. A consuming CLI here would double-claim on every hook host and
+//     re-mint on the taught retry — an operator re-approval loop;
 //   - --check with no grant → "not granted" (exit 3), nothing minted — the
-//     guard script/plugin call this form on every GATE retry so the deny
-//     path never pollutes the store with pending records;
+//     guard script/plugin call the CONSUMING --check form on every GATE
+//     retry (exit 0 = claimed, then the command runs raw), so the deny path
+//     never pollutes the store with pending records;
 //   - no --check and no grant → MINT a pending, command-hash-bound approval
 //     (appr-<id>) and print the full ask-wait-retry instructions (exit 0).
 //
@@ -27,6 +30,37 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
+
+// closeApprovalHint returns a one-line teaching hint when the store holds an
+// exec-command approval whose bound command is a token-boundary prefix of
+// command (or command a prefix of it) — the decorated-retry trap (campaign
+// 2026-10-28): an agent appends output-shaping ("| tail", "&& echo
+// ok") to a retry, the bytes no longer match the grant, and a fresh
+// approval is minted instead of consuming the one a human already
+// answered. Empty when nothing is close.
+func closeApprovalHint(root, command string) string {
+	if strings.TrimSpace(command) == "" || root == "" {
+		return ""
+	}
+	records, err := governance.NewFileStore(root).Load()
+	if err != nil {
+		return ""
+	}
+	for _, a := range records {
+		if a.Kind != governance.ApprovalKindExecCommand || a.Command == "" || a.Command == command {
+			continue
+		}
+		if !governance.PrefixMatches(command, a.Command) && !governance.PrefixMatches(a.Command, command) {
+			continue
+		}
+		state := a.Status
+		if a.Status == "approved" && a.Scope == "prefix" {
+			state = "approved (prefix grant)"
+		}
+		return fmt.Sprintf("note: approval %s is %s for the close command %q — the grant binds the exact command bytes, so appending output-shaping (pipes, redirects, extra && segments) mints a NEW approval; retry exactly: %s", a.ID, state, a.Command, a.Command)
+	}
+	return ""
+}
 
 type grantFlags struct {
 	check bool
@@ -55,7 +89,7 @@ func parseGrantFlags(args []string) (grantFlags, []string, error) {
 }
 
 // runGuardGrant implements the grant subcommand and returns the process
-// exit code: 0 granted or minted, 3 --check not granted, 1 failure (via
+// exit code: 0 granted (peeked) or minted, 3 --check not granted, 1 failure (via
 // fatal's exitError sentinel path the run() wrapper converts).
 func runGuardGrant(rest []string) int {
 	f, args, err := parseGrantFlags(rest)
@@ -88,13 +122,23 @@ func runGuardGrant(rest []string) int {
 			root = "."
 		}
 	}
-	if err := governance.CheckGateGrant(cmd, root); err == nil {
-		fmt.Println("granted: an active approval covers this command — retry the byte-identical command now")
-		return 0
-	}
+	// The --check form is the PLUGIN/SCRIPT claim: the host guard consults it
+	// on a GATE retry and, on exit 0, runs the command RAW — so this form
+	// must consume exactly like an execution would (CheckGateGrant). The
+	// no-check form is the agent-side MINT bridge: it peeks (consuming
+	// nothing) so the taught byte-identical retry — which claims at the host
+	// guard — is never double-claimed into an operator re-approval loop.
 	if f.check {
+		if err := governance.CheckGateGrant(cmd, root); err == nil {
+			fmt.Println("granted: an active approval covers this command — this check consumed its use; the command may run now (retry it, do not wait)")
+			return 0
+		}
 		fmt.Println("not granted: no active approval covers this command (a human must answer)")
 		return 3
+	}
+	if err := governance.PeekGateGrant(cmd, root); err == nil {
+		fmt.Println("granted: an active approval covers this command — retry the byte-identical command now (nothing consumed here; the guard consumes it when the command runs)")
+		return 0
 	}
 	id, merr := governance.MintGateApproval(cmd, root)
 	if merr != nil {
@@ -105,5 +149,11 @@ func runGuardGrant(rest []string) int {
 	fmt.Printf("operator answers: kern approval ask %s --root %s   ([1] accept once / [2] accept prefix this session / [3] reject)\n", id, root)
 	fmt.Printf("await the decision: kern approval wait %s --timeout 30m\n", id)
 	fmt.Printf("then retry the byte-identical command: %s\n", cmd)
+	// Decorated-retry teaching (2026-10-28 campaign): when this mint is a
+	// decorated variant of a command a human already answered, say so —
+	// the agent was one exact retry away from done.
+	if hint := closeApprovalHint(root, cmd); hint != "" {
+		fmt.Println(hint)
+	}
 	return 0
 }

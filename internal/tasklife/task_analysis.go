@@ -11,14 +11,18 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/astrefs"
 	"github.com/JayveerPrajapati/kern/internal/calibrate"
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/refscan"
+	"github.com/JayveerPrajapati/kern/internal/typeimpact"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
@@ -405,16 +409,44 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	}
 
 	g := s.platform.Graph()
+	// Type expansion (P0): call edges attach to METHODS and constructors, not
+	// to a type node. Without this, `kern impact FileStore` reported
+	// "0 callers, risk low" for a type used across 20+ files — the flagship
+	// blast-radius query silently all-clearing. Expansion is conservative
+	// (same-directory receiver match + constructors returning the type).
+	roots := []string{target}
+	typeExpansion := ""
+	var ix *index.Index
+	var def *index.Symbol
+	if ix = s.platform.Index(); ix != nil {
+		if _, d, ok := intel.ResolveEntry(ix, change); ok && d != nil {
+			def = d
+			if tr, exp, isType := typeimpact.TypeImpactRoots(d, ix.Symbols); isType && len(tr) > 0 {
+				roots = tr
+				typeExpansion = exp
+			}
+		}
+	}
 	// The transitive dependents (reverse closure) are computed once and shared
 	// by every consumer: the APIs/services queries inside collectGraphImpact
 	// and the criticality tier below. The closure is memoized per
 	// (graph, symbol, strict) inside the intel package, so this is one walk
-	// no matter how many queries touch it.
-	dependents := g.WhatDependsOnPrecise(target, o.strict)
-	rep := s.collectGraphImpact(g, target, o.strict)
+	// no matter how many queries touch it. For a type, the union over every
+	// expanded root is used.
+	dependents := impactDependents(g, roots, o.strict)
+	// A type expands to its method/constructor roots; collectGraphImpactRoots
+	// already seeds the report with the type node, so the single-root collect
+	// must not also run first (it was recomputed and discarded for every type).
+	var rep domain.ImpactReport
+	if len(roots) > 1 {
+		rep = s.collectGraphImpactRoots(g, target, roots, o.strict)
+	} else {
+		rep = s.collectGraphImpact(g, target, o.strict)
+	}
+	rep.TypeExpanded = typeExpansion
 	// The blast radius must say WHICH files it touches (Fix 2): the distinct
 	// defining files of the target plus its transitive dependents.
-	rep.Files = impactedFiles(g, target, dependents)
+	rep.Files = impactedFilesForRoots(g, roots, dependents)
 	// Entity overlay (Feature 3): surface the twin entity nodes implicated by
 	// the change's blast radius (the target plus the report's affected
 	// symbols). Zero-cost when the twin graph carries no entities for them.
@@ -427,6 +459,7 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 		s.gatherRuntimeEvidence(&rep, target)
 	}
 	classifyCriticality(&rep, dependents)
+	applyReferenceSafetyNet(&rep, ix, def)
 	t, rep, text, err := s.finalizeImpact(t, &rep)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
@@ -531,6 +564,89 @@ func (s *TaskService) collectGraphImpact(g *intel.Graph, target string, strict b
 	return rep
 }
 
+// impactDependents unions the transitive reverse closure over every analysis
+// root. A type expands to its methods and constructors, so one walk per root
+// gives the real footprint while deduping shared callers by node ID.
+func impactDependents(g *intel.Graph, roots []string, strict bool) []domain.Node {
+	seen := map[string]bool{}
+	var out []domain.Node
+	for _, r := range roots {
+		for _, n := range g.WhatDependsOnPrecise(r, strict) {
+			if n.ID == "" || seen[n.ID] {
+				continue
+			}
+			seen[n.ID] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// collectGraphImpactRoots aggregates the six graph queries over the expanded
+// roots of a type. The type node's own direct callees/tests seed the report
+// (constructors are found as callees), then each method/constructor
+// contributes its callers, services, APIs, events and tests. Lists are
+// deduplicated in first-seen order so the render stays deterministic.
+func (s *TaskService) collectGraphImpactRoots(g *intel.Graph, target string, roots []string, strict bool) domain.ImpactReport {
+	rep := s.collectGraphImpact(g, target, strict)
+	seen := map[string]map[string]bool{}
+	track := func(list []string) map[string]bool {
+		m := make(map[string]bool, len(list))
+		for _, v := range list {
+			m[v] = true
+		}
+		return m
+	}
+	seen["who"] = track(rep.WhoCalls)
+	seen["services"] = track(rep.ServicesDepend)
+	seen["apis"] = track(rep.APIsAffected)
+	seen["events"] = track(rep.EventsAffected)
+	seen["tests"] = track(rep.TestsCover)
+	add := func(key string, dst *[]string, vals []string) {
+		m := seen[key]
+		for _, v := range vals {
+			if v == "" || m[v] {
+				continue
+			}
+			m[v] = true
+			*dst = append(*dst, v)
+		}
+	}
+	for _, r := range roots[1:] {
+		rr := s.collectGraphImpact(g, r, strict)
+		add("who", &rep.WhoCalls, rr.WhoCalls)
+		add("services", &rep.ServicesDepend, rr.ServicesDepend)
+		add("apis", &rep.APIsAffected, rr.APIsAffected)
+		add("events", &rep.EventsAffected, rr.EventsAffected)
+		add("tests", &rep.TestsCover, rr.TestsCover)
+		if rr.TestsCoverSamePackage > rep.TestsCoverSamePackage {
+			rep.TestsCoverSamePackage = rr.TestsCoverSamePackage
+		}
+	}
+	return rep
+}
+
+// impactedFilesForRoots is impactedFiles over every expanded root, so a type
+// report cites the files of its methods' callers too.
+func impactedFilesForRoots(g *intel.Graph, roots []string, dependents []domain.Node) []string {
+	seen := map[string]bool{}
+	var files []string
+	add := func(ref string) {
+		if f := graphNodeFile(g, ref); f != "" && !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	for _, r := range roots {
+		add(r)
+	}
+	for _, d := range dependents {
+		add(d.ID)
+	}
+	sort.Strings(files)
+	return files
+}
+
 // gatherRuntimeEvidence folds non-graph evidence into the report: affected data
 // stores from the context packet's runtime evidence, related incidents from
 // memory recall, and applicable architecture rules from the context packet.
@@ -600,6 +716,46 @@ func classifyCriticality(rep *domain.ImpactReport, dependents []domain.Node) {
 		} else {
 			rep.Risk = "low"
 		}
+	}
+}
+
+// applyReferenceSafetyNet prevents the flagship blast-radius query from
+// returning a confident false all-clear for a non-callable symbol. When the
+// resolved target's kind has no call edges and the graph produced a "low"
+// verdict, the risk becomes "unknown" and a bounded textual reference scan
+// reports the files that mention the identifier. The scan is labelled
+// "textual" on purpose: it counts comments, strings, and same-named symbols in
+// other packages, and it is the honest interim answer until AST reference
+// edges are persisted in the index (audit P0-1 stage 2).
+func applyReferenceSafetyNet(rep *domain.ImpactReport, ix *index.Index, d *index.Symbol) {
+	if rep == nil || ix == nil || d == nil || rep.Risk != "low" || !refscan.ReferenceOnlyKind(d.Kind) {
+		return
+	}
+	// AST references are the real answer for Go symbols (comments and other
+	// same-named packages cannot inflate them); the file count grades risk on
+	// the same tiers as transitive dependents. Textual is the fallback for
+	// non-Go kinds and for a Go symbol the AST scan cannot see.
+	r := astrefs.Lookup(ix, *d)
+	rep.ReferenceFiles = r.Files
+	rep.ReferenceCount = r.Count
+	rep.ReferenceConfidence = r.Confidence
+	if strings.HasPrefix(r.Confidence, "ast") {
+		switch {
+		case len(r.Files) >= 10:
+			rep.Risk = "high"
+		case len(r.Files) >= 3:
+			rep.Risk = "medium"
+		default:
+			rep.Risk = "low"
+		}
+		rep.RiskDetail = fmt.Sprintf("%d AST-verified %s reference(s) in %d file(s)", r.Count, d.Kind, len(r.Files))
+		return
+	}
+	rep.Risk = "unknown"
+	if r.Count > 0 {
+		rep.RiskDetail = fmt.Sprintf("call graph does not cover %s references; %d textual reference(s) in %d file(s)", d.Kind, r.Count, len(r.Files))
+	} else {
+		rep.RiskDetail = fmt.Sprintf("call graph does not cover %s references; no textual references found", d.Kind)
 	}
 }
 

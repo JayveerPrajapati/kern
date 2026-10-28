@@ -117,6 +117,9 @@ func runGuardCLI(rest []string) {
 		case "classify":
 			runGuardClassify(rest[1:])
 			return
+		case "parity":
+			runGuardParity(rest[1:])
+			return
 		case "pause":
 			runGuardPause(rest[1:])
 			return

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -289,32 +290,101 @@ func fileMatchesPathPrefix(file, prefix string) bool {
 // package-scoped node ID ("internal/governance.NewFileStore"); both forms
 // are matched against the node ID and the symbol's qualified name. It is the
 // tasklife-side copy of the platform helper (moved with the cluster).
+//
+// The lookup is index-backed: a linear scan over g.Nodes per call was
+// quadratic in practice because impact reports resolve one ref per affected
+// entry (a hub type yields thousands of entries over a ~17.5k-node graph —
+// ~87M string comparisons, measured as the dominant cost of `kern impact`
+// in the 2026-10-27 audit). The index is built once per Graph (Graphs are
+// immutable after build) and cached by pointer; it reproduces the scan's
+// exact semantics: the first node in scan order that either matches the
+// reference as a node ID (returning its file, empty or not) or matches it
+// as an unambiguous qualified name (exactly one node carries that
+// qualified name and it has a file) wins.
 func graphNodeFile(g *intel.Graph, ref string) string {
-	for _, n := range g.Nodes {
-		if n.ID == ref {
-			if n.Symbol != nil {
-				return n.Symbol.File
-			}
-			if n.File != nil {
-				return n.File.Path
-			}
-			return ""
+	if g == nil {
+		return ""
+	}
+	return graphFileIndexFor(g).file(ref)
+}
+
+// graphFileIndex is the precomputed node-lookup for one immutable Graph.
+type graphFileIndex struct {
+	idPos  map[string]int    // node ID -> position of its FIRST node
+	idFile map[string]string // node ID -> that node's file (may be "")
+	qualN  map[string]int    // qualified name -> number of nodes carrying it
+	qualF  map[string]string // qualified name -> file of the first node carrying it with a non-empty file
+	qualP  map[string]int    // qualified name -> position of that first-with-file node
+}
+
+var graphFileIndexCache sync.Map // *intel.Graph -> *graphFileIndex
+
+// graphFileIndexFor returns the cached index for g, building it on first use.
+func graphFileIndexFor(g *intel.Graph) *graphFileIndex {
+	if v, ok := graphFileIndexCache.Load(g); ok {
+		return v.(*graphFileIndex)
+	}
+	idx := newGraphFileIndex(g)
+	v, _ := graphFileIndexCache.LoadOrStore(g, idx)
+	return v.(*graphFileIndex)
+}
+
+func newGraphFileIndex(g *intel.Graph) *graphFileIndex {
+	idx := &graphFileIndex{
+		idPos:  make(map[string]int, len(g.Nodes)),
+		idFile: make(map[string]string, len(g.Nodes)),
+		qualN:  make(map[string]int),
+		qualF:  make(map[string]string),
+		qualP:  make(map[string]int),
+	}
+	for pos, n := range g.Nodes {
+		if _, seen := idx.idPos[n.ID]; !seen {
+			idx.idPos[n.ID] = pos
+			idx.idFile[n.ID] = nodeFile(n)
 		}
-		if n.Symbol != nil && n.Symbol.Qualified == ref && n.Symbol.File != "" {
-			// A bare qualified form can match several same-named symbols in
-			// different packages; only return when unambiguous.
-			dup := false
-			for _, m := range g.Nodes {
-				if m.ID != n.ID && m.Symbol != nil && m.Symbol.Qualified == ref {
-					dup = true
-					break
+		if n.Symbol != nil && n.Symbol.Qualified != "" {
+			idx.qualN[n.Symbol.Qualified]++
+			if f := n.Symbol.File; f != "" {
+				if _, seen := idx.qualP[n.Symbol.Qualified]; !seen {
+					idx.qualF[n.Symbol.Qualified] = f
+					idx.qualP[n.Symbol.Qualified] = pos
 				}
 			}
-			if !dup {
-				return n.Symbol.File
-			}
+		}
+	}
+	return idx
+}
+
+func nodeFile(n domain.Node) string {
+	if n.Symbol != nil {
+		return n.Symbol.File
+	}
+	if n.File != nil {
+		return n.File.Path
+	}
+	return ""
+}
+
+// file resolves ref with the original linear scan's semantics: whichever
+// comes first in node order — the first ID match (its file, empty or not) or
+// the first qualified match that has a file — decides. A qualified name
+// carried by more than one node is ambiguous and resolves to "" (the scan's
+// dup check); a qualified name carried by exactly one node resolves to that
+// node's file when non-empty.
+func (x *graphFileIndex) file(ref string) string {
+	idPos, idOK := x.idPos[ref]
+	qPos, qOK := x.qualP[ref]
+	// An ID match earlier in node order than any qualified-with-file match
+	// wins outright (the scan returns at it); a qualified dup also wins
+	// when its first-with-file node precedes the ID match.
+	if idOK && (!qOK || idPos <= qPos) {
+		return x.idFile[ref]
+	}
+	if qOK {
+		if x.qualN[ref] > 1 {
 			return ""
 		}
+		return x.qualF[ref]
 	}
 	return ""
 }

@@ -322,22 +322,40 @@ func TestWireGlobalSkipsWhenNotInstalled(t *testing.T) {
 	}
 }
 
-// TestGlobalMCPCommandPrefersPATH verifies that the global MCP command resolves
-// to a stable PATH-based "kern-mcp" rather than a volatile absolute path, so a
-// global agent config survives an upgrade or a change of install location. When
-// kern-mcp is resolvable on PATH the command must be the bare "kern-mcp" (the
-// agent re-resolves it at launch against whatever kern is currently installed),
-// and it must never be an os.Executable()-derived temp/versioned path.
-func TestGlobalMCPCommandPrefersPATH(t *testing.T) {
+// TestGlobalMCPCommandIsAbsolute pins the adoption fix: machine-global configs
+// must carry an ABSOLUTE kern-mcp command. GUI-launched hosts (Claude Code,
+// Cursor, Gemini, Qwen, Codex, Zed) do not inherit the shell PATH, so a bare
+// "kern-mcp" written from a terminal silently never starts and the agent falls
+// back to built-in tools. The install directory is stable across kern updates.
+func TestGlobalMCPCommandIsAbsolute(t *testing.T) {
 	cmd := GlobalMCPCommand()
 	if cmd == "" {
 		t.Fatal("GlobalMCPCommand returned empty")
 	}
-	if strings.Contains(cmd, string(filepath.Separator)) {
-		t.Fatalf("GlobalMCPCommand returned an absolute path %q; global configs must use a PATH-resolved bare command so upgrades/relocations don't break MCP", cmd)
+	if !filepath.IsAbs(cmd) {
+		t.Fatalf("GlobalMCPCommand = %q; global configs must use an absolute command so GUI-launched hosts (minimal PATH) can start the server", cmd)
 	}
-	if cmd != "kern-mcp" {
-		t.Fatalf("GlobalMCPCommand = %q, want bare \"kern-mcp\" (PATH-resolved at agent launch)", cmd)
+	if filepath.Base(cmd) != "kern-mcp" && filepath.Base(cmd) != "kern-mcp.exe" {
+		t.Fatalf("GlobalMCPCommand = %q, want a kern-mcp binary", cmd)
+	}
+	if _, err := os.Stat(cmd); err != nil {
+		t.Fatalf("GlobalMCPCommand = %q, binary not present: %v", cmd, err)
+	}
+}
+
+// TestLaunchCLICommandIsAbsolute pins the hook-side equivalent: global hook
+// settings execute in GUI-launched hosts too, so a bare `kern` there fails open
+// silently and kern-first steering is lost.
+func TestLaunchCLICommandIsAbsolute(t *testing.T) {
+	cmd := LaunchCLICommand()
+	if cmd == "" {
+		t.Fatal("LaunchCLICommand returned empty")
+	}
+	if !filepath.IsAbs(cmd) {
+		t.Fatalf("LaunchCLICommand = %q; global hooks must use an absolute command", cmd)
+	}
+	if _, err := os.Stat(cmd); err != nil {
+		t.Fatalf("LaunchCLICommand = %q, binary not present: %v", cmd, err)
 	}
 }
 

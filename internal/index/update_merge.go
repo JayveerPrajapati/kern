@@ -217,10 +217,8 @@ func mergeUpdateJobs(ix, prev *Index, snap *FreshnessSnapshot, jobs []fileJob, c
 // (callers, dispatch edges, resolution, prose vocab, precision), finishing
 // with the content-addressed identity and build stats.
 func finalizeUpdate(ix, prev *Index, gitID *identityGit, dispatch map[string]bool, copied map[string]bool, unattributable, unattributableInherits []string, reusedCount int64, t tunables, jobs []fileJob, start time.Time) error {
-	// Owners with no defining symbol are pathological (a Build-consistent
-	// index keys every call edge by a symbol's full name). Legacy edges without
-	// source provenance whose owner is defined in several files cannot be
-	// attributed to one bucket safely, so keep only those unowned edges.
+	// Unowned legacy edges whose owner is defined in several files cannot be
+	// attributed safely; keep only those.
 	for _, owner := range unattributable {
 		for _, ce := range prev.Calls[owner] {
 			if ce.SourceFile != "" || dispatch[owner+"->"+ce.Target] ||
@@ -278,6 +276,11 @@ func finalizeUpdate(ix, prev *Index, gitID *identityGit, dispatch map[string]boo
 	if len(jobs) >= t.parallelMin {
 		workers = t.workers
 	}
+	// Record what changed for the persistence layer: only these files/owners
+	// need rewriting (Save falls back to a full write on any delta error).
+	changed, removed := diffHashes(prev.FileHashes, ix.FileHashes)
+	ix.delta = &deltaPlan{changed: changed, removed: removed, owners: diffOwners(prev.Calls, ix.Calls)}
+
 	ix.BuildStats = BuildStats{
 		Kind:    "update",
 		Ms:      time.Since(start).Milliseconds(),

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
@@ -18,10 +19,10 @@ func TestAuditEntriesReadsPersistedStore(t *testing.T) {
 	ts := tasklife.NewTaskService(&Platform{root: root}, nil)
 
 	// Simulate a prior process: write entries to the persisted store directly.
-	log := governance.NewAuditLog().WithStore(storage.NewLocal(filepath.Join(root, ".kern", "audit")))
-	log.Record(governance.AuditEntry{AgentID: "agent-1", Action: "approve", Resource: "deploy", Approved: true, Result: "allowed", TaskID: "t-1"})
-	log.Record(governance.AuditEntry{AgentID: "agent-2", Action: "deny", Resource: "runtime", Approved: false, Result: "blocked", TaskID: "t-2"})
-	log.Record(governance.AuditEntry{AgentID: "agent-1", Action: "run", Resource: "loop", Approved: true, Result: "allowed", TaskID: "t-1"})
+	log := govaudit.NewAuditLog().WithStore(storage.NewLocal(filepath.Join(root, ".kern", "audit")))
+	log.Record(govaudit.AuditEntry{AgentID: "agent-1", Action: "approve", Resource: "deploy", Approved: true, Result: "allowed", TaskID: "t-1"})
+	log.Record(govaudit.AuditEntry{AgentID: "agent-2", Action: "deny", Resource: "runtime", Approved: false, Result: "blocked", TaskID: "t-2"})
+	log.Record(govaudit.AuditEntry{AgentID: "agent-1", Action: "run", Resource: "loop", Approved: true, Result: "allowed", TaskID: "t-1"})
 
 	entries, err := ts.AuditEntries()
 	if err != nil {

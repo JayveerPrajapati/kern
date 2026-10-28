@@ -19,6 +19,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/loop"
@@ -44,7 +45,7 @@ type Hooks struct {
 	// Audit returns the tamper-evident audit-log entries for a root (adapter
 	// wires governance.ReadAuditTrail with an empty taskID). Used by
 	// Audit only.
-	Audit func(ctx context.Context, root string) ([]governance.AuditEntry, error)
+	Audit func(ctx context.Context, root string) ([]govaudit.AuditEntry, error)
 	// PendingApprovals lists the pending approvals for a root (adapter wires
 	// governance.NewFileStore(root).Pending). Used by Approve only.
 	PendingApprovals func(ctx context.Context, root string) ([]domain.Approval, error)
@@ -86,7 +87,7 @@ func platform(ctx context.Context, h Hooks, root string) (*app.Platform, error) 
 }
 
 // audit returns the audit-log entries for a root through the injected hook.
-func audit(ctx context.Context, h Hooks, root string) ([]governance.AuditEntry, error) {
+func audit(ctx context.Context, h Hooks, root string) ([]govaudit.AuditEntry, error) {
 	if h.Audit == nil {
 		return nil, fmt.Errorf("highlevel: Audit hook is not wired")
 	}

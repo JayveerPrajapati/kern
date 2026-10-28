@@ -41,5 +41,24 @@
       "results": 137
     }
   ],
+  "cli_queries": [
+    {
+      "name": "search",
+      "args": ["search", "main", "--limit", "20", "--json"],
+      "median_ms": 120.5,
+      "min_ms": 115.2,
+      "runs": 3,
+      "ok": true
+    },
+    {
+      "name": "context",
+      "args": ["context", "main"],
+      "median_ms": 180.0,
+      "min_ms": 170.0,
+      "runs": 3,
+      "ok": false,
+      "err": "exit status 1"
+    }
+  ],
   "methodology_ref": "docs/benchmarks/graph-latency.md (cold-vs-warm, median/min over repeated runs)"
 }

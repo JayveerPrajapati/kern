@@ -53,16 +53,16 @@ curated by hand. Run the generator after adding/removing docs files.
 
 ## SDKs
 
-- [sdk/python/kern_sdk](../sdk/python/kern_sdk) — Python client (stdlib-only; `call_tool`).
-- [sdk/typescript/src](../sdk/typescript/src) — TypeScript client (zero-dep; `callTool`).
+- [sdk/python/kern_sdk](../sdk/python/kern_sdk) — Python `KernEngine` + framework adapters (stdlib-only).
+- [sdk/typescript/src](../sdk/typescript/src) — TypeScript `KernEngine` (zero-dep, uses `fetch`).
 
-Both SDKs speak the same control plane: typed endpoints for the core workflows plus a
-full-catalog passthrough through `POST /v1/tools/{name}` (the same governed dispatch MCP
-clients hit). Raw MCP JSON-RPC remains available over `kern mcp` stdio / `kern-mcp --http`.
-**Note:** the HTTP host for the `POST /v1/tools/{name}` route (the former enterprise web
-console, `kern serve`) is not part of this tree today; the SDKs target it for
-self-hosted/enterprise deployments, and the passthrough shape is exercised via the
-in-process governed dispatch.
+> **Deprecated:** the REST `Client` classes targeted the retired `kern-server`
+> control plane (`/v1/*`, including `POST /v1/tools/{name}`). Use the local
+> `KernEngine`/adapters below, or call tools through MCP (`kern mcp`).
+
+The local engines are the supported integration path. For programmatic tool calls, use
+MCP (`kern mcp` stdio or `kern-mcp --http`); the retired web-console REST host is not
+part of this tree.
 
 ## Configuration & operations
 
@@ -125,4 +125,5 @@ in-process governed dispatch.
 - [symbol-identity.md](symbol-identity.md)
 - [tool-catalog.md](tool-catalog.md)
 - [tool-selection.md](tool-selection.md)
+- [windows.md](windows.md)
 <!-- END AUTO-GENERATED -->

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,10 +100,11 @@ type FreshnessSnapshot struct {
 // subsequent staleness check either replaces it (content walk) or clears it
 // (no walk ran).
 func (ix *Index) retainStaleSnapshot(obs walkObservation, wasFresh bool) {
-	ix.staleMu.Lock()
-	defer ix.staleMu.Unlock()
+	mu := ix.staleMuRef()
+	mu.Lock()
 	if obs.hashes == nil {
 		ix.staleSnapshot = nil
+		mu.Unlock()
 		return
 	}
 	ix.staleSnapshot = &FreshnessSnapshot{
@@ -113,14 +115,115 @@ func (ix *Index) retainStaleSnapshot(obs walkObservation, wasFresh bool) {
 		VerifiedAt: time.Now(),
 		WasFresh:   wasFresh,
 	}
+	mu.Unlock()
+	ix.persistFreshnessSnapshot(obs)
+}
+
+// freshnessSnapshotFile is the cross-process freshness observation. A non-git
+// root has no git OID to consult, so without persisting the walk every
+// one-shot process re-hashes the whole tree; the stat-gate can re-validate
+// this observation with stats only (mtime+size+file-set) for gateTTL.
+const freshnessSnapshotFile = "freshness-snapshot.json"
+
+type persistedFreshness struct {
+	Root        string            `json:"root"`
+	ContentRoot string            `json:"content_root"`
+	Hashes      map[string]string `json:"hashes"`
+	Mtimes      map[string]int64  `json:"mtimes"`
+	Sizes       map[string]int64  `json:"sizes"`
+	WalkCount   int               `json:"walk_count"`
+	VerifiedAt  time.Time         `json:"verified_at"`
+}
+
+// persistFreshnessSnapshot writes the completed content walk beside the index.
+// Best-effort: a failure only costs the next process a full walk.
+func (ix *Index) persistFreshnessSnapshot(obs walkObservation) {
+	if ix == nil || ix.Root == "" || obs.hashes == nil {
+		return
+	}
+	data, err := json.Marshal(persistedFreshness{
+		Root:        ix.Root,
+		ContentRoot: aggregateHash(obs.hashes),
+		Hashes:      obs.hashes,
+		Mtimes:      obs.mtimes,
+		Sizes:       obs.sizes,
+		WalkCount:   obs.walkCount,
+		VerifiedAt:  time.Now(),
+	})
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(ix.Root, ".kern")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	path := filepath.Join(dir, freshnessSnapshotFile)
+	tmp, err := os.CreateTemp(dir, ".freshness-snapshot.*.tmp")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(name, path)
+}
+
+// loadPersistedFreshness seeds the in-memory stat-gate with the observation a
+// previous process persisted, so a non-git root's staleness check can be
+// stat-only instead of re-reading and re-hashing every file.
+func (ix *Index) loadPersistedFreshness() {
+	if ix == nil || ix.Root == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(ix.Root, ".kern", freshnessSnapshotFile))
+	if err != nil {
+		return
+	}
+	var p persistedFreshness
+	if err := json.Unmarshal(data, &p); err != nil || p.Hashes == nil {
+		return
+	}
+	if filepath.Clean(p.Root) != filepath.Clean(ix.Root) {
+		return
+	}
+	if ix.Identity == nil {
+		return
+	}
+	// An observation taken before the current index was written describes a
+	// previous index generation (e.g. the stale verdict from before a
+	// rebuild). Seeding it would make every process serve that stale verdict
+	// until the TTL expires even though the rebuilt index matches the tree.
+	if p.VerifiedAt.Before(ix.UpdatedAt) {
+		return
+	}
+	wasFresh := p.ContentRoot == ix.Identity.ContentRoot
+	ix.staleSnapshot = &FreshnessSnapshot{
+		Hashes:     p.Hashes,
+		Mtimes:     p.Mtimes,
+		Sizes:      p.Sizes,
+		WalkCount:  p.WalkCount,
+		VerifiedAt: p.VerifiedAt,
+		WasFresh:   wasFresh,
+	}
 }
 
 // clearStaleSnapshot drops any retained observation. Called whenever a
 // staleness check decides WITHOUT a content walk, so a snapshot is never
 // reused across decisions it did not come from.
 func (ix *Index) clearStaleSnapshot() {
-	ix.staleMu.Lock()
-	defer ix.staleMu.Unlock()
+	mu := ix.staleMuRef()
+	mu.Lock()
+	defer mu.Unlock()
 	ix.staleSnapshot = nil
 }
 
@@ -128,8 +231,9 @@ func (ix *Index) clearStaleSnapshot() {
 // UpdateWithSnapshot's read cannot race a concurrent staleness check's
 // retention (staleness checks fan out off any app-level lock by design).
 func (ix *Index) retainedSnapshot() *FreshnessSnapshot {
-	ix.staleMu.Lock()
-	defer ix.staleMu.Unlock()
+	mu := ix.staleMuRef()
+	mu.Lock()
+	defer mu.Unlock()
 	return ix.staleSnapshot
 }
 
@@ -417,6 +521,25 @@ func proofCacheTTL() time.Duration {
 	return 5 * time.Second
 }
 
+// NoteFreshness records a verdict the caller just decided from a live walk
+// (an Update or Build), so later consumers in this process — the index stamp,
+// a second Stale check — reuse it instead of re-proving freshness. Bounded by
+// the same TTL as the proof memo; a no-op when the memo is disabled.
+func (ix *Index) NoteFreshness(v FreshnessVerdict) {
+	if ix == nil {
+		return
+	}
+	ttl := proofCacheTTL()
+	if ttl <= 0 {
+		return
+	}
+	p := FreshnessProof{CheckedAt: time.Now().UTC(), Verdict: v}
+	if ix.Identity != nil {
+		p.Recorded = *ix.Identity
+	}
+	ix.proofMemo().store(p, ttl)
+}
+
 // FreshnessProof verifies that the on-disk tree at root still matches the
 // identity recorded when the index was built. Non-strict mode takes the cheap
 // git fast path (working-tree tree OID compare) and only falls back to a full
@@ -435,7 +558,8 @@ func proofCacheTTL() time.Duration {
 // on large repos), which every index-backed tool call previously paid per
 // call; the verdict is advisory metadata (provenance stamps, staleness
 // notes), so serving one up to proofCacheTTL() old stays within the
-// semantics the snapshot gate already accepts (gateTTL, 30s). Set
+// semantics the snapshot gate already accepts (gateTTL, 5 min since the
+// 2026-10-27 idle-tax fix; was 30 s). Set
 // KERN_FRESHNESS_PROOF_CACHE_MS=0 to disable. FreshnessProofStrict is
 // never memoized.
 func (ix *Index) FreshnessProof(root string) FreshnessProof {
@@ -443,24 +567,63 @@ func (ix *Index) FreshnessProof(root string) FreshnessProof {
 	if ttl <= 0 || root != ix.Root {
 		return ix.computeFreshnessProof(root)
 	}
-	if p, ok := ix.freshnessMemo.serve(); ok {
+	memo := ix.proofMemo()
+	if p, ok := memo.serve(); ok {
 		return p
 	}
-	if ch, leader := ix.freshnessMemo.claim(); !leader {
+	if ch, leader := memo.claim(); !leader {
 		<-ch
-		if p, ok := ix.freshnessMemo.serve(); ok {
+		if p, ok := memo.serve(); ok {
 			return p
 		}
 		// The flight finished without a stored result; compute directly.
 		return ix.computeFreshnessProof(root)
 	}
 	p := ix.computeFreshnessProof(root)
-	ix.freshnessMemo.store(p, ttl)
+	memo.store(p, ttl)
 	return p
+}
+
+// staleMuRef returns the index's stale-snapshot mutex, allocating it on first
+// use. It is a pointer so copying an Index value (snapshot encoding, tests)
+// never copies a lock.
+func (ix *Index) staleMuRef() *sync.Mutex {
+	if ix.staleMu == nil {
+		proofMemoInit.Lock()
+		if ix.staleMu == nil {
+			ix.staleMu = &sync.Mutex{}
+		}
+		proofMemoInit.Unlock()
+	}
+	return ix.staleMu
+}
+
+// proofMemoInit guards the lazy allocation of the per-index freshness memo so
+// a zero-value Index used concurrently still gets exactly one memo.
+var proofMemoInit sync.Mutex
+
+// proofMemo returns the index's freshness memo, allocating it on first use.
+func (ix *Index) proofMemo() *proofMemo {
+	if ix.freshnessMemo == nil {
+		proofMemoInit.Lock()
+		if ix.freshnessMemo == nil {
+			ix.freshnessMemo = &proofMemo{}
+		}
+		proofMemoInit.Unlock()
+	}
+	return ix.freshnessMemo
 }
 
 // computeFreshnessProof is the uncached non-strict proof computation.
 func (ix *Index) computeFreshnessProof(root string) FreshnessProof {
+	// Stat-gate first: a retained content walk that is recent and still
+	// stat-current decides the verdict with stats only. This must run BEFORE
+	// freshnessBaseline: on a dirty working tree the baseline's git tree-OID
+	// probe costs ~150ms on a medium repo, while the stat walk is a few ms —
+	// and the gate's verdict would ignore the probe anyway.
+	if proof, ok := ix.statGateProof(root); ok {
+		return proof
+	}
 	proof, ok := ix.freshnessBaseline(root)
 	if !ok {
 		// No baseline: no content walk ran, so no observation is retained.
@@ -559,6 +722,33 @@ func (ix *Index) StaleWithProof(root string) (bool, FreshnessProof) {
 	return proof.Stale(), proof
 }
 
+// statGateProof re-serves a retained walk's verdict when the tree has not
+// changed since (mtime+size+file-set), without any git call or content read.
+// Current is left minimal (the gate proves "unchanged since Recorded", not a
+// fresh content identity); callers that need git provenance run it themselves.
+func (ix *Index) statGateProof(root string) (FreshnessProof, bool) {
+	if ix == nil || ix.Identity == nil {
+		return FreshnessProof{}, false
+	}
+	snap := ix.retainedSnapshot()
+	if snap == nil || time.Since(snap.VerifiedAt) >= gateTTL() {
+		return FreshnessProof{}, false
+	}
+	if !snapshotStillCurrent(root, ignore.LoadCached(root), snap) {
+		return FreshnessProof{}, false
+	}
+	verdict := FreshnessStale
+	if snap.WasFresh {
+		verdict = FreshnessFresh
+	}
+	return FreshnessProof{
+		CheckedAt: time.Now().UTC(),
+		Recorded:  *ix.Identity,
+		Current:   IndexIdentity{BuiltAt: time.Now().UTC()},
+		Verdict:   verdict,
+	}, true
+}
+
 // freshnessBaseline fills the proof's Recorded/Current identities and reports
 // whether a baseline exists at all. ok=false (nil index or nil Identity)
 // yields an "unknown" proof.
@@ -597,10 +787,18 @@ func (ix *Index) freshnessBaseline(root string) (FreshnessProof, bool) {
 // the staleness verdict is based on, and its hashes are the ones the update
 // must reuse. On failure no observation is retained.
 // gateTTL is how long a retained content walk may serve stat-gated
-// staleness verdicts before a full re-verification walk is forced. Agent
-// tool bursts (search → explore → impact within seconds) stay fully gated;
-// a long idle or slow cadence re-verifies — which bounds how long a
-// same-size mtime-preserving edit can go undetected on a dirty tree.
+// staleness verdicts before a full re-verification walk is forced. Every
+// serve re-validates the observation with a stat-only walk (same file set,
+// mtimes, sizes), so a normal edit is caught on the very next check; the
+// TTL only bounds how long the walk's VERDICT may be re-served — the
+// defense-in-depth window for same-size mtime-preserving edits (content
+// changed, mtime+size identical), which stats can never see and only the
+// git tree-OID probe / content walk can catch. Agent tool bursts stay
+// fully gated either way; the bound is what an idle or slow cadence
+// re-pays (~0.6–0.7 s of git+content pass on a dirty tree, measured
+// 2026-10-27) per window. 30 s made that cost hit the first query after
+// every thinking/editing pause — the common agent cadence — so the window
+// is now 5 min: one re-witness per window instead of one per pause.
 // KERN_FRESHNESS_GATE_MS overrides (0 disables the gate entirely).
 func gateTTL() time.Duration {
 	if v := os.Getenv("KERN_FRESHNESS_GATE_MS"); v != "" {
@@ -608,23 +806,16 @@ func gateTTL() time.Duration {
 			return time.Duration(ms) * time.Millisecond
 		}
 	}
-	return 30 * time.Second
+	return 5 * time.Minute
 }
 
 func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessProof {
-	// Stat-gate (dirty-tree hot path): when the previous check retained a
-	// content walk, is recent enough (gateTTL), and a stat-only walk proves
-	// nothing changed since (same file set, same mtimes AND sizes, same
-	// walk count), the walk's verdict is still valid — no file is re-read
-	// or re-hashed. WasFresh selects WHICH verdict to re-serve: an
-	// unchanged tree over a mismatching walk serves STALE (the tree still
-	// does not match the index), not fresh. The first staleness check on a
-	// dirty tree pays the full walk; every subsequent one pays only stats.
-	// Trust model: mtime+size (a size-changing mtime-preserving edit like
-	// git apply is caught); a same-size mtime-preserving edit evades the
-	// gate only until the TTL expires — FreshnessProofStrict and the
-	// clean-tree git-OID path keep catching those regardless.
-	if snap := ix.retainedSnapshot(); snap != nil && time.Since(snap.VerifiedAt) < gateTTL() && snapshotStillCurrent(root, ignore.Load(root), snap) {
+	// Stat gate: a recent retained walk re-serves its verdict while a stat-only
+	// walk proves nothing changed (same file set, mtimes and sizes). WasFresh
+	// picks which verdict: an unchanged tree over a mismatching walk is STALE.
+	// Same-size mtime-preserving edits evade it until the TTL; the strict and
+	// clean-tree git-OID paths still catch those.
+	if snap := ix.retainedSnapshot(); snap != nil && time.Since(snap.VerifiedAt) < gateTTL() && snapshotStillCurrent(root, ignore.LoadCached(root), snap) {
 		if snap.WasFresh {
 			proof.Verdict = FreshnessFresh
 		} else {
@@ -632,7 +823,7 @@ func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessPro
 		}
 		return proof
 	}
-	obs, err := indexableHashesObserved(root, ignore.Load(root))
+	obs, err := indexableHashesObserved(root, ignore.LoadCached(root))
 	if err != nil {
 		// The walk failed and freshnessBaseline left Current.TreeOID lazy
 		// (empty on dirty/unavailable trees): only now is the expensive

@@ -16,7 +16,9 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/execclassify"
+	"github.com/JayveerPrajapati/kern/internal/grepscope"
 	"github.com/JayveerPrajapati/kern/internal/guardpaths"
+	"github.com/JayveerPrajapati/kern/internal/inplaceedit"
 )
 
 // ClassifyVerdict enumerates the risk-axis outcomes a command can receive.
@@ -35,6 +37,7 @@ type ClassifyResult struct {
 	Tier      int             `json:"tier"`                 // 1|2|3 when serve, else 0
 	Head      string          `json:"head,omitempty"`       // serve: read command name (grep|cat|find|...)
 	Pattern   string          `json:"pattern,omitempty"`    // serve: symbol pattern for grep-family
+	Scope     string          `json:"scope,omitempty"`      // serve: repo-relative file/dir the pattern is scoped to
 	File      string          `json:"file,omitempty"`       // serve: file path for cat/head/tail/less/more
 	Tails     []string        `json:"tails,omitempty"`      // serve tier 2: the tail segments
 	Hint      string          `json:"hint"`                 // one-line steer
@@ -82,44 +85,6 @@ var readOnlyGit = map[string]bool{
 
 var gitLogPatchFlags = map[string]bool{"-p": true, "--patch": true, "-u": true, "--raw": true}
 
-var symbolShaped = func(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, r := range s {
-		ok := r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-		if !ok {
-			return false
-		}
-		if i == 0 && (r == '.' || (r >= '0' && r <= '9')) {
-			return false
-		}
-	}
-	return true
-}
-
-// grepPatternAndTarget splits grep-family args into the pattern (first
-// non-flag argument) and whether an explicit TARGET follows it. Any
-// second non-flag argument names the file or directory the caller scoped
-// the search to — a flag whose value follows (e.g. -e PATTERN) still
-// leaves the target as the first non-flag argument after the pattern,
-// and multiple targets count as one. Callers use hasTarget to keep the
-// tier-1 symbol search for unscoped searches only.
-func grepPatternAndTarget(args []string) (pattern string, hasTarget bool) {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") && a != "-" {
-			continue
-		}
-		if pattern == "" {
-			pattern = a
-			continue
-		}
-		hasTarget = true
-		break
-	}
-	return pattern, hasTarget
-}
-
 // isStatOnlyGit mirrors the plugin's isStatOnlyGit: 0 iff the git diff/show
 // invocation prints only statistics or file names.
 func isStatOnlyGit(sub string, args []string) bool {
@@ -165,6 +130,13 @@ func unquotedMetachar(cmd string) string {
 			}
 		case inD:
 			switch c {
+			case '\\':
+				// A backslash inside double quotes escapes the next byte, so
+				// `\"` is a literal quote, not the end of the string. Without
+				// this, an escaped quote desynchronized the quote state and
+				// later text (a pipe, a redirect in a commit message) was
+				// misread as live shell syntax.
+				i++
 			case '"':
 				inD = false
 			case '`', '$':
@@ -370,6 +342,20 @@ func splitStages(command string) []string {
 	return stages
 }
 
+// redirectOperand scans the redirect target starting at k and returns the
+// operand with trailing shell metacharacters trimmed, plus the index just past
+// the raw operand. The operand ends at whitespace or at a shell metacharacter
+// ( ); & | ), so in `(cat 2>/dev/null))` the sink is /dev/null — the trailing
+// parens are syntax, not part of the path. Without this a read-only subshell
+// compared as "/dev/null))" and falsely gated.
+func redirectOperand(seg string, k int) (string, int) {
+	end := k
+	for end < len(seg) && seg[end] != ' ' && seg[end] != '\t' && !strings.ContainsRune(");&|", rune(seg[end])) {
+		end++
+	}
+	return strings.TrimRight(seg[k:end], ");&|"), end
+}
+
 // hasWriteRedirect reports whether the segment contains a real write
 // redirect: > or >> to any target other than the /dev/null sink (discarding
 // output writes nothing), excluding fd merges like 2>&1, outside quotes —
@@ -410,11 +396,8 @@ func hasWriteRedirect(seg string) bool {
 			for k < n && (seg[k] == ' ' || seg[k] == '\t') {
 				k++
 			}
-			end := k
-			for end < n && seg[end] != ' ' && seg[end] != '\t' {
-				end++
-			}
-			if seg[k:end] != "/dev/null" {
+			target, end := redirectOperand(seg, k)
+			if target != "/dev/null" {
 				return true
 			}
 			i = end
@@ -475,11 +458,7 @@ func stripNullRedirects(seg string) string {
 			for k < n && (seg[k] == ' ' || seg[k] == '\t') {
 				k++
 			}
-			end := k
-			for end < n && seg[end] != ' ' && seg[end] != '\t' {
-				end++
-			}
-			target := seg[k:end]
+			target, end := redirectOperand(seg, k)
 			if merge || target == "/dev/null" {
 				s := strings.TrimRight(b.String(), " \t")
 				if len(s) > 0 && s[len(s)-1] >= '0' && s[len(s)-1] <= '9' {
@@ -534,6 +513,13 @@ func gateSegmentHit(rawSeg string, depth int) bool {
 	}
 	name := toks[0]
 	rest := toks[1:]
+	// Destructive/pipe-install classes are shared with the exec firewall, so
+	// find -delete, xargs rm, tee, git clean/reset and forced kills gate here
+	// exactly as they do in kern_exec. The path-aware in-tree write arm runs
+	// BEFORE gateHit, so this only sees commands that already failed it.
+	if cls, _ := execclassify.ClassifyDangerousCommand(rawSeg); cls == execclassify.DangerDestructive || cls == execclassify.DangerPipeInstall {
+		return true
+	}
 	if depth < 2 && len(toks) > 2 && strings.HasPrefix(toks[1], "-c") && shellWrapperCMDs[name] {
 		inner := strings.Join(toks[2:], " ")
 		if inner != "" && gateHit(inner, depth+1) {
@@ -559,14 +545,20 @@ func gateSegmentHit(rawSeg string, depth int) bool {
 		}
 	}
 	if name == "git" {
-		for i, t := range rest {
+		// Any push publishes to a remote (network + irreversible history):
+		// the operator exempted git reads/add/commit, not push. A dry run
+		// writes nothing and stays out of the gate.
+		push, dry := false, false
+		for _, t := range rest {
 			if t == "push" {
-				for _, f := range rest[i+1:] {
-					if f == "--force" || f == "-f" || strings.HasPrefix(f, "--force=") {
-						return true
-					}
-				}
+				push = true
 			}
+			if t == "--dry-run" || t == "-n" {
+				dry = true
+			}
+		}
+		if push && !dry {
+			return true
 		}
 	}
 	return false
@@ -574,6 +566,11 @@ func gateSegmentHit(rawSeg string, depth int) bool {
 
 // gateHit reports whether ANY &&/||/;/|/newline-separated segment is a gate.
 func gateHit(cmd string, depth int) bool {
+	// Whole-pipeline classification: a dangerous pipeline whose individual
+	// segments look benign in isolation (printf | base64 -d | sh) must gate.
+	if cls, _ := execclassify.ClassifyDangerousCommand(cmd); cls == execclassify.DangerDestructive || cls == execclassify.DangerPipeInstall {
+		return true
+	}
 	for _, seg := range splitStages(cmd) {
 		if gateSegmentHit(seg, depth) {
 			return true
@@ -675,13 +672,18 @@ func readPipeline(cmd string) ClassifyResult {
 			return ClassifyResult{Verdict: VerdictServe, Tier: 1, Head: "find"}
 		}
 		if name == "grep" || name == "egrep" || name == "rg" || name == "ag" {
-			pattern, hasTarget := grepPatternAndTarget(args)
-			// A scoped grep (explicit file/directory target) must run as a
-			// REAL grep (tier 3): the tier-1 symbol search is repo-wide and
-			// ignores the caller's scope — a named file got answered with
-			// symbols from OTHER files, confidently wrong.
-			if symbolShaped(pattern) && !hasTarget {
+			pattern, targets := grepscope.SplitArgs(args)
+			// An unscoped symbol grep keeps the original tier-1 answer.
+			if grepscope.SymbolShaped(pattern) && len(targets) == 0 {
 				return ClassifyResult{Verdict: VerdictServe, Tier: 1, Head: name, Pattern: pattern}
+			}
+			// A scoped SYMBOL grep is answered from the index too, filtered
+			// to the caller's file/dir (Tier 1 carries the scope so the
+			// serve runs `kern search <pattern> --path <scope>`). Regex,
+			// include/exclude and count/list shapes have no index
+			// equivalent and stay Tier 3 — a real grep in the sandbox.
+			if p, scope, ok := grepscope.Scoped(args); ok {
+				return ClassifyResult{Verdict: VerdictServe, Tier: 1, Head: name, Pattern: p, Scope: scope}
 			}
 			return ClassifyResult{Verdict: VerdictServe, Tier: 3}
 		}
@@ -704,10 +706,15 @@ func readPipeline(cmd string) ClassifyResult {
 		headName := names[0]
 		if (headName == "grep" || headName == "egrep" || headName == "rg" || headName == "ag") && readCMDs[headName] {
 			headToks := execclassify.StripPrefixes(execclassify.ShellTokens(unwrapWrapper(strings.TrimSpace(segs[0]))))
-			pattern, hasTarget := grepPatternAndTarget(headToks[1:])
-			// Same fidelity rule as the tier-1 arm: a scoped grep never
-			// gets the repo-wide symbol answer, tails or not.
-			if symbolShaped(pattern) && !hasTarget {
+			pattern, targets := grepscope.SplitArgs(headToks[1:])
+			scope := ""
+			servable := grepscope.SymbolShaped(pattern) && len(targets) == 0
+			if !servable {
+				if p, s, ok := grepscope.Scoped(headToks[1:]); ok {
+					pattern, scope, servable = p, s, true
+				}
+			}
+			if servable {
 				tails := []string{}
 				ok := true
 				for _, s := range segs[1:] {
@@ -722,7 +729,7 @@ func readPipeline(cmd string) ClassifyResult {
 					break
 				}
 				if ok && len(tails) > 0 {
-					return ClassifyResult{Verdict: VerdictServe, Tier: 2, Head: headName, Pattern: pattern, Tails: tails}
+					return ClassifyResult{Verdict: VerdictServe, Tier: 2, Head: headName, Pattern: pattern, Scope: scope, Tails: tails}
 				}
 			}
 		}
@@ -777,13 +784,14 @@ func ClassifyCommand(cmd string) ClassifyResult {
 }
 
 // ClassifyCommandInRoot classifies with a project root, enabling the
-// path-aware write arm: local file-shape writes (rm/mv/cp/mkdir/touch)
-// whose every path argument resolves INSIDE the root (or the temp dir),
-// away from .git internals and credential-shaped files, are allowed — the
-// same intent the hosts' native edit tools already exercise ungated, with
-// commit-time verification as the backstop. Everything else (out-of-root
-// targets, .git, credentials, recursive rm of top-level entries, disk
-// and network commands) keeps the flat GATE verdict.
+// path-aware write arm: local file-shape writes (rm/mv/cp/mkdir/touch,
+// sed -i) whose every path argument resolves INSIDE the root (or the temp
+// dir), away from .git internals and credential-shaped files, are allowed —
+// the same intent the hosts' native edit tools already exercise ungated, with
+// commit-time verification as the backstop. Destructive-class commands are
+// NEVER path-aware-allowed (a recursive forced delete gates even in-tree);
+// everything else (out-of-root targets, .git, credentials, recursive rm of
+// top-level entries, disk and network commands) keeps the flat GATE verdict.
 func ClassifyCommandInRoot(cmd, root string) ClassifyResult {
 	return ClassifyCommandInRoots(cmd, root, nil)
 }
@@ -815,7 +823,18 @@ func ClassifyCommandInRoots(cmd, root string, extraRoots []string) ClassifyResul
 		return ClassifyResult{Verdict: VerdictAllow, Hash: hash,
 			Hint: "compound of content-free commands — runs raw"}
 	}
-	if root != "" && allSegmentsSafeWrites(eff, root, extraRoots) {
+	// In-place edits of CODE files are refactors, not scratch writes: gate
+	// them so the change goes through the edit tool / kern_apply (journaled
+	// and verifiable) instead of an opaque rewrite. Non-code files, temp
+	// scratch and out-of-root targets keep their existing write policy.
+	if root != "" && anyInPlaceCodeEdit(eff, root) {
+		return ClassifyResult{Verdict: VerdictGate, Hash: hash,
+			Hint: "GATE: in-place edit of a code file (sed -i / perl -pi) — use the edit tool or kern_apply"}
+	}
+	// Destructive commands only ride the path-aware arm when every target is
+	// scratch space: `rm -rf internal/x` gates like `rm -rf .git`, while
+	// /tmp scratch deletes stay raw (shared destructive class with exec).
+	if root != "" && allSegmentsSafeWrites(eff, root, extraRoots) && guardpaths.DestructiveAllowed(eff) {
 		return ClassifyResult{Verdict: VerdictAllow, Hash: hash, PathAware: true,
 			Hint: "path-aware write — every target in-tree (or tmp), .git/credentials/disk/network excluded; audited"}
 	}
@@ -839,6 +858,17 @@ func ClassifyCommandInRoots(cmd, root string, extraRoots []string) ClassifyResul
 	}
 	return ClassifyResult{Verdict: VerdictGoverned, Hash: hash,
 		Hint: "governed command — runs through kern build"}
+}
+
+// anyInPlaceCodeEdit reports whether any segment edits a code file in place
+// (sed -i, perl/ruby -i) inside the root.
+func anyInPlaceCodeEdit(cmd, root string) bool {
+	for _, seg := range splitStages(cmd) {
+		if inplaceedit.TargetsCodeFile(strings.TrimSpace(seg), root) {
+			return true
+		}
+	}
+	return false
 }
 
 // allSegmentsSafeWrites reports whether every stage of the command is

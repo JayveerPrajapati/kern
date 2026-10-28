@@ -16,10 +16,10 @@ import (
 )
 
 // runBrief implements `kern brief [root]`: builds and prints the repo brief
-// for root (default "."). A cold index produces the brief minus the
-// index/architecture sections plus a hint to run `kern index .` / `kern
-// precache .` once. By default the brief is a concise digest; --map appends
-// the full per-file project map.
+// for root (default "."). A missing or stale index is warmed (built and
+// persisted) first, so the digest is complete on first contact; a fresh index
+// is a no-op. By default the brief is a concise digest; --map appends the
+// full per-file project map.
 func runBrief(rest []string) {
 	root := "."
 	mapRequested := false
@@ -40,6 +40,12 @@ func runBrief(rest []string) {
 	}
 	if _, err := os.Stat(root); err != nil {
 		fatal("brief: %v", err)
+	}
+	// Onboarding must not dead-end on a cold store: `kern buddy` is the
+	// session-start command, so warm (build+persist) a missing or stale index
+	// before rendering. Warm is a no-op on a fresh index.
+	if err := brief.Warm(root); err != nil {
+		fmt.Fprintf(os.Stderr, "kern: brief: could not warm index for %q: %v\n", root, err)
 	}
 	out, err := brief.BuildWithOptions(root, brief.Options{Map: mapRequested})
 	if err != nil {

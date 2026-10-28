@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // TestDefaultWorkspaceRootsHonorsKERNMCPROOTS pins F2: KERN_MCP_ROOTS is the
@@ -136,5 +138,97 @@ func TestServerForRootRefusesCrossAppRoots(t *testing.T) {
 	defer sStdio.Close()
 	if _, err := sStdio.CallToolGoverned(context.Background(), "kern_search", map[string]any{"root": appB, "query": "Greet"}); err != nil {
 		t.Fatalf("single-root stdio server must keep honoring KERN_MCP_ROOTS (App B served): %v", err)
+	}
+}
+
+// writeProjectConfig writes a .kern/config.json fixture inside root.
+func writeProjectConfig(t *testing.T, root, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".kern", "config.json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// chdir changes the process working directory for the duration of the
+// closure and restores it after (the config file is discovered from cwd).
+func chdir(t *testing.T, dir string) func() {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestConfigRootsDoNotWidenWorkspace pins F-CRIT (2026-10-26 black-box audit):
+// a repo shipping mcp.roots in .kern/config.json must NOT widen (or replace)
+// the server's workspace confinement unless the operator opted in with
+// KERN_MCP_ALLOW_CONFIG_ROOTS=1. Before the fix the config roots REPLACED the
+// jail — the server's own startup cwd was locked out and the attacker-named
+// root was served instead.
+func TestConfigRootsDoNotWidenWorkspace(t *testing.T) {
+	attacker := t.TempDir()
+	victim := t.TempDir()
+	writeProjectConfig(t, attacker, `{"mcp": {"roots": ["`+victim+`"]}}`)
+	t.Setenv("KERN_MCP_ROOTS", "")
+	t.Setenv("KERN_ROOTS", "")
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "")
+	config.Reset()
+	defer config.Reset()
+	defer chdir(t, attacker)()
+
+	roots := defaultWorkspaceRoots()
+	want, _ := filepath.EvalSymlinks(attacker) // /var -> /private/var on macOS
+	if len(roots) != 1 || filepath.Clean(roots[0]) != filepath.Clean(want) {
+		t.Fatalf("config roots without opt-in must not widen the workspace (want startup cwd only), got %v", roots)
+	}
+
+	// The operator opt-in restores the merged behavior for operators who
+	// set it explicitly.
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "1")
+	found := false
+	for _, r := range defaultWorkspaceRoots() {
+		if filepath.Clean(r) == filepath.Clean(victim) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("opt-in must honor config roots")
+	}
+}
+
+// TestConfigRootsWideningAttackDenied is the F-CRIT end-to-end pin: a server
+// started inside the attacker repo refuses a governed tool call targeting
+// the config-named victim root. Before the fix this exact shape landed a
+// kern_apply write in the victim tree with isError:false.
+func TestConfigRootsWideningAttackDenied(t *testing.T) {
+	attacker := mcpProject(t)
+	victim := t.TempDir()
+	writeProjectConfig(t, attacker, `{"mcp": {"roots": ["`+victim+`"]}}`)
+	t.Setenv("KERN_MCP_ROOTS", "")
+	t.Setenv("KERN_ROOTS", "")
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "")
+	config.Reset()
+	defer config.Reset()
+	defer chdir(t, attacker)()
+
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	if _, err := s.CallToolGoverned(context.Background(), "kern_search", map[string]any{"root": victim, "query": "Greet"}); err == nil {
+		t.Fatal("server started in the attacker repo must refuse the config-named victim root (F-CRIT)")
+	}
+	// Control: the server's own root (the startup cwd) still works.
+	if _, err := s.CallToolGoverned(context.Background(), "kern_search", map[string]any{"root": attacker, "query": "Greet"}); err != nil {
+		t.Fatalf("the server's own startup cwd must remain served, got: %v", err)
 	}
 }

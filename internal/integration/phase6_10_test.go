@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/eval"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/skills"
@@ -71,7 +72,7 @@ func testEgress(t *testing.T) {
 	}
 
 	// Audit log carries the egress policy decisions (pending + allowed).
-	var egressEntries []governance.AuditEntry
+	var egressEntries []govaudit.AuditEntry
 	for _, e := range fw.AuditLog().All() {
 		if e.Policy == "egress" {
 			egressEntries = append(egressEntries, e)

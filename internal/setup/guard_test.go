@@ -35,7 +35,25 @@ func writeGuardScriptFile(t *testing.T) string {
 // timeout is forced low so any residual prompt path finishes fast.
 func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 	t.Helper()
+	return runGuardInDir(t, script, "", stdin, env)
+}
+
+// runGuardInDir runs the guard with an explicit CWD (empty = the test's CWD).
+// It is how hermetic cases prove the guard resolves command paths against the
+// caller's working directory, not the repository root.
+func runGuardInDir(t *testing.T, script, dir, stdin string, env []string) (int, string) {
+	t.Helper()
+	code, _, stderr := runGuardOutput(t, script, dir, stdin, env)
+	return code, stderr
+}
+
+// runGuardOutput is runGuardInDir plus the served stdout.
+func runGuardOutput(t *testing.T, script, dir, stdin string, env []string) (int, string, string) {
+	t.Helper()
 	cmd := exec.Command("sh", script)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stdin = strings.NewReader(stdin)
 	detachCmd(cmd)
 	// KERN_GUARD_ASSUME_KERN=1: the unit tests exercise the governed paths, so
@@ -45,8 +63,12 @@ func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 	// that must never land in the real ~/.kern/audit/bypass.jsonl); tests that
 	// assert on the audit trail pass HOME explicitly, which wins (last entry
 	// in the env list).
-	cmd.Env = append(os.Environ(), append([]string{"KERN_GUARD_CONFIRM_TIMEOUT=1", "KERN_GUARD_ASSUME_KERN=1", "HOME=" + t.TempDir()}, env...)...)
-	var stderr bytes.Buffer
+	// KERN_DAEMON=0: the guard drives `kern compact`/`kern exec`, and a daemon
+	// spawned from a test would outlive it. The serve path must be correct
+	// without a warm daemon anyway.
+	cmd.Env = append(os.Environ(), append([]string{"KERN_GUARD_CONFIRM_TIMEOUT=1", "KERN_GUARD_ASSUME_KERN=1", "KERN_DAEMON=0", "HOME=" + t.TempDir()}, env...)...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	code := 0
@@ -57,7 +79,7 @@ func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 		}
 		code = ee.ExitCode()
 	}
-	return code, stderr.String()
+	return code, stdout.String(), stderr.String()
 }
 
 // TestKernGuardAllowOnceConsume pins the shell-guard side of the operator
@@ -195,7 +217,7 @@ func TestKernGuardScript(t *testing.T) {
 			// Regression: a KERN_BYPASS=1 string in the payload (e.g. a file
 			// path) must NOT bypass the guard — only the env var may.
 			name:     "KERN_BYPASS=1 in read path does not bypass",
-			stdin:    `{"tool_name":"Read","path":"/repo/docs/KERN_BYPASS=1-notes.md"}`,
+			stdin:    `{"tool_name":"Read","path":"/repo/docs/KERN_BYPASS=1-notes.go"}`,
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_compact_file",
@@ -424,6 +446,49 @@ func TestKernGuardScript(t *testing.T) {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("stderr missing %q: %q", want, stderr)
 				}
+			}
+		})
+	}
+}
+
+// TestKernGuardFreshProjectReadServed pins hermetic read serving: a project
+// with no .kern index and no warm daemon must still serve a CWD-relative file
+// read. The fresh-clone regression: the guard passed the token to
+// `kern compact` without a root, kern resolved it against the repository root,
+// the compact failed, and a legitimate read became a deny — a failure that
+// only appeared in a checkout without a warm index.
+func TestKernGuardFreshProjectReadServed(t *testing.T) {
+	script := writeGuardScriptFile(t)
+	bin := buildCurrentKern(t)
+	project := t.TempDir()
+	sub := filepath.Join(project, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(sub, "main.go")
+	if err := os.WriteFile(src, []byte("package sub\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(project, ".kern")); !os.IsNotExist(err) {
+		t.Fatalf("fixture is not hermetic: %s/.kern exists", project)
+	}
+	cases := []struct{ name, dir, cmd string }{
+		{"cwd-relative file", sub, "cat main.go"},
+		{"compound with passthrough", sub, "git status && cat main.go"},
+		{"root-relative file", project, "cat sub/main.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":%q}}`, tc.cmd)
+			code, stdout, stderr := runGuardOutput(t, script, tc.dir, stdin, []string{"KERN_BIN=" + bin})
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected no stderr, got %q", stderr)
+			}
+			if !strings.Contains(stdout, "package sub") && !strings.Contains(stdout, "Hello") {
+				t.Fatalf("file was not served; stdout = %q", stdout)
 			}
 		})
 	}

@@ -1204,8 +1204,13 @@ func TestWireCopilotWritesMCPConfig(t *testing.T) {
 	if kern == nil {
 		t.Fatalf("mcpServers.kern missing from copilot mcp-config.json:\n%s", b)
 	}
-	if kern["command"] != PortableMCPCommand() {
-		t.Errorf("mcpServers.kern command = %v, want %q", kern["command"], PortableMCPCommand())
+	// Global scope: the command must be absolute so GUI-launched Copilot (which
+	// does not inherit the shell PATH) can start the server.
+	if kern["command"] != GlobalMCPCommand() {
+		t.Errorf("mcpServers.kern command = %v, want %q", kern["command"], GlobalMCPCommand())
+	}
+	if env, _ := kern["env"].(map[string]any); len(env) != 0 {
+		t.Errorf("mcpServers.kern env = %v, want empty (KERN_ALLOW_EXEC must stay opt-in)", env)
 	}
 
 	// Hooks must still be wired, and the MCP config must NOT go to XDG.

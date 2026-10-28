@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -37,7 +37,7 @@ func TestTaskTransitionAudited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
 	}
-	var found *governance.AuditEntry
+	var found *govaudit.AuditEntry
 	for i := range entries {
 		if entries[i].Action == "task.transition" {
 			found = &entries[i]
@@ -67,7 +67,7 @@ func TestTaskTransitionAudited(t *testing.T) {
 func TestTaskTransitionAuditFailureDoesNotAbort(t *testing.T) {
 	root := auditTestRoot(t)
 	ts := NewTaskService(&testPlatform{root: root}, nil).WithAgentID("audit-agent")
-	ts.WithAuditLog(governance.NewAuditLog().WithStore(failingAuditStore{}))
+	ts.WithAuditLog(govaudit.NewAuditLog().WithStore(failingAuditStore{}))
 
 	task, err := ts.Create("audit failure test")
 	if err != nil {
@@ -167,7 +167,7 @@ func TestTaskTransitionAuditedRealPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
 	}
-	var transitions []governance.AuditEntry
+	var transitions []govaudit.AuditEntry
 	for _, e := range entries {
 		if e.Action == "task.transition" {
 			transitions = append(transitions, e)

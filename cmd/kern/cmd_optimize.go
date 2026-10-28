@@ -88,7 +88,7 @@ func runOptimize(cmd string, rest []string) {
 	// echoes known secret patterns (sk-proj-…, emails, …). The LLM path is
 	// left unchanged — its output is intentionally unmasked and readable.
 	if f.mask && (f.llm == "" || res.LLMSkipped != "") {
-		out = pii.Mask(out).Text
+		out = pii.MaskAll(out).Text
 	}
 	fmt.Println(out)
 	if res.FromCache {
@@ -278,7 +278,7 @@ func runLog(rest []string) {
 	// log compressor keeps lines verbatim, so --mask must never echo a known
 	// secret pattern even if a placeholder round-trip slipped.
 	if f.mask {
-		out = pii.Mask(out).Text
+		out = pii.MaskAll(out).Text
 	}
 	fmt.Println(out)
 	window := ""
@@ -433,8 +433,8 @@ func runSemcache(rest []string) {
 	}
 	switch sub {
 	case "clear":
-		ns := ""
-		if len(args) > 0 {
+		ns := f.namespace
+		if ns == "" && len(args) > 0 {
 			ns = args[0]
 		}
 		if err := semcache.Clear(ns); err != nil {
@@ -450,10 +450,13 @@ func runSemcache(rest []string) {
 			fmt.Printf("semcache: cleared %q\n", ns)
 		}
 	case "list":
-		if len(args) == 0 {
-			fatalUsage("usage: kern semcache list <prompt|log>")
+		ns := f.namespace
+		if ns == "" && len(args) > 0 {
+			ns = args[0]
 		}
-		ns := args[0]
+		if ns == "" {
+			fatalUsage("usage: kern semcache list [<prompt|log>] [--namespace N]")
+		}
 		entries, err := semcache.Entries(ns)
 		if err != nil {
 			fatal("semcache: %v", err)
@@ -500,14 +503,18 @@ func runSemcache(rest []string) {
 		fmt.Printf("  %-10s entries=%-4d hits=%-7d misses=%-7d evictions=%-4d saved=%.1f KB\n",
 			"total", tN, tH, tM, tE, float64(tS)/1024)
 	case "sim":
-		if len(args) != 2 {
-			fatalUsage("usage: kern semcache sim <textA> <textB>")
+		a, b := f.textA, f.textB
+		if a == "" || b == "" {
+			if len(args) != 2 {
+				fatalUsage("usage: kern semcache sim <textA> <textB>  (or --a A --b B)")
+			}
+			a, b = args[0], args[1]
 		}
 		if f.json {
-			printJSON(map[string]any{"similarity": semcache.Similarity(args[0], args[1])})
+			printJSON(map[string]any{"similarity": semcache.Similarity(a, b)})
 			return
 		}
-		fmt.Printf("similarity: %.3f\n", semcache.Similarity(args[0], args[1]))
+		fmt.Printf("similarity: %.3f\n", semcache.Similarity(a, b))
 	default:
 		st, err := semcache.Stats()
 		if err != nil {

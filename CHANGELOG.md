@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
 
+## [0.9.13] — 2026-10-28
+- **Background Daemon & Resident Index Serving**: Resident daemon proxying queries (`kern daemon`) with binary-namespaced sockets, 15-minute idle lifecycle, and hot in-memory index persistence.
+- **AST Reference Resolution (`kern refs`) & Adjacency Persistence**: AST-verified cross-file reference engine (`internal/refscan`), textual fallback indexing, caller-adjacency persistence, and type impact expansion to methods and constructors.
+- **Security & Red-Team Audit Hardening**: Operator-signed Ed25519 execution approvals (`kern approve --sign`), machine-keyed HMAC evidence seals, path-confined temporary execution sandboxes, and interpreter/eval bypass barriers.
+- **Guardrails Parity & Frictionless Read Serving**: Refined 3-tier read serving, allowlist null-redirect subshell executions, non-destructive in-tree operations, and unblocked clean workspace adoption.
+- **Windows First-Class Hardening**: Native PowerShell installer and audit (`scripts/windows-audit.ps1`), blocking CI qualification legs, platform shell command routing, and prefix-scoped uninstall (`--machine`).
+- **High-Performance Delta Indexing & MCP Trimming**: SQLite WAL snapshot isolation, append-based DeclarationID encoding, pre-commit hook speedup (15s → 2.4s), and MCP tool advertisement payload trimming.
+
 ## [0.9.12] — 2026-10-25
 - **Tool Surface Expansion & Unified Change Application**: Added native `kern apply` CLI and `kern_apply` MCP tool, expanding the default advertised surface to 32 tools with full catalog parity across CLI and MCP layers.
 - **Smart Guard Steering & Interactive Ask Protocol**: Transitioned from fail-closed command denials to 3-tier read serving, path-aware in-tree filesystem mutations, and an interactive human Ask Protocol (`kern guard hook`, `kern guard grant/pause`).
@@ -35,6 +43,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.13] - 2026-10-28
+
+### Added
+- **Resident Query Daemon (`cmd/kern/cmd_daemon.go`, `cmd/kern/daemon_proxy.go`)**: Added lightweight background resident daemon proxying CLI queries (`kern daemon`), sharing hot hydrated project index state across calls and reducing CLI dispatch latency.
+- **Reference Resolution Engine & `kern refs` (`cmd/kern/cmd_refs.go`, `internal/refscan`)**: Added `kern refs` command and `internal/refscan` package providing AST-accurate identifier reference scanning and same-file textual reference counting.
+- **Operator-Signed Approvals (`internal/approvalsign`, `internal/approvalcli`)**: Ed25519-signed operator execution approvals with interactive TTY passphrase prompting and verified keystore validation.
+- **Evidence Verification Seals & Re-Rooting (`internal/claims`, `internal/governance/machinemac.go`)**: Added machine-keyed HMAC evidence seals and gate-backed claims verification (`kern verify claims`).
+- **Windows Audit Pipeline (`scripts/windows-audit.ps1`, `.github/workflows/windows-audit.yml`)**: Added dedicated Windows audit and CI workflow verifying command routing, PowerShell installer lifecycle, and path handling.
+
+### Changed
+- **Performance & Delta Persistence**: Optimized caller adjacency index persistence, fast SQLite snapshotting, append-based `DeclarationID` encoding, and reduced pre-commit hook overhead from 15s down to 2.4s.
+- **MCP Surface Economy & Annotation Payload Diet**: Streamlined MCP `tools/list` schema and descriptions down under payload bounds while ratcheting risk annotations and parameter contracts.
+- **Guardrail Steering Refinements**: Relaxed read-only null-redirected shell invocations, permitted in-tree directory queries from caller working directory, and hardened git push interception.
+- **Scoped Uninstallation**: Lifecycle installer (`install.sh`, `install.ps1`) prefix-scopes uninstallation by default, requiring `--machine` to remove global configuration and secret keys.
+
+### Fixed
+- **Confinement & Concurrency**: Enforced project root confinement on `mcp.roots` overrides (`KERN_MCP_ALLOW_CONFIG_ROOTS`), closed symlink and nested temp write bypasses in sandbox runtime.
+- **Build & Platform Parity**: Repaired pure Go/nosqlite builds by moving delta helpers out of SQLite-tagged units, corrected Windows shell command execution string quoting, and eliminated Dart duplicate method indexing.
 
 ## [0.9.12] - 2026-10-25
 

@@ -17,6 +17,7 @@ func TestClassifyTask(t *testing.T) {
 		{"document the dispatch package", TaskDocumentation},
 		{"the build fails with a compile error", TaskBuildFailure},
 		{"refactor the planner", TaskRefactor},
+		{"change the signature of Foo to accept a context", TaskRefactor},
 		{"add support for sqlite", TaskAddFeature},
 		{"the login is slow", TaskPerformanceReview},
 		{"unrelated gibberish", TaskAddFeature},

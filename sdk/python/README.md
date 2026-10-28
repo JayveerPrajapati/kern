@@ -1,7 +1,12 @@
 # kern-sdk (Python)
 
-Thin, stdlib-only HTTP client for the kern-server REST API. No third-party
-dependencies (`urllib` + `json` only).
+> **Deprecated:** the HTTP `Client` below targeted the retired `kern-server`
+> REST API. The supported surface is the local `KernEngine` and the framework
+> adapters (see "Local Engine & RAG Framework Adapters"); for tool calls use MCP
+> (`kern mcp`). The client remains for source/contract compatibility only and
+> will fail against a current install.
+
+Stdlib-only (`urllib` + `json`); no third-party dependencies.
 
 ## Install
 
@@ -10,7 +15,10 @@ cd sdk/python
 pip install -e .
 ```
 
-## Usage
+## Usage (deprecated REST client)
+
+The `Client` calls `/v1/*` on the removed `kern-server`; it is shown for contract
+reference only.
 
 ```python
 from kern_sdk import Client

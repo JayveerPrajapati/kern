@@ -217,7 +217,7 @@ func (s *Server) filteredTools() []Tool {
 	if singleTool() {
 		for _, t := range tools {
 			if t.Name == "kern_meta" {
-				s.filtered = []Tool{t}
+				s.filtered = []Tool{t.WithDerivedAnnotations()}
 				return s.filtered
 			}
 		}
@@ -247,7 +247,8 @@ func (s *Server) filteredTools() []Tool {
 			}
 			out = append(out, t)
 		}
-		s.filtered = out
+		annotateTools(out)
+		s.filtered = slimIfRequested(out)
 		return s.filtered
 	}
 	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 6-tool middle set (deprecated;
@@ -284,8 +285,19 @@ func (s *Server) filteredTools() []Tool {
 		}
 		out = append(out, t)
 	}
-	s.filtered = out
+	annotateTools(out)
+	s.filtered = slimIfRequested(out)
 	return s.filtered
+}
+
+// annotateTools stamps the standard MCP annotations (derived from each tool's
+// risk metadata) onto every advertised tool in place (W5, 2026-10-26
+// black-box audit: hosts render readOnlyHint/destructiveHint/openWorldHint in
+// their confirmation UX).
+func annotateTools(out []Tool) {
+	for i := range out {
+		out[i] = out[i].WithDerivedAnnotations()
+	}
 }
 
 // toolPhase returns the catalog phase of a tool name ("" for unknown tools —

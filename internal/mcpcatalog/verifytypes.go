@@ -54,8 +54,9 @@ func VerifyTypesExec(types []string) bool {
 // valid only when it matches one of them; anything else (e.g. a number
 // coerced to "123") is rejected up front so a garbage types list can never
 // degrade into a vacuous "summary: PASS" run where every sub-check is
-// silently skipped.
-var VerifyTypesKnown = []string{"build", "test", "security", "architecture", "dependency", "reuse", "e2e", "static-analysis", "performance", "cve", "license", "secrets", "ci", "arch"}
+// silently skipped. "claims" is not an engine check: it runs the deterministic
+// claims gate (internal/claims) that proves the public product guarantees.
+var VerifyTypesKnown = []string{"build", "test", "security", "architecture", "dependency", "reuse", "e2e", "static-analysis", "performance", "cve", "license", "secrets", "ci", "arch", "claims"}
 
 // KnownVerifyType reports whether a token names a verification the engine can
 // run. It mirrors verification.Engine.Verify's substring dispatch exactly, so
@@ -90,6 +91,11 @@ func KnownVerifyType(t string) bool {
 	case strings.Contains(t, "perf"), strings.Contains(t, "bench"):
 		return true
 	case strings.Contains(t, "ci"):
+		return true
+	case strings.Contains(t, "claims"):
+		// The claims gate is deterministic and in-process (index, audit
+		// store, classifier, catalog) — it never shells out, so it stays
+		// usable without an exec allowlist.
 		return true
 	}
 	return false

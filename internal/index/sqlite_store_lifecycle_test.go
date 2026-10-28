@@ -18,7 +18,7 @@ func TestOpenSQLite_CreatesSchema(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	for _, table := range []string{
-		"meta", "symbols", "calls", "callers", "communities",
+		"meta", "symbols", "calls", "communities",
 		"inherits", "packages", "file_imports", "files", "symbols_fts",
 	} {
 		var n int

@@ -354,7 +354,7 @@ func RequestExecApproval(wf *ApprovalWorkflow, command string, toolName ...strin
 	// resumed. In-memory workflows (no store) skip the stamp — there is
 	// nothing on disk to forge.
 	if wf.store != nil {
-		stamp, serr := execApprovalStamp(ap)
+		stamp, serr := execApprovalStamp(ap, wf.store.RootID())
 		if serr != nil {
 			return nil, risk, fmt.Errorf("governance: exec approval %s could not be integrity-stamped: %w", ap.ID, serr)
 		}
@@ -389,7 +389,7 @@ func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 		if serr != nil {
 			return fmt.Errorf("governance: exec approval %q not in the persisted store: %w", approvalID, serr)
 		}
-		if !execApprovalMACValid(stored) {
+		if !execApprovalMACValid(stored, wf.store.RootID()) {
 			return fmt.Errorf("governance: exec approval %q failed integrity verification; command not run", approvalID)
 		}
 	}

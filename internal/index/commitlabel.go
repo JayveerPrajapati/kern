@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/json"
 	"log"
+	"os"
 )
 
 // RefreshCommitLabel opportunistically refreshes the recorded git_commit
@@ -85,6 +86,11 @@ func (ix *Index) persistIdentityLabel() error {
 			return err
 		}
 		if err := s.SetMeta("identity", string(data)); err == nil {
+			// The derived fast snapshot still carries the OLD label. Remove it
+			// so the next Load reads the refreshed identity from the store
+			// (the snapshot is rewritten by the next Save). Never rewrite it
+			// here: a metadata-only load has no Symbols and would poison it.
+			_ = os.Remove(binSnapshotPathFor(StorePath(ix.Root)))
 			return nil
 		} else {
 			// Fall back to the JSON cache exactly like Save does.

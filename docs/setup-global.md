@@ -5,6 +5,18 @@ supported agent. This page documents what the global surface covers, which
 agents are supported, how presence is detected, and what happens when a new
 agent is installed after kern.
 
+**The policy is the universal default, not a per-host opt-in.** The canonical
+rules text (`internal/agentwire/assets/AGENTS.md`) states that every agent,
+in every project and on every harness — Claude Code, Codex, Cursor, Gemini,
+Copilot, Qwen, Qoder, Kiro, Continue, Windsurf, Zed and opencode — uses kern
+and its `kern_*` tools first for file/code/log/build/docs work. Harnesses with
+hooks or plugins (opencode, Claude, Gemini, …) add enforcement on top; they
+never change the default. Only an explicit operator opt-out
+(`KERN_ENFORCE=0` / `KERN_BYPASS=1`, audited) exempts a session, and if the
+`kern_*` tools are absent the agent runs `kern setup` before falling back to
+built-ins. `TestAgentRulesUniversalDefault` pins this wording across the
+embedded asset and every tracked instruction copy.
+
 ## Scope of a run
 
 `kern setup` has four scopes; combine them freely.

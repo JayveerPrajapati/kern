@@ -75,10 +75,13 @@ jobs:
         run: go run ./cmd/kern verify --types security,architecture
 
   # A2: full (non-short) E2E gate. The reusable `test` job runs -short, which
-  # skips ~25 test functions (the 20-step vertical slice, acceptance matrix,
-  # replay/resume, 3/4 cicd governance-gate tests, all MCP
-  # interface-consistency tests). This job runs those suites for real,
-  # with the kern binary built from this checkout and KERN_REQUIRE_BINARY=1.
+  # skips 115 test functions (measured 2026-10-28 — the old "~25" count was
+  # stale): the 20-step vertical slice, acceptance matrix, replay/resume,
+  # tasklife slices, the CLI exit-contract proofs, and the MCP
+  # interface-consistency tests. This job runs the behaviour-critical suites
+  # for real, with the kern binary built from this checkout and
+  # KERN_REQUIRE_BINARY=1. The intel impact-budget and project index-wait
+  # tests stay nightly-only (they index whole repos and are machine-bound).
   #
   # The suites are independent (each builds its own kern and uses its own
   # temp dirs), so they run as a matrix in parallel. The former `blueprint`
@@ -96,6 +99,12 @@ jobs:
           - suite: loop+verification
             parallel: "2"
             packages: ./internal/loop/... ./internal/verification/...
+          - suite: tasklife
+            parallel: "3"
+            packages: ./internal/tasklife/...
+          - suite: guard+safety
+            parallel: "2"
+            packages: ./internal/guard/... ./internal/mutation/... ./internal/script/... ./internal/secscan/...
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -119,9 +128,9 @@ jobs:
   # fail open without kern and still refuse a force-push to main, and
   # `kern setup --remove` leaves nothing behind.
   #
-  # The Windows leg is non-blocking until its first full run has been triaged
-  # (this script has only run on macOS/Linux). Flip continue-on-error off once
-  # it is green.
+  # Windows is blocking: the 2026-10-28 adversarial audit fixes (Windows
+  # classifier, install.ps1 fallback, platform shell) must be proven on a real
+  # runner before the next release (P1-3).
   global-install-smoke:
     name: global install smoke (${{ matrix.os }})
     strategy:
@@ -129,7 +138,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 25
     defaults:
       run:
@@ -140,9 +148,8 @@ jobs:
         run: bash scripts/ci-global-smoke.sh
 
   # The packages the install work touches, on the OSes users actually run.
-  # macOS is blocking. Windows is non-blocking until its first full run has
-  # been triaged: these suites have only ever run on macOS/Linux, so failures
-  # there are expected to be test-portability gaps to fix, not regressions.
+  # macOS and Windows are both blocking (P1-3): a Windows regression must fail
+  # the PR instead of shipping on a non-blocking leg.
   platform-tests:
     name: scoped tests (${{ matrix.os }})
     strategy:
@@ -150,7 +157,6 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 40
     steps:
       - uses: ./.github/actions/go-env
@@ -161,6 +167,13 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: go test -short -timeout 20m ./cmd/kern/
+      # The CLI contract proofs are short-gated, so the -short run above never
+      # exercises them. Run just those two (the full cmd/kern non-short suite
+      # includes the installer e2e, which rewrites repo files by design).
+      - name: Test CLI contract (non-short, macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: go test -timeout 10m -run 'TestAuthorizeContextDeniedExitContract|TestPlanJSONHonored' ./cmd/kern/
 
   # The one required check. `if: always()` so it still runs (and fails) when a
   # needed job failed or was cancelled, instead of showing as "skipped" and

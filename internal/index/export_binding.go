@@ -65,17 +65,26 @@ func buildExportCatalog(ix *Index) *exportCatalog {
 		directories[filepath.ToSlash(filepath.Dir(symbol.File))] = true
 		catalog.byFullName[symbol.FullName()] = append(catalog.byFullName[symbol.FullName()], symbol)
 	}
+	pkgNames := make(map[string]string, len(ix.Pkgs))
+	for dir, pkg := range ix.Pkgs {
+		if pkg != nil && pkg.Name != "" {
+			pkgNames[filepath.ToSlash(dir)] = pkg.Name
+		}
+	}
 	for _, imports := range ix.ImportsByFile {
 		for _, imp := range imports {
 			path := strings.Trim(imp.Path, `"' `)
 			if _, cached := catalog.importDirs[path]; cached {
 				continue
 			}
-			directory := ""
-			for candidate := range directories {
-				if candidate != "." && (path == candidate || strings.HasSuffix(path, "/"+candidate)) && len(candidate) > len(directory) {
-					directory = candidate
-				}
+			directory := matchImportDirectory(path, directories)
+			if directory == "" {
+				// The module root is not necessarily the index root (a Go
+				// module under src/ or backend/): the import path then shares
+				// only a suffix with the repo-relative package directory.
+				// Match by package name + longest shared path suffix, and
+				// refuse to guess when two directories tie.
+				directory = matchImportByPackage(path, directories, pkgNames)
 			}
 			catalog.importDirs[path] = directory
 		}
@@ -83,6 +92,66 @@ func buildExportCatalog(ix *Index) *exportCatalog {
 	catalog.files = sortedModuleFiles(ix, catalog.byID)
 	catalog.names = declarationNames(catalog.byID)
 	return catalog
+}
+
+// matchImportDirectory resolves an import path against repo-relative package
+// directories by exact match or path suffix (the module-at-root case).
+func matchImportDirectory(path string, directories map[string]bool) string {
+	directory := ""
+	for candidate := range directories {
+		if candidate != "." && (path == candidate || strings.HasSuffix(path, "/"+candidate)) && len(candidate) > len(directory) {
+			directory = candidate
+		}
+	}
+	return directory
+}
+
+// matchImportByPackage resolves an import path whose module root is a
+// subdirectory of the index root. It requires the package name to equal the
+// import path's final segment (Go's package convention), then picks the
+// directory with the longest shared path suffix from the end. A tie between
+// two directories is ambiguous and stays unresolved — binding the wrong
+// package is worse than an unresolved edge.
+func matchImportByPackage(path string, directories map[string]bool, pkgNames map[string]string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	tail := parts[len(parts)-1]
+	if tail == "" {
+		return ""
+	}
+	best, bestSegments, ambiguous := "", 0, false
+	for candidate := range directories {
+		if candidate == "." || pkgNames[candidate] != tail {
+			continue
+		}
+		dirParts := strings.Split(candidate, "/")
+		maxSegments := len(dirParts)
+		if len(parts) < maxSegments {
+			maxSegments = len(parts)
+		}
+		matched := 0
+		for n := 1; n <= maxSegments; n++ {
+			if dirParts[len(dirParts)-n] != parts[len(parts)-n] {
+				break
+			}
+			matched = n
+		}
+		if matched == 0 {
+			continue
+		}
+		switch {
+		case matched > bestSegments:
+			best, bestSegments, ambiguous = candidate, matched, false
+		case matched == bestSegments && candidate != best:
+			ambiguous = true
+		}
+	}
+	if ambiguous {
+		return ""
+	}
+	return best
 }
 
 func (catalog *exportCatalog) roots(query string) []Symbol {

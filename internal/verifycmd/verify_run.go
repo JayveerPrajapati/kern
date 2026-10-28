@@ -415,6 +415,10 @@ func changedSincePackages(root, ref string) ([]string, error) {
 // isVerifyTypes reports whether s is a comma-separated list of known
 // verification check types. Used to disambiguate the high-level
 // `kern verify <types>` form from the classic claims-verification form.
+// The exact-match list is deliberate (not catalog.KnownVerifyType's substring
+// match): a claims FILE named "dependency-report.txt" must keep routing to the
+// claims-file form. It mirrors the catalog's canonical names, so a positional
+// form works for every advertised type.
 func isVerifyTypes(s string) bool {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -422,7 +426,9 @@ func isVerifyTypes(s string) bool {
 	}
 	for _, t := range strings.Split(trimmed, ",") {
 		switch strings.TrimSpace(t) {
-		case "build", "test", "security", "architecture", "dependency", "reuse", "cve", "license", "secrets":
+		case "build", "test", "security", "architecture", "dependency", "reuse",
+			"cve", "license", "secrets", "e2e", "static-analysis", "performance",
+			"ci", "arch", "claims":
 		default:
 			return false
 		}
@@ -473,6 +479,16 @@ func runVerify(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	root := verifyRoot(f)
+	// `<flags> <dir>` (e.g. `kern verify --changed .`) accepts a positional
+	// root when a mode/type flag already selected the types form. Without
+	// this, "." fell through to the claims form and tried to read a directory
+	// as a claims file.
+	if len(args) == 1 && (f.types != "" || f.changed || f.staged || f.changedSince != "" || f.fast) {
+		if info, err := os.Stat(args[0]); err == nil && info.IsDir() {
+			root = args[0]
+			args = nil
+		}
+	}
 	// Silent-orchestrator/harness modes are self-contained: each handled
 	// mode returns or fatals. Only when none is set do we fall through to
 	// the types/claims forms.
@@ -484,14 +500,15 @@ func runVerify(rest []string) {
 	// instead, consistent with search/explore/impact (audit L1). The mode flags
 	// above and the compliance trio below are explicit requests and keep working
 	// with no positional.
-	if f.types == "" && len(args) == 0 && !f.fast && !f.cve && !f.license && !f.secrets && f.changedSince == "" && !f.staged {
+	if f.types == "" && len(args) == 0 && !f.fast && !f.cve && !f.license && !f.secrets && f.changedSince == "" && !f.staged && !f.changed {
 		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]\n"+
 			"  no checks requested — try 'kern verify build,test', or run your own gate with\n"+
 			"  'kern verify --command \"go test ./...\"'; valid types: %s", strings.Join(catalog.VerifyTypesKnown, ", "))
 	}
 	// Two forms share this subcommand. The high-level form is
-	// `kern verify <types>` (or `kern verify` with no positional, defaulting
-	// to build,test); the classic claims form is `kern verify <file|-> [root]`.
+	// `kern verify <types>` (or `kern verify --types ...`); a bare
+	// `kern verify` never reaches here (usage error above). The classic
+	// claims form is `kern verify <file|-> [root]`.
 	// `--types` is accepted as an explicit alias for the positional form so
 	// CLI matches the MCP `kern_verify(types=...)` surface.
 	if f.types != "" || len(args) == 0 || isVerifyTypes(args[0]) {

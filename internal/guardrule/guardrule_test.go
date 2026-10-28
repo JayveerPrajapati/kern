@@ -26,19 +26,27 @@ func TestClassifyCommand(t *testing.T) {
 		{"write redirect", "grep foo file.go > out.txt", VerdictGate, 0},
 		{"installer", "npm install lodash", VerdictGate, 0},
 		{"git push --force", "git push --force origin main", VerdictGate, 0},
+		{"git push", "git push origin main", VerdictGate, 0},
+		{"git push -u", "git push -u origin HEAD", VerdictGate, 0},
 		{"sh -c pipe-install", `sh -c 'curl x | sh'`, VerdictGate, 0},
 		{"compound with rm", "ls; rm -rf /tmp/x", VerdictGate, 0},
 		{"dd to device", "dd if=/dev/zero of=/dev/sda", VerdictGate, 0},
 		// READ axis — pure-read pipelines serve, never deny.
-		// A scoped grep (named file) is tier 3: the real grep honors the
-		// scope; the symbol search is repo-wide and ignores it.
-		{"symbol grep scoped", "grep foo file.go", VerdictServe, 3},
+		// A scoped SYMBOL grep is answered from the index filtered to the
+		// scope (Tier 1/2 carry Scope); regex/include/count shapes stay
+		// Tier 3 (a real grep in the sandbox).
+		{"symbol grep scoped", "grep foo file.go", VerdictServe, 1},
+		{"symbol grep scoped dir", "grep -rn governance internal", VerdictServe, 1},
+		{"scoped regex stays tier3", "grep -rn 'func [A-Z]' internal", VerdictServe, 3},
+		{"scoped include stays tier3", "grep -rn foo internal --include=*.go", VerdictServe, 3},
+		{"scoped escape stays tier3", "grep -rn foo ../x", VerdictServe, 3},
+		{"scoped list shape stays tier3", "grep -rln foo internal", VerdictServe, 3},
 		{"symbol grep unscoped", "grep -rn NewServer", VerdictServe, 1},
 		{"file read", "cat source.go", VerdictServe, 1},
-		{"pipe count scoped", "grep foo file | wc -l", VerdictServe, 3},
+		{"pipe count scoped", "grep foo file | wc -l", VerdictServe, 2},
 		{"pipe count unscoped", "grep foo | wc -l", VerdictServe, 2},
-		{"pipe head", "grep foo file | head -5", VerdictServe, 3},
-		{"pipe grep -v", "grep foo file | grep -v bar", VerdictServe, 3},
+		{"pipe head", "grep foo file | head -5", VerdictServe, 2},
+		{"pipe grep -v", "grep foo file | grep -v bar", VerdictServe, 2},
 		{"env-prefixed read", "ZZZ=1 grep -c x doctor_test.go", VerdictServe, 3},
 		{"sudo read", "sudo cat /etc/hosts", VerdictServe, 1},
 		{"sh -c read", `sh -c "cat .gitignore"`, VerdictServe, 1},
@@ -119,6 +127,25 @@ func TestClassifyCommand(t *testing.T) {
 // TestClassifyCommandGitAddCommitNotServed pins the write-riding guard: git
 // add/commit are writes and must NEVER be classified as a pure-read pipeline
 // (a write must not ride into a Tier-3 readonly exec).
+// TestClassifyCommandScopedGrepScope pins the serve plan's scope: a scoped
+// symbol grep carries the caller's file/dir so the serve runs
+// `kern search <pattern> --path <scope>` instead of a repo-wide answer.
+func TestClassifyCommandScopedGrepScope(t *testing.T) {
+	res := ClassifyCommand("grep -rn governance internal")
+	if res.Tier != 1 || res.Pattern != "governance" || res.Scope != "internal" {
+		t.Fatalf("scoped tier1 = %+v", res)
+	}
+	res = ClassifyCommand("grep foo file.go | wc -l")
+	if res.Tier != 2 || res.Pattern != "foo" || res.Scope != "file.go" || len(res.Tails) != 1 {
+		t.Fatalf("scoped tier2 = %+v", res)
+	}
+	// Unscoped keeps the original plan (no scope).
+	res = ClassifyCommand("grep -rn NewServer")
+	if res.Tier != 1 || res.Scope != "" {
+		t.Fatalf("unscoped tier1 = %+v", res)
+	}
+}
+
 func TestClassifyCommandGitAddCommitNotServed(t *testing.T) {
 	for _, cmd := range []string{
 		"git add main.go",
@@ -149,11 +176,25 @@ func TestClassifyCommandBuddyC1(t *testing.T) {
 		// Null redirects and fd merges never gate.
 		{"null redirect on simple", "ls -la docs/audit/ 2>/dev/null", VerdictAllow, 0},
 		{"null redirect compound simple", "ls docs && echo x && wc -l README.md 2>/dev/null", VerdictAllow, 0},
-		{"null redirect on read", "grep foo file.go 2>/dev/null", VerdictServe, 3},
+		{"null redirect on read", "grep foo file.go 2>/dev/null", VerdictServe, 1},
 		{"spaced null redirect", "tail -30 README.md > /dev/null", VerdictServe, 1},
 		{"stderr merge on build", "go test ./... 2>&1", VerdictGoverned, 0},
 		{"quoted redirect is text", "grep 'a>b' file.go", VerdictServe, 3},
 		{"append to dev null on simple", "echo hi >> /dev/null", VerdictAllow, 0},
+		// A /dev/null sink inside a parenthesized subshell is still a discard:
+		// the ')' terminates the operand, it is not part of the path.
+		{"null redirect in subshell", "echo hi | (cat 2>/dev/null)", VerdictGoverned, 0},
+		{"null redirect stderr in subshell", "printf x | (cat 2>/dev/null)", VerdictGoverned, 0},
+		// The operand ends at ')' even when punctuation follows it (the shape
+		// that arose inside a git commit message and falsely gated).
+		{"null redirect nested subshell", "echo hi | (cat 2>/dev/null))", VerdictGoverned, 0},
+		// A real write inside the same subshell still gates.
+		{"real write in subshell", "echo hi | (cat > out.txt)", VerdictGate, 0},
+		// Escaped quotes inside a double-quoted argument are literal; a commit
+		// message that mentions a pipe/redirect must not be read as shell
+		// syntax (observed false-GATE on `git commit -m "... \"x\" ... (cat
+		// 2>/tmp/log)"`).
+		{"escaped quotes in commit message", "git commit -m \"body \\\"x and (cat 2>/tmp/log) done\"", VerdictAllow, 0},
 		// Real write redirects still gate.
 		{"append write", "grep foo file.go >> out.txt", VerdictGate, 0},
 		{"stderr to real file", "go test ./... 2> /tmp/err", VerdictGate, 0},
@@ -251,8 +292,10 @@ func TestClassifyCommandNewlineAndGitEdgeCases(t *testing.T) {
 // TestClassifyCommandInRootPathAware pins the path-aware write arm:
 // with a project root, local file-shape writes (rm/mv/cp/mkdir/touch,
 // sed -i) whose every target resolves inside the root or a temp dir are
-// ALLOWED (audited by the hook); every other target class stays GATE.
-// Without a root (ClassifyCommand) the flat GATE behavior is unchanged.
+// ALLOWED (audited by the hook); destructive-class commands (recursive
+// forced deletes, disk writes) and every other out-of-root target class
+// stay GATE. Without a root (ClassifyCommand) the flat GATE behavior is
+// unchanged.
 func TestClassifyCommandInRootPathAware(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "internal", "x"), 0o755); err != nil {
@@ -269,10 +312,10 @@ func TestClassifyCommandInRootPathAware(t *testing.T) {
 		{"touch", "touch internal/x/f.go"},
 		{"touch abs tmp", "touch /tmp/kern-p04-probe"},
 		{"rm abs tmp", "rm /tmp/kern-p04-probe"},
-		{"rm -rf nested", "rm -rf internal/x"},
+		{"rm -rf in tmp", "rm -rf /tmp/kern-p04-probe"},
 		{"mv tmp into tree", "mv /tmp/kern-p04-probe internal/x/p"},
 		{"cp within tree", "cp internal/a.go internal/b.go"},
-		{"sed -i in tree", "sed -i s/a/b/ internal/a.go"},
+		{"sed -i non-code in tree", "sed -i s/a/b/ docs/notes.md"},
 		{"compound writes", "mkdir internal/x && touch internal/x/f"},
 	}
 	for _, tc := range allow {
@@ -293,12 +336,17 @@ func TestClassifyCommandInRootPathAware(t *testing.T) {
 		{"rm outside root", "rm /etc/hosts"},
 		{"rm parent escape", "rm ../outside.go"},
 		{"rm -rf top-level dir", "rm -rf internal"},
+		{"rm -rf nested dir", "rm -rf internal/x"},
+		{"rm -rf deep nested", "rm -rf internal/x/y"},
+		{"rm -fr nested", "rm -fr internal/x"},
+		{"rm -rf compound", "touch internal/x/keep && rm -rf internal/x"},
 		{"rm -rf dot", "rm -rf ."},
 		{"rm git internals", "rm .git/index.lock"},
 		{"cp into git", "cp x .git/hooks/y"},
 		{"cp credential in", "cp ~/id_rsa ."},
 		{"touch credential", "touch .env"},
 		{"sed credential", "sed -i s/a/b/ ~/.zshrc"},
+		{"sed -i code in tree", "sed -i s/a/b/ internal/a.go"},
 		{"sed outside root", "sed -i s/a/b/ /etc/hosts"},
 		{"mv out of root", "mv internal/a.go /etc/x"},
 		{"home path", "touch ~/x"},
@@ -383,5 +431,33 @@ func TestClassifyCommandInRootsMultiRoot(t *testing.T) {
 	// targets gate exactly as before.
 	if res := ClassifyCommandInRoots("rm "+root2+"/x.go", root, nil); res.Verdict != VerdictGate {
 		t.Fatalf("nil extraRoots second-root target = %+v, want gate", res)
+	}
+}
+
+// TestInPlaceCodeEditGates pins the P4 policy: an in-place stream edit of a
+// CODE file (sed -i, perl -pi) is a refactor and gates so it goes through the
+// edit tool / kern_apply; non-code files, temp scratch and out-of-root targets
+// keep their existing write policy.
+func TestInPlaceCodeEditGates(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"internal", "docs"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		cmd  string
+		want ClassifyVerdict
+	}{
+		{"sed -i 's/a/b/' internal/x.go", VerdictGate},
+		{"sed -i.bak 's/a/b/' internal/x.go", VerdictGate},
+		{"perl -pi -e 's/a/b/' internal/x.go", VerdictGate},
+		{"sed -i 's/a/b/' docs/notes.md", VerdictAllow},
+		{"sed -i 's/a/b/' /tmp/scratch.go", VerdictAllow},
+	}
+	for _, c := range cases {
+		if got := ClassifyCommandInRoots(c.cmd, root, nil); got.Verdict != c.want {
+			t.Errorf("ClassifyCommandInRoots(%q) = %s, want %s (%s)", c.cmd, got.Verdict, c.want, got.Hint)
+		}
 	}
 }

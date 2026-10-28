@@ -24,7 +24,7 @@ const (
 // its own (no telemetry, no phoning home), but two opt-in fetch paths reach
 // URLs the caller explicitly names — kern_doc action=fetch and kern_evidence
 // bundle urls.
-const instructions = "kern is a fully local-first code context engine. It requires no API keys and makes no network calls of its own — no telemetry, no phoning home: every tool runs against a prebuilt, per-project symbol index. The only network use is fetching a URL you explicitly name (kern_doc action=fetch, kern_evidence url bundles). Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified."
+const instructions = "kern is a fully local-first code context engine. It requires no API keys and makes no network calls of its own — no telemetry, no phoning home: every tool runs against a prebuilt, per-project symbol index. The only network use is fetching a URL you explicitly name (kern_doc action=fetch, kern_evidence url bundles). Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified. START HERE: call kern_buddy once for an unfamiliar repo; use kern_explore/kern_search instead of reading or grepping files; call kern_impact before editing (for a type it aggregates that type's methods and constructors); use kern_verify for build/test/lint; use kern_meta to route a natural-language request. Prefer these tools over built-in file/shell tools, and fall back only when a kern tool returns an error."
 
 // serverVersion is stamped at build time via -ldflags "-X main.version=...";
 // the binary entry points forward it through SetServerVersion. Defaults to
@@ -58,35 +58,53 @@ func SetServerVersion(v string) {
 }
 
 // workspaceRootsFromEnv returns the roots configured via the documented
-// confinement variables (KERN_MCP_ROOTS, the historical KERN_ROOTS alias, and
-// mcp.roots in .kern/config.json), deduplicated, in no particular order. It
-// is the env-scan half of defaultWorkspaceRoots (process-cwd fallback) — the
-// single-root stdio MCP server's workspace. Root-bound servers
-// (workspaceRootsForRoot) deliberately do NOT use it: per-App isolation.
+// confinement variables (KERN_MCP_ROOTS and the historical KERN_ROOTS alias),
+// deduplicated, in no particular order. It is the env-scan half of
+// defaultWorkspaceRoots (process-cwd fallback) — the single-root stdio MCP
+// server's workspace. Root-bound servers (workspaceRootsForRoot) deliberately
+// do NOT use it: per-App isolation.
+//
+// SECURITY (2026-10-26 black-box audit, F-CRIT): mcp.roots in .kern/config.json
+// is project-supplied data and is honored ONLY when the operator opted in
+// with KERN_MCP_ALLOW_CONFIG_ROOTS=1 — see config.EnvConfinementRoots. When a
+// repo ships mcp.roots without the opt-in they are ignored and the notice is
+// recorded for the initialize instructions (in addition to the stderr
+// warning), so an operator starting the server in an untrusted repo sees why
+// its config did not widen the confinement.
 func workspaceRootsFromEnv() []string {
-	var roots []string
-	seen := map[string]bool{}
-	split := func(s string) []string {
-		return strings.FieldsFunc(s, func(r rune) bool { return r == ':' || r == ',' })
+	roots, notice := config.EnvConfinementRoots()
+	if notice != "" {
+		configRootsNotice.Store(notice)
 	}
-	add := func(r string) {
-		r = strings.TrimSpace(r)
-		if r == "" {
-			return
-		}
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range roots {
 		abs := resolveAbs(r)
 		if !seen[abs] {
 			seen[abs] = true
-			roots = append(roots, abs)
+			out = append(out, abs)
 		}
 	}
-	for _, r := range config.StringsSplit("", "KERN_MCP_ROOTS", "mcp.roots", nil, split) {
-		add(r)
+	return out
+}
+
+// configRootsNotice holds the F-CRIT notice recorded by
+// workspaceRootsFromEnv when project-supplied mcp.roots were ignored; the
+// initialize handler appends it to the server instructions.
+var configRootsNotice atomic.Value
+
+// serverInstructions returns the initialize-result instructions, appending
+// the F-CRIT config-roots notice when project-supplied mcp.roots were
+// ignored (MCP hosts surface instructions to the operator, so the reason the
+// config did not apply travels with the session, not just the server's
+// stderr).
+func serverInstructions() string {
+	if v := configRootsNotice.Load(); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			return instructions + " NOTE: " + s
+		}
 	}
-	for _, r := range config.StringsSplit("", "KERN_ROOTS", "mcp.roots", nil, split) {
-		add(r)
-	}
-	return roots
+	return instructions
 }
 
 // defaultWorkspaceRoots returns the roots tools may target. KERN_MCP_ROOTS is

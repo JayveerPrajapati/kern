@@ -13,6 +13,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/explorebudget"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/mermaid"
 	"github.com/JayveerPrajapati/kern/internal/topology"
 	"github.com/JayveerPrajapati/kern/internal/twin"
 	"io/fs"
@@ -125,7 +126,7 @@ func runGraph(rest []string) {
 		return
 	}
 	if f.mermaid {
-		out := ix.Mermaid(symbol)
+		out := mermaid.Render(ix, symbol)
 		// Mermaid renders "" for an unresolvable symbol (no error return),
 		// so an empty render is the no-symbol-found signal: fail with the
 		// same did-you-mean message as the other graph paths instead of
@@ -877,7 +878,7 @@ func runExplore(rest []string) {
 			return
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "file: %s (%d symbols)\n", rel, len(syms))
+		fmt.Fprintf(&b, "file: %s (%d symbols)\n", cliout.DisplayPath(rel), len(syms))
 		for _, s := range syms {
 			fmt.Fprintf(&b, "  %-10s %-7s %s:%d\n", s.Kind, s.Lang, s.Name, s.Line)
 		}
@@ -1145,12 +1146,33 @@ func indexedFile(ix *index.Index, root, arg string) (string, bool) {
 		}
 		joined := filepath.Join(root, cand)
 		if fi, err := os.Stat(joined); err == nil && !fi.IsDir() {
-			if rel, err := filepath.Rel(root, joined); err == nil {
+			if rel, err := filepath.Rel(root, joined); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return rel, true
 			}
 		}
-	} else if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
-		return cand, true
+	} else {
+		// root defaults to ".": the on-disk fallback must stay confined to
+		// the project root, or any existing out-of-root file (/dev/null,
+		// ../../etc/passwd) renders "file: … (0 symbols)" exit 0 — a
+		// misleading success for a path the index never covered.
+		base, err := filepath.Abs(".")
+		if err == nil {
+			p := cand
+			if !filepath.IsAbs(p) {
+				if p, err = filepath.Abs(p); err != nil {
+					p = ""
+				}
+			} else {
+				p = filepath.Clean(p)
+			}
+			if p != "" {
+				if rel, rerr := filepath.Rel(base, p); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+						return rel, true
+					}
+				}
+			}
+		}
 	}
 	if hits := byBase[filepath.Base(cand)]; len(hits) == 1 {
 		return hits[0], true

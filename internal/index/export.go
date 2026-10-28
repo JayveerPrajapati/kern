@@ -258,6 +258,13 @@ func resolveName(ix *Index, name string) (Symbol, bool) {
 		if matches := ix.ResolveDottedMethod(qualifier, method); len(matches) > 0 {
 			return matches[0], true
 		}
+		// Package-qualified type method ("logger.Logger.Info"): the last
+		// qualifier segment is the receiver type.
+		if j := strings.LastIndexByte(qualifier, '.'); j >= 0 {
+			if matches := ix.ResolveDottedMethod(qualifier[j+1:], method); len(matches) > 0 {
+				return matches[0], true
+			}
+		}
 		// Package-qualified Go target ("index.Load"): match the qualifier to
 		// the directory that actually defines the bare-name symbol. Unlike the
 		// receiver path above, this is a directory match, not a receiver
@@ -270,9 +277,39 @@ func resolveName(ix *Index, name string) (Symbol, bool) {
 					return d, true
 				}
 			}
+			// Go package names need not equal their directory basename
+			// (package server in src/servers): match the qualifier against
+			// the recorded package NAME, only when that name is unique.
+			if dir, ok := ix.packageDirByName(pkg); ok {
+				for _, d := range defs {
+					if filepath.ToSlash(filepath.Dir(d.File)) == dir {
+						return d, true
+					}
+				}
+			}
 		}
 	}
 	return Symbol{}, false
+}
+
+// packageDirByName returns the single package directory whose declared Go
+// package name equals name. A name shared by two directories is ambiguous and
+// stays unresolved — binding the wrong package is worse than a miss.
+func (ix *Index) packageDirByName(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	found := ""
+	for dir, pkg := range ix.Pkgs {
+		if pkg == nil || pkg.Name != name {
+			continue
+		}
+		if found != "" && found != dir {
+			return "", false
+		}
+		found = filepath.ToSlash(dir)
+	}
+	return found, found != ""
 }
 
 // edgeConfidenceFor returns the parser's per-edge confidence (high/medium/

@@ -15,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -57,7 +59,14 @@ type Finding struct {
 var (
 	reDynamicSQL = regexp.MustCompile(`(?i)(?:\.(?:Query|QueryRow|Exec|Prepare|Execute))\(\s*(?:fmt\.Sprintf|fmt\.Fprintf|fmt\.Errorf|strings\.Join|strings\.ReplaceAll|map\[|\[\]any\{|"(?:[^"\\]|\\.)*"\s*\+)`)
 
-	reCommandInjection = regexp.MustCompile(`(?i)(?:exec\.Command(?:Context)?|CmdContext|spawn)\s*\([^)]*["']?(?:sh|bash|zsh|cmd|powershell|pwsh)["']?\s*,\s*["']-c["']?[^)]*?\+|(?:system\(|popen\(|os\.system\(|exec\()\s*["'][^"']*["']\s*\+`)
+	// reCommandInjection targets a SHELL whose command string is built from
+	// variables (exec.Command(..., "sh", "-c", "rm "+x)) plus the classic
+	// system/popen sinks. The generic `exec(` alternative must not match a
+	// method call: `tx.Exec("DELETE FROM "+table)` is a SQL statement, and
+	// matching it produced a false "command-injection" critical next to the
+	// real sql-injection one (2026-10-27 self-scan). RE2 has no lookbehind, so
+	// the left context is spelled as (?:^|[^.\w]).
+	reCommandInjection = regexp.MustCompile(`(?i)(?:exec\.Command(?:Context)?|CmdContext|spawn)\s*\([^)]*["']?(?:sh|bash|zsh|cmd|powershell|pwsh)["']?\s*,\s*["']-c["']?[^)]*?\+|(?:^|[^.\w])(?:system\(|popen\(|os\.system\(|exec\()\s*["'][^"']*["']\s*\+`)
 
 	// reUnsafeHTTP matches HTTP client calls whose URL argument is not a
 	// string literal — a variable URL (env var, request param, config value)
@@ -70,6 +79,14 @@ var (
 	// or payload (token, URL, script) built from identifiers or
 	// concatenation. Literal-only invocations ("git", "status") are
 	// construction, not flow.
+	//
+	// Severity: INFO. exec.Command passes an argv straight to execve — there
+	// is no shell, so computed arguments cannot be interpolated into a
+	// command. Flagging every computed argv as a WARNING made the rule fire on
+	// ~all legitimate process spawning (9 hits on kern's own tree, all
+	// provably safe), which trains reviewers to ignore the gate. The blocking
+	// signal for command execution is command-injection above (a shell with a
+	// built string); this rule stays as a visible, non-blocking inventory.
 	reUnsafeExec = regexp.MustCompile(`(?i)exec\.Command(?:Context)?\s*\([^)]*(?:[a-zA-Z_][a-zA-Z0-9_]*\s*[,)]|\+)`)
 
 	reWeakCrypto = regexp.MustCompile(`(?i)\b(?:md5\.(?:New|Sum|NewHash)|sha1\.(?:New|Sum|NewHash)|DES\.(?:NewCipher)|RC4|digest\.MD5)\b`)
@@ -131,7 +148,7 @@ func init() {
 	rules = append(rules,
 		Rule{ID: "sql-injection", Severity: SeverityError, Summary: "dynamic SQL built from variables", RE: reDynamicSQL},
 		Rule{ID: "command-injection", Severity: SeverityError, Summary: "shell command built from variables", RE: reCommandInjection},
-		Rule{ID: "unsafe-exec", Severity: SeverityWarning, Summary: "command executed with variable arguments", RE: reUnsafeExec},
+		Rule{ID: "unsafe-exec", Severity: SeverityInfo, Summary: "command executed with variable arguments (argv — no shell, informational)", RE: reUnsafeExec},
 		Rule{ID: "unsafe-http", Severity: SeverityWarning, Summary: "HTTP request to a variable URL (env, param, or config value)", RE: reUnsafeHTTP},
 		Rule{ID: "unsafe-deserialization", Severity: SeverityWarning, Summary: "untrusted input deserialized into untyped/weak types", RE: reUnsafeDeserialization},
 		Rule{ID: "code-eval", Severity: SeverityInfo, Summary: "dynamic code execution (eval, pickle, unsafe yaml)", RE: reCodeEval},
@@ -160,8 +177,28 @@ func isLockfile(rel string) bool {
 // ScanFile runs every rule against one source file. rel is a root-relative
 // path used only for reporting.
 func ScanFile(rel string, src []byte) []Finding {
+	return scanFile(rel, src, false)
+}
+
+// ScanSecretFile runs ONLY the hardcoded-secret rules against one file. It is
+// the pass used for credential-bearing non-source files (.pem, .key, .p12,
+// .txt, id_rsa, …): a private key must be found without also reporting code
+// patterns that only make sense in source (P0-2, 2026-10-28 adversarial audit).
+func ScanSecretFile(rel string, src []byte) []Finding {
+	return scanFile(rel, src, true)
+}
+
+func scanFile(rel string, src []byte, secretsOnly bool) []Finding {
 	var findings []Finding
 	for _, r := range rules {
+		if secretsOnly && r.ID != "hardcoded-secret" {
+			continue
+		}
+		// PHONE is PII, never a security finding: skip the regex entirely
+		// instead of paying the match cost only to discard every hit below.
+		if r.Label == "PHONE" {
+			continue
+		}
 		for _, idx := range r.RE.FindAllIndex(src, -1) {
 			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
@@ -862,8 +899,8 @@ func maxLineLength(src []byte) int {
 // secrets that are not real findings. Walk errors are returned so an unreadable
 // tree can't silently produce a misleading "clean" result.
 func Scan(root string) ([]Finding, error) {
-	var findings []Finding
 	ign := ignore.Load(root)
+	var paths []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -891,7 +928,14 @@ func Scan(root string) ([]Finding, error) {
 		if ign.Ignored(rel) {
 			return nil
 		}
-		if !langparse.QuickExt(rel) && !isConfigFile(rel) || isTestFile(rel) {
+		if isTestFile(rel) {
+			return nil
+		}
+		// Candidate files are source, config, or credential-bearing material.
+		// The last class (.pem/.key/.p12/.txt/id_rsa/...) is scanned with the
+		// secret rules only; without it the most natural place to store a
+		// private key was invisible to the gate (P0-2).
+		if !langparse.QuickExt(rel) && !isConfigFile(rel) && !isSecretMaterialFile(rel) {
 			return nil
 		}
 		// Skip non-regular files (FIFOs, sockets, device nodes) to prevent blocking reads.
@@ -902,38 +946,45 @@ func Scan(root string) ([]Finding, error) {
 		if info, ierr := d.Info(); ierr == nil && info.Size() > 10*1024*1024 {
 			return nil
 		}
-		src, serr := os.ReadFile(path)
-		if serr != nil {
-			// An unreadable file must not silently vanish from the scan: a
-			// "clean" verdict would then hide an unscanned file. Record it as
-			// a warning so it surfaces without failing the whole check.
-			findings = append(findings, Finding{
-				File:     rel,
-				Rule:     "unreadable-file",
-				Severity: "warning",
-				Message:  fmt.Sprintf("file could not be read and was skipped: %v", serr),
-			})
-			return nil
-		}
-		// Skip minified JavaScript bundles (vendored libraries in static/
-		// dirs): they pack entire libraries into single lines thousands of
-		// characters long and routinely trip the hardcoded-secret detectors
-		// with bogus findings.
-		if strings.EqualFold(filepath.Ext(rel), ".js") && maxLineLength(src) > 2000 {
-			return nil
-		}
-		findings = append(findings, ScanFile(rel, src)...)
-		// Config files get an additional config-aware scan pass.
-		if isConfigFile(rel) {
-			findings = append(findings, ScanConfigFile(rel, src)...)
-		}
-		// Python files get an additional Python-aware scan pass.
-		if isPythonFile(rel) {
-			findings = append(findings, ScanPythonFile(rel, src)...)
-		}
+		paths = append(paths, path)
 		return nil
 	})
-	sort.Slice(findings, func(i, j int) bool {
+	if err != nil {
+		return nil, err
+	}
+	// Per-file regex work is CPU-bound and independent: serial scanning cost
+	// ~8 s for ~2k files on 8+ cores (the serial-scan regression). A bounded worker pool keeps
+	// the result deterministic by merging in walk order and sorting below.
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	perFile := make([][]Finding, len(paths))
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				perFile[i] = scanPath(root, paths[i])
+			}
+		}()
+	}
+	for i := range paths {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	var findings []Finding
+	for _, ff := range perFile {
+		findings = append(findings, ff...)
+	}
+	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].File != findings[j].File {
 			return findings[i].File < findings[j].File
 		}
@@ -942,7 +993,67 @@ func Scan(root string) ([]Finding, error) {
 		}
 		return findings[i].Rule < findings[j].Rule
 	})
-	return findings, err
+	return findings, nil
+}
+
+// ScanOne scans a single file or a directory. root is the reporting/project
+// base (the file's directory in single-file mode), so relative paths and the
+// suppression-registry lookup stay coherent. `kern sec <file>` uses this
+// instead of treating the file as a root directory (P0-2).
+func ScanOne(root, path string) ([]Finding, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if st.IsDir() {
+		return Scan(path)
+	}
+	return scanPath(root, path), nil
+}
+
+// scanPath runs every per-file scan pass for one candidate path. It owns the
+// read so the walk stays cheap and the reads parallelize.
+func scanPath(root, path string) []Finding {
+	rel, rerr := filepath.Rel(root, path)
+	if rerr != nil {
+		return nil
+	}
+	rel = filepath.ToSlash(rel)
+	src, serr := os.ReadFile(path)
+	if serr != nil {
+		// An unreadable file must not silently vanish from the scan: a
+		// "clean" verdict would then hide an unscanned file. Record it as
+		// a warning so it surfaces without failing the whole check.
+		return []Finding{{
+			File:     rel,
+			Rule:     "unreadable-file",
+			Severity: "warning",
+			Message:  fmt.Sprintf("file could not be read and was skipped: %v", serr),
+		}}
+	}
+	// Skip minified JavaScript bundles (vendored libraries in static/
+	// dirs): they pack entire libraries into single lines thousands of
+	// characters long and routinely trip the hardcoded-secret detectors
+	// with bogus findings.
+	if strings.EqualFold(filepath.Ext(rel), ".js") && maxLineLength(src) > 2000 {
+		return nil
+	}
+	secretOnly := isSecretMaterialFile(rel) && !langparse.QuickExt(rel) && !isConfigFile(rel)
+	var findings []Finding
+	if secretOnly {
+		findings = ScanSecretFile(rel, src)
+	} else {
+		findings = ScanFile(rel, src)
+		// Config files get an additional config-aware scan pass.
+		if isConfigFile(rel) {
+			findings = append(findings, ScanConfigFile(rel, src)...)
+		}
+		// Python files get an additional Python-aware scan pass.
+		if isPythonFile(rel) {
+			findings = append(findings, ScanPythonFile(rel, src)...)
+		}
+	}
+	return findings
 }
 
 // FilterBySeverity keeps only findings whose severity is in the allow list.
@@ -1039,6 +1150,25 @@ func isConfigFile(rel string) bool {
 	// Spring Boot's application.properties / application.yml by name.
 	base := strings.ToLower(filepath.Base(rel))
 	return strings.HasPrefix(base, "application")
+}
+
+// isSecretMaterialFile reports whether rel is a credential-bearing file that
+// is neither source nor config: key stores, certificates, PEM/text dumps, and
+// extension-less credential files (id_rsa, .netrc, ...). These are scanned
+// with the secret rules only, so a private key stored in the most natural
+// formats cannot hide from the gate (P0-2, 2026-10-28 adversarial audit).
+func isSecretMaterialFile(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".der",
+		".jks", ".keystore", ".ppk", ".asc", ".txt":
+		return true
+	}
+	switch strings.ToLower(filepath.Base(rel)) {
+	case "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+		".netrc", ".pgpass", ".htpasswd":
+		return true
+	}
+	return false
 }
 
 // isPythonFile reports whether the file is a Python source file, which

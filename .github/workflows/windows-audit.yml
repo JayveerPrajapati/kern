@@ -1,0 +1,23 @@
+name: windows-audit
+# On-demand Windows behavior qualification. Not a PR gate: the PR gate is
+# ci.yml (its Windows legs are blocking there). This workflow runs the
+# self-contained scripts/windows-audit.ps1 matrix plus the pure-Go short
+# suite, and its run log is the runtime evidence for the Windows findings.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  GOTOOLCHAIN: go1.27.2
+jobs:
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: ./.github/actions/go-env
+      - name: Windows behavior audit
+        shell: pwsh
+        run: ./scripts/windows-audit.ps1 -RepoPath .
+      - name: Pure-Go short suite
+        shell: pwsh
+        run: go test -short -tags "sqlite,notreesitter" ./...

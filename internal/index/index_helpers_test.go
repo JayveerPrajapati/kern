@@ -85,9 +85,6 @@ func TestQualifiedNameEntryPoints(t *testing.T) {
 	if g := ix.Graph("lib.Public"); !strings.Contains(g, "def ") || strings.Contains(g, "no symbol found") {
 		t.Fatalf("Graph(lib.Public) failed:\n%s", g)
 	}
-	if m := ix.Mermaid("lib.Public"); !strings.Contains(m, "flowchart LR") {
-		t.Fatalf("Mermaid(lib.Public) failed:\n%s", m)
-	}
 	if _, ok := ix.Neighborhood("lib.Public"); !ok {
 		t.Fatal("Neighborhood(lib.Public) not found")
 	}

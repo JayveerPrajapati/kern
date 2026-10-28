@@ -153,4 +153,6 @@ var shipped = map[string]bool{
 	"5c0e65ec3ef02ec9d4eda5f21a41f201f811fcfd9d65377d184b99c8feb7c2b3": true, // P0.3: host-neutral grep-arm reason (raw=true advice removed)
 	"45f38c4bd1df954c5a63fdf793c2aad254ed55df8d14a35f159a37b680053a8b": true, // P0.6: scoped grep (named file/dir target) serves tier 3, never the repo-wide symbol search
 	"343998d9f51c0e229d40027e19a67fc0bf6d6bbe241c773b629b6818dfa88374": true, // P1.4: Ask Protocol — GATE arm consults guard grant, deny teaches ask-wait-retry
+	"7425aaddf51a7db3b020c4953a6cb123b062ff3b5154fcf4a3f607fa4be285d9": true, // P1: scoped symbol greps serve from the index (`kern search --path`); adoption log default-on; every git push gates
+	"a88ec9802ce1fd58213d72ba3822108348cdd9dbb2d5b6477bee633a70b21314": true, // F3: CLI binary re-resolved per call — a pinned project-local bin/kern went stale after make release/clean and bricked every governed call (127, even raw)
 }

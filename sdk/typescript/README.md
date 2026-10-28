@@ -1,7 +1,11 @@
 # kern-sdk (TypeScript)
 
-Thin HTTP client for the kern-server REST API. Uses the built-in `fetch`
-(available in Node 18+ and browsers) — no axios dependency.
+> **Deprecated:** the HTTP `Client` below targeted the retired `kern-server`
+> REST API. The supported surface is the local `KernEngine` (see
+> `src/engine.ts`); for tool calls use MCP (`kern mcp`). The client remains for
+> source/contract compatibility only and will fail against a current install.
+
+Zero-dependency, using the built-in `fetch` (Node 18+ and browsers).
 
 ## Install & build
 
@@ -11,7 +15,10 @@ npm install
 npm run build   # emits dist/
 ```
 
-## Usage
+## Usage (deprecated REST client)
+
+The `Client` calls `/v1/*` on the removed `kern-server`; it is shown for contract
+reference only.
 
 ```ts
 import { Client, KernError } from "@kern/sdk";

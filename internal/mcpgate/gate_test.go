@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // TestGateBrokenSymlinkEscapeDenied pins the L-batch fix: a BROKEN symlink
@@ -35,6 +37,55 @@ func TestGateBrokenSymlinkEscapeDenied(t *testing.T) {
 	// (not via a symlink) is a normal write-new-file request.
 	if err := g.gatePath("root", filepath.Join(root, "fresh", "new.go")); err != nil {
 		t.Fatalf("a new file inside the root must be admitted, got: %v", err)
+	}
+}
+
+// TestGateFromEnvIgnoresConfigRootsWithoutOptIn pins F-CRIT (2026-10-26
+// black-box audit) at the gate layer: mcp.roots in .kern/config.json under
+// the process cwd does NOT widen the gate's allowed roots unless the
+// operator opted in with KERN_MCP_ALLOW_CONFIG_ROOTS=1. Before the fix the
+// config roots fed NewGateFromEnv directly, so a server started inside an
+// untrusted repo gated against attacker-named roots.
+func TestGateFromEnvIgnoresConfigRootsWithoutOptIn(t *testing.T) {
+	attacker := t.TempDir()
+	victim := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(attacker, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"mcp": {"roots": ["` + victim + `"]}}`
+	if err := os.WriteFile(filepath.Join(attacker, ".kern", "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_MCP_ROOTS", "")
+	t.Setenv("KERN_ROOTS", "")
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "")
+	config.Reset()
+	defer config.Reset()
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(attacker); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+
+	g := NewGateFromEnv()
+	if err := g.gatePath("root", filepath.Join(victim, "planted.go")); err == nil {
+		t.Fatal("gate must refuse the config-named victim root without the operator opt-in (F-CRIT)")
+	}
+	// Control: a path inside the startup cwd (the fail-closed default root)
+	// is still admitted.
+	if err := g.gatePath("root", filepath.Join(attacker, "inside.go")); err != nil {
+		t.Fatalf("a path inside the startup cwd must be admitted, got: %v", err)
+	}
+
+	// The operator opt-in restores the old widened behavior.
+	t.Setenv("KERN_MCP_ALLOW_CONFIG_ROOTS", "1")
+	g = NewGateFromEnv()
+	if err := g.gatePath("root", filepath.Join(victim, "planted.go")); err != nil {
+		t.Fatalf("opt-in must honor config roots, got: %v", err)
 	}
 }
 func TestGateErrorNamesAllowedRootsAndEscapes(t *testing.T) {

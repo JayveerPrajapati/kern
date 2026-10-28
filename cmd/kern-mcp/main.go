@@ -84,11 +84,23 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "TLS private key file (PEM) for the HTTP transport; env KERN_MCP_TLS_KEY")
 	longVer := flag.Bool("version", false, "print version and exit")
 	shortVer := flag.Bool("v", false, "shorthand for -version")
-	// Augment the default usage with the environment surface: an operator
-	// (or agent) bootstrapping from --help alone otherwise never learns the
-	// governance knobs exist (envelope audit F-5, 2026-10-25).
+	// Augment the default usage with the binary's purpose and the
+	// environment surface: an operator (or agent) bootstrapping from --help
+	// alone otherwise never learns what the server is or that the governance
+	// knobs exist (envelope audit F-5 2026-10-25; W3, 2026-10-26 black-box
+	// audit: the bare flag dump carried no purpose line).
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, `%[1]s — the kern MCP server.
+
+Serves kern's local code-intelligence tools (kern_explore, kern_search,
+kern_verify, ...) to MCP clients over stdio (the default; speak JSON-RPC on
+stdin/stdout) or HTTP (-http). Every call is answered from a prebuilt
+per-project symbol index — nothing leaves the machine.
+
+Usage: %[1]s [flags]
+
+Flags:
+`, os.Args[0])
 		flag.PrintDefaults()
 		fmt.Fprint(os.Stderr, `
 Governance and tuning (environment): KERN_MCP_ROOTS, KERN_MCP_PHASE,
@@ -159,6 +171,13 @@ KERN_ALLOW_EXEC — full reference: docs/mcp/protocol.md
 		}
 		tlsCfg := transport.TLSOptions(*tlsCert, *tlsKey)
 		if err := mcp.ServeHTTPContextWithTLS(ctx, listenAddr, tlsCfg); err != nil {
+			// os.Exit skips deferred functions — run the auto-selected
+			// socket-dir cleanup before exiting, or the temp dir leaks
+			// (W18, 2026-10-26 black-box audit; the graceful SIGTERM path
+			// returns nil and the deferred cleanup runs normally).
+			if cleanup != nil {
+				cleanup()
+			}
 			os.Exit(1)
 		}
 		return

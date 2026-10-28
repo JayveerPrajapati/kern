@@ -619,17 +619,11 @@ func (g *Graph) DirectCallersNames(symbol string, strict bool) []string {
 	seen := map[string]bool{}
 	seenNames := map[string]bool{}
 	var out []string
-	for _, e := range g.Edges {
-		if e.Kind != "calls" {
-			continue
-		}
-		// Callee endpoint: keep the edge only when it names the target.
-		// An unresolvable callee (e.g. a foreign qualifier matching no
-		// caller import) does not call the target and never attributes a
-		// caller.
-		if !g.calleeIsTarget(e, target) {
-			continue
-		}
+	for _, ei := range g.calleeIndex()[target] {
+		e := g.Edges[ei]
+		// The callee endpoint names the target by construction (calleeIndex
+		// is built from calleeCandidates, the per-edge target-independent
+		// form of calleeIsTarget), so only caller attribution remains.
 		// Caller endpoint: resolve to a node ID when possible — package-aware
 		// (same-package, then import-based against the callee's package) when
 		// the bare name is shared by several packages — and keep the RAW
@@ -712,189 +706,149 @@ func (g *Graph) foreignCallee(ref string) bool {
 	return false
 }
 
-// calleeIsTarget reports whether a "calls" edge's callee endpoint names the
-// target node. The direct/import-qualified resolution (ResolveEdgeEndpoint)
-// is tried first; when its caller pre-condition fails — the caller endpoint
-// is an ambiguous bare name, or the callee is a bare name with no qualifier
-// to link — two package-aware fallbacks run, anchored on the caller's own
-// package and on the target's own package respectively. A foreign or
-// unresolvable callee (e.g. "fmt.Println", "buf.Save") never matches.
-func (g *Graph) calleeIsTarget(e domain.Edge, target string) bool {
-	if e.Resolution != "" {
-		return e.To == target
-	}
-	// A foreign-qualified callee never names a local symbol, even when the
-	// local bare name is unique: the unique-simple-name resolution
-	// (resolveNodeID case 1) would otherwise attribute every stdlib/vendor
-	// method call sharing the name to the one project symbol that defines it
-	// (the Go stdlib http.DefaultClient.Do call in TestV1EventsStreamSSE was
-	// attributed to internal/mcp/highlevel.Do). Mirrors the index's
-	// TestForeignCalleeNeverAliasesLocalSymbol contract.
-	g.initIndex()
-	if g.foreignCallee(e.To) {
-		return false
-	}
-	// A bare callee that is a Go predeclared identifier ("append", "len")
-	// binds to the builtin unless the CALLER's package shadows it with a
-	// package-level definition (Go scoping; methods are never bare-callable,
-	// so a method named "append" never shadows the builtin). The
-	// project-wide unique-name resolution must not capture every builtin
-	// call for the one project symbol that happens to define the name
-	// (internal/gates Store.append): only a same-package receiver-less
-	// definition can be the callee.
-	if !strings.Contains(e.To, ".") && goPredeclared[e.To] {
-		if callerID, ok := g.resolveNodeID(e.From); ok {
-			if id, ok := g.resolveEndpointPackageAware(e.To, callerID, false, false); ok {
-				if tn, ok2 := g.byID[id]; ok2 && tn.Symbol != nil && tn.Symbol.Receiver != "" {
-					return false
-				}
-				return id == target
+// calleeIndex indexes every "calls" edge by the node IDs its callee endpoint
+// can name (calleeCandidates), built once per graph. DirectCallersNames then
+// scans only the edges incident to the queried target instead of re-resolving
+// every edge for each of a hub type's expanded roots.
+func (g *Graph) calleeIndex() map[string][]int {
+	g.calleeOnce.Do(func() {
+		m := make(map[string][]int, len(g.Edges))
+		for i, e := range g.Edges {
+			if e.Kind != "calls" {
+				continue
+			}
+			for _, id := range g.calleeCandidates(e) {
+				m[id] = append(m[id], i)
 			}
 		}
-		return false
+		g.calleeEdges = m
+	})
+	return g.calleeEdges
+}
+
+// calleeCandidates returns every node ID an edge's callee endpoint can name
+// under calleeIsTarget's resolution rules — the per-edge, target-independent
+// form of that predicate. The two MUST agree; TestCalleeCandidatesParity
+// sweeps every edge against every node, and the branch order below mirrors
+// calleeIsTarget's short-circuits (an authoritative branch ends the search).
+func (g *Graph) calleeCandidates(e domain.Edge) []string {
+	g.initIndex()
+	if e.Resolution != "" {
+		return []string{e.To}
 	}
-	// A bare callee from a receiver-qualified caller is resolved
-	// package-aware FIRST: inside a method, a bare reference resolves to the
-	// caller's own package — a package-level func in Go, or the receiver
-	// type's method in TS (the extractor records `this.get(...)` as a bare
-	// "get"). Without this the unique receiver-less definition project-wide
-	// (the internal/web helper "get") hijacks every Client method's call,
-	// and impact reports the TS Client.get callers against the web helper
-	// instead of the method. Every receiver-matched candidate is tried (the
-	// caller key "Client.audit" is pooled by the Python and TS SDKs); if a
-	// candidate's package resolves the callee, that resolution is
-	// authoritative for the edge.
-	if !strings.Contains(e.To, ".") {
-		if qual, bare := endpointParts(e.From); qual != "" && bare != "" {
+	if g.foreignCallee(e.To) {
+		return nil
+	}
+	bare := !strings.Contains(e.To, ".")
+	if bare && goPredeclared[e.To] {
+		if callerID, ok := g.resolveNodeID(e.From); ok {
+			if id, ok := g.resolveEndpointPackageAware(e.To, callerID, false, false); ok && !g.goMethod(id) {
+				return []string{id}
+			}
+		}
+		return nil
+	}
+	// A bare callee from a receiver-qualified caller resolves package-aware
+	// first; any resolution is authoritative for the edge.
+	if bare {
+		if qual, name := endpointParts(e.From); qual != "" && name != "" {
+			var ids []string
 			resolved := false
-			for _, cid := range g.nameIndex[bare] {
+			for _, cid := range g.nameIndex[name] {
 				n, ok := g.byID[cid]
 				if !ok || n.Symbol == nil || n.Symbol.Receiver != qual {
 					continue
 				}
 				if id, ok := g.resolveEndpointPackageAware(e.To, cid, false, false); ok {
 					resolved = true
-					if id == target {
-						// A BARE reference never names a method under GO
-						// SCOPING (a bare call binds to a package-level func
-						// or the builtin). The caller-anchored resolution of a
-						// bare callee must not land on a same-named method —
-						// the import-based fallback below would otherwise
-						// attribute the local closure "add" inside
-						// TaskService.impactCitedFiles to
-						// PlaybookStore.add. Go-only, mirroring the
-						// ResolveEdgeEndpoint branch: in TS/Python/Java a bare
-						// reference CAN name a method.
-						if tn, ok2 := g.byID[id]; ok2 && tn.Symbol != nil && tn.Symbol.Receiver != "" && tn.Symbol.Language == "go" {
-							continue
-						}
-						return true
+					if !g.goMethod(id) {
+						ids = append(ids, id)
 					}
 				}
 			}
 			if resolved {
-				return false
+				return dedupIDs(ids)
 			}
 		}
 	}
+	var out []string
 	if toID, ok := g.ResolveEdgeEndpoint(e.To, e.From); ok {
-		if toID == target {
-			// A BARE reference never names a method under GO SCOPING (a bare
-			// call binds to a package-level func or the builtin). The
-			// unique-simple-name resolution must not capture every bare
-			// call for a method that happens to be the only symbol of its
-			// name ("check" is unique because only Schema.check exists, but
-			// CheckBoundariesPrecise's bare check() is not a call to it).
-			// The rule is Go-only: in TS/Python/Java a bare reference CAN
-			// name a method (`this.greet()` is recorded bare "greet" by the
-			// extractor), so a foreign resolved method is a real callee
-			// (A5, Phase 5 — verified per-language by
-			// TestParityReportPerLanguage's guard model).
-			if !strings.Contains(e.To, ".") {
-				if tn, ok2 := g.byID[toID]; ok2 && tn.Symbol != nil && tn.Symbol.Receiver != "" && tn.Symbol.Language == "go" {
-					return false
-				}
-			}
-			return true
+		if !(bare && g.goMethod(toID)) {
+			out = append(out, toID)
 		}
-		// A node-ID direct-hit on the raw endpoint (a root-package symbol
-		// whose bare node ID collides with the reference — the CHANGELOG.md
-		// heading "Changelog" is a node whose ID is the bare name) resolved
-		// the callee WITHOUT disambiguation. That resolution is provisional:
-		// fall through to the package-aware fallbacks below, which anchor on
-		// the caller's package and only match when the endpoint genuinely
-		// names the target (the Go tests call package-local Changelog-style
-		// helpers, never the markdown heading). Any other (import-qualified /
-		// unique-name) resolution is authoritative: a callee that resolved
-		// to a different symbol does not call the target.
 		if _, direct := g.byID[e.To]; !direct {
-			return false
+			// An authoritative non-direct resolution: only toID can be the
+			// target, and it was excluded above when Go scoping forbids it.
+			return dedupIDs(out)
 		}
 	}
-	g.initIndex()
-	// A bare callee referenced from the caller's own package resolves to
-	// the same-package candidate (a package holds at most one definition of
-	// any name), so the target's own-package edges survive even though the
-	// callee is a bare ambiguous name ("AuthorizeContext" from
-	// authorize_test.go is the core, not the MCP wrapper).
 	if callerID, ok := g.resolveNodeID(e.From); ok {
-		if id, ok := g.resolveEndpointPackageAware(e.To, callerID, false, false); ok && id == target {
-			// A BARE reference never names a method under GO SCOPING (a bare
-			// call binds to a package-level func or the builtin). The
-			// caller-anchored resolution of a bare callee must not land on
-			// a same-named method (a bare "check" in a package importing
-			// internal/schema is not Schema.check), or every import-linked
-			// bare call would pool onto the method. Go-only, mirroring the
-			// guard above: foreign receiver-less method edges (TS
-			// `this.greet()`, Ruby file-owned `install`) are real callees
-			// (A5, Phase 5).
-			if !strings.Contains(e.To, ".") {
-				if tn, ok2 := g.byID[id]; ok2 && tn.Symbol != nil && tn.Symbol.Receiver != "" && tn.Symbol.Language == "go" {
-					return false
-				}
-			}
-			return true
+		if id, ok := g.resolveEndpointPackageAware(e.To, callerID, false, false); ok && !(bare && g.goMethod(id)) {
+			out = append(out, id)
 		}
-		// The package-aware resolution attributed the callee to a DIFFERENT
-		// same-named node (the caller's own package wins). That is correct
-		// for a bare ambiguous callee, but a receiver-qualified endpoint
-		// ("Server.dispatch") still names this target when its qualifier is
-		// the target's receiver — fall through to that check instead of
-		// dropping the edge (the index attributes such edges to every
-		// same-named method, and explore reports them for each).
 	}
-	// An import-qualified callee ("governance.AuthorizeContext") whose
-	// caller is itself an ambiguous bare name (New, Generate): the qualifier
-	// names the target's own package, so the callee IS the target — the edge
-	// must not be dropped on the caller pre-condition. The qualifier is a
-	// PACKAGE name, so it can only name a package-level (receiver-less)
-	// symbol: "tokenize.Count" is the func Count's qualified form and must
-	// not be base-matched onto the method Estimator.Count just because both
-	// live in internal/tokenize.
-	if i := strings.LastIndexByte(e.To, '.'); i > 0 && i < len(e.To)-1 {
-		targetPkg := g.nodePkg[target]
-		if targetPkg != "" && e.To[:i] == lastPathSeg(targetPkg) {
-			if tn, ok := g.byID[target]; ok && tn.Symbol != nil && tn.Symbol.Receiver != "" {
-				return false
+	// A qualified callee names either a receiver-less symbol in the package
+	// whose final path segment is the qualifier, or the method on that
+	// receiver. A package-qualified match on a method rejects the edge
+	// outright (calleeIsTarget returns false before its endpoint fallback).
+	if qual, name := endpointParts(e.To); qual != "" {
+		for _, id := range g.nameIndex[name] {
+			n, ok := g.byID[id]
+			if !ok || n.Symbol == nil {
+				continue
 			}
-			for _, id := range g.nameIndex[e.To[i+1:]] {
-				if id == target {
-					return true
+			if pkg := g.nodePkg[id]; pkg != "" && lastPathSeg(pkg) == qual {
+				if n.Symbol.Receiver == "" {
+					out = append(out, id)
 				}
+				continue
+			}
+			if n.Symbol.Receiver == qual {
+				out = append(out, id)
 			}
 		}
 	}
-	// A receiver-qualified callee ("Server.dispatch") whose caller is itself
-	// an ambiguous receiver-qualified name ("Server.Serve"): neither side
-	// carries package context, but the endpoint names the target's own
-	// receiver + name, so the edge calls the target. Without this, impact
-	// reported 0 callers for a method whose edges explore resolves (both
-	// endpoints are ambiguous whenever two packages define the same method
-	// name on the same receiver type).
-	if g.endpointNamesNode(e.To, target) {
-		return true
+	return dedupIDs(out)
+}
+
+// goMethod reports whether id is a Go method node: a bare reference never
+// names one under Go scoping (a bare call binds to a package-level func or
+// the builtin).
+func (g *Graph) goMethod(id string) bool {
+	n, ok := g.byID[id]
+	return ok && n.Symbol != nil && n.Symbol.Receiver != "" && n.Symbol.Language == "go"
+}
+
+// nodesNamedByEndpoint returns the node IDs a receiver-qualified raw endpoint
+// can name directly (its qualifier is the node's receiver and its bare name
+// the node's name) — the target-independent set behind endpointNamesNode.
+func (g *Graph) nodesNamedByEndpoint(ref string) []string {
+	qual, name := endpointParts(ref)
+	if qual == "" || name == "" {
+		return nil
 	}
-	return false
+	var out []string
+	for _, id := range g.nameIndex[name] {
+		if n, ok := g.byID[id]; ok && n.Symbol != nil && n.Symbol.Receiver == qual {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func dedupIDs(ids []string) []string {
+	if len(ids) < 2 {
+		return ids
+	}
+	seen := make(map[string]bool, len(ids))
+	out := ids[:0]
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // resolveCallerNodeID resolves a "calls" edge's CALLER endpoint to a node ID,
@@ -1129,6 +1083,66 @@ func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
 // is shared by several packages (its own edges are recorded under that bare
 // name, which the adjacency's opaque "?"-bucket would otherwise lose, so
 // `kern impact` reported "What it calls: 0" for e.g. the governance core).
+// edgeCallerAttr is the per-edge, target-independent caller attribution
+// used by DirectDependsOnNames (built once per graph by callerIndex):
+// the resolved caller node ID when the raw endpoint resolves, otherwise
+// the callee-anchored attribution, with both raw endpoints retained for
+// the target-dependent fallback and the callee naming pass.
+type edgeCallerAttr struct {
+	idx        int
+	from, to   string
+	resolved   string
+	resolvedOK bool
+	anchored   string
+	anchoredOK bool
+}
+
+// callerIndex builds (once) the per-edge caller attribution that lets
+// DirectDependsOnNames serve repeated queries without re-resolving every
+// edge per call, plus callerEdges: the same attribution inverted into
+// target → edge indices so a query scans only incident edges. Resolution
+// order and outcomes match the un-memoized form exactly: resolveNodeID first;
+// on failure the callee-anchored attribution (the target-dependent
+// endpointNamesNode fallback is indexed under every node the raw caller
+// endpoint can name, and the query re-applies the precedence).
+func (g *Graph) callerIndex() []edgeCallerAttr {
+	g.callerOnce.Do(func() {
+		attr := make([]edgeCallerAttr, 0, len(g.Edges))
+		for i, e := range g.Edges {
+			if e.Kind != "calls" {
+				continue
+			}
+			a := edgeCallerAttr{idx: i, from: e.From, to: e.To}
+			if id, ok := g.resolveNodeID(e.From); ok {
+				a.resolved, a.resolvedOK = id, true
+			} else if calleeID, cok := g.ResolveEdgeEndpoint(e.To, e.From); cok {
+				if id, aok := g.resolveCallerNodeID(e.From, calleeID, strings.Contains(e.To, ".")); aok {
+					a.anchored, a.anchoredOK = id, true
+				}
+			}
+			attr = append(attr, a)
+		}
+		edges := make(map[string][]int, len(attr))
+		for ai, a := range attr {
+			if a.resolvedOK {
+				// A resolved caller endpoint is authoritative: the
+				// endpoint-named fallback is never consulted for it.
+				edges[a.resolved] = append(edges[a.resolved], ai)
+				continue
+			}
+			if a.anchoredOK {
+				edges[a.anchored] = append(edges[a.anchored], ai)
+			}
+			for _, id := range g.nodesNamedByEndpoint(a.from) {
+				edges[id] = append(edges[id], ai)
+			}
+		}
+		g.callerAttr = attr
+		g.callerEdges = edges
+	})
+	return g.callerAttr
+}
+
 func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
 	target := g.resolveSymbol(symbol)
 
@@ -1144,38 +1158,36 @@ func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
 	}
 
 	byID := g.nodesByID()
+	attrs := g.callerIndex()
 	seen := map[string]bool{}
 	var out []string
-	for _, e := range g.Edges {
-		if e.Kind != "calls" {
-			continue
-		}
+	for _, ai := range g.callerEdges[target] {
+		a := attrs[ai]
 		// Caller endpoint: the edge belongs to the target only when the
 		// caller resolves to it. A target whose bare name is shared by
 		// several packages is attributed package-aware via the callee's
-		// package.
-		fromID, ok := g.resolveNodeID(e.From)
-		if !ok {
+		// package. (Resolution outcomes are memoized per edge by
+		// callerIndex, which also files the edge under every node its
+		// caller endpoint can name; the target-dependent precedence below
+		// still decides the attribution.)
+		var fromID string
+		switch {
+		case a.resolvedOK:
+			fromID = a.resolved
+		case g.endpointNamesNode(a.from, target):
 			// A receiver-qualified caller endpoint naming the target
 			// directly ("Server.dispatch" for a Server-method target) is
-			// the most specific evidence the endpoint carries — try it
+			// the most specific evidence the endpoint carries — checked
 			// before the callee-anchored attribution so a same-package
 			// method call cannot be mis-attributed to a same-named method
 			// in an importing package.
-			if g.endpointNamesNode(e.From, target) {
-				fromID = target
-			} else {
-				calleeID, cok := g.ResolveEdgeEndpoint(e.To, e.From)
-				if !cok {
-					// Unresolvable callee AND ambiguous caller: the edge cannot
-					// be attributed to any package — drop it rather than guess.
-					continue
-				}
-				fromID, ok = g.resolveCallerNodeID(e.From, calleeID, strings.Contains(e.To, "."))
-				if !ok {
-					continue
-				}
-			}
+			fromID = target
+		case a.anchoredOK:
+			fromID = a.anchored
+		default:
+			// Unresolvable callee AND ambiguous caller: the edge cannot
+			// be attributed to any package — drop it rather than guess.
+			continue
 		}
 		if fromID != target {
 			continue
@@ -1191,12 +1203,12 @@ func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
 		// A foreign-qualified callee ("http.DefaultClient.Do") is never
 		// resolved to the same-named project symbol (its bare name may be
 		// unique; the call is still the stdlib method, not the project's).
-		name := e.To
-		if node, found := byID[e.To]; found && node.Kind == "reference" {
+		name := a.to
+		if node, found := byID[a.to]; found && node.Kind == "reference" {
 			name = node.Label
 		}
-		if !g.foreignCallee(e.To) {
-			if toID, ok := g.ResolveEdgeEndpoint(e.To, e.From); ok {
+		if !g.foreignCallee(a.to) {
+			if toID, ok := g.ResolveEdgeEndpoint(a.to, a.from); ok {
 				if n, ok2 := byID[toID]; ok2 && n.Symbol != nil {
 					if n.Symbol.Qualified != "" {
 						name = n.Symbol.Qualified
@@ -1270,15 +1282,19 @@ func (g *Graph) WhatServicesAffectedPrecise(symbol string, strict bool) []domain
 		affected[filepath.Dir(e.Symbol.File)] = true
 	}
 
-	seen := map[string]bool{}
-	var out []domain.Node
-	for id, n := range g.nodesByID() {
-		if n.Kind != "module" || !affected[id] || seen[id] {
-			continue
+	// Resolve each affected package path to its module node. Module IDs ARE
+	// package paths, so the previous full scan over every node was O(N) per
+	// root for a lookup that touches only the affected directories (a hub
+	// type expands to 189 roots; measured as the top flat cost of
+	// `kern impact` in the 2026-10-28 profile).
+	byID := g.nodesByID()
+	out := make([]domain.Node, 0, len(affected))
+	for dir := range affected {
+		if n, ok := byID[dir]; ok && n.Kind == "module" {
+			out = append(out, n)
 		}
-		seen[id] = true
-		out = append(out, n)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -1540,30 +1556,21 @@ func (g *Graph) WhatTestsCoverRanked(symbol string, strict bool) (ranked, rest [
 	}
 	paired := pairedTestFile(symFile)
 	simple := symbolSimpleName(symbol)
+	symToks := symbolNameTokens(simple)
 
-	// The scoped covering set (same-package + direct callers), merged so a
-	// test in both buckets is tiered once, at its best tier.
-	covered := map[string]domain.Node{}
+	// The scoped covering set (same-package + direct callers), tiered once at
+	// its best tier. testsByPackage and incoming are both ID-sorted, so
+	// membership is a binary search instead of a per-root map: a hub type's
+	// roots share large packages (Server: 189 roots x ~500 same-package
+	// tests), and filling a map per root was the report's largest remaining
+	// allocation (2026-10-28 profile).
+	var pkgIDs []string
 	if n.Symbol != nil && n.Symbol.File != "" {
-		for _, id := range g.testsByPackage()[filepath.Dir(n.Symbol.File)] {
-			if nn, ok := byID[id]; ok {
-				covered[id] = nn
-			}
-		}
+		pkgIDs = g.testsByPackage()[filepath.Dir(n.Symbol.File)]
 	}
-	direct := map[string]bool{}
-	for _, caller := range incoming[resolved] {
-		direct[caller] = true
-		if nn, ok := byID[caller]; ok {
-			covered[caller] = nn
-		}
-	}
-
+	callers := incoming[resolved]
 	var filePaired, nameMatched, directCallers, samePkg []domain.Node
-	for id, nn := range covered {
-		if id == resolved || !isTest(nn.Symbol) {
-			continue // a test does not cover itself; only tests cover
-		}
+	tier := func(nn domain.Node, direct bool) {
 		var f string
 		if nn.Symbol != nil {
 			f = nn.Symbol.File
@@ -1571,13 +1578,35 @@ func (g *Graph) WhatTestsCoverRanked(symbol string, strict bool) (ranked, rest [
 		switch {
 		case paired != "" && f == paired:
 			filePaired = append(filePaired, nn)
-		case testNameMatchesSymbol(nn, simple):
+		case g.testNameMatchesSymbol(nn, symToks):
 			nameMatched = append(nameMatched, nn)
-		case direct[id]:
+		case direct:
 			directCallers = append(directCallers, nn)
 		default:
 			samePkg = append(samePkg, nn)
 		}
+	}
+	for _, id := range pkgIDs {
+		nn, ok := byID[id]
+		if !ok || id == resolved || !isTest(nn.Symbol) {
+			continue // a test does not cover itself; only tests cover
+		}
+		tier(nn, hasID(callers, id))
+	}
+	last := ""
+	for _, id := range callers {
+		if id == last {
+			continue // incoming can repeat an edge; tier once
+		}
+		last = id
+		if hasID(pkgIDs, id) {
+			continue // already tiered from the package bucket
+		}
+		nn, ok := byID[id]
+		if !ok || id == resolved || !isTest(nn.Symbol) {
+			continue
+		}
+		tier(nn, true)
 	}
 	sortNodes := func(ns []domain.Node) {
 		sort.Slice(ns, func(i, j int) bool { return ns[i].ID < ns[j].ID })
@@ -1590,6 +1619,12 @@ func (g *Graph) WhatTestsCoverRanked(symbol string, strict bool) (ranked, rest [
 	ranked = append(ranked, nameMatched...)
 	ranked = append(ranked, directCallers...)
 	return ranked, samePkg
+}
+
+// hasID reports whether the ascending, sorted ids contains want.
+func hasID(ids []string, want string) bool {
+	i := sort.SearchStrings(ids, want)
+	return i < len(ids) && ids[i] == want
 }
 
 // pairedTestFile returns the _test.go twin of a Go source file
@@ -1614,15 +1649,29 @@ func symbolSimpleName(symbol string) string {
 
 // testNameMatchesSymbol reports whether the test's name shares a
 // case-insensitive token with the symbol's simple name ("runTaint" ↔
-// "TestParseTaintRange" share "taint"). Tokens split on camelCase boundaries
-// and non-alphanumeric runs.
-func testNameMatchesSymbol(nn domain.Node, simple string) bool {
-	if simple == "" || nn.Symbol == nil || nn.Symbol.Name == "" {
+// "TestParseTaintRange" share "taint"). symToks is the symbol's token set
+// (computed once per query); the test's own token set is cached per node.
+func (g *Graph) testNameMatchesSymbol(nn domain.Node, symToks map[string]bool) bool {
+	if len(symToks) == 0 || nn.Symbol == nil || nn.Symbol.Name == "" {
 		return false
 	}
-	toks := symbolNameTokens(nn.Symbol.Name)
-	for t := range symbolNameTokens(simple) {
-		if toks[t] {
+	return anyTokenShared(g.symbolNameTokens(nn.ID, nn.Symbol.Name), symToks)
+}
+
+// symbolNameTokens returns node id's cached name-token set, tokenizing once
+// per graph. A hub-type impact asks the same tests about every expanded root.
+func (g *Graph) symbolNameTokens(id, name string) map[string]bool {
+	if v, ok := g.testTokens.Load(id); ok {
+		return v.(map[string]bool)
+	}
+	toks := symbolNameTokens(name)
+	g.testTokens.Store(id, toks)
+	return toks
+}
+
+func anyTokenShared(a, b map[string]bool) bool {
+	for t := range a {
+		if b[t] {
 			return true
 		}
 	}

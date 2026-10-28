@@ -63,3 +63,16 @@ func TestEveryToolHasCategory(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryToolCarriesAnnotations is the 2026-10-26 audit gate: hosts render
+// readOnlyHint/destructiveHint in their confirmation UX, so every advertised
+// tool must derive at least readOnlyHint (true for low risk, explicit false
+// for medium/high/critical). Eight tools rendered hint-free before this.
+func TestEveryToolCarriesAnnotations(t *testing.T) {
+	for _, tool := range All {
+		ann := tool.WithDerivedAnnotations().Annotations
+		if _, ok := ann["readOnlyHint"]; !ok {
+			t.Errorf("tool %s has no readOnlyHint after annotation derivation (risk=%q)", tool.Name, tool.RiskLevel)
+		}
+	}
+}

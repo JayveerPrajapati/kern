@@ -2,6 +2,7 @@ package governance
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"os"
 	"path/filepath"
 	"sync"
@@ -566,13 +567,13 @@ func TestFileStoreClear(t *testing.T) {
 	}
 
 	// The clear is audited in the tamper-evident chain.
-	l := NewAuditLog().
+	l := govaudit.NewAuditLog().
 		WithStore(storage.NewLog(filepath.Join(root, ".kern", "audit"))).
 		WithLockPath(filepath.Join(root, ".kern", "audit", ".lock"))
 	if _, err := l.Replay(); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	var found *AuditEntry
+	var found *govaudit.AuditEntry
 	for i := range l.All() {
 		e := &l.All()[i]
 		if e.Resource == "approval:appr-clearme" {

@@ -13,6 +13,7 @@ import (
 	"context"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/highlevel"
 	"github.com/JayveerPrajapati/kern/internal/verifycmd"
@@ -25,7 +26,7 @@ import (
 func (s *Server) highlevelHooks() highlevel.Hooks {
 	return highlevel.Hooks{
 		PlatformFor: s.platformFor,
-		Audit: func(ctx context.Context, root string) ([]governance.AuditEntry, error) {
+		Audit: func(ctx context.Context, root string) ([]govaudit.AuditEntry, error) {
 			return governance.ReadAuditTrail(ctx, root, "")
 		},
 		PendingApprovals: func(ctx context.Context, root string) ([]domain.Approval, error) {
