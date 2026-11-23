@@ -1,0 +1,5 @@
+{
+  "_comment": "Versioned gate config for make load-gate. Ceilings are deliberately broad for shared CI runners; tighten only with fresh baselines from at least three machines.",
+  "max_p95_ms": 10000,
+  "max_p99_ms": 30000
+}

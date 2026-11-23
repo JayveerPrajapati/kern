@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/astrefs"
+	"github.com/JayveerPrajapati/kern/internal/cliflags"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/refscan"
+	"github.com/JayveerPrajapati/kern/internal/typealias"
 )
 
 // runRefs implements `kern refs <symbol>`: the reference set behind a symbol,
@@ -15,8 +17,18 @@ import (
 // and falling back to the bounded textual safety net for other languages.
 func runRefs(rest []string) int {
 	f, args := parseFlagsOrDie(rest)
+	// Preserve the pre-mode default: refs' evidence is its reference list.
+	// Concise mode is opt-in and only shortens the human text report.
+	mode := cliflags.ModeEvidence
+	if strings.TrimSpace(f.mode) != "" {
+		parsed, err := cliflags.ParseOutputMode(f.mode)
+		if err != nil {
+			fatalUsage("refs: %v", err)
+		}
+		mode = parsed
+	}
 	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
-		fatalUsage("usage: kern refs <symbol> [root] [--json] [--root DIR]")
+		fatalUsage("usage: kern refs <symbol> [root] [--json] [--root DIR] [--mode concise|evidence|full]")
 	}
 	symbol := strings.TrimSpace(args[0])
 	root := projectRoot(f)
@@ -33,7 +45,7 @@ func runRefs(rest []string) int {
 		return 1
 	}
 	def := map[string]any{"file": d.File, "line": d.Line}
-	if refs, complete := astrefs.References(ix, d); len(refs) > 0 {
+	if refs, complete := typealias.References(ix, &d); len(refs) > 0 {
 		confidence := "ast"
 		if !complete {
 			confidence = "ast (scan truncated)"
@@ -49,6 +61,9 @@ func runRefs(rest []string) int {
 		}
 		fmt.Printf("# %s %s -> %s:%d\n", d.Kind, d.FullName(), d.File, d.Line)
 		fmt.Printf("references: %d in %d file(s) (%s)\n", len(refs), len(files), confidence)
+		if mode == cliflags.ModeConcise {
+			return 0
+		}
 		for _, r := range refs {
 			fmt.Printf("%s:%d:%d  %s\n", r.File, r.Line, r.Col, r.Kind)
 		}
@@ -69,6 +84,9 @@ func runRefs(rest []string) int {
 	}
 	fmt.Printf("# %s %s -> %s:%d\n", d.Kind, d.FullName(), d.File, d.Line)
 	fmt.Printf("references: %d in %d file(s) (%s; no line positions)\n", count, len(files), confidence)
+	if mode == cliflags.ModeConcise {
+		return 0
+	}
 	for _, file := range files {
 		fmt.Println(file)
 	}

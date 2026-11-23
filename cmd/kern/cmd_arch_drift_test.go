@@ -83,7 +83,7 @@ func TestArchDriftRecordsMapping(t *testing.T) {
 // a real fixture, and that the findings keep their non-fatal warn/ok levels.
 func TestArchDriftSectionFindsRecords(t *testing.T) {
 	dir := t.TempDir()
-	findings, records := archDriftSection(dir)
+	findings, records, _ := archDriftSection(dir)
 	// A fresh temp dir has no ARCHITECTURE.md: the parity run fails closed.
 	if len(findings) != 1 || findings[0].Level != "fail" {
 		t.Fatalf("findings = %+v, want one fail finding (missing ARCHITECTURE.md)", findings)

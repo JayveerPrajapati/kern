@@ -21,8 +21,14 @@ package main
 // memory only — nothing here changes gates, caps, or policy.
 
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"math"
+	"os"
+	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,16 +45,184 @@ import (
 // invocation. On a hard parity error (unreadable ARCHITECTURE.md, broken
 // table) it returns the fail finding and no records — nothing is learned from
 // a broken measure.
-func archDriftSection(root string) ([]doctor.Finding, []domain.ArchitectureDriftRecord) {
+// archHeadroomFindings renders the headroom section: every subsystem under
+// HeadroomWarnPct of its cap, tightest first, with its documented extraction
+// candidate. Warn-level (a tight package is a scheduling signal, not a
+// failure); the definite ok line keeps the section legible when clean.
+func archHeadroomFindings(report *architecture.ArchDocReport) []doctor.Finding {
+	rows := headroomRows(report)
+	if len(rows) == 0 {
+		return []doctor.Finding{{
+			Check:  "arch-headroom",
+			Level:  "ok",
+			Detail: fmt.Sprintf("every subsystem has at least %.0f%% cap headroom", headroomWarnPct),
+		}}
+	}
+	out := make([]doctor.Finding, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, doctor.Finding{Check: "arch-headroom", Level: "warn", Detail: r.detail()})
+	}
+	return out
+}
+
+// headroomGateFindings is the advisory CI check: it fails (fail-level, exit 1
+// via doctorExitCode) only when THIS change moved a subsystem from above the
+// tight line to at/below it. It is advisory by wiring — CI runs it in a
+// non-blocking lane — but the failure is real and names the subsystem, the
+// before/after percentages, and the required action. HEAD's ledger is read
+// straight from git so the comparison never depends on the working tree's
+// uncommitted doc state.
+func headroomGateFindings(report *architecture.ArchDocReport, root string) []doctor.Finding {
+	headRows, err := headArchRows(root)
+	if err != nil {
+		// No git history (or an unborn HEAD): nothing to compare against, so
+		// the advisory check stays silent rather than failing spuriously.
+		return nil
+	}
+	headLOC, err := headArchLOC(root, headRows)
+	if err != nil {
+		// No committed Go sources to measure (unborn HEAD): stay silent.
+		return nil
+	}
+	crossings := headroomCrossings(report, headRows, headLOC)
+	out := make([]doctor.Finding, 0, 1+len(crossings))
+	if len(crossings) == 0 {
+		out = append(out, doctor.Finding{
+			Check:  "arch-headroom-gate",
+			Level:  "ok",
+			Detail: "no subsystem crossed the tight-headroom line in this change",
+		})
+	}
+	for _, c := range crossings {
+		out = append(out, doctor.Finding{Check: "arch-headroom-gate", Level: "fail", Detail: c.detail()})
+	}
+	return append(out, staleBaselineFindings(root, report)...)
+}
+
+// headArchLOC measures every ledger row's non-test Go LOC AS OF HEAD with one
+// git process: `git grep -c "" HEAD -- *.go` emits per-file line counts, which
+// are summed into the row with the longest matching directory prefix (the
+// ledger's subtree rule). This is a real HEAD measurement — the pre-fix gate
+// derived "before" from the ledger's baseline column, so a drifted baseline
+// made a clean tree look like a crossing.
+func headArchLOC(root string, rows []architecture.ArchRow) (map[string]int, error) {
+	cmd := exec.Command("git", "-C", root, "grep", "-c", "", "HEAD", "--", "*.go")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return map[string]int{}, nil // no matches: unborn/empty tree
+		}
+		return nil, err
+	}
+	dirs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		dirs = append(dirs, r.Dir)
+	}
+	res := map[string]int{}
+	for _, line := range strings.Split(string(out), "\n") {
+		first := strings.IndexByte(line, ':')
+		last := strings.LastIndexByte(line, ':')
+		if first < 0 || last <= first {
+			continue
+		}
+		path, count := line[first+1:last], line[last+1:]
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		n, convErr := strconv.Atoi(count)
+		if convErr != nil {
+			continue
+		}
+		best := ""
+		for _, d := range dirs {
+			if (path == d || strings.HasPrefix(path, d+"/")) && len(d) > len(best) {
+				best = d
+			}
+		}
+		if best != "" {
+			res[best] += n
+		}
+	}
+	return res, nil
+}
+
+// staleBaselineFindings reports a drifted ledger baseline column — but only on
+// a CLEAN tree, where the baseline is supposed to equal the live measurement.
+// One warn finding names the drifted rows; it never fails the gate (the
+// crossing check is the enforcement, and caps are unchanged).
+func staleBaselineFindings(root string, report *architecture.ArchDocReport) []doctor.Finding {
+	if report == nil || !gitTreeClean(root) {
+		return nil
+	}
+	rows, err := architecture.ParseArchDoc(root)
+	if err != nil {
+		return nil
+	}
+	base := make(map[string]int, len(rows))
+	for _, r := range rows {
+		base[r.Dir] = r.Baseline
+	}
+	var stale []string
+	for _, f := range report.Findings {
+		b := base[f.Subsystem]
+		if f.Err != "" || f.Cap <= 0 || b <= 0 {
+			continue
+		}
+		if math.Abs(float64(f.LOC-b))/float64(b)*100 > 2 {
+			stale = append(stale, fmt.Sprintf("%s (baseline %d, live %d)", f.Subsystem, b, f.LOC))
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	sort.Strings(stale)
+	n := len(stale)
+	if n > 8 {
+		stale = append(stale[:8], fmt.Sprintf("+%d more", n-8))
+	}
+	return []doctor.Finding{{
+		Check:  "arch-baseline",
+		Level:  "warn",
+		Detail: fmt.Sprintf("%d ledger baseline(s) drifted >2%% from live LOC — refresh the table: %s", n, strings.Join(stale, ", ")),
+	}}
+}
+
+// gitTreeClean reports whether the working tree has no tracked or untracked
+// changes (the condition under which a ledger baseline must match live LOC).
+func gitTreeClean(root string) bool {
+	cmd := exec.Command("git", "-C", root, "status", "--porcelain")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	return err == nil && len(bytes.TrimSpace(out)) == 0
+}
+
+// headArchRows parses ARCHITECTURE.md as of HEAD (git show) so the gate
+// compares against the committed ledger, not the in-progress one.
+func headArchRows(root string) ([]architecture.ArchRow, error) {
+	cmd := exec.Command("git", "-C", root, "show", "HEAD:ARCHITECTURE.md")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return architecture.ParseArchDocBytes(out)
+}
+
+// archDriftSection measures the ledger ONCE per doctor run and returns the
+// parity findings plus the drift records, with the parity report so the
+// headroom section and the advisory gate reuse the same measurement instead
+// of walking the tree again.
+func archDriftSection(root string) ([]doctor.Finding, []domain.ArchitectureDriftRecord, *architecture.ArchDocReport) {
 	report, err := architecture.CheckArchDocParity(root)
 	if err != nil {
 		return []doctor.Finding{{
 			Check:  "arch-drift",
 			Level:  "fail",
 			Detail: fmt.Sprintf("architecture parity run failed: %v", err),
-		}}, nil
+		}}, nil, nil
 	}
-	return archDriftFindings(report), archDriftRecords(report)
+	return archDriftFindings(report), archDriftRecords(report), report
 }
 
 // archDriftFindings renders the parity report as doctor findings (warn-level
@@ -76,6 +250,14 @@ func archDriftFindings(report *architecture.ArchDocReport) []doctor.Finding {
 		}
 		out = append(out, doctor.Finding{Check: "arch-drift", Level: lvl, Detail: detail})
 	}
+	for _, dir := range report.Unlisted {
+		driftRows++
+		out = append(out, doctor.Finding{
+			Check:  "arch-drift",
+			Level:  "warn",
+			Detail: fmt.Sprintf("%s: Go package missing from the ledger (no own row, no ancestor row) — add rows to ARCHITECTURE.md + docs/architecture/ledger-details.md", dir),
+		})
+	}
 	if driftRows == 0 {
 		out = append(out, doctor.Finding{
 			Check:  "arch-drift",
@@ -91,12 +273,14 @@ func archDriftFindings(report *architecture.ArchDocReport) []doctor.Finding {
 // and uses the parity checker's own drift conditions (the validator's kind
 // strings):
 //
-//	Subsystem            -> the ARCHITECTURE.md subsystem dir (f.Subsystem);
-//	"loc-over-cap"        -> f.LOC exceeds f.Cap (no change ref);
-//	"import-not-in-allowed-deps" -> len(f.Violations) > 0, with the offending
-//	                        new imports (sorted, comma-joined) as the change ref;
-//	"degraded-warn"       -> f.Err non-empty (missing directory or
-//	                        unmeasurable source; no change ref).
+//		Subsystem            -> the ARCHITECTURE.md subsystem dir (f.Subsystem);
+//		"loc-over-cap"        -> f.LOC exceeds f.Cap (no change ref);
+//		"import-not-in-allowed-deps" -> len(f.Violations) > 0, with the offending
+//		                        new imports (sorted, comma-joined) as the change ref;
+//		"unlisted-package"    -> the dir appears in report.Unlisted (a Go package
+//	                       with no ledger row of its own and no ancestor row);
+//		"degraded-warn"       -> f.Err non-empty (missing directory or
+//	                       unmeasurable source; no change ref).
 //
 // A subsystem can contribute up to three records (one per drift condition) in
 // a single run; all carry the same observation timestamp.
@@ -129,6 +313,13 @@ func archDriftRecords(report *architecture.ArchDocReport) []domain.ArchitectureD
 				At:            now,
 			})
 		}
+	}
+	for _, dir := range report.Unlisted {
+		records = append(records, domain.ArchitectureDriftRecord{
+			Subsystem:     dir,
+			ViolationKind: "unlisted-package",
+			At:            now,
+		})
 	}
 	return records
 }

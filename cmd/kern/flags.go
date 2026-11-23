@@ -42,6 +42,10 @@ type flags struct {
 	plain                bool // --plain (setup: legacy plain-text output, no boxes/glyphs/colour)
 	globalOnly           bool // --global-only (setup: wire user-level MCP/hooks/rules only; write no file in any repo)
 	remove               bool // --remove (setup: undo the machine-wide wiring; kern-owned entries only)
+	hooksOnly            bool // --hooks-only (setup: surgical removal of agent/git hooks only)
+	data                 bool // --data (setup --remove: also remove ~/.kern, machine secrets and the cache — the user-data half of a full uninstall)
+	projectOnly          bool // --project-only (uninstall: reverse only this repo's wiring, not the installation)
+	prefixOnly           bool // --prefix-only (uninstall: remove only this prefix's binaries + PATH lines — the CI/scratch mode)
 	global               bool
 	globalRules          bool   // --global-rules (setup: manage kern rules in each host's GLOBAL instructions slot)
 	indexOnly            bool   // --index-only (onboard: skip ALL agent wiring, build the index only)
@@ -144,6 +148,7 @@ type flags struct {
 	enterprise           bool
 	projects             []string
 	terseCode            bool
+	machine              bool // --machine (compact: emit the machine signal — empty for non-indexable input)
 	lens                 string
 	profile              string
 	evalDir              string
@@ -175,7 +180,8 @@ type flags struct {
 	entities             bool   // --entities (graph: render the digital-twin entity nodes connected to the symbol, or the repo entity inventory without a symbol)
 	risk                 bool   // --risk (impact: render the governance risk assessment)
 	sinks                string // --sinks (synthesize-test: comma-separated security sink rule ids)
-	archDrift            bool   // --arch-drift (doctor: report ARCHITECTURE.md LOC/deps drift section)
+	archDrift            bool   // --arch-drift (doctor: report ARCHITECTURE.md LOC/deps drift + headroom sections)
+	headroomGate         bool   // --headroom-gate (doctor: advisory CI check — fail only when this change moves a subsystem from >2% to <2% cap headroom)
 	calibration          bool   // --calibration (doctor: report prediction-vs-reality calibration health section)
 	correlate            bool   // --correlate (incident: run the incident→twin→code correlation engine)
 	runbook              string // --runbook (incident: JSON of a heal playbook to add)

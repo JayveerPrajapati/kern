@@ -176,17 +176,25 @@ func runCompact(rest []string) {
 	if f.terseCode {
 		content = kernctx.PruneCode(file, content, true)
 	}
-	rendered := code.RenderTier(file, content, tier)
+	rendered := renderCompactFile(file, content, tier, !f.machine)
 	// Conditional fetch (B1, ADR-0012): --etag matches → `unchanged (etag
 	// <E>)` and exit 0; otherwise the full render plus an `etag: <hash>`
 	// footer on stderr.
 	if clietag.EtagResponse("kern_compact_file", f.etag, rendered) {
 		return
 	}
-	fmt.Println(rendered)
+	// Machine consumers must see a truly empty stream for non-indexable input:
+	// Println("") would emit a lone newline the fallback checks would have to
+	// trim.
+	if rendered != "" {
+		fmt.Println(rendered)
+	}
 	before := tokenize.Count(string(content))
 	after := tokenize.Count(rendered)
-	cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", filepath.Base(file)))
+	// The savings footer is operator feedback, not part of the machine answer.
+	if !f.machine {
+		cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", filepath.Base(file)))
+	}
 	// Record to the savings ledger like every other compression surface
 	// (QA Pick #1, finding F-B): without this, `kern compact` under-reports
 	// lifetime savings in `kern stats` / `kern diff`.
@@ -210,6 +218,20 @@ func runCompact(rest []string) {
 			AfterBytes:   len(rendered),
 		})
 	}
+}
+
+// renderCompactFile is the CLI presentation layer for a compact render. The
+// summary tier deliberately renders an EMPTY string for non-indexable input so
+// machine consumers (the opencode plugin and kern-guard.sh, both of which
+// capture stdout) can fall back to a raw read. Only a human-facing call gets
+// the explanation instead of a blank line; callers that need the machine
+// signal pass --machine and receive the empty stream.
+func renderCompactFile(path string, content []byte, tier code.Tier, human bool) string {
+	rendered := code.RenderTier(path, content, tier)
+	if human && tier == code.TierSummary && strings.TrimSpace(rendered) == "" {
+		return code.NotIndexableNote(path, content)
+	}
+	return rendered
 }
 
 // confineToRoot resolves file so it stays lexically inside root, mirroring the
@@ -372,6 +394,9 @@ func runTerse(rest []string) {
 // `kern terse` and `kern budget --mode terse`.
 func runTerseCore(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	if f.max < 0 {
+		fatalUsage("--max: must be >= 0 (0 = unbounded)")
+	}
 	text := ""
 	if len(args) > 0 {
 		if args[0] == "-" {
@@ -541,6 +566,9 @@ func runStats(cmd string, rest []string) {
 	// Positional args are unused by the stats subcommands; parseFlags still
 	// validates unknown flags so typos fail loudly (rc=2).
 	f, _ := parseFlagsOrDie(rest)
+	if f.days < 0 {
+		fatalUsage("--days: must be >= 0 (0 = the default window; negative is junk input)")
+	}
 	rec, err := stats.NewRecorder()
 	if err != nil {
 		fatal("stats: %v", err)

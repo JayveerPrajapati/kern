@@ -255,9 +255,13 @@ func joinVerbPositionals(args []string) []string {
 
 func runImpact(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	mode, merr := cliflags.ParseOutputMode(f.mode)
+	if merr != nil {
+		fatalUsage("impact: %v", merr)
+	}
 	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern impact <change> [kind] [new-target] [--root ROOT]")
+		fatalUsage("usage: kern impact <change> [kind] [new-target] [--root ROOT] [--mode concise|evidence|full]")
 	}
 	// F22: --precision previously accepted any value and silently ignored
 	// everything except "strict". Reject unknown values as a usage error
@@ -385,7 +389,18 @@ func runImpact(rest []string) {
 	// the "What it calls" section are relabeled against the index's direct call
 	// edges so transitive entries are no longer indistinguishable from direct
 	// ones.
-	fmt.Print(app.AnnotateImpactCallees(text, change, root))
+	evidenceText := app.AnnotateImpactCallees(text, change, root)
+	// Concise mode is the new default: the counts + risk block. --mode
+	// evidence keeps the full render byte-identical.
+	if mode == cliflags.ModeConcise {
+		summary := tasklife.RenderImpactSummary(change, rep)
+		if footer := intel.TokenFooter(evidenceText, summary); footer != "" {
+			summary += "\n" + footer
+		}
+		fmt.Println(summary)
+	} else {
+		fmt.Print(evidenceText)
+	}
 	if f.precision == "strict" {
 		fmt.Println("precision: strict — call edges from non-resolved languages were skipped (unknown)")
 	}

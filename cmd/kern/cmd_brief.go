@@ -67,7 +67,7 @@ func runProjectMap(rest []string) {
 	if _, err := os.Stat(root); err != nil {
 		fatal("project_map: %v", err)
 	}
-	out, err := brief.ProjectMap(root)
+	out, err := brief.ProjectMapLimit(root, f.maxFiles)
 	if err != nil {
 		fatal("project_map: %v", err)
 	}

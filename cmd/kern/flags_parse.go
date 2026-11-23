@@ -164,6 +164,8 @@ func (p *flagParser) parseCoreFlag(name, inline string, hasInline bool, i *int, 
 		p.setBool(&p.f.yes, "--yes", inline, hasInline)
 	case "--terse-code", "-terse-code":
 		p.setBool(&p.f.terseCode, "--terse-code", inline, hasInline)
+	case "--machine":
+		p.setBool(&p.f.machine, "--machine", inline, hasInline)
 	case "--reset":
 		p.setBool(&p.f.reset, "--reset", inline, hasInline)
 	case "--net":
@@ -198,6 +200,12 @@ func (p *flagParser) parseCoreFlag(name, inline string, hasInline bool, i *int, 
 		} else if v, ok := p.take(i, args); ok {
 			p.f.projects = append(p.f.projects, v)
 		}
+	case "--project-only":
+		p.setBool(&p.f.projectOnly, "--project-only", inline, hasInline)
+	case "--prefix-only":
+		p.setBool(&p.f.prefixOnly, "--prefix-only", inline, hasInline)
+	case "--data":
+		p.setBool(&p.f.data, "--data", inline, hasInline)
 	case "--pattern":
 		p.setStr(i, args, &p.f.pattern, inline, hasInline)
 	case "--query":
@@ -226,6 +234,8 @@ func (p *flagParser) parseCoreFlag(name, inline string, hasInline bool, i *int, 
 		p.setBool(&p.f.ci, "--ci", inline, hasInline)
 	case "--arch-drift":
 		p.setBool(&p.f.archDrift, "--arch-drift", inline, hasInline)
+	case "--headroom-gate":
+		p.setBool(&p.f.headroomGate, "--headroom-gate", inline, hasInline)
 	case "--calibration":
 		p.setBool(&p.f.calibration, "--calibration", inline, hasInline)
 	case "--correlate":
@@ -272,6 +282,8 @@ func (p *flagParser) parseCoreFlag(name, inline string, hasInline bool, i *int, 
 		p.setBool(&p.f.globalOnly, "--global-only", inline, hasInline)
 	case "--remove":
 		p.setBool(&p.f.remove, "--remove", inline, hasInline)
+	case "--hooks-only":
+		p.setBool(&p.f.hooksOnly, "--hooks-only", inline, hasInline)
 	case "--global":
 		p.setBool(&p.f.global, "--global", inline, hasInline)
 	case "--index-only":

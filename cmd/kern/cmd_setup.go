@@ -12,21 +12,52 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
+	"github.com/JayveerPrajapati/kern/internal/daemon"
 	"github.com/JayveerPrajapati/kern/internal/fw"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/hook"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/setup"
+	setupundo "github.com/JayveerPrajapati/kern/internal/setupundo"
 )
 
 // runSetup implements `kern setup`. The setup family's business logic
-// (flag collection, wiring/check/verify/remove dispatch, the interactive
-// render surface) lives in internal/setup (workstream 3.6-A — setup family
-// extraction); this is a thin delegate that forwards the args and returns
-// the entry point's exit code (usage errors -> 2, runtime errors -> 1,
-// success -> 0).
+// (flag collection, wiring/check/verify dispatch, the interactive render
+// surface) lives in internal/setup (workstream 3.6-A — setup family
+// extraction); the removal family (--remove [--project]) lives in
+// internal/setupundo (the cap-driven extraction). This is a thin delegate
+// that forwards the args and returns the entry point's exit code (usage
+// errors -> 2, runtime errors -> 1, success -> 0).
 func runSetup(rest []string) int {
+	if code, ok := setupundo.TryRemove(rest); ok {
+		return code
+	}
+	convergeMachineState(rest)
 	return setup.RunSetup(rest)
+}
+
+// convergeMachineState is the "it just works" pass that runs before the
+// wiring so `make install` + `kern setup` + `kern doctor` is green with no
+// manual remediation: it retires stale daemons from previous builds (the
+// same remedy `kern daemon stop` performs; a fresh daemon auto-starts on
+// the next read-only command) and re-keys the repo's audit chain when the
+// machine key was destroyed and reminted (the uninstall → reinstall flow:
+// `kern uninstall` removes <UserConfigDir>/kern with the HMAC key, and old
+// records then verify against nothing). Both are no-ops on a healthy
+// machine, and neither failure blocks setup — the wiring is the user's
+// actual request; convergence is opportunistic.
+func convergeMachineState(rest []string) {
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if n, err := daemon.StopAll(root, version); err == nil && n > 0 {
+		fmt.Printf("✔ retired %d stale daemon(s) from a previous build (a fresh one auto-starts on the next command)\n", n)
+	}
+	if n, err := govaudit.AutoRepairIfRekeyed(root); err != nil {
+		fmt.Printf("⚠ audit rekey check skipped: %v\n", err)
+	} else if n > 0 {
+		fmt.Printf("✔ audit chain re-keyed for this repo: %d entries re-chained (fresh machine key detected; see `kern audit`)\n", n)
+	}
 }
 
 // runOnboard ensures a working directory is fully wired to kern: registers the

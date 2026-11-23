@@ -21,6 +21,9 @@ import (
 // entries (semantic=false). A non-empty name is slugified; an empty one is
 // derived from the URL.
 func docsFetchCore(rawURL, name, root string, semantic bool) {
+	if err := fetch.DocFetchAllowed(rawURL); err != nil {
+		fatal("docs fetch: %v", err)
+	}
 	res, err := fetch.Fetch(rawURL, 0)
 	if err != nil {
 		fatal("docs fetch: %v", err)

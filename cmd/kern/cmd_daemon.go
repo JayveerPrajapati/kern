@@ -22,6 +22,7 @@ import (
 // daemonFlags holds the small flag surface shared by every daemon subcommand.
 type daemonFlags struct {
 	root string
+	json bool
 }
 
 // parseDaemonFlags accepts only --root; anything else is a usage error (the
@@ -37,12 +38,29 @@ func parseDaemonFlags(args []string) (daemonFlags, []string, error) {
 		switch name {
 		case "--root", "-r":
 			p.SetStr(&f.root, inline, hasInline)
+		case "--json":
+			p.SetBool(&f.json, "--json", inline, hasInline)
 		case "--help", "-h":
 		default:
 			p.Unknown(name)
 		}
 	}
 	return f, p.Rest, p.Err()
+}
+
+// daemonStatus is the machine-readable `kern daemon status --json` contract.
+// Paths are always present, even when no daemon is running, because finding
+// the socket and log is the first diagnostic step.
+type daemonStatus struct {
+	Running  bool                 `json:"running"`
+	Pid      int                  `json:"pid,omitempty"`
+	Version  string               `json:"version,omitempty"`
+	Identity string               `json:"identity,omitempty"`
+	Root     string               `json:"root"`
+	Socket   string               `json:"socket"`
+	Log      string               `json:"log"`
+	Error    string               `json:"error,omitempty"`
+	Stale    []daemon.StaleDaemon `json:"stale,omitempty"`
 }
 
 // runDaemon implements `kern daemon [serve|status|stop] [--root ROOT]`.
@@ -79,18 +97,62 @@ func runDaemon(rest []string) int {
 		return daemonServe(abs)
 	case "status":
 		resp, err := daemon.Status(abs)
+		stale := daemon.StaleDaemons(abs, version)
+		if f.json {
+			status := daemonStatus{
+				Running: err == nil,
+				Root:    abs,
+				Socket:  daemon.SocketPath(abs),
+				Log:     daemon.LogPath(abs),
+				Stale:   stale,
+			}
+			if err == nil {
+				status.Pid = resp.Pid
+				status.Version = resp.Version
+				status.Identity = resp.Identity
+			} else {
+				status.Error = err.Error()
+			}
+			printJSON(status)
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
 		if err != nil {
-			fmt.Printf("daemon: not running for %s (%v)\n", abs, err)
+			fmt.Printf("daemon: not running for %s (%v)\nsocket=%s\nlog=%s\n", abs, err, daemon.SocketPath(abs), daemon.LogPath(abs))
+			if len(stale) > 0 {
+				fmt.Printf("stale daemons=%d (run `kern daemon stop --root %s`)\n", len(stale), abs)
+			}
 			return 1
 		}
-		fmt.Printf("daemon: running pid=%d version=%s socket=%s\n", resp.Pid, resp.Version, daemon.SocketPath(abs))
+		fmt.Printf("daemon: running pid=%d version=%s\nsocket=%s\nlog=%s\n", resp.Pid, resp.Version, daemon.SocketPath(abs), daemon.LogPath(abs))
+		if len(stale) > 0 {
+			fmt.Printf("stale daemons=%d (run `kern daemon stop --root %s`)\n", len(stale), abs)
+		}
 		return 0
 	case "stop":
+		// Retire stale-identity daemons FIRST (a previous build's daemon
+		// lingers on its own socket until the idle timeout), then this
+		// build's own. Same command, one remedy — this is what the doctor's
+		// stale-daemon warning points at.
+		staleStopped, staleErr := daemon.StopAll(abs, version)
 		if err := daemon.Stop(abs); err != nil {
+			if staleStopped > 0 {
+				fmt.Printf("daemon: stopped %d stale daemon(s); no daemon running for %s (%v)\n", staleStopped, abs, err)
+				return 0
+			}
 			fmt.Fprintf(os.Stderr, "daemon: not running for %s (%v)\n", abs, err)
 			return 1
 		}
-		fmt.Printf("daemon: stopped (%s)\n", abs)
+		if staleStopped > 0 {
+			fmt.Printf("daemon: stopped (%s) and %d stale daemon(s)\n", abs, staleStopped)
+		} else {
+			fmt.Printf("daemon: stopped (%s)\n", abs)
+		}
+		if staleErr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: stale sweep: %v\n", staleErr)
+		}
 		return 0
 	default:
 		fatalUsage("daemon: unknown subcommand %q (want serve, status, or stop)", sub)

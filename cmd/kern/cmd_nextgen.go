@@ -64,6 +64,9 @@ func runFitContextCore(rest []string) {
 		}
 	}
 
+	if len(files) == 0 && len(syms) == 0 && f.query == "" {
+		fatalUsage("usage: kern fit-context <file|symbol>... | --file F | --symbol S | --query Q [--max-tokens N]")
+	}
 	res, err := fit.FitContext(context.Background(), fit.Request{
 		Root:      root,
 		MaxTokens: maxTok,
@@ -78,6 +81,12 @@ func runFitContextCore(rest []string) {
 	if f.json {
 		printJSON(res)
 		return
+	}
+	// The tier selection is best-effort (a pinned contract), but a result that
+	// cannot honor the budget must SAY so instead of silently claiming to fit
+	// (2026-11-10 campaign: --max-tokens 1 returned the smallest tier anyway).
+	if res.UsedTokens > res.Budget && res.Budget > 0 {
+		fmt.Fprintf(os.Stderr, "kern: no representation fits %d tokens; returning the smallest (%d tokens) — raise --max-tokens\n", res.Budget, res.UsedTokens)
 	}
 	fmt.Print(res.Content)
 }

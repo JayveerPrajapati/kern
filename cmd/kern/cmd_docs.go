@@ -4,6 +4,10 @@ package main
 // trees (query / index / clear / fetch subcommands). Restored to its own
 // file after the dead-CLI sweep removed cmd_agent.go (where it had been
 // co-located with the orchestrator shells).
+//
+// A query NEVER creates its target root: the positional root is validated as
+// an existing directory first (2026-11-10 break campaign — `kern docs search
+// X` used to materialise a full .kern index inside a new directory named X).
 
 import (
 	"fmt"
@@ -17,13 +21,19 @@ import (
 func runDocs(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	sub := ""
-	if len(args) > 0 && (args[0] == "index" || args[0] == "clear" || args[0] == "fetch") {
-		sub = args[0]
-		args = args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "index", "clear", "fetch", "search":
+			sub = args[0]
+			args = args[1:]
+		}
 	}
 	root := "."
 	query := ""
-	if sub == "" && len(args) > 0 {
+	if sub == "" || sub == "search" {
+		if len(args) == 0 {
+			fatalUsage("usage: kern docs <query> [root] | kern docs search <query> [root] | kern docs index [root] [--semantic] | kern docs clear")
+		}
 		query = args[0]
 		args = args[1:]
 	}
@@ -47,9 +57,20 @@ func runDocs(rest []string) {
 	}
 	if len(args) > 0 {
 		root = args[0]
+		args = args[1:]
+	}
+	if len(args) > 0 {
+		fatalUsage("docs: unexpected extra argument %q (usage: kern docs <query> [root])", args[0])
 	}
 	if f.root != "" {
 		root = f.root
+	}
+	if query != "" {
+		// A read must never create its root (2026-11-10: a mistyped root
+		// silently built ./<typo>/.kern and reported a confident no-match).
+		if st, err := os.Stat(root); err != nil || !st.IsDir() {
+			fatalUsage("docs: root %q is not an existing directory — a query never creates one (usage: kern docs <query> [root])", root)
+		}
 	}
 	switch sub {
 	case "index":
