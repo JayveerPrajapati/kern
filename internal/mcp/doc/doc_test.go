@@ -93,6 +93,18 @@ func TestFetchRequiresURL(t *testing.T) {
 	}
 }
 
+func TestFetchDeniesUnapprovedHost(t *testing.T) {
+	_, err := Fetch(context.Background(), map[string]any{
+		"url": "https://example.com/unapproved",
+	})
+	if err == nil {
+		t.Fatal("Fetch must fail closed when the host is not operator-approved")
+	}
+	if !strings.Contains(err.Error(), "not in KERN_DOC_FETCH_DOMAINS") {
+		t.Fatalf("unexpected denial error: %v", err)
+	}
+}
+
 // TestSearchEmptyDocsIndexExplains pins N3: a repo with NO documentation
 // indexed gets an explanatory message (with the `kern docs index` hint), not
 // a bare "no matching document fragments" that reads as a confident miss.

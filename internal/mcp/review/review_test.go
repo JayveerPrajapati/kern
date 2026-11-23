@@ -166,6 +166,29 @@ func TestReviewHappy(t *testing.T) {
 	}
 }
 
+// TestReviewNoChangesVerdict (audit F8, 2026-11-21): a review over zero
+// changes must state "no changes found" — not the vacuous "all changed
+// symbols are covered by tests".
+func TestReviewNoChangesVerdict(t *testing.T) {
+	ctx := context.Background()
+	ix := testIndex(t)
+	h := Hooks{
+		ChangedContext: func(ctx context.Context, args map[string]any) ([]intel.FileChange, *index.Index, error) {
+			return nil, ix, nil
+		},
+	}
+	out, err := Review(ctx, h, map[string]any{})
+	if err != nil {
+		t.Fatalf("Review failed: %v", err)
+	}
+	if !strings.Contains(out, "no changes found") {
+		t.Errorf("expected 'no changes found' verdict, got: %q", out)
+	}
+	if strings.Contains(out, "covered by tests") {
+		t.Errorf("zero-change review must not claim test coverage, got: %q", out)
+	}
+}
+
 func TestReviewMaxTokensInvalid(t *testing.T) {
 	ctx := context.Background()
 	ix := testIndex(t)

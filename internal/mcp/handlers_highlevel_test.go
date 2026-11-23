@@ -272,23 +272,26 @@ func TestHandleVerifyAcceptsBuildTest(t *testing.T) {
 	}
 }
 
-// TestHandleVerifyDeniedWithoutExecAllowlist pins the agent-surface gate
-// (P3): the MCP kern_verify types path for command-executing types must fail
-// closed WITHOUT KERN_ALLOW_EXEC / KERN_TOOLS — the CLI gate removal must
-// not open an agent hole. build/test are governed exec checks; the denial
-// must surface before any check runs (no real build on the fixture).
-func TestHandleVerifyDeniedWithoutExecAllowlist(t *testing.T) {
+// TestHandleVerifyExecPosture pins the agent-surface exec gate after the
+// 2026-11-10 posture change (Item 1.1): with an empty allowlist the default
+// ASK posture no longer hard-denies — the risk firewall decides (LOW/MEDIUM
+// run audited, HIGH/CRITICAL mint a resolvable approval) — while
+// KERN_EXEC_POSTURE=closed restores the strict fail-closed behavior for
+// operators who want it. The closed posture must surface the denial before
+// any check runs (no real build on the fixture).
+func TestHandleVerifyExecPosture(t *testing.T) {
 	// The dev box exports KERN_ALLOW_EXEC globally; clear it plus the tool
-	// allowlist so the denial is deterministic.
+	// allowlist so the verdicts are deterministic.
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
 	t.Setenv("KERN_EXEC_RISK", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
 	_, err := s.handleVerify(context.Background(), "", map[string]any{"root": root, "types": "build,test"})
 	if err == nil {
-		t.Fatal("kern_verify(build,test) without KERN_ALLOW_EXEC must be denied, got nil")
+		t.Fatal("kern_verify(build,test) under closed posture must be denied, got nil")
 	}
 	if !strings.Contains(err.Error(), "command execution blocked") {
 		t.Fatalf("denial must name the exec firewall, got: %v", err)

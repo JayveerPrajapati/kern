@@ -353,6 +353,22 @@ func TestUnknownParamsHint(t *testing.T) {
 	if hint := unknownParamsHint("kern_search", map[string]any{"agent_id": "a", "task": "t", "scope": map[string]any{}}); hint != "" {
 		t.Fatalf("governance passthrough keys must stay silent, got %q", hint)
 	}
+	// Universal sandbox controls are honored by the SERVER for every tool
+	// (serveoutput.CallOutputBudget reads max_output; the slice cursor
+	// short-circuit runs before dispatch), so warning "ignored" about them was
+	// factually wrong: a kern_project_map call with max_output=400 WAS
+	// truncated to that budget while the response still said "ignored"
+	// (audit-closure black-box case, 2026-11-03). It must be silent — and a
+	// genuine typo on the same tool must still warn.
+	if hint := unknownParamsHint("kern_project_map", map[string]any{"max_output": "400"}); hint != "" {
+		t.Fatalf("max_output is honored for every tool — must not warn, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_project_map", map[string]any{"slice": "anchor-abc123def456:lines:1-20"}); hint != "" {
+		t.Fatalf("slice is honored for every tool — must not warn, got %q", hint)
+	}
+	if hint := unknownParamsHint("kern_project_map", map[string]any{"maxfiles": "10"}); !strings.Contains(hint, "maxfiles") {
+		t.Fatalf("a real typo must still warn, got %q", hint)
+	}
 	if hint := unknownParamsHint("kern_no_such_tool", map[string]any{"x": 1}); hint != "" {
 		t.Fatalf("unknown tools must stay silent, got %q", hint)
 	}

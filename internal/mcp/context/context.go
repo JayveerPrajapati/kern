@@ -91,7 +91,15 @@ func Compact(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if mcpargs.ArgBool(args, "terse_code") || mcpargs.ArgBool(args, "terse") {
 		content = kernctx.PruneCode(abs, content, true)
 	}
-	return code.RenderTier(abs, content, tier), nil
+	out := code.RenderTier(abs, content, tier)
+	// The summary model returns "" for non-indexable input as the machine
+	// "serve raw" signal. An agent calling this tool directly would see an
+	// empty successful response, so explain it here (the CLI mirror keeps the
+	// empty string for the interception fallback).
+	if tier == code.TierSummary && strings.TrimSpace(out) == "" {
+		out = code.NotIndexableNote(path, content)
+	}
+	return out, nil
 }
 
 // buddyWarmWG tracks Buddy's background index warms so callers that own the

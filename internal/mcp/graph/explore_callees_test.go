@@ -35,7 +35,7 @@ func Greet() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Explore(context.Background(), ix, rawGVC(), map[string]any{"root": root, "symbol": "Greet"})
+	out, err := Explore(context.Background(), ix, rawGVC(), map[string]any{"root": root, "symbol": "Greet", "mode": "evidence"})
 	if err != nil {
 		t.Fatal(err)
 	}

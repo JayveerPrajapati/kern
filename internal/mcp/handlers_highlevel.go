@@ -98,7 +98,11 @@ func (s *Server) handleDo(ctx context.Context, args map[string]any) (string, err
 }
 
 func (s *Server) handleRun(ctx context.Context, args map[string]any) (string, error) {
-	return highlevel.Run(ctx, s.highlevelHooks(), args)
+	text, err := highlevel.Run(ctx, s.highlevelHooks(), args)
+	if err != nil {
+		return "", err
+	}
+	return s.appendContextGuidance(args, text), nil
 }
 
 func (s *Server) handleWorkflow(ctx context.Context, args map[string]any) (string, error) {

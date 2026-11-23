@@ -42,7 +42,7 @@ func TestExploreQualifiedSourceIdentity(t *testing.T) {
 				StampGov: func(*gov.Governor, []provenance.SymbolProvenance) {},
 				StampRaw: func([]provenance.SymbolProvenance) {},
 			}
-			out, err := Explore(context.Background(), ix, gvc, map[string]any{"symbol": "b.Shared"})
+			out, err := Explore(context.Background(), ix, gvc, map[string]any{"symbol": "b.Shared", "mode": "evidence"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,7 +87,7 @@ func TestExploreGovernedDistinctDeclarationRadius(t *testing.T) {
 		StampGov: func(*gov.Governor, []provenance.SymbolProvenance) {},
 		StampRaw: func([]provenance.SymbolProvenance) {},
 	}
-	out, err := Explore(context.Background(), ix, gvc, map[string]any{"symbol": "a.Shared"})
+	out, err := Explore(context.Background(), ix, gvc, map[string]any{"symbol": "a.Shared", "mode": "evidence"})
 	if err != nil {
 		t.Fatal(err)
 	}

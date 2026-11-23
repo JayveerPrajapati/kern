@@ -2,11 +2,14 @@ package mcp
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,9 +18,9 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
-	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/metaroute"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/serveoutput"
 	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
@@ -62,6 +65,71 @@ type toolCacheEntry struct {
 	Prov *Provenance // provenance stamped at store time (nil for tools that loaded no index)
 	Ts   time.Time   // store time — drives TTL expiry
 	ETag string      // conditional-fetch etag (B1, ADR-0012); computed from the RAW PRE-MASK text
+	Sig  string      // HMAC over the unsigned entry; tampered entries are dropped
+}
+
+var (
+	toolCacheSigningKeyOnce sync.Once
+	toolCacheSigningKeyVal  []byte
+	toolCacheSigningKeyErr  error
+)
+
+func toolCacheSigningKey() ([]byte, error) {
+	toolCacheSigningKeyOnce.Do(func() {
+		p := os.Getenv("KERN_TOOL_CACHE_KEY")
+		if p == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				toolCacheSigningKeyErr = err
+				return
+			}
+			p = filepath.Join(home, ".kern", "secrets", "tool-cache.key")
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			toolCacheSigningKeyErr = err
+			return
+		}
+		if data, err := os.ReadFile(p); err == nil {
+			if len(data) != 32 {
+				toolCacheSigningKeyErr = fmt.Errorf("tool-cache signing key %s is %d bytes, want 32", p, len(data))
+				return
+			}
+			toolCacheSigningKeyVal = data
+			return
+		}
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			toolCacheSigningKeyErr = err
+			return
+		}
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			toolCacheSigningKeyErr = err
+			return
+		}
+		if _, err := f.Write(key); err != nil {
+			_ = f.Close()
+			toolCacheSigningKeyErr = err
+			return
+		}
+		if err := f.Close(); err != nil {
+			toolCacheSigningKeyErr = err
+			return
+		}
+		toolCacheSigningKeyVal = key
+	})
+	return toolCacheSigningKeyVal, toolCacheSigningKeyErr
+}
+
+func toolCacheEntrySignature(e toolCacheEntry, key []byte) (string, error) {
+	e.Sig = ""
+	data, err := json.Marshal(e)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // cacheEnabled reports whether the D1 cache is active. KERN_MCP_CACHE=0
@@ -234,9 +302,11 @@ func cacheKeyFor(ctx context.Context, name string, args map[string]any, root, id
 	// Serve-time and identity-only conditional-fetch concerns (etag, no_cache,
 	// agent_id, task) are stripped by the ONE shared helper
 	// (etag.StripServeTimeArgs — the same F8 set the working-set registry key
-	// uses, NIT-10). max_output is deliberately NOT stripped (F-2): the etag
-	// is view-bound, so different serve views key separate entries.
-	canon, _ := json.Marshal(etag.StripServeTimeArgs(args))
+	// uses, NIT-10), keyed by the routed tool so probe/research keep their
+	// content-bearing task arg (TaskIsContent). max_output is deliberately NOT
+	// stripped (F-2): the etag is view-bound, so different serve views key
+	// separate entries.
+	canon, _ := json.Marshal(etag.StripServeTimeArgs(name, args))
 	schemaVersion := toolByName[name].SchemaVersion
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, canon, root, identity, schemaVersion, version.BuildID())
@@ -308,6 +378,16 @@ func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]a
 	} else if err := cache.Load(key, &e); err != nil {
 		return "", false
 	}
+	signingKey, err := toolCacheSigningKey()
+	if err != nil {
+		return "", false
+	}
+	want, err := toolCacheEntrySignature(e, signingKey)
+	if err != nil || !hmac.Equal([]byte(want), []byte(e.Sig)) {
+		lruDel(key)
+		_ = cache.Remove(key)
+		return "", false
+	}
 	// TTL: expired = miss (and delete) — cheap insurance beyond the index
 	// identity (F6).
 	if ttl := cacheTTL(); ttl > 0 && time.Since(e.Ts) > ttl {
@@ -372,6 +452,10 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 	// scope (NIT-9); the recompute fallback only serves direct callers with
 	// no scope (tests).
 	e := toolCacheEntry{Text: pii.Mask(text).Text, Ts: time.Now()}
+	signingKey, err := toolCacheSigningKey()
+	if err != nil {
+		return
+	}
 	if etag.Eligible(name) {
 		if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok && scope.etag != "" {
 			e.ETag = scope.etag
@@ -381,7 +465,7 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 			// the fallback and the short-circuit agree byte-for-byte. A
 			// malformed max_output errors the call downstream; -1 keeps the
 			// hash deterministic here too.
-			budget, err := mcpserve.CallOutputBudget(name, args)
+			budget, err := serveoutput.CallOutputBudget(name, args)
 			if err != nil {
 				budget = -1
 			}
@@ -410,6 +494,11 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 		}
 	}
 	key := toolCacheKeyPrefix + cacheKeyFor(ctx, name, args, root, identity)
+	if sig, err := toolCacheEntrySignature(e, signingKey); err == nil {
+		e.Sig = sig
+	} else {
+		return
+	}
 	lruPut(key, e)
 	_ = cache.Store(key, e)
 }

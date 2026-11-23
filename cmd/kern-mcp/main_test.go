@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // safeBuffer is a mutex-guarded bytes.Buffer for capturing child-process
@@ -85,6 +86,75 @@ func TestVersionFlags(t *testing.T) {
 			t.Errorf("kern-mcp %v: expected version banner, got %q", args, string(out))
 		}
 	}
+}
+
+// TestVersionFlagMatchesVersionPackage (F-B1, dogfood 2026-11-22):
+// --version must report the version package's value — the ldflags stamp on
+// release builds, the derived commit on a plain `go build` from a checkout
+// — never a bare "dev" next to a derivable commit.
+func TestVersionFlagMatchesVersionPackage(t *testing.T) {
+	out, err := exec.Command(binPath, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("kern-mcp --version: %v", err)
+	}
+	got := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "kern-mcp "))
+	if want := kversion.Describe(kversion.Adopt("dev")); got != want {
+		t.Errorf("kern-mcp --version reported %q, want the version package value %q", got, want)
+	}
+	if got == "dev" {
+		t.Log("NOTE: no commit derivable for this build (git-less or -buildvcs=false) — bare \"dev\" is correct here")
+	}
+}
+
+// TestServerInfoVersionMatchesVersionPackage (F-B1, dogfood 2026-11-22):
+// the initialize handshake must report the same version the version
+// package derives for this build, so an MCP client can confirm which build
+// it is talking to (stamped tag, or commit for an unstamped source build).
+func TestServerInfoVersionMatchesVersionPackage(t *testing.T) {
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"KERN_PRELOAD=0",
+		"KERN_MCP_WATCH=0",
+		"XDG_CACHE_HOME="+t.TempDir(),
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr safeBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n"
+	if _, err := io.WriteString(stdin, req); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(stdout.String(), `"serverInfo"`) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(stdout.String(), `"serverInfo"`) {
+		t.Fatalf("no initialize result within 10s; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var resp struct {
+		Result struct {
+			ServerInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
+		t.Fatalf("initialize response is not JSON: %v (out=%q)", err, stdout.String())
+	}
+	if want := kversion.Describe(kversion.Adopt("dev")); resp.Result.ServerInfo.Version != want {
+		t.Errorf("serverInfo.version = %q, want the version package value %q", resp.Result.ServerInfo.Version, want)
+	}
+	_ = stdin.Close()
+	_ = cmd.Wait()
 }
 
 // TestStdioInitializeRoundTrip drives the real stdio transport: one JSON-RPC

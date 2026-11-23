@@ -97,6 +97,7 @@ func TestProvenance_RawExplore(t *testing.T) {
 		"root":   root,
 		"symbol": "PublicA",
 		"depth":  "0",
+		"mode":   "evidence",
 		"scope":  deniedScope(),
 	})
 	text, isErr := toolResultText(t, resp)
@@ -175,6 +176,7 @@ func TestProvenance_PermissiveRawExplore(t *testing.T) {
 		"root":   root,
 		"symbol": "PublicA",
 		"depth":  "0",
+		"mode":   "evidence",
 	})
 	text, isErr := toolResultText(t, resp)
 	if isErr {
@@ -231,6 +233,7 @@ func TestProvenance_DefaultScopedExplore(t *testing.T) {
 		"root":   root,
 		"symbol": "PublicA",
 		"depth":  "0",
+		"mode":   "evidence",
 	})
 	text, isErr := toolResultText(t, resp)
 	if isErr {
@@ -263,6 +266,7 @@ func TestProvenance_DefaultScopedExplore(t *testing.T) {
 		"root":   root,
 		"symbol": "PublicA",
 		"depth":  "0",
+		"mode":   "evidence",
 		"scope":  deniedScope(),
 	})
 	text, isErr = toolResultText(t, resp)

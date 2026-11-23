@@ -2,13 +2,14 @@ package mcp
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/config"
+	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/version"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
-
-	"github.com/JayveerPrajapati/kern/internal/config"
-	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
 const (
@@ -41,13 +42,25 @@ func init() {
 var devServerVersion = "dev"
 
 // currentServerVersion returns the version reported in the initialize
-// response, defaulting to "dev" before any stamping.
+// response and the health handler. A still-"dev" value (unstamped source
+// build) is decorated with the build's commit via version.Describe — the
+// F-B1 dogfood fix (2026-11-22): a plain `go build` binary must identify
+// itself in the MCP handshake, not report a bare "dev". Stamped values
+// (release builds) pass through untouched.
 func currentServerVersion() string {
-	if v := serverVersion.Load(); v != nil {
+	if v := serverVersion.Load(); v != nil && *v != "dev" {
 		return *v
 	}
-	return devServerVersion
+	return devVersionOnce()
 }
+
+// devVersionOnce caches the described dev version: deriving it reads the
+// binary's build info and (as fallback) the checkout's .git/HEAD, inputs
+// that are immutable for the process lifetime, so currentServerVersion
+// stays cheap for the health handler's polls.
+var devVersionOnce = sync.OnceValue(func() string {
+	return version.Describe(devServerVersion)
+})
 
 // SetServerVersion overrides the version reported in the initialize response.
 // The CLI entry points call it with their ldflags-stamped main.version.

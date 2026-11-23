@@ -19,6 +19,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/gov"
 	"github.com/JayveerPrajapati/kern/internal/mcp/graph"
+	"github.com/JayveerPrajapati/kern/internal/mcp/research"
 	"github.com/JayveerPrajapati/kern/internal/verifycmd"
 )
 
@@ -122,7 +123,18 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 	return s.graphGoverned(ctx, args, graph.Explore)
 }
 func (s *Server) handleProbe(ctx context.Context, args map[string]any) (string, error) {
-	return s.graphGoverned(ctx, args, graph.Probe)
+	text, err := s.graphGoverned(ctx, args, graph.Probe)
+	if err != nil {
+		return "", err
+	}
+	return s.appendContextGuidance(args, text), nil
+}
+func (s *Server) handleResearch(ctx context.Context, args map[string]any) (string, error) {
+	text, err := s.graphGoverned(ctx, args, research.Research)
+	if err != nil {
+		return "", err
+	}
+	return s.appendContextGuidance(args, text), nil
 }
 
 func (s *Server) handleFrameworks(ctx context.Context, args map[string]any) (string, error) {

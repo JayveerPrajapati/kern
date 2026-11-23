@@ -70,7 +70,7 @@ func (s *Server) ledgerLookup(ctx context.Context, name string, args map[string]
 	if !etag.Eligible(rname) || argBool(rargs, "semantic") || argBool(rargs, metaroute.WorkingsetArg) {
 		return "", false
 	}
-	canon, _ := json.Marshal(etag.StripServeTimeArgs(rargs))
+	canon, _ := json.Marshal(etag.StripServeTimeArgs(rname, rargs))
 	key := string(canon) + "\x00" + s.ledgerContentKey(ctx, name, args)
 	return s.ledger.Lookup(sessionKeyFor(args), rname, key)
 }
@@ -119,7 +119,7 @@ func (s *Server) ledgerRecord(ctx context.Context, name string, args map[string]
 	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
 		e = scope.etag
 	}
-	canon, _ := json.Marshal(etag.StripServeTimeArgs(rargs))
+	canon, _ := json.Marshal(etag.StripServeTimeArgs(rname, rargs))
 	key := string(canon) + "\x00" + s.ledgerContentKey(ctx, name, args)
 	s.ledger.Record(sessionKeyFor(args), rname, key, e, ledgerFilesFromText(text))
 }

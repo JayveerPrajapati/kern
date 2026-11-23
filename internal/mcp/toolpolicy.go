@@ -74,8 +74,9 @@ func mcpPhase() string {
 // mcpCategory returns the active tool-family filter from KERN_MCP_CATEGORY.
 // An unset or invalid value returns "" which means no category filtering:
 // the whole tier surface (default/high-level/full) is advertised as before.
-// Like KERN_MCP_PHASE it filters ADVERTISEMENT only (tools/list responses),
-// never execution — direct sub-tool calls still work.
+// Like KERN_MCP_PHASE it shapes the advertised surface and therefore the
+// direct tools/call set; kern_meta remains the natural-language router to
+// every registered sub-tool.
 func mcpCategory() string {
 	c := strings.ToLower(strings.TrimSpace(os.Getenv("KERN_MCP_CATEGORY")))
 	if !catalog.ValidCategory(c) {
@@ -167,23 +168,39 @@ var highLevelTools = map[string]bool{
 
 // defaultTools is the surface advertised by default. The full catalog is
 // gated behind KERN_MCP_FULL=1, and phase-aware routing (KERN_MCP_PHASE)
-// filters either surface down to the active phase's shortlist. kern_meta's
-// NL router still reaches every sub-tool handler internally regardless of
-// what is advertised, so no capability is lost — only the advertised
-// surface shrinks. This implements the MCP spec's "high-level tools, not
-// dozens of tiny low-value tools" guidance.
+// filters either surface down to the active phase's shortlist. kern_meta
+// routes within that same advertised surface, so shrinking the surface
+// shrinks both discovery and execution. This implements the MCP spec's
+// "high-level tools, not dozens of tiny low-value tools" guidance.
 //
-// The default surface is usage-curated: it exposes the lifecycle tools agents
-// use most while keeping schema cost below the full catalog. kern_exec is the
-// deliberate execution exception: advertising it keeps the governed execution
-// path discoverable, while every call still fails closed behind
-// KERN_ALLOW_EXEC/KERN_TOOLS. Advertisement is not an execution firewall.
+// The default surface is direct and densic-like: the common search, context,
+// graph, impact, review, verification, onboarding, and routing routes. No
+// security-gated tool is advertised by default. Advertisement is now an
+// execution boundary; direct calls, kern_meta, and pipelines obey it unless
+// KERN_MCP_ALLOW_UNADVERTISED=1 is explicitly set.
 //
 // The name list lives in the leaf package internal/mcp/toolsurface so the
 // highlevel control plane (kern_run recommendations) can annotate tools
 // outside the default surface with their KERN_MCP_FULL gating (deep-dive
 // A1) without an import cycle.
 var defaultTools = toolsurface.Set()
+
+// advertisedForCall reports whether a tools/call for name is permitted on
+// this server's active surface (audit F3, 2026-11-21): the invocable set
+// equals the advertised set (the same filteredTools() list tools/list
+// serves). KERN_MCP_ALLOW_UNADVERTISED=1 is the operator escape for
+// clients that legitimately drive unadvertised tools directly.
+func (s *Server) advertisedForCall(name string) bool {
+	if os.Getenv("KERN_MCP_ALLOW_UNADVERTISED") == "1" {
+		return true
+	}
+	for _, t := range s.filteredTools() {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // schemaVersionFor returns the tool schema contract version this connection
 // negotiated during initialize (P2-003), defaulting to the current catalog
@@ -252,8 +269,8 @@ func (s *Server) filteredTools() []Tool {
 		return s.filtered
 	}
 	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 6-tool middle set (deprecated;
-	// prefer the full 32-tool catalog). Otherwise the
-	// DEFAULT: the full 32-tool catalog (standing mandate 2026-10-23).
+	// prefer either the direct surface or KERN_MCP_FULL=1). Otherwise the
+	// DEFAULT: the direct eleven-tool surface.
 	var keep map[string]bool
 	if highLevelOnly() {
 		keep = highLevelTools
@@ -329,12 +346,13 @@ func exploreBudgetCap() int {
 // dispatch, or an error when the tool is not allowed and no allowed
 // alternative exists, or when the root argument fails validation.
 func (s *Server) precheckTool(name string, args map[string]any) (string, error) {
-	// Validates against the full registered catalog by design — phase
-	// filtering (KERN_MCP_PHASE) only affects advertisement, never execution.
-	// Resolve against the FULL registered catalog, not the advertised
-	// (filtered) set: kern_meta's NL router reaches every sub-tool handler
-	// internally even when the sub-tool is not advertised, and an explicit
-	// KERN_TOOLS allowlist still gates execution here.
+	// The invocable set equals the advertised set for every path: direct
+	// tools/call requests, kern_meta routing, and composed pipeline steps.
+	// KERN_MCP_ALLOW_UNADVERTISED=1 is the explicit operator escape for
+	// embedded clients that need unadvertised direct tools.
+	if !s.advertisedForCall(name) {
+		return "", fmt.Errorf("%w: tool %q is not advertised on this surface (set KERN_MCP_FULL=1, or KERN_MCP_ALLOW_UNADVERTISED=1 to opt out)", domain.ErrToolDenied, name)
+	}
 	if !toolAllowed(tools, s.allowlist, name) {
 		// Tool fallback: when a tool is blocked by the KERN_TOOLS
 		// allowlist, route to its policy-approved alternative if one exists and

@@ -253,6 +253,9 @@ func Fetch(ctx context.Context, args map[string]any) (string, error) {
 	if rawURL == "" {
 		return "", fmt.Errorf("url is required")
 	}
+	if err := fetch.DocFetchAllowed(rawURL); err != nil {
+		return "", err
+	}
 	root := mcpargs.ArgString(args, "root")
 	if root == "" {
 		root = "."

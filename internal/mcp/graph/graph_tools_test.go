@@ -486,6 +486,61 @@ func TestExploreBranches(t *testing.T) {
 	}
 }
 
+func TestExploreConciseDefaultAndEvidenceMode(t *testing.T) {
+	_, ix := fixture(t)
+	ctx := context.Background()
+	gvc := rawGov()
+
+	concise, err := Explore(ctx, ix, gvc, map[string]any{"symbol": "Helper"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(concise, "callers:") || !strings.Contains(concise, "risk:") {
+		t.Fatalf("concise output must carry counts and risk: %s", concise)
+	}
+	if strings.Contains(concise, "== source ==") {
+		t.Fatalf("concise output must not include the full source block: %s", concise)
+	}
+
+	balanced, err := Explore(ctx, ix, gvc, map[string]any{"symbol": "Helper", "mode": "balanced"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"top callers:",
+		"top callees:",
+		"top affected files:",
+		"full evidence: mode=evidence",
+	} {
+		if !strings.Contains(balanced, want) {
+			t.Fatalf("balanced output missing %q: %s", want, balanced)
+		}
+	}
+	if strings.Contains(balanced, "== source ==") {
+		t.Fatalf("balanced output must not include the full source block: %s", balanced)
+	}
+
+	evidence, err := Explore(ctx, ix, gvc, map[string]any{"symbol": "Helper", "mode": "evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(evidence, "== source ==") {
+		t.Fatalf("evidence mode must include the full source block: %s", evidence)
+	}
+
+	explained, err := Explore(ctx, ix, gvc, map[string]any{"symbol": "Helper", "explain": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(explained, "== source ==") {
+		t.Fatalf("explain mode must preserve full evidence: %s", explained)
+	}
+
+	if _, err := Explore(ctx, ix, gvc, map[string]any{"symbol": "Helper", "mode": "bogus"}); err == nil {
+		t.Fatal("unknown explore mode must error")
+	}
+}
+
 // TestGovernedPaths pins the governed branch of the read tools: with a real
 // governor (the default agent identity), Context/Graph/Explore still answer,
 // and their provenance stamping runs instead of the raw path.

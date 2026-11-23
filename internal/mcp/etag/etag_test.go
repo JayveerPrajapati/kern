@@ -56,14 +56,49 @@ func TestUnchangedResponseText(t *testing.T) {
 func TestCanonicalArgsKeyStripsServeTimeArgs(t *testing.T) {
 	base := map[string]any{"symbol": "greet", "root": "/repo", "lines": "12"}
 	withEtag := map[string]any{"symbol": "greet", "root": "/repo", "lines": "12", "etag": "deadbeef", "no_cache": "1", "agent_id": "alice", "task": "t1"}
-	if CanonicalArgsKey(base) != CanonicalArgsKey(withEtag) {
+	if CanonicalArgsKey("kern_explore", base) != CanonicalArgsKey("kern_explore", withEtag) {
 		t.Fatal("identity/conditional-fetch args must not change the registry key")
 	}
-	if CanonicalArgsKey(base) == CanonicalArgsKey(map[string]any{"symbol": "greet", "root": "/repo", "lines": "12", "max_output": "100"}) {
+	if CanonicalArgsKey("kern_explore", base) == CanonicalArgsKey("kern_explore", map[string]any{"symbol": "greet", "root": "/repo", "lines": "12", "max_output": "100"}) {
 		t.Fatal("max_output must change the registry key (the etag is view-bound, F-2)")
 	}
-	if CanonicalArgsKey(base) == CanonicalArgsKey(map[string]any{"symbol": "greet", "root": "/repo", "lines": "13"}) {
+	if CanonicalArgsKey("kern_explore", base) == CanonicalArgsKey("kern_explore", map[string]any{"symbol": "greet", "root": "/repo", "lines": "13"}) {
 		t.Fatal("a real arg difference must change the registry key")
+	}
+}
+
+// TestStripKeepsTaskForContentTools (audit F2, 2026-11-21): `task` is the
+// primary content input of kern_probe/kern_research — it must stay in the
+// canonical args so two different asks key different entries; stripping it
+// made the D1 cache and served ledger replay the first response for every
+// subsequent different task. For all other tools `task` stays identity-only.
+func TestStripKeepsTaskForContentTools(t *testing.T) {
+	probe := map[string]any{"task": "how does Greet work", "root": "/repo"}
+	if StripServeTimeArgs("kern_probe", probe)["task"] != "how does Greet work" {
+		t.Fatal("kern_probe task is content: it must survive the strip")
+	}
+	if StripServeTimeArgs("kern_research", probe)["task"] != "how does Greet work" {
+		t.Fatal("kern_research task is content: it must survive the strip")
+	}
+	if _, ok := StripServeTimeArgs("kern_explore", probe)["task"]; ok {
+		t.Fatal("non-content tool task is identity-only: it must be stripped")
+	}
+	if _, ok := StripServeTimeArgs("kern_meta", probe)["task"]; ok {
+		t.Fatal("kern_meta task is identity-only: it must be stripped")
+	}
+	if CanonicalArgsKey("kern_probe", probe) == CanonicalArgsKey("kern_probe", map[string]any{"task": "who calls Mul instead", "root": "/repo"}) {
+		t.Fatal("two different probe tasks must key different registry entries")
+	}
+	// etag/no_cache/agent_id variance still collapses for content tools.
+	withId := map[string]any{"task": "how does Greet work", "root": "/repo", "etag": "x", "no_cache": "1", "agent_id": "bob"}
+	if CanonicalArgsKey("kern_probe", probe) != CanonicalArgsKey("kern_probe", withId) {
+		t.Fatal("identity/conditional-fetch args must not change the key for content tools either")
+	}
+	if !TaskIsContent("kern_probe") || !TaskIsContent("kern_research") {
+		t.Fatal("TaskIsContent must cover kern_probe and kern_research")
+	}
+	if TaskIsContent("kern_explore") || TaskIsContent("kern_meta") || TaskIsContent("kern_search") {
+		t.Fatal("TaskIsContent must not cover non-content tools")
 	}
 }
 

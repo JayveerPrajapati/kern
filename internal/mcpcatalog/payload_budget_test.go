@@ -7,7 +7,7 @@ import (
 
 // TestToolsListPayloadBudget pins the per-session catalogue tax: every MCP
 // client pays this serialized payload before its first call. Measured
-// 36,483 B on 2026-10-28 for the 32-tool default surface (71% is
+// 36,483 B on 2026-10-28 for the 33-tool default surface (71% is
 // per-parameter documentation, which agents read; there is no $schema /
 // additionalProperties boilerplate left to shave, and the phase/risk/category/
 // schemaVersion/cacheable fields are protocol-pinned). A conscious addition

@@ -72,14 +72,17 @@ func TestSandboxRunsGuardedCommand(t *testing.T) {
 	}
 }
 
-// TestSandboxDeniedByGovernance pins the fail-closed default a fresh install
-// sees: no KERN_ALLOW_EXEC and no allowlist → the command never starts.
+// TestSandboxDeniedByGovernance pins the closed posture's fail-closed gate:
+// no KERN_ALLOW_EXEC, no allowlist, KERN_EXEC_POSTURE=closed → the command
+// never starts. (Default posture is ask — LOW/MEDIUM commands run audited —
+// so the strict deny is now explicitly opt-in; this pin keeps it load-bearing.)
 func TestSandboxDeniedByGovernance(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	root := t.TempDir()
 	if _, err := Sandbox(context.Background(), "id", map[string]any{"root": root, "command": "echo nope"}); err == nil {
-		t.Fatal("sandbox must be denied without an exec grant")
+		t.Fatal("sandbox must be denied without an exec grant under closed posture")
 	}
 }
 
@@ -131,12 +134,14 @@ func TestRunBuildExecutesCommand(t *testing.T) {
 	}
 }
 
-// TestRunBuildDeniedByGovernance pins fail-closed behavior for the build path.
+// TestRunBuildDeniedByGovernance pins fail-closed behavior for the build path
+// under the closed posture.
 func TestRunBuildDeniedByGovernance(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	if _, err := RunBuild(context.Background(), "id", map[string]any{"command": "echo nope", "dir": t.TempDir()}); err == nil {
-		t.Fatal("build must be denied without an exec grant")
+		t.Fatal("build must be denied without an exec grant under closed posture")
 	}
 }
 

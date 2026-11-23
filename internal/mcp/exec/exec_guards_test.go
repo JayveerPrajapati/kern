@@ -96,17 +96,18 @@ func TestMaskedOutputMasksBeforeTruncating(t *testing.T) {
 }
 
 // TestSandboxValidatesBeforeExecuting pins the guards that must fire before any
-// process starts: empty command, and a fail-closed governance denial.
+// process starts: empty command, and the closed-posture governance denial.
 func TestSandboxValidatesBeforeExecuting(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	root := t.TempDir()
 
 	if _, err := Sandbox(context.Background(), "id", map[string]any{"root": root}); err == nil || !strings.Contains(err.Error(), "command is required") {
 		t.Fatalf("empty command: %v", err)
 	}
 	if _, err := Sandbox(context.Background(), "id", map[string]any{"root": root, "command": "echo hi"}); err == nil {
-		t.Fatal("governance must deny exec without KERN_ALLOW_EXEC/KERN_TOOLS")
+		t.Fatal("closed-posture governance must deny exec without KERN_ALLOW_EXEC/KERN_TOOLS")
 	}
 	// An open command with a malformed timeout is rejected at parse time, still
 	// before execution.
@@ -191,16 +192,17 @@ func TestRootedPathConfinement(t *testing.T) {
 
 // TestValidateGuards pins the validation tool's pre-execution guards: the
 // command is subject to the same governance firewall as exec, so it fails
-// closed in a default environment.
+// closed under the closed posture.
 func TestValidateGuards(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Validate(context.Background(), map[string]any{"root": root}); err == nil {
-		t.Fatal("validate must fail closed without exec permission")
+		t.Fatal("validate must fail closed under closed posture")
 	}
 	if _, err := Validate(context.Background(), map[string]any{"root": root, "command": "true"}); err == nil {
 		t.Fatal("validate with an explicit command must still fail closed")
@@ -219,11 +221,13 @@ func TestHealGuards(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Default environment: the governance firewall denies before any round.
+	// Closed posture: the governance firewall denies before any round.
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	if _, err := Heal(context.Background(), map[string]any{"root": root}); err == nil {
-		t.Fatal("heal must fail closed without exec permission")
+		t.Fatal("heal must fail closed under closed posture")
 	}
 	// With exec permitted, argument validation still happens before the loop.
+	t.Setenv("KERN_EXEC_POSTURE", "")
 	t.Setenv("KERN_ALLOW_EXEC", "1")
 	if _, err := Heal(context.Background(), map[string]any{"root": root, "max_rounds": "many"}); err == nil || !strings.Contains(err.Error(), "max_rounds") {
 		t.Fatalf("non-numeric max_rounds must error, got %v", err)

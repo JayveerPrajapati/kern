@@ -13,8 +13,8 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
-	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/serveoutput"
 )
 
 // resultField reads a top-level field off a tools/call result object.
@@ -50,7 +50,7 @@ func TestConditionalFetchEtagOnEligibleResponse(t *testing.T) {
 	}
 	// The served etag folds in the same effective budget the server used
 	// (per-tool default for kern_compact_file, R7).
-	budget, err := mcpserve.CallOutputBudget("kern_compact_file", map[string]any{"root": root, "path": f})
+	budget, err := serveoutput.CallOutputBudget("kern_compact_file", map[string]any{"root": root, "path": f})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestMaybePreRenderShortCircuit(t *testing.T) {
 	if r1.Etag == "" {
 		t.Fatal("eligible response must carry an etag")
 	}
-	entry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey(exploreArgs))
+	entry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey("kern_explore", exploreArgs))
 	if !ok {
 		t.Fatal("fresh serve must record the working-set entry")
 	}
@@ -544,7 +544,7 @@ func TestMaybePreRenderShortCircuit(t *testing.T) {
 	if _, err := s.CallToolGovernedResult(context.Background(), "kern_compact_file", cfServe); err != nil {
 		t.Fatalf("compact_file serve failed: %v", err)
 	}
-	cfEntry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey(cfServe))
+	cfEntry, ok := etag.Default.ServedEntry("", etag.CanonicalArgsKey("kern_compact_file", cfServe))
 	if !ok {
 		t.Fatal("compact_file serve must record a working-set entry")
 	}

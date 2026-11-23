@@ -47,10 +47,30 @@ func (s *Server) hintFor(ctx context.Context, name string, args map[string]any, 
 	if loopMarker != "" {
 		return "" // the loop marker already teaches this response
 	}
-	if line := s.hints.Select(key, rname, hintsOutcomeFor(rname, text)); line != "" {
+	// Hints are surface-aware (F-B4, dogfood 2026-11-22): they may only
+	// advertise tools this server actually serves — the same advertised set
+	// tools/list answers with — so a default-surface install never nudges
+	// the agent toward a KERN_MCP_FULL-only tool and a -32602 unknown-tool
+	// error.
+	if line := s.hints.Select(key, rname, hintsOutcomeFor(rname, text), s.advertisedTool); line != "" {
 		return line
 	}
-	return s.hints.Gap(key, s.hints.Reads(key), s.hints.Used(key))
+	return s.hints.Gap(key, s.hints.Reads(key), s.hints.Used(key), s.advertisedTool)
+}
+
+// advertisedTool reports whether name is in the server's advertised tool
+// set (the same filteredTools() list tools/list serves) — deliberately NOT
+// the advertisedForCall invocability gate: KERN_MCP_ALLOW_UNADVERTISED=1
+// lets an operator drive unadvertised tools directly, but a hint may only
+// name tools the agent can discover and call normally (tools/list), so the
+// probe follows advertisement, not invocation.
+func (s *Server) advertisedTool(name string) bool {
+	for _, t := range s.filteredTools() {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // appendHintLine appends the advisory hint line after the payload text with a

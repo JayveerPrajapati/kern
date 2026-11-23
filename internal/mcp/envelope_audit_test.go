@@ -239,7 +239,7 @@ func TestToolsListCursorRejectedAndNextCursorOmitted(t *testing.T) {
 // low-risk (read-only) tools, destructiveHint for high, destructiveHint +
 // openWorldHint for critical (command execution/deployment).
 func TestToolsListAnnotationsDerivedFromRisk(t *testing.T) {
-	t.Parallel()
+	t.Setenv("KERN_MCP_FULL", "1")
 	s := newHTTPServer()
 	resp := s.dispatch(rpcRequest{ID: json.RawMessage(`1`), Method: "tools/list"})
 	m, ok := resp.(map[string]any)
@@ -267,7 +267,7 @@ func TestToolsListAnnotationsDerivedFromRisk(t *testing.T) {
 			}
 		}
 	}
-	// Spot-check the three classes are present in the default surface.
+	// Spot-check all three risk classes in the full advertised surface.
 	byName := map[string]Tool{}
 	for _, tl := range tools {
 		byName[tl.Name] = tl

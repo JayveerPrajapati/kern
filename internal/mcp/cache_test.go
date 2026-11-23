@@ -314,6 +314,31 @@ func TestToolCacheKeyChangesWithIndexIdentity(t *testing.T) {
 	}
 }
 
+// TestToolCacheKeyKeepsProbeResearchTask (audit F2, 2026-11-21): `task` is
+// the primary CONTENT input of kern_probe/kern_research — two different
+// tasks must key different D1 cache entries. Stripping task made the first
+// response replay for every subsequent different task, cross-process.
+func TestToolCacheKeyKeepsProbeResearchTask(t *testing.T) {
+	t.Parallel()
+	taskA := map[string]any{"root": "/r", "task": "how does Greet work"}
+	taskB := map[string]any{"root": "/r", "task": "who calls Mul instead"}
+	kA := cacheKeyFor(context.Background(), "kern_probe", taskA, "/r", "identityA")
+	kB := cacheKeyFor(context.Background(), "kern_probe", taskB, "/r", "identityA")
+	if kA == kB {
+		t.Fatal("two different kern_probe tasks must key different cache entries")
+	}
+	rA := cacheKeyFor(context.Background(), "kern_research", taskA, "/r", "identityA")
+	rB := cacheKeyFor(context.Background(), "kern_research", taskB, "/r", "identityA")
+	if rA == rB {
+		t.Fatal("two different kern_research tasks must key different cache entries")
+	}
+	// Identity/conditional-fetch variance still collapses for content tools.
+	taskAId := map[string]any{"root": "/r", "task": "how does Greet work", "etag": "e", "no_cache": "1", "agent_id": "a"}
+	if kA != cacheKeyFor(context.Background(), "kern_probe", taskAId, "/r", "identityA") {
+		t.Fatal("etag/no_cache/agent_id must still be stripped for kern_probe")
+	}
+}
+
 // TestToolCacheMutatingToolNeverCached: stateful / mutating / git-diff-family
 // tools are never cacheable (F1), and a call to one stores nothing.
 func TestToolCacheMutatingToolNeverCached(t *testing.T) {
@@ -449,6 +474,10 @@ func TestToolCacheAuditEntryOnHit(t *testing.T) {
 // without any index involvement — no session is created and the "noindex"
 // identity keys the entry.
 func TestToolCachePureArgToolNoIndex(t *testing.T) {
+	// kern_mask_pii is off the default surface; this test exercises cache
+	// semantics, so allow the unadvertised call explicitly (the gate from
+	// audit F3 would otherwise answer "unknown tool").
+	t.Setenv("KERN_MCP_ALLOW_UNADVERTISED", "1")
 	s := cacheTestServer(t)
 	pa, _ := json.Marshal(map[string]any{
 		"name": "kern_mask_pii", "arguments": map[string]any{"text": "hello bob@example.com"},
@@ -470,6 +499,7 @@ func TestToolCachePureArgToolNoIndex(t *testing.T) {
 // timing — the key stays "noindex" across the whole test.
 func TestToolCacheTTLExpiry(t *testing.T) {
 	t.Setenv("KERN_MCP_CACHE_TTL", "50ms")
+	t.Setenv("KERN_MCP_ALLOW_UNADVERTISED", "1") // kern_mask_pii: cache-semantics test, not a surface test
 	s := cacheTestServer(t)
 	pa, _ := json.Marshal(map[string]any{
 		"name": "kern_mask_pii", "arguments": map[string]any{"text": "hello bob@example.com"},
@@ -527,6 +557,93 @@ func TestToolCacheStoredTextIsPiiMasked(t *testing.T) {
 	}
 }
 
+func TestToolCacheTamperedEntryIsRejected(t *testing.T) {
+	s := cacheTestServer(t)
+	ctx := context.WithValue(context.Background(), indexScopeKey{}, &indexScope{})
+	args := map[string]any{"root": "/tmp", "query": "q"}
+	s.cacheStore(ctx, "kern_search", args, "trusted response")
+	key := toolCacheKeyPrefix + cacheKeyFor(context.Background(), "kern_search", args, "/tmp", "noindex")
+
+	var e toolCacheEntry
+	if err := cache.Load(key, &e); err != nil {
+		t.Fatalf("entry must be stored: %v", err)
+	}
+	e.Text = "poisoned response"
+	if err := cache.Store(key, e); err != nil {
+		t.Fatalf("tampered entry must be persistable for the negative test: %v", err)
+	}
+	lruDel(key)
+	if got, ok := s.cacheLookup(context.Background(), "kern_search", args); ok {
+		t.Fatalf("tampered entry must not be served, got %q", got)
+	}
+	if cache.Exists(key) {
+		t.Fatal("tampered entry must be removed from the disk cache")
+	}
+}
+
+func TestToolCacheSigningKeyLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	reset := func() {
+		toolCacheSigningKeyOnce = sync.Once{}
+		toolCacheSigningKeyVal = nil
+		toolCacheSigningKeyErr = nil
+	}
+	t.Cleanup(reset)
+
+	valid := filepath.Join(dir, "valid.key")
+	if err := os.WriteFile(valid, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_TOOL_CACHE_KEY", valid)
+	reset()
+	got, err := toolCacheSigningKey()
+	if err != nil || len(got) != 32 {
+		t.Fatalf("valid key returned len=%d err=%v, want 32 bytes and no error", len(got), err)
+	}
+
+	invalid := filepath.Join(dir, "invalid.key")
+	if err := os.WriteFile(invalid, []byte("too short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_TOOL_CACHE_KEY", invalid)
+	reset()
+	got, err = toolCacheSigningKey()
+	if err == nil {
+		t.Fatal("short key must be rejected")
+	}
+	if len(got) != 0 {
+		t.Fatalf("short key returned %d bytes, want none", len(got))
+	}
+
+	generated := filepath.Join(dir, "generated.key")
+	t.Setenv("KERN_TOOL_CACHE_KEY", generated)
+	reset()
+	got, err = toolCacheSigningKey()
+	if err != nil || len(got) != 32 {
+		t.Fatalf("generated key returned len=%d err=%v, want 32 bytes and no error", len(got), err)
+	}
+	data, err := os.ReadFile(generated)
+	if err != nil || len(data) != 32 {
+		t.Fatalf("generated key was not persisted: len=%d err=%v", len(data), err)
+	}
+
+	// A directory cannot be opened with O_CREATE|O_EXCL|O_WRONLY, covering the
+	// fail-closed path without depending on filesystem permissions.
+	blocked := filepath.Join(dir, "blocked.key")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_TOOL_CACHE_KEY", blocked)
+	reset()
+	got, err = toolCacheSigningKey()
+	if err == nil {
+		t.Fatal("unwritable key path must be rejected")
+	}
+	if len(got) != 0 {
+		t.Fatalf("unwritable key path returned %d bytes, want none", len(got))
+	}
+}
+
 // TestToolCacheSizeCapSkipsLargeEntries (F9): entries whose raw text exceeds
 // the 512 KiB cap are not stored.
 func TestToolCacheSizeCapSkipsLargeEntries(t *testing.T) {
@@ -554,12 +671,12 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 	t.Parallel()
 	cacheable := map[string]bool{
 		// index-backed deterministic tools (F1) — the 2026-10-18 surface slim
-		// shrank the catalog to 32 tools; the cacheable set is the 12 survivors
+		// grew the catalog to 34 tools; the cacheable set is the 13 survivors
 		// flagged Cacheable in the catalog.
 		"kern_search": true, "kern_explore": true, "kern_context": true,
 		"kern_compact_file": true, "kern_ast_search": true, "kern_why": true,
 		"kern_path": true, "kern_arch": true, "kern_probe": true,
-		"kern_graph": true, "kern_meta": true,
+		"kern_graph": true, "kern_research": true, "kern_meta": true,
 		// pure-arg tools (F1)
 		"kern_mask_pii": true,
 	}
