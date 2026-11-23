@@ -46,6 +46,9 @@ live when one is. The socket is local-user-only; a second
   channel `latest` resolves to — `latest` (default), `stable` (newest
   3-component tag, 4-component hotfixes excluded), or a regex over tag
   names; an explicit `KERN_VERSION` pin always overrides the channel).
+  `KERN_LLM_CLI_TIMEOUT` bounds one local agent-CLI call (default `20`
+  seconds), and `KERN_LLM_CHAIN_TIMEOUT` bounds the whole auto-chain attempt
+  (default `30` seconds).
 `KERN_TOKENIZER` selects the token counter used across all sizing and
 savings numbers: `estimator` (default — stable, heuristic, offline),
 `bpe` (self-trained byte-level BPE), or exact OpenAI encodings
@@ -73,9 +76,10 @@ widen server confinement by itself. (The former per-App web-console and
 enterprise tool servers were removed in the platform pivot; `kern-mcp` is
 the only server that honors these roots.)
 `KERN_MCP_FULL=1` / `KERN_MCP_PHASE` / `KERN_MCP_CATEGORY` /
-`KERN_MCP_SINGLE_TOOL` / `KERN_MCP_HIGH_LEVEL_ONLY` shape only what `tools/list`
-**advertises** — a named `tools/call` always dispatches through the full catalog.
-The full 32-tool catalog is the default surface (standing mandate 2026-10-23);
+`KERN_MCP_SINGLE_TOOL` / `KERN_MCP_HIGH_LEVEL_ONLY` shape both what `tools/list`
+**advertises** and which tools a direct `tools/call` accepts. `kern_meta` still
+routes to the full catalog. The direct eleven-tool surface is the default;
+`KERN_MCP_FULL=1` advertises the full 34-tool catalog;
 `KERN_MCP_PHASE=explore|plan|edit|verify` filters it down to the active
 agent phase plus the always-on meta/cross tools; `KERN_MCP_CATEGORY=<family>`
 keeps one tool family (e.g. `graph`, `verify`) with `kern_meta` always present;
@@ -119,9 +123,16 @@ favor of the default surface or `KERN_MCP_FULL=1`.
   `KERN_GITHUB_TOKEN`, `KERN_K8S_TOKEN`, OpenAI/Anthropic/Gemini keys,
   `KERN_ALLOW_*`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_NO_CONFINE`, `KERN_TOOLS`,
   `KERN_MCP_FULL/PHASE/SINGLE_TOOL/SLIM/HIGH_LEVEL_ONLY/AUDIT_DIR`,
+  `KERN_MCP_ALLOW_UNADVERTISED`,
   `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` (optional TLS for the HTTP MCP transport),
-`KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
+`KERN_ALLOW_LOOPBACK_FETCH`, `KERN_DOC_FETCH_DOMAINS`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
 isolation knobs, and installer vars.
+
+`KERN_DOC_FETCH_DOMAINS` is a comma-separated allowlist for `kern_doc
+action=fetch` and `kern docs fetch`. A public URL is refused unless its host
+is listed exactly or is a subdomain of a listed domain; `*` is the explicit
+operator opt-in for any public host. Loopback fetches additionally require
+`KERN_ALLOW_LOOPBACK_FETCH=1`.
 
 **Why denial messages name bypass knobs inline:** guard denials mention
 `KERN_BYPASS=1` / `KERN_ENFORCE=0` and related overrides so a human operator
@@ -139,7 +150,7 @@ setup: the first agent call indexes it. These switches control that behavior.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `KERN_AUTO_WIRE=0` | wire | Installer only: download kern but do not wire any agent. |
+| `KERN_AUTO_WIRE=1` | off | Installer only: opt in to machine-wide agent wiring (`--wire` / `-Wire` is the one-invocation equivalent). |
 | `KERN_INDEX_WAIT_SECONDS` | `25` | Longest one MCP tool call waits on an index build. Past it the call returns the stale index if one exists, else a retryable "still building" error; the build keeps running. `0` waits indefinitely. One-shot CLI commands always wait. |
 | `KERN_FRESHNESS_PROOF_CACHE_MS` | `5000` | How long a resident server re-serves the last non-strict freshness verdict before recomputing it. A warm proof costs a git staging pass or a stat-only tree walk, which every index-backed tool call otherwise pays per call (provenance stamps, staleness notes); the verdict is advisory, so serving one up to this TTL old stays within the semantics the snapshot gate already accepts. `0` disables the cache (always recompute). |
 | `KERN_FRESHNESS_GATE_MS` | `30000` | Maximum age of the retained stat-walk observation before the freshness check re-walks the tree instead of trusting it. `0` disables the gate. |
@@ -190,7 +201,24 @@ security-relevant ones are reported by `kern doctor`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KERN_ALLOW_EXEC=1` | unset | `kern_exec`/sandbox/execute tools fail closed on an empty `KERN_TOOLS` allowlist unless this is set. |
+| `KERN_EXEC_POSTURE=ask\|closed` | `ask` | Exec governance posture. `ask` (default): an empty `KERN_TOOLS` allowlist falls through to the risk firewall — LOW/MEDIUM commands run audited, HIGH/CRITICAL mint a resolvable approval. `closed`: the strict fail-closed behavior — exec is refused on an empty allowlist unless `KERN_ALLOW_EXEC=1` is set. |
+| `KERN_ALLOW_EXEC=1` | unset | Total opt-in that skips the empty-allowlist gate (the risk firewall still applies under both postures). |
+
+### Escape hatches — the complete list
+
+Every mechanism that can change a guard/governance outcome, in one table
+(`kern guard --help` prints the same list):
+
+| Mechanism | What it does |
+|---|---|
+| `KERN_EXEC_POSTURE=closed` | Strict exec: refuse on an empty allowlist (the default `ask` posture runs LOW/MEDIUM audited, mints resolvable approvals for HIGH/CRITICAL). |
+| `KERN_ALLOW_EXEC=1` | Total exec opt-in (the risk firewall still applies). |
+| `KERN_TOOLS=a,b` | Allowlist specific governed tools. |
+| `kern guard allow <hash>` | Tty-gated operator allow-once for a denied command. |
+| `kern guard grant <command>` | Mint approval `appr-<id>` and print the ask-wait-retry instructions. |
+| `kern approval ask\|wait\|clear` | Resolve, await, or clear a minted approval. |
+| `kern guard pause\|resume` | Audited repo pause (read/grep/glob steering only; exec governance stays enforced). |
+| `KERN_BYPASS=1` / `KERN_ENFORCE=0` | Emergency break-glass, audited — host env only. |
 | `KERN_ALLOW_NO_ISOLATE=1` | unset | Honor a script's `no_isolate` request (skip the sandbox). Any other value is treated as unset. |
 | `KERN_ALLOW_UNISOLATED=1` | unset | Alias `KERN_ALLOW_NET=1`. On hosts without unprivileged network namespaces (macOS, Windows), script execution fails closed unless this is set. |
 | `KERN_READONLY_EXEC=1` | unset | Governed execution (`kern build`) runs read-only — mutations are skipped, GATE commands stay denied. |
@@ -207,11 +235,13 @@ security-relevant ones are reported by `kern doctor`.
 | `KERN_READONLY=1` | off | Read-path suppression: pure-read sessions stop writing state (tool-call audit-chain appends, content/semantic/D1 cache persistence, prediction and stats telemetry, the index watcher) so `.kern/` and the kern cache dir stay untouched. Explicit write actions (e.g. `kern_memory` `action=add`) are the tool's purpose and still work. Point it at an already-indexed checkout — index maintenance for a stale index still writes. |
 | `KERN_MCP_CACHE_TTL` | unset | Cache TTL. Malformed values fail loud — they never silently disable the cache. |
 | `KERN_MCP_RETAIN_TTL` | unset | How long the full retained output of a truncated call stays available. |
+| `KERN_TOOL_CACHE_KEY` | unset | Override the tool-cache signing key file (default `~/.kern/secrets/tool-cache.key`). Entries carry an HMAC and tampered entries are dropped, not served. |
 | `KERN_MCP_CONCURRENCY` | unset | Per-request concurrency for bursty multi-call workloads. |
 | `KERN_MCP_MAX_OUTPUT` | unset | Output sandbox budget override (a per-call `max_output` still wins). |
 | `KERN_MCP_TRANSPORT=tcp` | stdio | Serve HTTP instead of stdio (non-Windows). |
 | `KERN_MCP_WATCH=0` | on | Disable the file watcher; `KERN_MCP_WATCH_INTERVAL` sets its poll interval (default 5s). |
 | `KERN_MCP_WATCH_INTERVAL_MS` | unset (off) | Opt in to the ADR-0011 reactive file watcher; a positive integer is the poll interval in ms. |
+| `KERN_MCP_ALLOW_UNADVERTISED=1` | unset | Allow direct `tools/call` requests and `kern_meta` routing for registered but unadvertised tools. Intended for embedded clients and test harnesses; normal agents should advertise the full catalog. |
 | `KERN_EXPLORE_BUDGET=N` | unset | Beyond N explore-phase tool calls, the server denies with an "emit a plan" error. |
 | `KERN_ALLOW_EMPTY=1` | unset | Serve a root with an empty symbol index (greenfield project) instead of failing. |
 
@@ -244,6 +274,35 @@ security-relevant ones are reported by `kern doctor`.
 | `KERN_PIN=1` | unset | `kern update` refuses version downgrades. |
 | `KERN_BENCH_THRESHOLDS` | built-in | Path to the `kern bench` threshold JSON. |
 | `KERN_HOST_SAMPLER_CMD` | unset | Register a host command sampler (stdin = user prompt, `$KERN_SYSTEM_PROMPT` = system prompt, stdout = reply); `_KEY` namespaces it, `_TIMEOUT` (default 180s) bounds each call. |
+
+## Uninstalling: what each surface removes and leaves
+
+Every removal surface is scoped and reversible-from-backup; this is the
+residue table, so nothing is a surprise. **`kern uninstall`** chains phase 1
+(the wiring AND the user data) with phase 2 (the binaries, via
+`install.sh uninstall --prefix-only`); `kern setup --remove [--project]`
+runs the wiring half alone (add `--data` for the user-data half);
+`install.sh uninstall` runs everything; `install.sh uninstall
+--prefix-only` runs the binary half alone (the CI/scratch mode).
+
+| Surface | What it removes | What it deliberately leaves |
+|---|---|---|
+| `kern setup --remove` (machine-wide) | kern's own entries in user-level agent config (MCP registrations, hooks, rules blocks, plugin and skill copies, `core.hooksPath` if kern set it, editor `files.exclude` entries); every edited file is backed up first | `~/.kern` data (index, approvals, audit, memory) and every project file `kern setup` wrote inside repos (undo those with `--project`) |
+| `kern setup --remove --project` | this repo's kern wiring (`.mcp.json` entry, repo AGENTS.md block, project plugin/skills/rules, opencode.json merge, `.gitignore` block, `.git/info/exclude` pair) | `.kern/` data (index, approvals, persisted config) and all user-level config |
+| `kern setup --remove --data` | everything `kern setup --remove` removes, plus `~/.kern` (indexes, approvals, audit, memory), `<UserConfigDir>/kern` secrets and `~/.cache/kern` | every project file `kern setup` wrote inside repos (undo those with `--project`) |
+| `kern uninstall` (the default full uninstall) | both phases: all wiring, the `~/AGENTS.md` kern block, `~/.kern`, machine secrets, `~/.cache/kern`, the binaries and this prefix's PATH rc lines; a kern-managed current project is offered its own cleanup (or given the exact command) | project wiring in OTHER repositories — never discovered or deleted (run `kern setup --remove --project --root <dir>` there); another prefix's PATH lines |
+| `install.sh uninstall` (default: the full uninstall) | the same end state as `kern uninstall`: wiring + user data (`~/AGENTS.md` block backed up first, `<UserConfigDir>/kern` — audit-chain + approval signing keys, so old audit records lose HMAC verification — `~/.cache/kern`, `~/.kern`) + the binaries and this prefix's PATH lines | project wiring in every repository; another prefix's PATH lines. `--machine` is a compatibility alias of this default |
+| `install.sh uninstall --prefix-only` | `kern` + `kern-mcp` in the install prefix and the PATH rc lines naming that prefix only | everything else: agent wiring, `~/AGENTS.md`, machine secrets, caches, `~/.kern` — the CI/scratch-install mode |
+
+Notes: a second `kern setup` (or the installer) re-creates everything the
+wiring phase removed — but nothing restores removed `~/.kern` data, so a
+full uninstall means reinstalling from scratch; a rejected/sticky approval
+record clears with `kern approval clear <id>`; the cache removal targets
+the resolved runtime cache root (default `~/.cache/kern`; `XDG_CACHE_HOME`
+and `KERN_CACHE_DIR` are honoured — the same resolver the runtime writes
+through); and the global git hook
+template is only unwired if `core.hooksPath` points at kern's own
+directory — a foreign path is left untouched.
 
 ## What the index skips
 

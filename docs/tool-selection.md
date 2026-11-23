@@ -6,25 +6,26 @@
 > [`internal/mcp/toolpolicy.go`](../internal/mcp/toolpolicy.go).
 > If this guide and those files disagree, those files win.
 
-kern ships a **32-tool** MCP catalog and advertises the **full catalog by default** (standing mandate 2026-10-23: agents use all available tools). Every tool is advertised on `tools/list`; `kern_meta` routes natural language to any of them.
+kern ships a **34-tool** MCP catalog and advertises a **direct 11-tool surface by default**. `KERN_MCP_FULL=1` advertises every tool directly; `kern_meta` routes natural language within that same advertised surface. Direct calls outside the advertised surface are rejected unless `KERN_MCP_ALLOW_UNADVERTISED=1` is set.
 
 ## Surface
 
 | Mode | Tools |
 |---|---:|
-| Default | 32 |
-| Full (`KERN_MCP_FULL=1`) | 32 |
+| Default | 11 |
+| Full (`KERN_MCP_FULL=1`) | 34 |
 | Router-only (`KERN_MCP_SINGLE_TOOL=1`) | 1 |
 | High-level (`KERN_MCP_HIGH_LEVEL_ONLY=1`) | 6 |
 | Phase filter (`KERN_MCP_PHASE`) | Default/full subset plus `meta` and `cross` tools |
 | Category filter (`KERN_MCP_CATEGORY`) | One category plus `kern_meta` |
 | Allowlist (`KERN_TOOLS`) | Execution gate applied on every call |
+| Unadvertised direct calls (`KERN_MCP_ALLOW_UNADVERTISED=1`) | Escape hatch for embedded clients and tests |
 
 The default surface is:
 
-`kern_meta`, `kern_explore`, `kern_impact`, `kern_apply`, `kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`, `kern_compact_file`, `kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`, `kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`, `kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`, `kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`, `kern_fetch_raw_anchor`, `kern_review`, `kern_graph`, `kern_arch`.
+`kern_buddy`, `kern_search`, `kern_explore`, `kern_context`, `kern_probe`, `kern_research`, `kern_impact`, `kern_graph`, `kern_review`, `kern_verify`, `kern_meta`.
 
-`kern_exec` is advertised for discoverability only. Every execution attempt still fails closed unless explicitly enabled through `KERN_ALLOW_EXEC` or an allowlist policy.
+No security-gated tool is advertised by default. `kern_exec` remains reachable in full mode and every execution attempt still fails closed unless explicitly enabled through `KERN_ALLOW_EXEC` or an allowlist policy.
 
 ## Choose by intent
 
@@ -35,6 +36,8 @@ The default surface is:
 | Structural pattern (`func greet`, `type *User*`) | `kern_ast_search` | AST-aware search |
 | Understand one symbol deeply | `kern_explore` | Definition, callers, callees, blast radius |
 | Need only the exact source slice | `kern_context` | Minimal definition and direct edges |
+| Resolve a task or error that names several symbols | `kern_probe` | Budget-capped definitions, callers, callees and tests |
+| Research a multi-symbol task with impact and affected files | `kern_research` | One read-only evidence bundle; no execution or network |
 | Understand a file's structure | `kern_compact_file` | Functions, types, line numbers; `tier=full` for verbatim |
 | Explain why a symbol matters | `kern_why` | Rationale, docs, dependency counts |
 | Plan a change | `kern_plan` | Deterministic affected files, risks, validation |
@@ -61,12 +64,35 @@ The default surface is:
 
 | Tool | Purpose |
 |---|---|
+| `kern_apply` | Use instead of shell file writes: transactional edits — sandboxed compile gate, scoped `go test`, automatic rollback on failure, deterministic receipt. Pass {path, content} NEW COMPLETE files. |
+| `kern_arch` | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple. Large by default — set max_output to bound it. |
+| `kern_ast_search` | AST-level symbol search over the indexed project (all indexed languages — Go extraction richest): patterns like 'func greet', 'type *User*'. |
+| `kern_compact_file` | Compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. tier=full for verbatim, tier=folded for signatures. Use before reading files in large codebases. |
+| `kern_doc` | Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
+| `kern_evidence` | Signed-evidence toolkit: verify validates a bundle (tamper-seal, signature, audit-chain replay), explain renders it in plain language, export builds a signed bundle, anchor validates a code claim and issues a tamper-evident SHA-256 certificate. |
+| `kern_exec` | One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1. |
+| `kern_fetch_raw_anchor` | Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand. |
+| `kern_fit_context` | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). Pass at least one of files, symbols or query — with none, the call returns "No matching files or symbols found to fit." |
+| `kern_heal` | Self-correction loop: run validation, ask a local Ollama model to fix failing files in a throwaway snapshot, re-validate. Never edits the working tree. |
+| `kern_mask_pii` | Locally scan text for secrets/PII (API keys, passwords, tokens, URLs, emails). |
+| `kern_memory` | Project brain memory, one tool for every action: add a lesson, list stored lessons, recall by prompt, ranked recall with decay half-life, remove by list-index or text prefix, or clear the whole store. |
+| `kern_optimize` | Compress context: action=prompt compresses and masks a raw prompt, action=log strips log noise (errors/warnings/stack traces), action=output compresses an LLM response. Not cacheable: prompt optimization injects project memory and session state. |
+| `kern_path` | Shortest call path between two symbols, following in-project call edges in either direction. |
+| `kern_plan` | Use before a refactor: produce an implementation plan for a proposed change — affected files, dependencies, risks, required validation. Deterministic; no LLM. |
+| `kern_plan_context` | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, fit the selection to a token budget. Explainable; json=true returns the structured plan. |
+| `kern_project_map` | Return a compressed map of a whole project: every source file with its symbols and line counts. |
+| `kern_run` | Run an intent through the full task pipeline: compile it, select workflow + capabilities + agents, create the Task, run the policy preflight, return the result (task, workflow, risk/approval, caps, tools, agents, next steps). |
+| `kern_semcache` | Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity. |
+| `kern_skill` | Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills). |
+| `kern_stats` | Return before/after token savings and cost estimates from kern optimizations, optionally filtered. |
+| `kern_swap` | Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit a token budget, or expand them back |
+| `kern_why` | Rationale and doc-reference report for a symbol: doc comment, who depends on it and why, in/out edge counts. |
 
 ## Risk model
 
 | Risk | Count | Meaning |
 |---|---:|---|
-| low | 20 | Read-only or locally contained operations |
+| low | 22 | Read-only or locally contained operations |
 | medium | 8 | Analysis, planning, memory, docs, verification |
 | high | 3 | Orchestration and self-repair |
 | critical | 1 | Governed command execution |

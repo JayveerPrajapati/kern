@@ -4,7 +4,7 @@ The full command reference for the `kern` CLI. The README keeps a compact
 summary and links here. This list mirrors the shipped dispatch table
 (`cmd/kern/dispatch_table.go`) — when the CLI grows, this file grows with it.
 `kern --all` prints the authoritative catalog; this document is the
-curated one-liner reference for the same 65 commands.
+curated one-liner reference for the same 76 commands.
 
 ## Command list
 
@@ -16,17 +16,20 @@ kern -v [flags]                              (alias of version)
 kern meta "<request>" [--root ROOT]          NL request router ("show me the architecture")
 kern ask "<question>" [--root ROOT]          NL request router (alias of meta)
 kern exitcode                                print kern's documented exit-code conventions (0 ok, 1 error, 2 usage, 3 decided-state/policy)
-kern bench [--root ROOT] [--json]            deterministic zero-network latency harness (cold/warm index load + fixed query set; writes .kern/bench.json);
+kern bench [--root ROOT] [--mode MODE] [--json]  deterministic zero-network latency harness (cold/warm index load + fixed query set; writes .kern/bench.json);
+                                             --mode cold-cli (default) times fresh one-shot processes with KERN_DAEMON=0; --mode daemon times fresh clients against a warm daemon;
                                              --check verifies the run against cmd/kern/bench_thresholds.json and exits 1 on hard violations
 
 # wiring
-kern setup [flags]                           wire agents/MCP/hooks (--agents, --agents-md thin|full, --all-agents, --check, --detect, --dry-run,
-                                             --global, --global-only, --global-rules, --json, --plain, --remove, --root, --verify, --yes)
+kern setup [flags]                           wire agents/MCP/hooks (--agents, --agents-md thin|full, --all-agents, --check, --data, --detect, --dry-run,
+                                             --global, --global-only, --global-rules, --hooks-only, --json, --plain, --project, --remove, --root, --verify, --yes)
+kern skills <subcommand>                     manage bundled agent skills (list, show, install, check)
 kern buddy [root]                            session onboarding digest
 kern project-map [root]                      full per-file project map (the same renderer buddy --map appends)
 kern onboard [flags]                         register+index+wired status for the repo
 kern update [--dry-run] [--force] [--pin <tag>] [--channel <name>]   update the installed binaries (via install.sh)
-kern doctor [flags]                          self-diagnostics (--arch-drift, --calibration, --json, --root)
+kern uninstall [--prefix-only] [--project-only] [--machine] [--agents <list>] [--dry-run] [--yes]   reverse the install completely: wiring + user data + binaries + PATH (via install.sh)
+kern doctor [flags]                          self-diagnostics (--arch-drift, --headroom-gate, --calibration, --json, --root)
 kern config [flags]                          show effective configuration (env > .kern/config.json > default)
 
 # compression
@@ -42,13 +45,13 @@ kern stats [--days N] [--session ID] [--json] [--by-tool] [--by-agent] [--by-roo
 kern swap [FILE|-] [--max N] [--mode fit|summary|expand]   budget-swap path-tagged fenced code blocks
 
 # exec
-kern exec "<code>" [--json] [--lang LANG] [--list] [--max N] [--stdin file|-] [--timeout s]   isolated local runtime, stdout only
+kern exec "<code>" [--json] [--lang LANG] [--list] [--max N] [--readonly] [--stdin file|-] [--timeout s]   isolated local runtime, stdout only
 kern build "<command>" [--dir DIR] [--root ROOT] [--session ID] [--timeout s]   run a build command in the governed sandbox
 
 # analysis
 kern plan <change> [--root ROOT] [--json]    analyze a proposed change (blast-radius impact + surgical refactor planning)
 kern apply <edits-file|-> [--root ROOT] [--test] [--dry-run] [--json]    apply edits transactionally, verify, roll back on failure (edits = JSON array of {path, content}; exit 0 applied+verified, 1 failed/rolled back, 2 usage)
-kern impact <change> [kind] [new-target] [--root ROOT] [--json] [--precision] [--risk] [--runtime]   blast radius of a change
+kern impact <change> [kind] [new-target] [--root ROOT] [--json] [--precision] [--risk] [--runtime] [--mode concise|evidence|full]   blast radius of a change
 
 # autonomy
 kern run <intent> [--root ROOT]              intent through the task pipeline
@@ -58,10 +61,11 @@ kern approve <id> | kern approve list        resolve an approval gate (interacti
 kern approval ask <id> [--root R]           answer a pending approval at the terminal: [1] accept once / [2] accept prefix this session / [3] reject
 kern approval wait <id> [--timeout 30m] [--root R]   block until a pending approval is decided (exit 0 approved / 3 rejected / 1 timed out)
 kern approval list [--root R]               list pending approvals and active prefix grants (uses, expiry)
-kern approval clear <id> [--approver] [--reason]     remove a blocking approval record (operator escape hatch)
+kern approval clear <id> [--approver] [--reason]     remove a blocking approval record (operator escape hatch); --stale --yes clears pending records that predate the current MAC key (unverifiable, never the tampered ones)
+kern approval key status | rotate [--signing|--mac|--both] [--yes]   inspect both approval keys (signing = grant authority, MAC = tamper detection) with fingerprints and record counts; rotate moves the old key aside as <path>.bak-<ts> (never deletes) and records the rotation in the audit chain
 kern policy <set|get|apply> [--file F] [--merge] [--json] [--root R]   org-level governance policy distribution
 kern reject <id> [--approver ID] [--reason TEXT]     reject a pending approval request
-kern audit [flags] | kern audit append | kern audit repair   governance audit log (tamper-evident chain; bounded display: 50 most recent by default, --limit N / --tail N, 0 = all)
+kern audit [flags] | kern audit append | kern audit repair | kern audit rotate   governance audit log (tamper-evident chain; bounded display: 50 most recent by default, --limit N / --tail N, 0 = all; rotate archives the active chain under .kern/audit/archive-<ts>/ and starts a fresh keyed chain, --keep N newest archives, default 3, 0 = all)
 
 # security
 kern sec [root] [--engine internal|gosec|all|none] [--json] [--max N] [--severity ...]   security scan (exit 1 on error findings)
@@ -69,7 +73,8 @@ kern sec [root] [--engine internal|gosec|all|none] [--json] [--max N] [--severit
 # verification
 kern verify [<types>|<file|->] [flags]       unified verification engine (types: build,test,security,architecture,dependency,reuse,e2e,static-analysis,performance,cve,license,secrets,ci,arch,claims; --types T);
                                              --command CMD --output summary|failures|tail:N|lines:A-B|full; --anchor ID re-slices a kept run;
-                                             --short/--fast/--changed/--changed-since/--staged/--full; compliance: --cve --license --secrets
+                                             --short/--fast/--changed/--changed-since/--staged/--full; compliance: --cve --license --secrets;
+                                             also --eval, --json, --root, --scan, --skill, --timeout (command-mode seconds), --verify-pipeline, --verify-silent, --verify-token-reduction
 kern heal "<task>" [--llm MODEL] [--force] [--yes] [--task]   self-correct failing files (snapshot-based)
 
 # docs
@@ -79,21 +84,24 @@ kern docs <query> [root] | kern docs fetch <url> [name] [root] | kern docs index
 kern index [root] [--force] [--json] [--status] [--strict] [--update]   (re)build the symbol index
 kern ast <pattern> [root] [--all]            AST symbol search (wildcards, kind prefixes)
 kern fts "<query>" [root] [--limit N] [--json]   direct SQLite FTS5 symbol search (no full index load)
-kern search <query> [root] [--limit N] [--repos] [--json] [--semantic] [--etag E]   ranked free-text symbol search
+kern search <query> [root] [--limit N] [--path DIR] [--repos] [--json] [--semantic] [--etag E]   ranked free-text symbol search
 
 # graph
-kern graph <symbol> [root] [--one-line] [--mermaid] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--limit N] [--etag E]
+kern graph <symbol> [root] [--one-line] [--format one-line] [--mermaid] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--limit N] [--etag E] [--mode concise|evidence|full]
                                              adaptive context-min slice (definition + callers/callees); graph exports
-kern explore <symbol> [root] [--depth N] [--max N] [--max-tokens N] [--explain] [--etag E]   symbol source + blast radius
+kern explore <symbol> [root] [--depth N] [--max N] [--max-tokens N] [--min-confidence T] [--explain] [--etag E] [--mode concise|evidence|full]   symbol source + blast radius
 kern path <from-symbol> <to-symbol> [root] (or --from S --to S)   shortest call path
 kern probe "<task text>" [root] [--max N] [--json]   task-driven context bundle
-kern why <symbol> [root] [--json] [--etag E]   rationale: doc comment + dependents
-kern refs <symbol> [root] [--json]   AST-verified references (types/consts/vars/fields included)
+kern research "<task text>" [root] [--max N] [--json] [--min-confidence]   read-only multi-symbol research with impact and affected files
+kern why <symbol> [root] [--json] [--etag E] [--mode concise|evidence|full]   rationale: doc comment + dependents
+kern refs <symbol> [root] [--json] [--mode concise|evidence|full]   AST-verified references (types/consts/vars/fields included)
 kern arch [flags]                            architecture overview
 kern project [root]                          compact project map
 
 # context
-kern context <symbol> [root] [--lines N] [--lens] [--profile] [--etag E]   minimal source slice
+kern context <symbol> [root] [--lines N] [--lens] [--profile] [--etag E] [--mode concise|evidence|full]   minimal source slice
+                                             default concise mode uses a summary-only fast path: counts + risk are resolved from the graph without building the evidence slice; the body matches the full path but the token footer and etag line are omitted;
+                                             --etag, --lens, --profile, --terse-code, or --mode evidence|full routes to the full evidence path unchanged; any summary failure silently falls back to it
 kern authorize-context -agent <id> -task <task> [--deny-path ...] [--symbol SYM] [--root ROOT] [--json]   compute authorized context
 kern explain-context --task "<change or intent>" [--root ROOT] [--budget N] [--json]   explainable deterministic context plan
 kern orchestrate "<intent>" [--root ROOT] [--mode full|envelope|plan|fix|review|architecture|incident|explain]   silent context pipeline over an intent (JSON)
@@ -102,7 +110,7 @@ kern orchestrate "<intent>" [--root ROOT] [--mode full|envelope|plan|fix|review|
 kern review [--file F] [--lens] [--max N] [--range a..b] [--root R] [--runtime]   review context for changed files (exits 1 when changed files carry risk — findings)
 
 # memory
-kern memory <subcommand>                     engineering memory ops (add/list/recall/ranked/remove/clear)
+kern memory <subcommand>                     engineering memory ops (add/list/recall/remove/prune; --clear empties the whole store; ranked retrieval is the separate kern memory-ranked command)
 kern remember <lesson> [--auto]              store a lesson ('memory add' alias)
 kern memory-ranked <prompt> [--k 5] [--half-life 7.0] [--root ROOT]   decay-weighted memory retrieval
 
@@ -124,7 +132,7 @@ kern commit [--all] [--dry-run] [--message M]   stage+commit
 # servers
 kern mcp [tools [category] [--json] [--category X]] [flags]   run the MCP server ('kern mcp tools' lists the catalog)
 kern mcp-client <add|list|rm|call> [args...]   manage external MCP servers and call their tools (config: .kern/mcp-servers.json; see docs/mcp-client.md)
-kern daemon [serve|status|stop] [--root ROOT]  warm per-project index daemon (auto-started for read-only commands: search/context/compact/explore/graph/impact/dependencies/why; KERN_DAEMON=0 disables)
+kern daemon [serve|status|stop] [--root ROOT] [--json]  warm per-project index daemon (auto-started for read-only commands: search/context/compact/explore/graph/impact/dependencies/why; KERN_DAEMON=0 disables; status --json reports running, pid, identity, socket, log, error, stale)
 
 # docgen
 kern gen-catalog [--root ROOT] [--check]     regenerate (or verify without writing) docs/tool-catalog.md
@@ -132,7 +140,16 @@ kern gen-contracts [--root ROOT] [--check]   regenerate (or verify without writi
 kern gen-docs --doc catalog|contracts|schemas|site|selection [--root ROOT] [--check]   regenerate or verify docs (tool catalog, contracts, schemas, tool-selection guide, or the mechanical file-tree block of docs/index.md)
 kern gen-plugin [--root ROOT] [--check]   sync the opencode plugin's canonical .opencode/plugins/kern.ts into the embedded asset AND register its sha256 in internal/pluginhash (idempotent); --check verifies both without writing
 ```
-
+## Version formats
+`kern version` prints one line, `kern <version>`, in one of two formats:
+- **Release builds** (installed via `install.sh`/`install.ps1`, or built with
+the Makefile's ldflags stamping `-X .../internal/version.Version=<tag>`)
+print the release tag, e.g. `0.9.15`.
+- **Unstamped builds** (plain `go build` without the Makefile) print the
+source commit plus a `(dev)` marker, e.g. `9693283 (dev)`. The `(dev)`
+  suffix means the binary was not version-stamped at build time — it is the
+  expected output for a local source build, and on a release install it
+  would indicate a missing stamp, not a different channel.
 ## Conditional fetch: `--etag`
 
 `kern explore`, `kern context`, `kern compact`, `kern search`, `kern why`

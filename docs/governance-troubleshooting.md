@@ -53,11 +53,14 @@ kern setup --global
 
 ## Execution gates
 
-`kern_exec` is fail-closed by default. Enable it only for the host/process that
-needs it:
+`kern_exec` is risk-assessed by default (the "ask" posture): LOW/MEDIUM
+commands run audited, HIGH/CRITICAL commands require a human approval minted
+with a resolution command (`kern approval ask <id>`). To restore blanket
+fail-closed exec, or to opt a process in entirely:
 
 ```bash
-KERN_ALLOW_EXEC=1            # enable governed isolated execution
+KERN_EXEC_POSTURE=closed     # strict: refuse exec on an empty allowlist
+KERN_ALLOW_EXEC=1            # total opt-in (risk firewall still applies)
 KERN_TOOLS=kern_exec,kern_run
 ```
 

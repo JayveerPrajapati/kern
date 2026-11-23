@@ -19,38 +19,23 @@ re-reading files. All tools run locally; the only network call in kern is the ex
 
 The server practices progressive disclosure at the advertisement layer:
 
-- **Default (no env):** the full 32-tool catalog — `kern_meta`
-  (the natural-language router) plus the original core (`explore`,
-  `impact`, `search`, `verify`, `buddy`, `exec` — governed script runner;
-  fails closed without `KERN_ALLOW_EXEC` or a `KERN_TOOLS` entry) and 24
-  usage-curated additions (`compact_file`, `run`, `optimize`, `context`,
-  `memory`, `evidence`, `probe`, `plan`, `doc`, `project_map`,
-  `ast_search`, `stats`, `why`, `heal`, `fit_context`,
-  `plan_context`, `path`, `semcache`, `swap`, `mask_pii`,
-  `fetch_raw_anchor`, `review`, `graph`, `arch`). This is what `kern setup`'s `.mcp.json`
-  wires, and a plain handshake's view.
-- **`KERN_MCP_FULL=1`:** also the full 32-tool catalog, returned by `tools/list` in
-  a single unfiltered response (no `nextCursor`/`_meta` pagination). The
-  retain/cursor mechanism pages tool *output* (retained `slice=` reads), not
-  `tools/list` itself.
+- **Default (no env):** the direct eleven-tool surface — `kern_buddy`, `kern_search`, `kern_explore`, `kern_context`, `kern_probe`, `kern_research`, `kern_impact`, `kern_graph`, `kern_review`, `kern_verify`, and `kern_meta`. This is what `kern setup`'s `.mcp.json` wires and a plain handshake's view.
+- **`KERN_MCP_FULL=1`:** the full 34-tool catalog, returned by `tools/list` in a single unfiltered response (no `nextCursor`/`_meta` pagination). The retain/cursor mechanism pages tool *output* (retained `slice=` reads), not `tools/list` itself.
 
-Every tool is reachable in BOTH modes once named in `tools/call` — the modes differ
-only in what is ADVERTISED. `kern_meta` routes natural language to any of the 32
-tools, so no capability is lost: the full 32-tool catalog is the default surface
-(standing mandate 2026-10-23: agents use all available tools).
+Direct `tools/call` requests are limited to the advertised surface: an unadvertised tool is rejected as `unknown tool` unless `KERN_MCP_ALLOW_UNADVERTISED=1` is set. `kern_meta` routes within that same advertised surface; `KERN_MCP_FULL=1` expands it to the full 34-tool catalog. Use `KERN_TOOLS` when you need a real execution allowlist for every advertised tool.
 
 ## Document index
 
 | Document | Contents |
 |---|---|
-| [`tool-contracts.md`](tool-contracts.md) | Authoritative catalog of all 32 MCP tools: name, phase, risk, parameters, and JSON-RPC examples. |
+| [`tool-contracts.md`](tool-contracts.md) | Authoritative catalog of all 34 MCP tools: name, phase, risk, parameters, and JSON-RPC examples. |
 | [`protocol.md`](protocol.md) | Wire protocol: transports (stdio / HTTP), JSON-RPC methods, governance gates, shutdown behavior. |
 | [`versioning.md`](versioning.md) | Versioning policy: supported MCP protocol versions, catalog stability, client negotiation. |
 
 ## Catalog at a glance
 
-- **32 tools** across six phases: explore, plan, edit, verify, meta, cross.
-- **Risk levels** on every tool: low (20), medium (8), high (2), critical (1).
+- **34 tools** across six phases: explore, plan, edit, verify, meta, cross.
+- **Risk levels** on every tool: low (21), medium (8), high (3), critical (1).
 - Every tool is tagged with its agent **phase**; phase-aware servers advertise only the
   relevant shortlist plus the always-on meta/cross tools.
 

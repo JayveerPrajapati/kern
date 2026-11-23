@@ -99,8 +99,9 @@ known limitations, and how to report vulnerabilities.
 
 ## Machine-wide install
 
-By default the installer runs `kern setup --global-only --global-rules`
-(opt out with `KERN_AUTO_WIRE=0`). What that means for your machine:
+Wiring is an explicit installer opt-in (`--wire` / PowerShell `-Wire`, or
+`KERN_AUTO_WIRE=1`) that runs `kern setup --global-only --global-rules`.
+What that means for your machine:
 
 - **It edits user-level files, not repos.** It registers the kern MCP server,
   hook scripts and rules in each supported agent's home config, adds a global
@@ -169,6 +170,7 @@ All fail closed unless noted:
 | `KERN_ALLOW_EXEC` | Master switch for governed host-command execution (`CheckExec`). Unset = execution refused. |
 | `KERN_ALLOW_DEPLOY` | Gates external deploy operations; production mutation is disabled unless set to `1`. |
 | `KERN_MCP_ROOTS` | Comma-separated workspace roots for MCP path confinement. Defaults to the process cwd and fails closed. |
+| `KERN_MCP_ALLOW_UNADVERTISED` | If set to `1`, allows direct `tools/call` requests for registered but unadvertised MCP tools. Leave unset for normal agents; `kern_meta` already routes to the full catalog, and `KERN_TOOLS` remains the execution allowlist. |
 | `KERN_AUTH_TOKEN` | Bearer token required for enterprise / HTTP serve mode. Unset = server refuses to serve (503). |
 | `KERN_MCP_AUTH_TOKEN` | Opt-in bearer auth for the HTTP MCP transport: when set, `POST /mcp` requires `Authorization: Bearer <token>` (constant-time compare; `/health` stays open). Unset = no bearer auth — the default `auto` transport is a 0600 unix socket, and explicit TCP binds are loopback-only with Origin checks. |
 | `KERN_SANDBOX_MAX_SNAPSHOT_BYTES` | Per-file sandbox snapshot cap (default 100 MiB). |

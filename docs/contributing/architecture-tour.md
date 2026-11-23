@@ -6,14 +6,14 @@ no line numbers (they rot); every claim here is checkable with `kern` itself.
 
 ## 0. The shape (30 seconds)
 
-One Go module, three binaries:
+One Go module, two binaries:
 
 | Binary | Entry | What it is |
 |---|---|---|
-| `kern` | `cmd/kern` | The CLI — 424 commands |
+| `kern` | `cmd/kern` | The CLI — 76 commands |
 | `kern-mcp` | `cmd/kern-mcp` | The MCP server agents talk to |
 
-All logic lives in `internal/` (200 packages). `cmd/kern` is deliberately thin:
+All logic lives in `internal/` (181 packages). `cmd/kern` is deliberately thin:
 command-table entries dispatch to `run*` functions that parse flags and call
 `internal/*` packages.
 
@@ -57,14 +57,14 @@ persistence layer.
 ## 3. The MCP surface (2 minutes)
 
 `internal/mcp` is the server; `internal/mcpcatalog/tools.go` is the single
-source of truth for the 32-tool catalog (name, phase, risk, schema).
+source of truth for the 34-tool catalog (name, phase, risk, schema).
 
-- The full 32-tool catalog is advertised by default (`internal/mcp/toolsurface`
-  — the original `kern_meta`, `kern_explore`, `kern_impact`, `kern_search`,
-  `kern_verify`, `kern_buddy`, `kern_exec` plus the usage-curated additions);
-  standing mandate 2026-10-23. The
-  advertisement gate never blocks execution: `kern_meta`'s natural-language
-  router reaches every tool.
+- The default advertisement is the direct eleven-tool surface
+  (`internal/mcp/toolsurface`: `kern_buddy`, `kern_search`, `kern_explore`,
+  `kern_context`, `kern_probe`, `kern_research`, `kern_impact`, `kern_graph`, `kern_review`, `kern_verify`,
+  and `kern_meta`), with `KERN_MCP_FULL=1` opting into the full 34-tool
+  catalog. The advertisement gate never blocks execution: `kern_meta`'s
+  natural-language router still reaches every governed sub-tool.
 - Every tool call passes `precheckTool` → string validation → the governance
   gate. `kern_exec` additionally goes through
   `internal/governance.CheckExec` — fail-closed, approval-bound, audited.
@@ -73,8 +73,8 @@ source of truth for the 32-tool catalog (name, phase, risk, schema).
   (`audit-dropped` check).
 - The opencode plugin (`.opencode/plugins/kern.ts`) mirrors the catalog and
   the default surface — it must stay byte-identical to
-  `internal/setup/assets/plugin/kern.ts`, with its sha256 registered in
-  `internal/setup/plugin_hashes.go`. Change one, sync all four copies.
+  `internal/agentwire/assets/plugin/kern.ts`, with its sha256 registered in
+  `internal/pluginhash/pluginhash.go`. Change one, sync both copies.
 
 ## 4. The self-checks that keep this honest (2 minutes)
 

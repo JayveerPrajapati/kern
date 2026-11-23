@@ -41,9 +41,11 @@ primitives.
 3. **Opt-in power.** Arbitrary host command execution requires explicit
    opt-in (`KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` allowlist naming the exec
    tool) and passes a risk firewall.
-4. **No implicit trust.** `KERN_MCP_PHASE` is explicitly documented as *not*
-   a security boundary — only the `KERN_TOOLS` allowlist is
-   (`internal/mcp/server.go`, comment on the phase constants).
+4. **No implicit trust.** Phase and category filters shape the direct
+   advertised surface, and `kern_meta` routes only within that same advertised
+   sub-tool. Treat `KERN_TOOLS` as the execution allowlist; set
+   `KERN_MCP_ALLOW_UNADVERTISED=1` only for embedded clients that genuinely
+   need direct access to unadvertised tools.
 
 ---
 
@@ -52,9 +54,10 @@ primitives.
 ### 2.1 MCP Protocol
 
 A malicious or compromised MCP client (or an agent under prompt injection)
-sends tool calls over JSON-RPC. Because MCP phase filtering only changes
-*advertisement* (`tools/list`), any client that knows a tool name can call it
-directly — so every handler must enforce its own constraints.
+sends tool calls over JSON-RPC. Direct calls outside the advertised
+phase/category surface are rejected as `unknown tool`; `kern_meta`, however,
+still routes to the full registered catalog, so every handler must continue to
+enforce its own constraints.
 
 | Vector | Description | Example |
 |---|---|---|
@@ -105,7 +108,7 @@ By default kern makes **no** network calls. Opt-in network surfaces:
 |---|---|
 | HTTP MCP mode | Loopback-only binding with Origin-header checks; **optional TLS** (`--tls-cert/--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`); plain HTTP by default |
 | LLM providers | Opt-in calls to a local Ollama (`http://localhost:11434`, `internal/llm/llm.go`) or a configured OpenAI-compatible endpoint (`OPENAI_BASE_URL`) |
-| Doc fetch | Opt-in `kern_doc action=fetch`; loopback fetches require `KERN_ALLOW_LOOPBACK_FETCH=1` (`internal/fetch/fetch.go`) |
+| Doc fetch | Opt-in `kern_doc action=fetch`; public hosts must be listed in `KERN_DOC_FETCH_DOMAINS` (`*` is the explicit any-domain opt-in), and loopback fetches require `KERN_ALLOW_LOOPBACK_FETCH=1` (`internal/fetch/allow.go`) |
 
 ### 2.5 Supply Chain
 
@@ -219,10 +222,10 @@ Applied to execution output at `internal/mcp/handlers_exec.go:72` and `:335`
 - Writes **outside the snapshot root are never rolled back**; only changes
   inside `root` are reverted on a non-zero exit. The sandbox protects the
   project tree, nothing else.
-- **File-borne secrets are readable by sandboxed commands**: `~/.aws/credentials`,
-  `~/.ssh/id_rsa`, and any other file the user can read are visible to the
-  command. Only the *environment* is stripped of secret-named variables
-  (see `envAllowlist`/`sanitizedEnv`); the filesystem is not scrubbed.
+- **Filesystem reads are allowlisted**: workspace, temp, toolchain/cache, and
+  system runtime roots are readable; `~/.aws/credentials`, `~/.ssh/id_rsa`,
+  and other curated secret paths are denied. The environment is also stripped
+  of secret-named variables (`envAllowlist`/`sanitizedEnv`).
 - Treat the sandbox as an **undo button for the project tree**, not a
   security boundary. Do not run untrusted commands in it expecting
   containment.
@@ -296,6 +299,9 @@ need raw built-ins should use this hatch rather than fighting the guard
   chain snapshot and authorized-scope lineage (`internal/evidence/bundle.go`);
   `kern evidence verify` checks the bundle digest (and the embedded
   audit-chain snapshot) against the local chain.
+- **Signed tool cache** — D1 cache entries carry an HMAC over the stored
+  response and provenance (`internal/mcp/tool_cache.go`). A tampered entry is
+  dropped rather than served.
 
 ### 3.6 Loopback-only HTTP binding
 
@@ -377,9 +383,9 @@ The MCP client (the AI agent host) is **semi-trusted**:
 | 3 | **Exec tools are powerful** | `kern_exec` runs arbitrary host code as the invoking user. They are opt-in (allowlist + `KERN_ALLOW_EXEC`), fail closed, and can be approval-gated at `HIGH`/`CRITICAL` risk, but a misconfigured `KERN_ALLOW_EXEC=1` + `KERN_EXEC_RISK=LOW` deployment hands an attacker code execution. Operators should keep exec risk at `MEDIUM` or above and review approval requests. |
 | 4 | **Execution output and timeouts** | `kern_exec` retains bounded stdout and enforces timeouts. These bounds protect memory and liveness, not privilege isolation. |
 | 5 | **Symlink races (TOCTOU)** | Confinement resolves symlinks at check time; a symlink swapped between check and use is not covered. This is the standard TOCTOU limitation and is accepted for a local tool. |
-| 6 | **Phase filtering is not a security boundary** | `KERN_MCP_PHASE` only changes `tools/list` advertisement; a client that knows a tool name can call it. Only `KERN_TOOLS` restricts execution. |
+| 6 | **Phase/category filtering is now an execution boundary** | Direct `tools/call` requests and `kern_meta` routing are both rejected outside the advertised surface. `KERN_TOOLS` remains the execution allowlist for every advertised tool. `KERN_MCP_ALLOW_UNADVERTISED=1` additionally allows direct calls and meta routing to unadvertised tools. |
 | 7 | **Local process trust** | Any local process with the user's privileges can already read the workspace and environment; kern adds no defense against that actor. |
-| 8 | **Execution is network-isolated, not privilege-isolated** | `kern_exec` code runs with full user privileges and can read file-borne secrets (`~/.aws/credentials`, `~/.ssh/id_rsa`). It can write outside the workspace unless OS-level containment is supplied. Do not treat the runtime as a sandbox for untrusted code. |
+| 8 | **Execution is network-isolated, not privilege-isolated** | `kern_exec` code runs with full user privileges, but reads are confined to workspace, temp, toolchain/cache, and system runtime roots; curated secret paths are denied. It can still write outside the workspace unless OS-level containment is supplied. Do not treat the runtime as a sandbox for untrusted code. |
 | 9 | **Same-user actor can forge exec approvals** | The approval HMAC key is a 0600 file in the user's config dir. Anything running as the same OS user (including a coding agent with file access) can read it and stamp a forged "approved" record, defeating the human-approval guarantee for that actor. No software-only storage fixes this: the server process that verifies approvals runs as the same user, so a keychain entry or a second file would be readable the same way. **Mitigation is OS-level separation**: run untrusted agents in a container, VM or separate OS account with no access to the operator's config dir, and keep approvals on the operator's side of that boundary. |
 | 10 | **Allowlisted toolchain commands run repo-controlled code** | `kern_verify command=...` accepts single-line toolchain commands (`go test`, `npm test`, `make`, `pytest`, ...) and rejects pipes, redirects and `$(`. Those commands execute whatever the repository defines (test files, Makefile targets, package scripts), so the allowlist is **not** a containment boundary against a malicious repository. Flags that make a toolchain run a caller-chosen program (`go -exec/-toolexec/-vettool`, Gradle `--init-script`/`-I`) are refused (`denyFlags` in `internal/verifycmd/verify_classify.go`). Approvals are scoped to the project through the per-root store (`<root>/.kern/approvals.json`) and the command-text hash, but are **not** bound to `PATH`, the environment or the resolved binary, so identical text can resolve to a different executable. Use a container or VM for untrusted repos. |
 | 11 | **Pseudo-terminal defeats the bypass TTY probe** | The human-confirmation gate checks that stdin is a terminal. An agent that can allocate a pty (for example via `script` or Python's `pty`) can present a terminal and type `YES` itself. Treat the gate as protection against accidental or non-interactive bypass, not against a hostile same-user agent. |

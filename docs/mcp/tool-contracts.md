@@ -23,9 +23,9 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 
 | Metric | Value |
 |---|---|
-| Total tools | 32 |
-| Phases | explore (12), plan (5), edit (3), verify (3), meta (1), cross (8) |
-| Risk levels | low (20), medium (8), high (3), critical (1) |
+| Total tools | 34 |
+| Phases | explore (13), plan (5), edit (3), verify (3), meta (1), cross (9) |
+| Risk levels | low (22), medium (8), high (3), critical (1) |
 
 ## Full catalog (summary)
 
@@ -37,10 +37,10 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 | `kern_buddy` | explore | low | Session-start onboarding digest — the project's conventions, layout, entry points, gotchas and prior project memory distilled from the index, docs and history. Use instead of exploring with glob/ls/read. |
 | `kern_compact_file` | explore | low | Compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. tier=full for verbatim, tier=folded for signatures. Use before reading files in large codebases. |
 | `kern_context` | explore | low | Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls. |
-| `kern_doc` | cross | medium | Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
+| `kern_doc` | cross | medium | Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
 | `kern_evidence` | verify | medium | Signed-evidence toolkit: verify validates a bundle (tamper-seal, signature, audit-chain replay), explain renders it in plain language, export builds a signed bundle, anchor validates a code claim and issues a tamper-evident SHA-256 certificate. |
-| `kern_exec` | edit | critical | One-off runs instead of raw bash: network-isolated, stdout only. Code runs in a discarded temp dir; a shell command runs in the workdir with writes confined to it + build caches (darwin). Credential reads denied; fails closed without isolation unless KERN_ALLOW_UNISOLATED=1. |
-| `kern_explore` | explore | low | Use instead of reading a whole file: one-call symbol exploration — definition source, callers, callees, and blast radius up to N hops; optional why-rationale. |
+| `kern_exec` | edit | critical | One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1. |
+| `kern_explore` | explore | low | Use instead of reading a whole file: one-call symbol exploration. Default is concise (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns source, callers, callees, and blast radius. |
 | `kern_fetch_raw_anchor` | cross | low | Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand. |
 | `kern_fit_context` | plan | low | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). Pass at least one of files, symbols or query — with none, the call returns "No matching files or symbols found to fit." |
 | `kern_graph` | explore | low | One-call graph context: a symbol's call-graph neighbourhood — callers first, then callees, every edge tagged with its provenance tier; use format=one-line for the compact single-line adjacency. |
@@ -55,10 +55,12 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 | `kern_plan_context` | plan | low | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, fit the selection to a token budget. Explainable; json=true returns the structured plan. |
 | `kern_probe` | explore | low | Micro-context router: extract symbols from a task (bug report, error text) and return a budget-capped bundle of definitions, callers, callees and tests. |
 | `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. |
+| `kern_research` | explore | low | Read-only multi-symbol research: deterministically rank task keywords, combine definitions, callers, callees, tests, impact and affected files, then fit one compact evidence bundle. No execution, writes, or network. |
 | `kern_review` | verify | low | Token-optimised code-review context for changed files: line-scoped changed symbols with callers, blast radius, risk and test gaps. Scope: a git range (default: working-tree changes) or an explicit file list. |
 | `kern_run` | cross | high | Run an intent through the full task pipeline: compile it, select workflow + capabilities + agents, create the Task, run the policy preflight, return the result (task, workflow, risk/approval, caps, tools, agents, next steps). |
 | `kern_search` | explore | low | Use instead of grep/find: ranked free-text symbol search — symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama. |
 | `kern_semcache` | cross | medium | Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity. |
+| `kern_skill` | cross | low | Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills). |
 | `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered. |
 | `kern_swap` | plan | low | Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit a token budget, or expand them back |
 | `kern_verify` | verify | medium | Use instead of running build/test/lint by hand: verify a change with the unified engine (build, unit tests, security, architecture, dependency). Defaults to 'build' only; pass types=build,test for tests. fast=changed-scope build+tests; full=complete suite |
@@ -163,7 +165,7 @@ Return the minimal relevant source slice for a symbol: definition source, caller
 - **Risk level:** low
 - **Required:** none
 
-Use instead of reading a whole file: one-call symbol exploration — definition source, callers, callees, and blast radius up to N hops; optional why-rationale.
+Use instead of reading a whole file: one-call symbol exploration. Default is concise (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns source, callers, callees, and blast radius.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -177,6 +179,7 @@ Use instead of reading a whole file: one-call symbol exploration — definition 
 | `max_output` | integer | no | Output cap in bytes (0 disables) |
 | `max_tokens` | integer | no | Token budget for source + callee skeletons (default: verbatim) |
 | `min_confidence` | string | no | Prune callers/callees below this provenance tier (default: keep all) |
+| `mode` | string | no | Output mode: concise (default), balanced (top callers/callees/files), or evidence |
 | `no_cache` | boolean | no | Bypass the session dedup/response cache |
 | `root` | string | no | Project root (default: cwd; stdio: workspace-confined) |
 | `scope` | object | no | Governed mode: task scope {paths, denied_paths, services, envs, artifacts} |
@@ -254,6 +257,22 @@ Return a compressed map of a whole project: every source file with its symbols a
 |---|---|---|---|
 | `max_files` | integer | no | Maximum number of files to include (default 500) |
 | `root` | string | no | Project root (default: cwd; stdio: workspace-confined) |
+
+### `kern_research`
+
+- **Phase:** explore
+- **Risk level:** low
+- **Required:** none
+
+Read-only multi-symbol research: deterministically rank task keywords, combine definitions, callers, callees, tests, impact and affected files, then fit one compact evidence bundle. No execution, writes, or network.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `max_tokens` | integer | no | Token budget for the bundle (default 6000) |
+| `min_confidence` | string | no | Prune anchor call rows below this provenance tier (default: keep all) |
+| `no_cache` | boolean | no | Bypass the session dedup/response cache |
+| `root` | string | no | Project root (default: cwd; stdio: workspace-confined) |
+| `task` | string | no | Natural-language research task or question |
 
 ### `kern_search`
 
@@ -397,7 +416,7 @@ Use instead of shell file writes: transactional edits — sandboxed compile gate
 - **Risk level:** critical
 - **Required:** none
 
-One-off runs instead of raw bash: network-isolated, stdout only. Code runs in a discarded temp dir; a shell command runs in the workdir with writes confined to it + build caches (darwin). Credential reads denied; fails closed without isolation unless KERN_ALLOW_UNISOLATED=1.
+One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -523,7 +542,7 @@ Use when unsure which tool fits: describe what you need in natural language; ker
 - **Risk level:** medium
 - **Required:** none
 
-Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).
+Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -634,6 +653,20 @@ Inspect/manage the semantic cache serving similar prior queries: stats (default)
 | `action` | string | no | Semcache operation (default stats; list requires namespace, similarity requires a and b) |
 | `b` | string | no | Second input for similarity (required for action=similarity) |
 | `namespace` | string | no | prompt or log (default: all; required for action=list) |
+
+### `kern_skill`
+
+- **Phase:** cross
+- **Risk level:** low
+- **Required:** none
+
+Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | no | Skill operation |
+| `root` | string | no | Project root (default: cwd; stdio: workspace-confined) |
+| `skill` | string | no | Skill name (action=load; bundled skill or user skill under <root>/.kern/skills) |
 
 ### `kern_stats`
 

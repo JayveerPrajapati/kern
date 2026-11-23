@@ -3,7 +3,7 @@
      The catalog:doc gate (G36) fails when this file is stale or a tool is missing. -->
 # MCP Tool Catalog
 
-Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
+Every model-facing tool the kern MCP server registers (`kern_*`). 34 tools.
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
@@ -13,10 +13,10 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 | `kern_buddy` | explore | low | Session-start onboarding digest — the project's conventions, layout, entry points, gotchas and prior project memory distilled from the index, docs and history. Use instead of exploring with glob/ls/read. |
 | `kern_compact_file` | explore | low | Compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. tier=full for verbatim, tier=folded for signatures. Use before reading files in large codebases. |
 | `kern_context` | explore | low | Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls. |
-| `kern_doc` | cross | medium | Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
+| `kern_doc` | cross | medium | Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings). |
 | `kern_evidence` | verify | medium | Signed-evidence toolkit: verify validates a bundle (tamper-seal, signature, audit-chain replay), explain renders it in plain language, export builds a signed bundle, anchor validates a code claim and issues a tamper-evident SHA-256 certificate. |
-| `kern_exec` | edit | critical | One-off runs instead of raw bash: network-isolated, stdout only. Code runs in a discarded temp dir; a shell command runs in the workdir with writes confined to it + build caches (darwin). Credential reads denied; fails closed without isolation unless KERN_ALLOW_UNISOLATED=1. |
-| `kern_explore` | explore | low | Use instead of reading a whole file: one-call symbol exploration — definition source, callers, callees, and blast radius up to N hops; optional why-rationale. |
+| `kern_exec` | edit | critical | One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1. |
+| `kern_explore` | explore | low | Use instead of reading a whole file: one-call symbol exploration. Default is concise (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns source, callers, callees, and blast radius. |
 | `kern_fetch_raw_anchor` | cross | low | Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand. |
 | `kern_fit_context` | plan | low | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures -> Summary). Pass at least one of files, symbols or query — with none, the call returns "No matching files or symbols found to fit." |
 | `kern_graph` | explore | low | One-call graph context: a symbol's call-graph neighbourhood — callers first, then callees, every edge tagged with its provenance tier; use format=one-line for the compact single-line adjacency. |
@@ -31,10 +31,12 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 | `kern_plan_context` | plan | low | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, fit the selection to a token budget. Explainable; json=true returns the structured plan. |
 | `kern_probe` | explore | low | Micro-context router: extract symbols from a task (bug report, error text) and return a budget-capped bundle of definitions, callers, callees and tests. |
 | `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. |
+| `kern_research` | explore | low | Read-only multi-symbol research: deterministically rank task keywords, combine definitions, callers, callees, tests, impact and affected files, then fit one compact evidence bundle. No execution, writes, or network. |
 | `kern_review` | verify | low | Token-optimised code-review context for changed files: line-scoped changed symbols with callers, blast radius, risk and test gaps. Scope: a git range (default: working-tree changes) or an explicit file list. |
 | `kern_run` | cross | high | Run an intent through the full task pipeline: compile it, select workflow + capabilities + agents, create the Task, run the policy preflight, return the result (task, workflow, risk/approval, caps, tools, agents, next steps). |
 | `kern_search` | explore | low | Use instead of grep/find: ranked free-text symbol search — symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama. |
 | `kern_semcache` | cross | medium | Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity. |
+| `kern_skill` | cross | low | Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills). |
 | `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered. |
 | `kern_swap` | plan | low | Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit a token budget, or expand them back |
 | `kern_verify` | verify | medium | Use instead of running build/test/lint by hand: verify a change with the unified engine (build, unit tests, security, architecture, dependency). Defaults to 'build' only; pass types=build,test for tests. fast=changed-scope build+tests; full=complete suite |
@@ -86,7 +88,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 
 - Phase: `cross`
 - Risk: `medium`
-- Description: Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).
+- Description: Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).
 - Input parameters: `action`, `k`, `name`, `query`, `root`, `semantic`, `url`
 
 ## `kern_evidence`
@@ -100,15 +102,15 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 
 - Phase: `edit`
 - Risk: `critical`
-- Description: One-off runs instead of raw bash: network-isolated, stdout only. Code runs in a discarded temp dir; a shell command runs in the workdir with writes confined to it + build caches (darwin). Credential reads denied; fails closed without isolation unless KERN_ALLOW_UNISOLATED=1.
+- Description: One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1.
 - Input parameters: `anchor`, `code`, `egress`, `lang`, `list`, `max`, `no_isolate`, `output`, `stdin`, `timeout`
 
 ## `kern_explore`
 
 - Phase: `explore`
 - Risk: `low`
-- Description: Use instead of reading a whole file: one-call symbol exploration — definition source, callers, callees, and blast radius up to N hops; optional why-rationale.
-- Input parameters: `agent_id`, `agent_token`, `depth`, `end_line`, `etag`, `explain`, `max`, `max_output`, `max_tokens`, `min_confidence`, `no_cache`, `root`, `scope`, `slice`, `start_line`, `symbol`, `task`, `with_freshness`
+- Description: Use instead of reading a whole file: one-call symbol exploration. Default is concise (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns source, callers, callees, and blast radius.
+- Input parameters: `agent_id`, `agent_token`, `depth`, `end_line`, `etag`, `explain`, `max`, `max_output`, `max_tokens`, `min_confidence`, `mode`, `no_cache`, `root`, `scope`, `slice`, `start_line`, `symbol`, `task`, `with_freshness`
 
 ## `kern_fetch_raw_anchor`
 
@@ -208,6 +210,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 - Description: Return a compressed map of a whole project: every source file with its symbols and line counts.
 - Input parameters: `max_files`, `root`
 
+## `kern_research`
+
+- Phase: `explore`
+- Risk: `low`
+- Description: Read-only multi-symbol research: deterministically rank task keywords, combine definitions, callers, callees, tests, impact and affected files, then fit one compact evidence bundle. No execution, writes, or network.
+- Input parameters: `max_tokens`, `min_confidence`, `no_cache`, `root`, `task`
+
 ## `kern_review`
 
 - Phase: `verify`
@@ -235,6 +244,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 32 tools.
 - Risk: `medium`
 - Description: Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity.
 - Input parameters: `a`, `action`, `b`, `namespace`
+
+## `kern_skill`
+
+- Phase: `cross`
+- Risk: `low`
+- Description: Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills).
+- Input parameters: `action`, `root`, `skill`
 
 ## `kern_stats`
 

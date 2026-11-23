@@ -193,6 +193,14 @@ kern probe "<natural language task>"     # map prose to anchor symbols
   report that instead of a bare no-match.
 - `kern probe` is the right tool when the query is a *task* ("Add returns wrong
   result"), not a name.
+- The **daemon lifecycle** needs no management in normal use: it auto-starts on
+  the first proxied read-only command (search/context/compact/explore/graph/
+  impact/dependencies/why), exits after 15 minutes idle (`KERN_DAEMON_IDLE`
+  overrides), and is per-binary — a rebuilt `kern` gets a fresh socket and
+  never talks to an older daemon. After an upgrade, `kern doctor` warns if a
+  previous build's daemon is still holding an index (`daemon` check, with the
+  pids); `kern daemon stop --root <root>` retires it along with this build's
+  daemon, and the next read-only command starts a fresh one.
 
 ---
 

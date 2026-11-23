@@ -12,6 +12,7 @@ curated by hand. Run the generator after adding/removing docs files.
 ## Start here
 
 - [../README.md](../README.md) — user-facing quickstart: install, core verbs, benchmark table, docs links.
+- [installation.md](installation.md) — installation, opt-in agent wiring, indexing, and first queries.
 - [CHANGELOG.md](../CHANGELOG.md) — release history and feature timeline.
 - [recipes.md](recipes.md) — task-oriented recipes: "Is this refactor safe?", "Triage a prod crash", and more.
 
@@ -34,6 +35,7 @@ curated by hand. Run the generator after adding/removing docs files.
 ## Benchmarks
 
 - [benchmarks/README.md](benchmarks/README.md) — the benchmark suite index (semantic retention, graph latency, telemetry audit, token savings).
+- [benchmarks/overview.md](benchmarks/overview.md) — the benchmark overview and comparison against naive agent workflows.
 - [benchmarks/semantic-retention.md](benchmarks/semantic-retention.md) — does compression retain meaning? Spec, gates, baseline.
 - [benchmarks/graph-latency.md](benchmarks/graph-latency.md) — cold/warm index + query latency methodology and honest verdict on "sub-millisecond graph".
 - [benchmarks/telemetry-audit.md](benchmarks/telemetry-audit.md) — zero network egress in core packages (CI-enforced).
@@ -46,6 +48,7 @@ curated by hand. Run the generator after adding/removing docs files.
 - [tool-catalog.md](tool-catalog.md) — generated MCP tool catalog.
 - [tool-selection.md](tool-selection.md) — generated tool-selection guide, routing matrix, and risk levels.
 - [mcp/README.md](mcp/README.md) — MCP server overview.
+- [mcp/overview.md](mcp/overview.md) — user-facing MCP setup, routing, and surface policy.
 - [mcp/protocol.md](mcp/protocol.md) — MCP protocol integration details.
 - [mcp/tool-contracts.md](mcp/tool-contracts.md) — per-tool contracts (generated).
 - [mcp/versioning.md](mcp/versioning.md) — MCP tool versioning policy.
@@ -53,6 +56,7 @@ curated by hand. Run the generator after adding/removing docs files.
 
 ## SDKs
 
+- [sdk/README.md](sdk/README.md) — SDK overview and the built-in specialist roles.
 - [sdk/python/kern_sdk](../sdk/python/kern_sdk) — Python `KernEngine` + framework adapters (stdlib-only).
 - [sdk/typescript/src](../sdk/typescript/src) — TypeScript `KernEngine` (zero-dep, uses `fetch`).
 
@@ -74,6 +78,7 @@ part of this tree.
 
 ## Security & privacy
 
+- [security/overview.md](security/overview.md) — user-facing security, governance, and privacy defaults.
 - [privacy.md](privacy.md) — security and privacy specification.
 - [security/threat-model.md](security/threat-model.md) — threat model.
 - [security/signed-releases.md](security/signed-releases.md) — signed-release verification.
@@ -96,9 +101,11 @@ part of this tree.
 - [benchmarks/agent-evals.md](benchmarks/agent-evals.md)
 - [benchmarks/cold-start.md](benchmarks/cold-start.md)
 - [benchmarks/command-qa-ledger.md](benchmarks/command-qa-ledger.md)
+- [benchmarks/daemon-latency.md](benchmarks/daemon-latency.md)
 - [benchmarks/fixtures/README.md](benchmarks/fixtures/README.md)
 - [benchmarks/graph-latency.md](benchmarks/graph-latency.md)
 - [benchmarks/multi-repo-latency.md](benchmarks/multi-repo-latency.md)
+- [benchmarks/overview.md](benchmarks/overview.md)
 - [benchmarks/semantic-retention.md](benchmarks/semantic-retention.md)
 - [benchmarks/telemetry-audit.md](benchmarks/telemetry-audit.md)
 - [benchmarks/token-savings.md](benchmarks/token-savings.md)
@@ -109,20 +116,25 @@ part of this tree.
 - [file-caps.md](file-caps.md)
 - [gates.md](gates.md)
 - [governance-troubleshooting.md](governance-troubleshooting.md)
+- [installation.md](installation.md)
 - [local-llm.md](local-llm.md)
 - [mcp-client.md](mcp-client.md)
 - [mcp/README.md](mcp/README.md)
+- [mcp/overview.md](mcp/overview.md)
 - [mcp/protocol.md](mcp/protocol.md)
 - [mcp/tool-contracts.md](mcp/tool-contracts.md)
 - [mcp/versioning.md](mcp/versioning.md)
 - [privacy.md](privacy.md)
 - [recipes.md](recipes.md)
 - [runtime-integrations.md](runtime-integrations.md)
+- [sdk/README.md](sdk/README.md)
+- [security/overview.md](security/overview.md)
 - [security/signed-releases.md](security/signed-releases.md)
 - [security/threat-model.md](security/threat-model.md)
 - [setup-global.md](setup-global.md)
 - [skills.md](skills.md)
 - [symbol-identity.md](symbol-identity.md)
+- [testing/e2e-flaky-policy.md](testing/e2e-flaky-policy.md)
 - [tool-catalog.md](tool-catalog.md)
 - [tool-selection.md](tool-selection.md)
 - [windows.md](windows.md)
