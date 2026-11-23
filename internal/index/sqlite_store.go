@@ -229,7 +229,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	// Prepare once, execute per row: re-preparing the insert on every symbol
 	// was measurable overhead on large indexes. The calls/callers/inherits/
 	// communities/FTS loops already use this pattern.
-	stmtSymbols, err := tx.Prepare("INSERT INTO symbols(rowid,kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+	stmtSymbols, err := tx.Prepare("INSERT INTO symbols(rowid,kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name,alias) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		}
 		symRow++
 		if _, err := stmtSymbols.Exec(symRow, sym.Kind, sym.Name, sym.Receiver, sym.File, sym.Line, sym.End, sym.Lang,
-			entry, sym.Framework, sym.Route, string(params), string(returns), string(sym.Confidence), sym.Outer); err != nil {
+			entry, sym.Framework, sym.Route, string(params), string(returns), string(sym.Confidence), sym.Outer, sym.Alias); err != nil {
 			return err
 		}
 	}
@@ -403,6 +403,10 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	// Bounded vacuum policy: the DELETE+INSERT write cycle leaves free pages
 	// behind (measured 32% of the file). Reclaim only when the waste is large,
 	// and never on a small store where VACUUM's rewrite is pure overhead.
+	// F-C4 (2026-11-22 dogfood): the same cycle also grows fts5 tombstone
+	// segments, which are live pages the freelist trigger below cannot see —
+	// optimize collapses them first, so the vacuum can reclaim the space.
+	indexdb.OptimizeFTS(s.db)
 	s.maybeVacuum()
 	// WAL valve: the write committed; checkpoint once the WAL has crossed
 	// walTrigger. This is the single post-write valve point — Save is the
@@ -469,6 +473,10 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	// reports the same promoteLowEdges outcome as the build that produced it.
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='promoted_low_edges'").Scan(&ix.PromotedLowEdges)
 	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='unresolved_low_edges'").Scan(&ix.UnresolvedLowEdges)
+	// Restore the quarantine counter (dropped duplicate identities) for
+	// `kern index --status`; stores written before the field existed keep
+	// the zero value.
+	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='dropped_symbol_conflicts'").Scan(&ix.DroppedSymbolConflicts)
 	// Restore the build stats (kind/duration/workers/reused) for `kern index
 	// --status`; stores written before the field existed keep the zero value.
 	var buildStats string
@@ -480,7 +488,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		}
 	}
 
-	rows, err := s.db.Query("SELECT kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name FROM symbols")
+	rows, err := s.db.Query("SELECT kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name,alias FROM symbols")
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +498,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		var end, entry int
 		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer, &sym.Alias); err != nil {
 			return nil, err
 		}
 		sym.End = end
@@ -776,7 +784,7 @@ func (s *SQLiteStore) SearchFTS(query string, limit int) ([]Symbol, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-SELECT s.kind,s.name,s.receiver,s.file,s.line,s."end",s.lang,s.entry,s.framework,s.route,s.params,s.returns,s.confidence,s.outer_name
+SELECT s.kind,s.name,s.receiver,s.file,s.line,s."end",s.lang,s.entry,s.framework,s.route,s.params,s.returns,s.confidence,s.outer_name,s.alias
 FROM symbols_fts JOIN symbols s ON s.rowid = symbols_fts.rowid
 WHERE symbols_fts MATCH ?
 ORDER BY rank LIMIT ?`, q, limit)
@@ -790,7 +798,7 @@ ORDER BY rank LIMIT ?`, q, limit)
 		var end, entry int
 		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer, &sym.Alias); err != nil {
 			return nil, err
 		}
 		sym.End = end
@@ -899,6 +907,9 @@ func LoadMetadata(root string) (*Metadata, error) {
 	}
 	if v := meta["build_stats"]; v != "" {
 		_ = json.Unmarshal([]byte(v), &ix.BuildStats)
+	}
+	if v, err := strconv.Atoi(meta["dropped_symbol_conflicts"]); err == nil {
+		ix.DroppedSymbolConflicts = v
 	}
 	ix.GoTypes = meta["go_types"] == "true"
 	ix.JavaCompiler = meta["java_compiler"] == "true"
@@ -1013,19 +1024,19 @@ func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) {
 	// terms on a compound SELECT — they must be result columns, and the scan
 	// below expects exactly the 14 symbol columns).
 	row := s.db.QueryRow(`
-SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,alias
 FROM (
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,alias,
 	       0 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name = ?
 	UNION ALL
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,alias,
 	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name <> ? AND receiver = ? AND name = ?
 	UNION ALL
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,alias,
 	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name <> ? AND (receiver || '.' || name) = ?
@@ -1033,7 +1044,7 @@ FROM (
 ORDER BY prio, has_recv, recv_len, name, receiver, file, line
 LIMIT 1`, name, name, recvPart, namePart, name, name)
 	if err := row.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer); err != nil {
+		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer, &sym.Alias); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -1096,7 +1107,7 @@ func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) {
 // LookupFileSymbols performs a point-query for all symbols defined in a file.
 func (s *SQLiteStore) LookupFileSymbols(file string) ([]Symbol, error) {
 	rows, err := s.db.Query(`
-SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,outer_name,alias
 FROM symbols
 WHERE file = ?
 ORDER BY line ASC`, file)
@@ -1110,7 +1121,7 @@ ORDER BY line ASC`, file)
 		var end, entry int
 		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence, &sym.Outer, &sym.Alias); err != nil {
 			return nil, err
 		}
 		sym.End = end

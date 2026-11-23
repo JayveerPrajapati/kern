@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/evaluate/agentbench"
 	"os"
 	"path/filepath"
 )
@@ -76,14 +77,14 @@ func cmdRescore(args []string) error {
 	if len(runs) == 0 {
 		return fmt.Errorf("%s: no (arm, task) directories found", runDir)
 	}
-	res := newResults(runs)
+	res := agentbench.NewResults(runs)
 	for _, w := range warnings {
 		res.Warnings = append(res.Warnings, w)
 	}
 	if err := writeJSON(filepath.Join(runDir, "results-rescored.json"), res); err != nil {
 		return err
 	}
-	printSummary(os.Stdout, res)
+	agentbench.PrintSummary(os.Stdout, res)
 	fmt.Fprintf(os.Stderr, "rescored: %s\n", filepath.Join(runDir, "results-rescored.json"))
 	return nil
 }
@@ -107,7 +108,7 @@ func rescoreOne(runDir, arm string, task Task) (RunOutcome, error) {
 	}
 
 	oc.Usage = extractUsage(mustRead(filepath.Join(art, "events.jsonl")))
-	if d := workspaceDelta(task.Fixture, ws); d != nil {
+	if d := agentbench.WorkspaceDelta(task.Fixture, ws); d != nil {
 		oc.FilesChanged, oc.NonTestLOC, oc.TestLOC = d.FilesChanged, d.NonTestLOC, d.TestLOC
 	}
 	oc.Pass = runCheck(task, ws, art)

@@ -136,42 +136,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 			}
 		}
 	}
-	// v14 migration: symbols carry their declared return types and parser
-	// confidence (the JSON cache has always persisted both). Older stores
-	// default to '[]' / '' — the pre-column behavior — which degrades
-	// update-reconstruction and confidence reporting until the next rebuild.
-	if !HasColumn(db, "symbols", "returns") {
-		if _, err := db.Exec("ALTER TABLE symbols ADD COLUMN returns TEXT NOT NULL DEFAULT '[]'"); err != nil {
-			return err
-		}
-	}
-	if !HasColumn(db, "symbols", "confidence") {
-		if _, err := db.Exec("ALTER TABLE symbols ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !HasColumn(db, "symbols", "outer_name") {
-		if _, err := db.Exec("ALTER TABLE symbols ADD COLUMN outer_name TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	// v13 migration: packages carry StructFields, needed so a load-time
-	// computeCallers reproduces the build-time rewriteConstructorCallees
-	// results (receiver-field call chains). Older stores lack the column;
-	// rows then default to no struct fields, exactly the pre-column behavior.
-	if !HasColumn(db, "packages", "struct_fields") {
-		if _, err := db.Exec("ALTER TABLE packages ADD COLUMN struct_fields TEXT NOT NULL DEFAULT '{}'"); err != nil {
-			return err
-		}
-	}
-	// v13 migration: packages carry Constructors, needed so a load-time
-	// computeCallers reproduces the build-time rewriteConstructorCallees
-	// results (cross-package constructor-assigned receiver chains). Older
-	// stores lack the column; rows then default to no constructors, exactly
-	// the pre-column behavior.
-	if !HasColumn(db, "packages", "constructors") {
-		if _, err := db.Exec("ALTER TABLE packages ADD COLUMN constructors TEXT NOT NULL DEFAULT '{}'"); err != nil {
-			return err
+	// Column migrations (v13-v15). Fresh databases already carry every column;
+	// older stores gain the ones they lack with legal constant defaults. Rows
+	// default to the pre-column values, which degrades (never fabricates) the
+	// feature that reads them until the next rebuild.
+	for _, m := range []struct{ table, column, ddl string }{
+		{"symbols", "returns", "ALTER TABLE symbols ADD COLUMN returns TEXT NOT NULL DEFAULT '[]'"},
+		{"symbols", "confidence", "ALTER TABLE symbols ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"},
+		{"symbols", "outer_name", "ALTER TABLE symbols ADD COLUMN outer_name TEXT NOT NULL DEFAULT ''"},
+		{"symbols", "alias", "ALTER TABLE symbols ADD COLUMN alias TEXT NOT NULL DEFAULT ''"},
+		{"packages", "struct_fields", "ALTER TABLE packages ADD COLUMN struct_fields TEXT NOT NULL DEFAULT '{}'"},
+		{"packages", "constructors", "ALTER TABLE packages ADD COLUMN constructors TEXT NOT NULL DEFAULT '{}'"},
+	} {
+		if !HasColumn(db, m.table, m.column) {
+			if _, err := db.Exec(m.ddl); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -41,6 +41,18 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 		}
 		return ""
 	}
+	// Finish a Rust raw string opened on a previous line. Raw-string bodies
+	// are data, not code — without this, code samples embedded in test
+	// fixtures (r#" ... impl A { ... } ... "#) are extracted as real
+	// declarations and collide on the fail-loud duplicate gate.
+	if spec.rawStr && st.inRaw != "" {
+		j := strings.Index(ln, st.inRaw)
+		if j < 0 {
+			return ""
+		}
+		ln = ln[j+len(st.inRaw):]
+		st.inRaw = ""
+	}
 	blockEnd := spec.blockEnd
 	if blockEnd == "" {
 		blockEnd = "*/"
@@ -96,8 +108,46 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 				continue
 			}
 		}
-		// Plain string or char literal, with backslash escapes.
-		if c := ln[i]; c == '"' || c == '\'' {
+		// Rust raw string: r"..." / r#"..."# / br#"..."#. The body is data,
+		// even when it contains source-looking text.
+		if spec.rawStr && (ln[i] == 'r' || (ln[i] == 'b' && i+1 < n && ln[i+1] == 'r')) &&
+			(i == 0 || !isIdentChar(ln[i-1])) {
+			ri := i
+			if ln[ri] == 'b' {
+				ri++
+			}
+			if ri < n && ln[ri] == 'r' {
+				k := ri + 1
+				for k < n && ln[k] == '#' {
+					k++
+				}
+				if k < n && ln[k] == '"' {
+					closer := `"` + strings.Repeat("#", k-ri-1)
+					if e := strings.Index(ln[k+1:], closer); e >= 0 {
+						drop(k + 1 + e + len(closer))
+						continue
+					}
+					b.WriteString(ln[start:i])
+					st.inRaw = closer
+					return b.String()
+				}
+			}
+		}
+		// Char literal ('x', '\n', b'x') vs a Rust LIFETIME ('a, 'static):
+		// a lifetime is not a literal and must stay in the code stream —
+		// treating it as an unterminated string swallowed the rest of the line
+		// (including `{`), which corrupted brace-depth tracking and cut every
+		// generic-impl body short at its first method.
+		if ln[i] == '\'' {
+			if end := charLiteralEnd(ln, i); end >= 0 {
+				drop(end)
+				continue
+			}
+			i++
+			continue
+		}
+		// Plain string literal, with backslash escapes.
+		if ln[i] == '"' {
 			j := i + 1
 			for j < n {
 				if ln[j] == '\\' {
@@ -107,7 +157,7 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 					}
 					continue
 				}
-				if ln[j] == c {
+				if ln[j] == '"' {
 					break
 				}
 				j++
@@ -146,6 +196,38 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 		i++
 	}
 	return finish()
+}
+
+// charLiteralEnd reports the index just past the closing quote of a C-family
+// char literal starting at i, or -1 when the quote starts something else — a
+// Rust lifetime ('a, 'static) or a loop label ('outer:) — which must stay in
+// the code stream. Only a quote that closes within a few bytes counts, so a
+// lifetime can never swallow the rest of the line.
+func charLiteralEnd(ln string, i int) int {
+	n := len(ln)
+	j := i + 1
+	if j >= n {
+		return -1
+	}
+	if ln[j] == '\\' {
+		for k := j; k < n && k < i+12; k++ {
+			switch ln[k] {
+			case '\\':
+				k++
+			case '\'':
+				return k + 1
+			}
+		}
+		return -1
+	}
+	// 'x' or a multi-byte rune 'é'.
+	if j+1 < n && ln[j+1] == '\'' {
+		return j + 2
+	}
+	if j+2 < n && ln[j+2] == '\'' {
+		return j + 3
+	}
+	return -1
 }
 
 func braceDelta(clean string) (opens, closes int) {
@@ -371,6 +453,18 @@ func ExtractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 		} else {
 			sym.End = i + 1
 		}
+		// Rust impl blocks are keyed by the implemented type plus the
+		// normalized header: `impl From<String> for Failure` and
+		// `impl From<u8> for Failure` both implement Failure but are
+		// different blocks. Without this they share one identity and trip
+		// the fail-loud duplicate gate. Outer is the discriminator and never
+		// joins FullName, so graph keys are unchanged.
+		if rule.kind == "impl" {
+			if selfType, disc := ImplIdentity(implHeaderLines(f, i, bodyEnd)); selfType != "" {
+				sym.Name = selfType
+				sym.Outer = disc
+			}
+		}
 		if rule.recv > 0 {
 			sym.Kind = "method"
 			sym.Receiver = m[rule.recv]
@@ -378,19 +472,25 @@ func ExtractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 			// A method or nested def resolves its receiver to the nearest
 			// enclosing container. Innermost container wins: a class enclosing
 			// line i, or an enclosing func/method.
-			var candType string
+			var candType, candTypeOuter string
 			candTypeLine := -1
 			for j := len(types) - 1; j >= 0; j-- {
 				t := types[j]
 				if TypeKinds[t.sym.Kind] && i >= t.sym.Line && (t.bodyEnd == 0 || i < t.bodyEnd) {
 					candType = t.sym.Name
+					candTypeOuter = t.sym.Outer
 					candTypeLine = t.sym.Line
 					break
 				}
 			}
 			var candFunc string
 			candFuncLine := -1
-			for j := len(syms) - 1; j >= 0; j-- {
+			// OuterMOST enclosing function wins, matching the tree-sitter
+			// extractor (FindReceiver): a helper nested two levels deep
+			// (`gen` inside `_factory` inside a test method) must key on the
+			// method, not the shared inner closure name, or same-named
+			// helpers in different methods collapse into one identity.
+			for j := 0; j < len(syms); j++ {
 				s := syms[j]
 				if (s.Kind == "func" || s.Kind == "method") && i >= s.Line && (s.End == 0 || i < s.End) {
 					candFunc = s.Name
@@ -405,6 +505,15 @@ func ExtractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 			if recv != "" {
 				sym.Kind = "method"
 				sym.Receiver = recv
+				// A method declared inside an impl block inherits that
+				// block's discriminator: `impl From<String> for Failure` and
+				// `impl From<u8> for Failure` both hold `fn from`, which are
+				// distinct declarations even though the receiver type is the
+				// same. Outer never joins FullName, so graph keys are
+				// unchanged.
+				if recv == candType {
+					sym.Outer = candTypeOuter
+				}
 			} else if sym.Kind == "method" {
 				sym.Kind = "func"
 			}
@@ -549,10 +658,88 @@ func matchRule(line string, spec *langSpec) (*declRule, []string) {
 	return nil, nil
 }
 
+// indentHeaderEnd returns the last line index of an indentation-scoped
+// declaration header (Python/Ruby). A header continues while a bracket is
+// open or the line ends with a backslash, and ends at the first line that
+// closes all brackets without a continuation. Brackets inside string
+// literals are ignored. Falls back to i when the brackets never balance
+// (malformed source).
+func indentHeaderEnd(i int, f *ffile) int {
+	depth := 0
+	inStr := byte(0)
+	escaped := false
+	for j := i; j < len(f.lines); j++ {
+		line := f.clean[j]
+		for k := 0; k < len(line); k++ {
+			c := line[k]
+			if inStr != 0 {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if c == '\\' {
+					escaped = true
+					continue
+				}
+				if c == inStr {
+					inStr = 0
+				}
+				continue
+			}
+			switch c {
+			case '\'', '"':
+				inStr = c
+			case '(', '[', '{':
+				depth++
+			case ')', ']', '}':
+				if depth > 0 {
+					depth--
+				}
+			}
+		}
+		// A header line never carries an unterminated string; stop treating
+		// the next line as its continuation.
+		inStr = 0
+		escaped = false
+		if depth == 0 && !strings.HasSuffix(strings.TrimSpace(line), "\\") {
+			return j
+		}
+	}
+	return i
+}
+
+// implHeaderLines reconstructs a declaration header from source lines,
+// stopping at the opening brace (or at bodyEnd for headers without one).
+func implHeaderLines(f *ffile, i, bodyEnd int) string {
+	var b strings.Builder
+	for j := i; j < len(f.lines) && (bodyEnd == 0 || j < bodyEnd); j++ {
+		if f.blank[j] || f.com[j] {
+			continue
+		}
+		b.WriteString(f.clean[j])
+		b.WriteByte(' ')
+		if strings.Contains(f.clean[j], "{") {
+			break
+		}
+	}
+	return b.String()
+}
+
 func bodyEndFor(i int, f *ffile, spec *langSpec) int {
 	if spec.indent {
 		base := f.indent[i]
-		for j := i + 1; j < len(f.lines); j++ {
+		// A declaration header may span several lines inside brackets or
+		// with a trailing backslash (Python/Ruby):
+		//
+		//     async def test_x(
+		//         self, a, b
+		//     ) -> None:
+		//
+		// The dedent scan must start at the body, not at the header's
+		// closing line — otherwise End stops before the body and a nested
+		// def loses its enclosing-function receiver, collapsing same-named
+		// helpers onto the class identity (duplicate-symbol conflict).
+		for j := indentHeaderEnd(i, f) + 1; j < len(f.lines); j++ {
 			if f.blank[j] || f.com[j] {
 				continue
 			}

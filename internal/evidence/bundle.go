@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -230,6 +231,7 @@ func Generate(root, agentID, task string, ix *index.Index) (*Bundle, error) {
 	// coherent.
 	scope := resp.Scope
 	scopeSymbolsTotal := len(scope.Symbols)
+	scope = dedupeScope(scope)
 	if len(scope.Symbols) > scopeSymbolsCap {
 		scope.Symbols = scope.Symbols[:scopeSymbolsCap]
 	}
@@ -285,6 +287,41 @@ func stampMachineMAC(b *Bundle) {
 	if mac, err := governance.StampMachineMAC([]byte(b.BundleHash)); err == nil {
 		b.MachineMAC = mac
 	}
+}
+
+// dedupeScope removes duplicate symbol and edge records from an authorized
+// scope. The authorizer emits an edge per declaration pair, so the same
+// from→to pair can appear many times (31 duplicate pairs observed in a fresh
+// export, 2026-11-10 campaign) — duplicated rows say nothing extra and made
+// the bundle harder to read and diff.
+func dedupeScope(scope governance.AuthorizedScope) governance.AuthorizedScope {
+	if len(scope.Symbols) > 1 {
+		seen := make(map[string]struct{}, len(scope.Symbols))
+		kept := scope.Symbols[:0]
+		for _, s := range scope.Symbols {
+			k := s.File + "\x00" + s.Name + "\x00" + s.Qualified + "\x00" + strconv.Itoa(s.Line)
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			kept = append(kept, s)
+		}
+		scope.Symbols = kept
+	}
+	if len(scope.Edges) > 1 {
+		seen := make(map[string]struct{}, len(scope.Edges))
+		kept := scope.Edges[:0]
+		for _, e := range scope.Edges {
+			k := e.From + "\x00" + e.To
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			kept = append(kept, e)
+		}
+		scope.Edges = kept
+	}
+	return scope
 }
 
 // lineageFromScope maps an authorized scope to the bundle's lineage records.

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/approvalkeycli"
+	"github.com/JayveerPrajapati/kern/internal/approvalqueue"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
@@ -36,56 +38,24 @@ func runApproval(rest []string) int {
 			return runApprovalAsk(rest[1:])
 		case "list":
 			return runApprovalList(rest[1:])
+		case "prune":
+			return runApprovalPrune(rest[1:])
+		case "key":
+			return runApprovalKey(rest[1:])
 		}
 	}
-	fatalUsage("approval requires a subcommand: kern approval ask <id> [--root R] | kern approval wait <id> [--timeout 30m] [--root R] | kern approval list [--root R] | kern approval clear <id> [--reason R] [--root R] — see 'kern approval --help'")
+	fatalUsage("approval requires a subcommand: kern approval ask <id> [--root R] | kern approval wait <id> [--timeout 30m] [--root R] | kern approval list [--root R] | kern approval clear <id>|--stale [--reason R] [--root R] | kern approval key status|rotate [--yes] — see 'kern approval --help'")
 	return 0 // unreachable (fatalUsage panics with the exitError sentinel)
 }
 
-// runApprovalList implements `kern approval list [--root R]` — the Ask
-// Protocol's visibility surface: every PENDING approval a human could still
-// decide, plus every LIVE prefix grant (scope "prefix": unexpired, under its
-// use cap) with prefix, uses/max and expiry. `kern approval clear <id>`
-// revokes a grant early; the deny/ask paths never mint silently, so this
-// listing is the complete picture of what agents may currently do.
+// runApprovalList implements `kern approval list [--root R]` — the thin
+// flag wrapper; the queue rendering itself lives in internal/approvalqueue
+// (the headroom extraction: the read surface vs the decide/ask/wait
+// lifecycle).
 func runApprovalList(rest []string) int {
 	f, _ := parseFlagsOrDie(rest)
-	root := projectRoot(f)
-	store := governance.NewFileStore(root)
-	pending, err := store.Pending()
-	if err != nil {
-		fatal("approval list: %v", err)
-	}
-	fmt.Printf("pending approvals (%d):\n", len(pending))
-	if len(pending) == 0 {
-		fmt.Println("  (none)")
-	}
-	for _, a := range pending {
-		reason := a.Reason
-		if len(reason) > 60 {
-			reason = reason[:57] + "..."
-		}
-		fmt.Printf("  %-20s %-8s %s\n", a.ID, a.RiskLevel, reason)
-		if !governance.ApprovalIntegrityOK(a, root) {
-			fmt.Printf("    !! INTEGRITY: record was modified outside the approval workflow — DO NOT APPROVE\n")
-		}
-	}
-	grants, gerr := governance.LivePrefixGrants(root)
-	if gerr != nil {
-		fatal("approval list: %v", gerr)
-	}
-	fmt.Printf("live prefix grants (%d):\n", len(grants))
-	if len(grants) == 0 {
-		fmt.Println("  (none)")
-	}
-	for _, g := range grants {
-		cmd := g.Command
-		if len(cmd) > 60 {
-			cmd = cmd[:57] + "..."
-		}
-		fmt.Printf("  %-20s prefix %q uses %d/%d expires %s\n", g.ID, g.Prefix, g.Uses, g.MaxUses, g.ExpiresAt.Format(time.RFC3339))
-		fmt.Printf("    command: %s\n", cmd)
-		fmt.Printf("    revoke: kern approval clear %s --root %s\n", g.ID, root)
+	if err := approvalqueue.List(projectRoot(f), f.limit, f.limitSet); err != nil {
+		fatal("%v", err)
 	}
 	return 0
 }
@@ -107,6 +77,28 @@ func runApprovalList(rest []string) int {
 // agent-side path is `kern approval wait <id>`. The typed choice IS the
 // human action; nothing is decided on timeout/EOF (an abort, never a
 // decision, and the abort is audit-recorded).
+// runApprovalPrune implements `kern approval prune [--older-than 168h]` —
+// the thin flag wrapper; the prune logic lives in internal/approvalqueue.
+func runApprovalPrune(rest []string) int {
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
+		root = args[0]
+	}
+	window := 7 * 24 * time.Hour
+	if f.olderThan != "" {
+		d, err := time.ParseDuration(f.olderThan)
+		if err != nil || d <= 0 {
+			fatalUsage("approval prune: --older-than must be a positive duration (e.g. 168h)")
+		}
+		window = d
+	}
+	if err := approvalqueue.Prune(root, window); err != nil {
+		fatal("%v", err)
+	}
+	return 0
+}
+
 func runApprovalAsk(rest []string) int {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
@@ -121,8 +113,8 @@ func runApprovalAsk(rest []string) int {
 	if rec.DecidedAt != nil || (rec.Status != "" && rec.Status != "pending") {
 		fatalPolicy("approval ask: approval %q already decided as %s — check kern audit %s for state", id, rec.Status, id)
 	}
-	if !governance.ApprovalIntegrityOK(rec, root) {
-		fatalPolicy("approval ask: approval %q failed integrity verification — it was modified outside the approval workflow; DO NOT answer it", id)
+	if rep := governance.ApprovalIntegrity(rec, root); !rep.OK() {
+		fatalPolicy("approval ask: approval %q failed integrity verification (%s): %s", id, rep.Verdict, rep.Reason)
 	}
 	tty, terr := approveTerminal()
 	if terr != nil {
@@ -190,6 +182,10 @@ func runApprovalAsk(rest []string) int {
 			prefix = governance.SuggestedPrefix(rec.Command)
 		}
 		prefix = promptAskPrefix(tty, rec.Command, prefix)
+		if err := validateAskPrefix(rec, prefix); err != nil {
+			recordApprovalAttemptAuditVerb(root, "ask", id, approver, "refused", err.Error())
+			fatal("approval ask: %v — the ask is NOT answered; run it again and choose a valid prefix, accept once, or reject", err)
+		}
 		if _, mem := decideApproval(root, "approve", id, approver, true, f.reason, sign); mem != nil {
 			recordPolicySignalsBounded(root, mem)
 		}
@@ -208,6 +204,24 @@ func runApprovalAsk(rest []string) int {
 		}
 		return 0
 	}
+}
+
+// validateAskPrefix checks the prefix answer before the once-decision is
+// persisted. A bad custom prefix must leave the approval pending so the human
+// can rerun the same ask and choose [1], a valid [2], or [3]. Persisting
+// "approved once" first made that retry impossible and surfaced only as
+// "already decided".
+func validateAskPrefix(rec domain.Approval, prefix string) error {
+	if rec.Command == "" {
+		return errors.New("no prefix grant is possible for a legacy approval")
+	}
+	if prefix == "" || !governance.PrefixMatches(rec.Command, prefix) {
+		return fmt.Errorf("prefix %q must be a token prefix of the approved command %q", prefix, rec.Command)
+	}
+	if rec.RiskLevel == domain.RiskCritical {
+		return errors.New("CRITICAL commands are never prefix-grantable — accept once or reject")
+	}
+	return nil
 }
 
 // readAskChoice reads the [1]/[2]/[3] answer from the interactive terminal
@@ -275,8 +289,14 @@ func promptAskPrefix(tty io.ReadWriter, command, suggested string) string {
 func runApprovalClear(rest []string) int {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
+	if f.stale {
+		if len(args) > 0 {
+			fatalUsage("approval clear --stale clears every pending key-rotated record; it takes no id")
+		}
+		return approvalkeycli.ClearStale(root, f.approver, f.reason, f.yes)
+	}
 	if len(args) < 1 || args[0] == "" {
-		fatalUsage("approval clear requires an approval id: kern approval clear <id> [--reason R] [--root R] — rejected ids: see the denial message or `kern audit`; pending ids: `kern approve list`")
+		fatalUsage("approval clear requires an approval id: kern approval clear <id> [--reason R] [--root R] | kern approval clear --stale --yes — rejected ids: see the denial message or `kern audit`; pending ids: `kern approve list`")
 	}
 	id := args[0]
 	actor := f.approver
@@ -311,17 +331,22 @@ func runApprovalClear(rest []string) int {
 }
 
 // runApprovalWait blocks until the approval with the given ID is decided,
-// polling the two stores `kern approve` resolves — the governance store
-// (<root>/.kern/approvals.json, appr-* ids) and the blueprint two-person-rule
-// store (<root>/.blueprint/approvals/requests.jsonl, apr-* ids written by
-// `kern request-approval`) — on a ~1s ticker. It is the blocking observer
-// for a pending approval: an agent that hit a "resolve with: kern approve
-// <id>" denial can await the human decision instead of relying on manual
-// relay. It prints the current state once at start ("pending: <id>"), then
-// the decision when it lands.
+// polling the governance store (<root>/.kern/approvals.json, appr-* ids) on
+// a ~1s ticker. It is the blocking observer for a pending approval: an
+// agent that hit a "resolve with: kern approve <id>" denial can await the
+// human decision instead of relying on manual relay. It prints a
+// deterministic pending-state response immediately ("pending: <id>" plus the
+// one-line grant hint a human can copy verbatim), then the decision when it
+// lands.
+//
+// --notify-once emits that pending response and exits 0 WITHOUT blocking:
+// the single-notification probe for agents that want to confirm the
+// approval exists and hand the grant command to the human without tying up
+// their execution slot for the whole wait window.
 //
 // Exit codes per the repo contract (see `kern exitcode`):
-//   - 0 when the approval was approved;
+//   - 0 when the approval was approved (or --notify-once emitted its
+//     pending notification);
 //   - 3 (denied / policy outcome) when it was rejected;
 //   - 1 when --timeout expires before a decision lands (or the id is
 //     unknown — a miss is a real error, not a reason to block for the full
@@ -330,13 +355,31 @@ func runApprovalWait(rest []string) int {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
-		fatalUsage("approval wait requires an approval id: kern approval wait <id> [--timeout 30m] [--root R]")
+		fatalUsage("approval wait requires an approval id: kern approval wait <id> [--notify-once] [--timeout 30m] [--root R]")
 	}
 	id := args[0]
 	timeout := approvalWaitTimeout(f)
 
 	govStore := governance.NewFileStore(root)
+	// Deterministic pending-state response, emitted IMMEDIATELY (before any
+	// store round-trip can delay it): the state line first, then the
+	// one-line grant hint with the approval id and root a human can run
+	// verbatim. Agents can parse the first line and relay the second without
+	// guessing when or how to poll.
 	fmt.Printf("pending: %s\n", id)
+	fmt.Printf("grant: kern approval ask %s --root %s\n", id, root)
+
+	if f.notifyOnce {
+		// Single notification: verify the id exists (a miss is a real
+		// error, not a "pending" claim) and return without blocking.
+		if _, err := govStore.Get(id); err != nil {
+			fatal("approval wait: approval not found: %s — the id is wrong, or the approval was already consumed by a successful retry (re-run the original command; it will pass without a new approval); pending ids: `kern approve list`", id)
+		}
+		if a, err := govStore.Get(id); err == nil && a.DecidedAt != nil {
+			return printApprovalDecision(a)
+		}
+		return 0
+	}
 
 	// Fail fast on an unknown id: the wait is for an approval the caller was
 	// already told about (e.g. via the exec deny message or `kern

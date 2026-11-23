@@ -55,8 +55,8 @@ func runApprove(rest []string) {
 				reason = reason[:37] + "..."
 			}
 			fmt.Printf("%-20s %-12s %-20s %s\n", a.ID, a.TaskID, a.Requester, reason)
-			if !governance.ApprovalIntegrityOK(a, root) {
-				fmt.Printf("%54s !! INTEGRITY: record was modified outside the approval workflow — DO NOT APPROVE\n", "")
+			if rep := governance.ApprovalIntegrity(a, root); !rep.OK() {
+				fmt.Printf("%54s %s\n", "", integrityNote(rep))
 			}
 			for _, ref := range a.EvidenceRefs {
 				r := ref

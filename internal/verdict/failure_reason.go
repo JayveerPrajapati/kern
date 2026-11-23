@@ -35,7 +35,7 @@ func isDiagnosticLine(t string) bool {
 func boundedFailureOutput(s string) string {
 	s = strings.TrimSpace(s)
 	names := ""
-	if failed := failedTestNames(s); len(failed) > 0 {
+	if failed := FailedTestNames(s); len(failed) > 0 {
 		names = "failed tests: " + strings.Join(failed, ", ") + "\n"
 	}
 	if stripped := stripPassingTestNoise(s); strings.TrimSpace(stripped) != "" {
@@ -89,9 +89,9 @@ func TestFailureExcerpt(s string, maxLines int) string {
 	return strings.Join(lines, "\n")
 }
 
-// failedTestNames lists the tests a `go test -v` log marks "--- FAIL:", so a
+// FailedTestNames lists the tests a `go test -v` log marks "--- FAIL:", so a
 // failed run names its failures even when the log tail does not reach them.
-func failedTestNames(output string) []string {
+func FailedTestNames(output string) []string {
 	const maxNames = 20
 	var out []string
 	seen := map[string]bool{}

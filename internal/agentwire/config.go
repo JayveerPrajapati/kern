@@ -128,6 +128,42 @@ func FileStatus(path, label string) Status {
 	return Status{Agent: label, Installed: installed, Path: path, Note: note}
 }
 
+// HookStatus reports whether path contains an actual kern hook. Unlike
+// FileStatus, an unrelated kern MCP entry never counts as a hook.
+func HookStatus(path, label string) Status {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Status{Agent: label, Path: path, Note: "not present"}
+	}
+	installed, herr := configstrip.HasKernHook(string(b))
+	note := "kern hook present"
+	switch {
+	case herr != nil:
+		note = "file exists but hooks could not be parsed: " + herr.Error()
+	case !installed:
+		note = "file exists but no kern hook"
+	}
+	return Status{Agent: label, Installed: installed, Path: path, Note: note}
+}
+
+// HookStatusAny reports the first path carrying a kern hook, falling back to
+// the first path for a precise not-present diagnosis.
+func HookStatusAny(label string, paths ...string) Status {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		st := HookStatus(p, label)
+		if st.Installed {
+			return st
+		}
+	}
+	if len(paths) > 0 {
+		return HookStatus(paths[0], label)
+	}
+	return Status{Agent: label, Note: "not present"}
+}
+
 // FileStatusAny reports the first present path's status, falling back to the
 // first path when none exists.
 func FileStatusAny(label string, paths ...string) Status {

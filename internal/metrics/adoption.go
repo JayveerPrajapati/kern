@@ -15,13 +15,15 @@ type AdoptionEvent struct {
 	Ts     int64  `json:"ts"`
 	Tool   string `json:"tool"`
 	Routed bool   `json:"routed"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // AdoptionCounts is the aggregate of an adoption log: how many shadow-tool
 // calls were observed in total and how many were served by kern.
 type AdoptionCounts struct {
-	Routed int64
-	Total  int64
+	Routed      int64
+	Total       int64
+	RawFastPath int64
 }
 
 // Pct returns the kern-routed share as a percentage in [0, 100]. It returns 0
@@ -59,6 +61,9 @@ func AggregateAdoptionLog(path string) (AdoptionCounts, error) {
 			continue // malformed line — best-effort aggregate
 		}
 		counts.Total++
+		if !ev.Routed && validFastPathReason(ev.Reason) {
+			counts.RawFastPath++
+		}
 		if ev.Routed {
 			counts.Routed++
 		}
@@ -67,6 +72,14 @@ func AggregateAdoptionLog(path string) (AdoptionCounts, error) {
 		return counts, err
 	}
 	return counts, nil
+}
+
+func validFastPathReason(reason string) bool {
+	switch reason {
+	case "non-code", "window", "missing", "tiny", "text-search", "native-glob":
+		return true
+	}
+	return false
 }
 
 // trimSpace is a tiny []byte equivalent of strings.TrimSpace (kept local to
@@ -100,7 +113,10 @@ func (r *Recorder) IngestAdoptionLog(path string) error {
 	for i := int64(0); i < counts.Routed; i++ {
 		r.RecordKernAdoption(true)
 	}
-	for i := counts.Routed; i < counts.Total; i++ {
+	for i := int64(0); i < counts.RawFastPath; i++ {
+		r.RecordRawFastPath()
+	}
+	for i := counts.Routed + counts.RawFastPath; i < counts.Total; i++ {
 		r.RecordKernAdoption(false)
 	}
 	return nil

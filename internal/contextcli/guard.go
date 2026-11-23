@@ -148,6 +148,13 @@ func runGuardCLI(rest []string) {
 	if len(args) > 1 {
 		root = args[1]
 	}
+	// `kern guard check <command>` is a common typo: check takes a ROOT path.
+	// Treat a command-shaped argument as a usage error with the classify hint
+	// instead of indexing the command string as a root (which failed with a
+	// confusing "stat <command>: no such file or directory").
+	if sub == "check" && commandShapedRoot(root) {
+		fatalUsage("guard check takes a ROOT path; to classify a command run: kern guard classify <command>")
+	}
 	switch sub {
 	case "init":
 		path := guard.DefaultBoundariesPath(root)
@@ -374,6 +381,19 @@ func runGuardCLI(rest []string) {
 // subscribers see guard results immediately instead of at the next replay.
 // Publishing is best-effort and deterministic (event order = violation order);
 // it never fails the guard or alters its output or exit behavior.
+// commandShapedRoot reports whether the `check` positional looks like a shell
+// command rather than a directory: whitespace, a shell metacharacter, or a
+// leading dash. Plain paths (".", "./web", "/abs/path", "sub/dir") pass.
+func commandShapedRoot(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "-") {
+		return true
+	}
+	return strings.ContainsAny(s, " \t\n;&|<>()$`'\"*?[]{}~!")
+}
+
 func publishGuardEvents(root string, violations []guard.Violation, warnNotConfigured bool) {
 	relay.PublishPersisted(root, guard.GuardEvents(violations, warnNotConfigured))
 }

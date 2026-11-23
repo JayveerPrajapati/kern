@@ -21,12 +21,16 @@ type FileChange struct {
 }
 
 // FilesForRangeL returns the changed files with their added-line ranges.
-// An empty range means the working tree (git diff HEAD).
+// An empty range means the working tree (git diff HEAD). Range sides are
+// validated (validateRangeSides) before they reach git — see audit F1.
 func FilesForRangeL(root, from, to string) ([]FileChange, error) {
 	var cmdArgs []string
 	if from == "" && to == "" {
 		cmdArgs = []string{"diff", "-U0", "HEAD"}
 	} else {
+		if err := validateRangeSides(from, to); err != nil {
+			return nil, err
+		}
 		cmdArgs = []string{"diff", "-U0", from + ".." + to}
 	}
 	out, err := exec.Command("git", append([]string{"-C", root}, cmdArgs...)...).Output()

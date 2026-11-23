@@ -465,28 +465,153 @@ func claimExecApproval(root, id string) (bool, error) {
 	return true, nil
 }
 
-// ApprovalIntegrityOK reports whether an approval record's integrity is
-// verifiable at the given project root. Records without an exec stamp
-// (other features sharing the approvals file) are OK by definition — they
-// do not participate in the exec integrity layer. Exec-stamped records
-// must carry a valid HMAC over their full decision-relevant content,
-// bound to the root's canonical identity (v4): a record copied from
-// another workspace fails here. `kern approve` listings flag records
-// failing this check, and FileStore.Decide refuses to decide them, so a
-// governed client cannot tamper a pending record into misleading a human
-// approver (gate-1 attempt-2).
-func ApprovalIntegrityOK(a domain.Approval, root string) bool {
+// IntegrityVerdict classifies why an approval record's integrity does or does
+// not verify. A bare bool cannot distinguish a tampered record from one whose
+// MAC was computed under a key that has since been rotated — reporting the
+// latter as tampering accuses an untouched record of being hand-edited.
+type IntegrityVerdict string
+
+const (
+	// IntegrityOK: the record verifies (or carries no exec stamp at all).
+	IntegrityOK IntegrityVerdict = "ok"
+	// IntegrityTampered: an exec-stamped record's MAC does not verify and the
+	// record was created while the current MAC key already existed.
+	IntegrityTampered IntegrityVerdict = "tampered"
+	// IntegrityKeyRotated: an exec-stamped record predates the current MAC
+	// key, so its MAC cannot verify under it. Still never a grant.
+	IntegrityKeyRotated IntegrityVerdict = "key-rotated"
+	// IntegritySignatureUnverifiable: an approved (or operator-signed) record
+	// whose signature does not verify with the current signing key.
+	IntegritySignatureUnverifiable IntegrityVerdict = "signature-unverifiable"
+)
+
+// IntegrityReport is a verdict plus an operator-facing one-line reason.
+type IntegrityReport struct {
+	Verdict IntegrityVerdict
+	Reason  string
+}
+
+// OK reports whether the record is decidable: only OK records may be approved
+// and only they are live grants.
+func (r IntegrityReport) OK() bool { return r.Verdict == IntegrityOK }
+
+// ApprovalIntegrity reports whether an approval record's integrity is
+// verifiable at the given project root, and when it is not, WHY. Records
+// without an exec stamp (other features sharing the approvals file) are OK by
+// definition — they do not participate in the exec integrity layer.
+// Exec-stamped records must carry a valid HMAC over their full
+// decision-relevant content, bound to the root's canonical identity (v4): a
+// record copied from another workspace fails here. `kern approve` listings
+// flag records failing this check, and FileStore.Decide refuses to decide
+// them, so a governed client cannot tamper a pending record into misleading a
+// human approver (gate-1 attempt-2).
+func ApprovalIntegrity(a domain.Approval, root string) IntegrityReport {
 	rid := execRootIdentity(root)
 	if a.Signature != "" || a.Status == "approved" {
 		// An approved exec record is a grant only when the operator signature
 		// verifies. A v4 HMAC-only approved record (pre-P0-3) is no longer a
 		// grant: the HMAC key is same-user-readable and forgeable.
-		return execApprovalSignatureValid(a, rid)
+		if execApprovalSignatureValid(a, rid) {
+			return IntegrityReport{Verdict: IntegrityOK}
+		}
+		if a.Signature == "" {
+			return IntegrityReport{
+				Verdict: IntegritySignatureUnverifiable,
+				Reason:  "approved without an operator signature (pre-signing record) — not a grant",
+			}
+		}
+		return IntegrityReport{
+			Verdict: IntegritySignatureUnverifiable,
+			Reason:  "operator signature does not verify with the current signing key (key rotated, or the record came from another machine) — not a grant",
+		}
 	}
 	if execApprovalStampFrom(a) == "" {
-		return true
+		return IntegrityReport{Verdict: IntegrityOK}
 	}
 	// Pending records still carry the HMAC so a tampered record is flagged
 	// before a human decides it (the HMAC is not a grant authority).
-	return execApprovalMACValid(a, rid)
+	if execApprovalMACValid(a, rid) {
+		return IntegrityReport{Verdict: IntegrityOK}
+	}
+	created, haveKey := execApprovalSecretCreatedAt()
+	if !haveKey {
+		return IntegrityReport{
+			Verdict: IntegrityKeyRotated,
+			Reason:  "the MAC key is absent or unreadable, so a stamp made under an earlier key cannot verify — `kern approval key status`",
+		}
+	}
+	if !a.RequestedAt.IsZero() && a.RequestedAt.Before(created) {
+		return IntegrityReport{
+			Verdict: IntegrityKeyRotated,
+			Reason: fmt.Sprintf("MAC key was created %s, after this record (%s) — unverifiable, not tampering; see `kern approval key status`",
+				created.Format(time.RFC3339), a.RequestedAt.Format(time.RFC3339)),
+		}
+	}
+	return IntegrityReport{
+		Verdict: IntegrityTampered,
+		Reason:  "record was modified outside the approval workflow (or stamped for a different workspace — the MAC binds the canonical root) — DO NOT APPROVE",
+	}
+}
+
+// ApprovalIntegrityOK reports whether the record is decidable. It is the
+// boolean gate used by every decide path; ApprovalIntegrity carries the reason
+// a human-facing listing needs.
+func ApprovalIntegrityOK(a domain.Approval, root string) bool {
+	return ApprovalIntegrity(a, root).OK()
+}
+
+// execApprovalSecretCreatedAt reports when the current MAC key file was
+// created. The file is written once and never rewritten, so its mtime is its
+// creation time — the boundary below which a stored MAC cannot verify.
+func execApprovalSecretCreatedAt() (time.Time, bool) {
+	p, err := execApprovalSecretPath()
+	if err != nil {
+		return time.Time{}, false
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return fi.ModTime(), true
+}
+
+// ExecApprovalMACKeyPath exposes the MAC-key path for `kern approval key
+// status`. The MAC key is tamper detection only — never a grant authority.
+func ExecApprovalMACKeyPath() (string, error) { return execApprovalSecretPath() }
+
+func resetExecApprovalSecret() {
+	execApprovalSecretOnce = sync.Once{}
+	execApprovalSecretKey = nil
+	execApprovalSecretErr = nil
+}
+
+// RotateExecApprovalMACKey moves the current MAC key aside (never deletes it)
+// and drops the in-process cache, so the next governed command mints a fresh
+// key. Every record stamped before the rotation becomes unverifiable, which
+// ApprovalIntegrity reports as IntegrityKeyRotated — NOT as tampering.
+func RotateExecApprovalMACKey() (string, error) {
+	p, err := execApprovalSecretPath()
+	if err != nil {
+		return "", err
+	}
+	backup, err := approvalsign.RotateFile(p)
+	if err != nil {
+		return "", err
+	}
+	resetExecApprovalSecret()
+	return backup, nil
+}
+
+// ApprovalIntegrityCounts classifies every record in the workspace's approval
+// store by integrity verdict, for `kern approval key status`.
+func ApprovalIntegrityCounts(root string) (map[IntegrityVerdict]int, error) {
+	recs, err := NewFileStore(root).Load()
+	if err != nil {
+		return nil, err
+	}
+	out := map[IntegrityVerdict]int{}
+	for _, a := range recs {
+		out[ApprovalIntegrity(a, root).Verdict]++
+	}
+	return out, nil
 }

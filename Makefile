@@ -16,7 +16,7 @@ RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapa
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-purego test test-short test-fresh test-touched test-race vet lint bench bench-gate cover cover-floor cover-risky install install-purego hooks plugin-sync plugin-check pre-release release dist release-smoke mcpb clean clean-artifacts help
+.PHONY: all build build-purego test test-short test-fresh test-touched test-race vet lint bench bench-gate cover cover-floor cover-risky docs-drift check verify check-launcher verify-launcher install install-purego hooks plugin-sync plugin-check release-manifest pre-release release dist release-smoke mcpb clean clean-artifacts help
 
 all: build
 
@@ -25,6 +25,10 @@ all: build
 help:
 	@echo "kern Makefile targets:"
 	@sed -n 's/^.PHONY: //p' $(MAKEFILE_LIST) | tr ' ' '\n' | sed '/^$$/d' | sed 's/^/  make /'
+
+# check and verify are aliases for the comprehensive pre-release gate:
+# build, generated artifacts, plugin parity, doctor, and benchmark checks.
+check verify: pre-release
 
 # build is the DEFAULT build: tree-sitter is compiled in (hard CGO — the
 # grammar bindings compile C sources via `import "C"`). CGO_ENABLED=1 is
@@ -87,6 +91,11 @@ cover-floor:
 cover-risky:
 	@bash scripts/cover-risky.sh
 
+# docs-drift keeps the short README and architecture tour aligned with the
+# live binary, command, package, and MCP counts.
+docs-drift:
+	python3 scripts/check-docs-drift.py
+
 # test-race runs the test suite with the Go race detector. It is slower than
 # `test` but catches data races in the event bus, gateway, stores, and loop.
 # This is the deterministic-verification path for concurrency-sensitive code
@@ -118,7 +127,47 @@ bench-latency:
 bench-gate:
 	go run ./cmd/kern bench --root . --check
 
-install: build
+# e2e-mcp runs the focused MCP end-to-end slice (one tool per test).
+e2e-mcp:
+	go test ./internal/mcp -run '^TestE2E' -count=1
+
+# e2e-cli runs the focused CLI end-to-end slice (one command per test).
+e2e-cli:
+	go test ./cmd/kern -run '^TestCLI_' -count=1
+
+# e2e-daemon exercises the real per-project daemon lifecycle and transport.
+e2e-daemon:
+	go test ./cmd/kern -run '^TestE2E_daemon_' -count=1
+
+# e2e-full is the deterministic local completion gate for the whole surface.
+e2e-full: e2e-mcp e2e-cli e2e-daemon
+
+# load-smoke runs the small concurrency/load harness without the full suite.
+load-smoke:
+	go test ./internal/mcp -run '^TestLoad_' -count=1
+
+# load-gate runs the smoke load suite, writes a JSON+Markdown report, then
+# enforces zero errors and broad latency ceilings.
+load-gate:
+	@mkdir -p .kern/load
+	@rm -f .kern/load/load.json .kern/load/load.md
+	KERN_LOAD_REPORT_DIR=$(CURDIR)/.kern/load go test ./internal/mcp -run '^TestLoad_' -count=1
+	KERN_LOAD_REPORT_DIR=$(CURDIR)/.kern/load go test ./internal/mcp -run '^TestLoadGate$$' -count=1
+	@mkdir -p docs/benchmarks
+	@cp .kern/load/load.md docs/benchmarks/e2e-load.md
+
+verify-launcher:
+	@test -x ./kern || { echo "./kern launcher is missing or not executable"; exit 1; }
+	@test -x $(BIN)/kern || { echo "$(BIN)/kern is missing; run make build"; exit 1; }
+	@launcher_version=$$(./kern version); bin_version=$$($(BIN)/kern version); \
+		if [ "$$launcher_version" != "$$bin_version" ]; then \
+			echo "./kern $$launcher_version does not match $(BIN)/kern $$bin_version"; exit 1; \
+		fi; \
+		echo "./kern launcher matches $(BIN)/kern ($$bin_version)"
+
+check-launcher: build verify-launcher
+
+install: build verify-launcher
 	mkdir -p $${HOME}/.local/bin
 	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/
 # macOS Gatekeeper SIGKILLs adhoc-signed binaries carrying the
@@ -131,7 +180,7 @@ ifeq ($(shell uname -s),Darwin)
 	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
 endif
 
-install-purego: build-purego
+install-purego: build-purego verify-launcher
 	mkdir -p $${HOME}/.local/bin
 	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/
 ifeq ($(shell uname -s),Darwin)
@@ -202,9 +251,16 @@ dist: release
 release-smoke:
 	./scripts/release-smoke.sh --dir $(BIN) --repo . $(if $(VERSION),--version $(VERSION),)
 
+# release-manifest prevents stale packaging metadata from reaching a tag:
+# server.json, CHANGELOG.md, Go/Homebrew toolchains, command count, and the
+# advertised/full MCP surfaces must agree at HEAD.
+release-manifest:
+	python3 scripts/check-release-manifest.py
+	python3 -m unittest discover -s python/tests
+
 # pre-release validates all release gates and generated artifacts before tagging:
 # documentation freshness, plugin sync, catalog/contract parity, diagnostics, and bench gates.
-pre-release: build
+pre-release: build release-manifest docs-drift
 	./$(BIN)/kern gen-catalog --check
 	./$(BIN)/kern gen-contracts --check
 	./$(BIN)/kern gen-docs --doc schemas --check

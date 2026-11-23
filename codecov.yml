@@ -6,14 +6,14 @@
 # (56,550 / 79,277) across all packages.
 #
 # Two layers, deliberately:
-# - `scripts/cover-floor.sh` is the ENFORCEABLE aggregate floor (>=68%) and
+# - `scripts/cover-floor.sh` is the ENFORCEABLE aggregate floor (>=70%) and
 #   runs inside ci-ok. Codecov's project status is advisory: the upload has
 #   fail_ci_if_error: false and the status is not part of ci-ok.
 # - the project status below mirrors that floor for the report; patch is a
 #   real gate (informational: false) for hosts that require the Codecov
 #   status, but ci-ok does not depend on it.
 #
-# - project: target 68%, threshold 2% — a few points under the measured
+# - project: target 70%, threshold 1% — just under the measured
 #   baseline. Deleting a large package's tests (internal/index = 6.2% of
 #   statements; app+mcp = 4.7%) trips it.
 # - patch: target 75%, threshold 2%. The previous `informational: true` let a
@@ -24,8 +24,8 @@
 coverage:
   status:
     project:
-      target: 68%
-      threshold: 2%
+      target: 70%
+      threshold: 1%
     patch:
       target: 75%
       threshold: 2%

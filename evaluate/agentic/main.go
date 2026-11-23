@@ -12,7 +12,7 @@
 //	go run ./evaluate/agentic list   [-tasks dir] [-arms file]
 //
 // This is a dev script, deliberately outside the product surface: stdlib
-// only, no kern internal imports, not listed in the architecture ledger.
+// only, no kern internal imports; its stdlib-only scoring helper is listed separately in the architecture ledger.
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/evaluate/agentbench"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,11 +124,11 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	res := newResults(results)
+	res := agentbench.NewResults(results)
 	if err := writeJSON(filepath.Join(runDir, "results.json"), res); err != nil {
 		return err
 	}
-	printSummary(os.Stdout, res)
+	agentbench.PrintSummary(os.Stdout, res)
 	fmt.Fprintf(os.Stderr, "run dir: %s\n", runDir)
 	return nil
 }

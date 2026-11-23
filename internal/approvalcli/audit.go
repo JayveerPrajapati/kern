@@ -135,7 +135,7 @@ func runAudit(rest []string) {
 				fmt.Fprintf(os.Stderr, "NOTE: audit integrity: %d of %d entries are HMAC-keyed; %d verify only under an unkeyed formula (written before keyed hashing or while the key was unavailable) and could have been forged by a writer with store access\n", tiers.Keyed, tiers.Total, tiers.Unkeyed())
 			}
 			if l.IntegrityMode() == "plain" {
-				fmt.Fprintf(os.Stderr, "WARNING: audit chain HMAC secret unavailable — hashes are plain SHA-256 (full-chain-rewrite tamper protection is OFF); restore the key at <UserConfigDir>/kern/audit-chain.key, then run `kern audit repair`\n")
+				fmt.Fprintf(os.Stderr, "WARNING: audit chain HMAC secret unavailable — hashes are plain SHA-256 (full-chain-rewrite tamper protection is OFF); restore the key at <UserHomeDir>/.kern/secrets/audit-chain.key, then run `kern audit repair`\n")
 			}
 		}
 	}
@@ -205,6 +205,13 @@ func runAudit(rest []string) {
 			cellOrDash(took),
 			cellOrDash(result),
 		)
+	}
+	// A broken tamper chain is a FINDING: exit 1 so scripts and CI cannot read
+	// the observation as success (2026-11-10 campaign — the warning alone
+	// exited 0, and doctor stayed green). The table above is already printed;
+	// the error line names the repair path.
+	if v := govaudit.CachedChainVerdict(filepath.Join(root, ".kern", "audit")); v.Verified > 0 && v.FirstBroken >= 0 {
+		fatal("audit: chain broken at entry %d of %d — governance records may have been modified (kern audit repair)", v.FirstBroken+1, v.Total)
 	}
 }
 

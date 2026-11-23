@@ -36,6 +36,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/graphcache"
 	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -111,6 +112,10 @@ func NewWithIndex(root string, ix *index.Index) (*Platform, error) {
 	return NewWithGraph(root, ix, &g)
 }
 
+// graphSidecarName is the graphcache sidecar name for the built domain graph
+// (see NewIndexOnly).
+const graphSidecarName = "graph"
+
 // NewIndexOnly builds a Platform carrying only the index and its code graph.
 // It deliberately skips the farm of one-shot graph queries does not need:
 // twin extractors (filesystem walks), memory store, governance firewall, and
@@ -126,6 +131,22 @@ func NewIndexOnly(root string) (*Platform, error) {
 		// platform_memo.go). A rebuild replaces the pointer, so this can never
 		// serve a graph from a previous index generation.
 		return memoizedIndexOnly(root, ix), nil
+	}
+	// One-shot cold path: a graph sidecar persisted for this exact index
+	// identity decodes in a fraction of the FromIndex build time; a miss
+	// builds from the index and best-effort saves the snapshot for the next
+	// one-shot process. Keys are identity-derived (see Index.GraphCacheKey),
+	// so a rebuilt index never loads a stale graph.
+	if key, ok := ix.GraphCacheKey(); ok {
+		var snap intel.GraphSnapshot
+		if graphcache.Load(root, graphSidecarName, key, &snap) {
+			g := intel.NewGraphFromSnapshot(snap)
+			return &Platform{root: root, ix: ix, graph: &g}, nil
+		}
+		g := intel.FromIndex(ix)
+		s := g.Snapshot()
+		_ = graphcache.Save(root, graphSidecarName, key, &s)
+		return &Platform{root: root, ix: ix, graph: &g}, nil
 	}
 	g := intel.FromIndex(ix)
 	return &Platform{root: root, ix: ix, graph: &g}, nil
@@ -201,14 +222,28 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 	if n, err := fw.AuditLog().Replay(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: audit log replay failed: %v\n", err)
 	} else if n > 0 {
-		if brk, verified := fw.AuditLog().VerifyChainReport(); brk >= 0 {
+		// Verify at most once per chain state: the verdict is cached on disk
+		// (size+mtime stamp), so read-only commands stop re-HMACing the whole
+		// chain on every start (2026-11-10 campaign: plan/meta/ask paid 3
+		// full walks each). Any append/edit invalidates the stamp.
+		verdict := govaudit.CachedChainVerdict(auditDir)
+		if brk, verified := verdict.FirstBroken, verdict.Verified; brk >= 0 {
 			// NEW-5 tier-aware verification: when every broken entry is a
 			// format downgrade (written while the HMAC secret was
 			// unavailable — e.g. a no-$HOME/containerized server), the
 			// break is explained, not tampering: ordering still verifies
 			// via the stored hashes. Report the degradation accurately and
 			// steer to repair, instead of crying "FAILED" on every start.
-			tiers := fw.AuditLog().ChainTierReport()
+			tiers := govaudit.ChainTiers{
+				Total:               verdict.Total,
+				Keyed:               verdict.Keyed,
+				Plain:               verdict.Plain,
+				Legacy:              verdict.Legacy,
+				Broken:              verdict.BrokenCount,
+				Downgraded:          verdict.Downgraded,
+				TailDowngraded:      verdict.TailUnkeyed,
+				FirstTailDowngraded: verdict.FirstTailUnkeyed,
+			}
 			if tiers.DowngradeExplainsBreak() {
 				if tiers.TailDowngraded > 0 {
 					fmt.Fprintf(os.Stderr, "WARNING: audit chain: %d entr%s starting at entry %d lack HMAC — written by an environment-degraded server (audit secret unavailable at write time). Ordering is verified; those entries' authenticity is not. They stay unkeyed by design — `kern audit repair` re-chains only genuinely broken links, never re-signs an entry of unknown origin\n", tiers.TailDowngraded, map[bool]string{true: "y", false: "ies"}[tiers.TailDowngraded == 1], tiers.FirstTailDowngraded+1)
@@ -217,9 +252,22 @@ func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, erro
 				// through that entry's Prev hash: ordering AND authenticity
 				// are anchored, so warning on every command is noise.
 			} else if verified == 0 {
-				fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit)\n", n)
+				// F-C3 (2026-11-22 dogfood campaign): platform construction
+				// is a side effect of every read command, and this signature
+				// (0 of N verifiable) is a cross-version/cross-machine chain
+				// — the norm on repos previously touched by another kern
+				// build, not tampering. Informational here; `kern audit` is
+				// the loud forensic surface.
+				fmt.Fprintf(os.Stderr, "note: audit chain not verifiable under this build (0 of %d entries — likely written by a different kern version or machine); run kern audit to inspect\n", n)
 			} else {
-				fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit)\n", brk+1, n)
+				// F-C3: a mid-chain break at CONSTRUCTION time is usually a
+				// mixed-version chain (entries from interleaved kern builds),
+				// which is indistinguishable from tampering at the hash
+				// level. Report it without the WARNING alarm: the verdict,
+				// exit codes and `kern audit`'s loud tamper warning are
+				// unchanged — this site must not cry FAILED on every command
+				// for a chain the current build cannot fully verify.
+				fmt.Fprintf(os.Stderr, "note: audit chain verification breaks at entry %d of %d — possibly a mixed-version chain or modified records; run kern audit to investigate\n", brk+1, n)
 				// Discriminate a benign format downgrade (HMAC secret
 				// unavailable when the entries were written, or an unlocked
 				// degraded write) from genuine tampering: a downgraded entry

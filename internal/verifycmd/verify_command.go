@@ -75,11 +75,47 @@ func verifyCommandCore(ctx context.Context, roots []string, args map[string]any)
 		return "", 0, &DeniedError{Err: err}
 	}
 
+	// T-02 anchor reuse: the fingerprint must be captured BEFORE execution.
+	// Manifest-free roots skip the git subprocess on the lookup side but
+	// still capture the pre-run state so the FIRST manifest can be saved.
+	var head, digest string
+	if reuseEnabled() {
+		if hasManifests(root) {
+			head, digest, _ = repoFingerprint(root)
+			if rr, ok := lookupReusableRun(root, command, head, digest); ok {
+				recordCommandAudit(root, command+" [reused "+rr.manifest.Anchor+"]",
+					commandRun{output: rr.output, exit: rr.manifest.Exit, dur: time.Duration(rr.manifest.DurMS) * time.Millisecond})
+				out, err := shapeOutput(rr.output, rr.manifest.Exit,
+					time.Duration(rr.manifest.DurMS)*time.Millisecond, rr.manifest.Anchor, mode)
+				if err != nil {
+					return "", 0, err
+				}
+				return reuseProvenance(rr.manifest) + out, rr.manifest.Exit, nil
+			}
+		} else {
+			head, digest, _ = repoFingerprint(root)
+		}
+	}
+
 	res := runCommand(ctx, root, command, commandTimeout(args))
 	recordCommandAudit(root, command, res)
 
 	anchor := optimize.StoreAnchor(res.output)
 	saveRun(root, anchor, res.output)
+	// Only successful, non-timed-out runs become reusable — never failures.
+	if reuseEnabled() && res.exit == 0 && !res.timedOut && head != "" {
+		m := runManifest{
+			Command:    command,
+			Root:       root,
+			Head:       head,
+			TreeDigest: digest,
+			Anchor:     anchor,
+			Exit:       res.exit,
+			DurMS:      res.dur.Milliseconds(),
+			At:         time.Now().Unix(),
+		}
+		_ = saveRunManifest(root, m) // best-effort: a failed save only costs a fresh run
+	}
 	out, err := shapeOutput(res.output, res.exit, res.dur, anchor, mode)
 	if err != nil {
 		return "", 0, err
@@ -94,8 +130,14 @@ const maxSavedRuns = 20
 
 func runsDir(root string) string { return filepath.Join(root, ".kern", "runs") }
 
+// RunsDir exposes the on-disk location of saved command runs so sibling
+// surfaces (the bench harness) can reason about reuse state without
+// duplicating the path.
+func RunsDir(root string) string { return runsDir(root) }
+
 // saveRun keeps the full output on disk so an anchor outlives the server
-// process and works from the CLI. Only the newest maxSavedRuns are kept.
+// process and works from the CLI. Only the newest maxSavedRuns are kept
+// (logs AND their reuse manifests are swept together so neither leaks).
 func saveRun(root, anchor, output string) {
 	if anchor == "" {
 		return
@@ -106,7 +148,7 @@ func saveRun(root, anchor, output string) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, anchor+".log"), []byte(output), 0o600)
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) <= maxSavedRuns {
+	if err != nil || len(entries) <= maxSavedRuns*2 {
 		return
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -114,8 +156,30 @@ func saveRun(root, anchor, output string) {
 		b, _ := entries[j].Info()
 		return a != nil && b != nil && a.ModTime().Before(b.ModTime())
 	})
-	for _, e := range entries[:len(entries)-maxSavedRuns] {
-		_ = os.Remove(filepath.Join(dir, e.Name()))
+	// Evict oldest anchors until at most maxSavedRuns .log files remain;
+	// every swept anchor takes its .meta.json with it, and any manifest
+	// whose .log is already gone is swept too.
+	logs := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".log") {
+			logs++
+		}
+	}
+	excess := logs - maxSavedRuns
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".log") {
+			if excess > 0 {
+				excess--
+				_ = os.Remove(filepath.Join(dir, name))
+				_ = os.Remove(filepath.Join(dir, strings.TrimSuffix(name, ".log")+manifestSuffix))
+			}
+		} else if strings.HasSuffix(name, manifestSuffix) {
+			anchor := strings.TrimSuffix(name, manifestSuffix)
+			if _, err := os.Stat(filepath.Join(dir, anchor+".log")); os.IsNotExist(err) {
+				_ = os.Remove(filepath.Join(dir, name))
+			}
+		}
 	}
 }
 

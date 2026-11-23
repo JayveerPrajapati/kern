@@ -18,7 +18,7 @@ func checkAdoption(root string) Finding {
 	if err != nil {
 		return Finding{Check: "adoption", Level: "warn", Detail: err.Error()}
 	}
-	d := fmt.Sprintf("%d/%d shadow-tool calls kern-routed (%.1f%%)", counts.Routed, counts.Total, counts.Pct())
+	d := fmt.Sprintf("%d/%d shadow-tool calls kern-routed (%.1f%%; intentional raw fast paths: %d)", counts.Routed, counts.Total, counts.Pct(), counts.RawFastPath)
 	if counts.Total >= 20 && counts.Pct() < 60 {
 		return Finding{Check: "adoption", Level: "warn", Detail: d + " — below the 60% kern-first target"}
 	}

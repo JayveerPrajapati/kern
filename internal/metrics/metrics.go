@@ -40,15 +40,16 @@ type Recorder struct {
 	cacheMisses      int64
 
 	// Self-observability metrics
-	requestCount  int64
-	toolCallCount int64
-	agentRunCount int64
-	llmLatency    []time.Duration
-	indexingCount int64
-	approvalCount int64
-	sandboxOps    int64
-	incidentCount int64
-	errorCount    int64
+	requestCount            int64
+	toolCallCount           int64
+	agentRunCount           int64
+	llmLatency              []time.Duration
+	indexingCount           int64
+	approvalCount           int64
+	sandboxOps              int64
+	incidentCount           int64
+	errorCount              int64
+	taskPersistenceFailures int64
 
 	// Product success metrics
 	tokenBefore        int64
@@ -75,6 +76,7 @@ type Recorder struct {
 	// counters by AggregateAdoptionLog / IngestAdoptionLog.
 	kernAdoptionRouted int64
 	kernAdoptionTotal  int64
+	kernRawFastPath    int64
 }
 
 // New creates a new empty Recorder.
@@ -290,6 +292,18 @@ func (r *Recorder) RecordError() {
 	r.errorCount++
 }
 
+// RecordTaskPersistenceFailure records a task or task-snapshot write that
+// could not be persisted. It is a health signal: callers may keep working, but
+// a non-zero count means task history can be lost across restarts.
+func (r *Recorder) RecordTaskPersistenceFailure() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.taskPersistenceFailures++
+}
+
 // --- Product success metrics ---
 
 // RecordTokenUsage records before/after token counts (for reduction metric).
@@ -334,6 +348,18 @@ func (r *Recorder) RecordKernAdoption(routed bool) {
 	if routed {
 		r.kernAdoptionRouted++
 	}
+}
+
+// RecordRawFastPath records a raw pass made intentionally (non-code, tiny,
+// missing, windowed, text search, or native glob) rather than a kern fallback.
+func (r *Recorder) RecordRawFastPath() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kernAdoptionTotal++
+	r.kernRawFastPath++
 }
 
 // RecordAnalysis records a completed analysis.
@@ -388,17 +414,18 @@ type Snapshot struct {
 	TotalIndexTimeMs      float64 `json:"total_index_time_ms"`
 
 	// Self-observability — 14 dimensions
-	RequestCount    int64   `json:"request_count"`
-	ToolCallCount   int64   `json:"tool_call_count"`
-	AgentRunCount   int64   `json:"agent_run_count"`
-	LLMLatencyAvgMs float64 `json:"llm_latency_avg_ms"`
-	IndexingCount   int64   `json:"indexing_count"`
-	ApprovalCount   int64   `json:"approval_count"`
-	SandboxOps      int64   `json:"sandbox_ops"`
-	IncidentCount   int64   `json:"incident_count"`
-	ErrorCount      int64   `json:"error_count"`
-	CacheHits       int64   `json:"cache_hits"`
-	CacheMisses     int64   `json:"cache_misses"`
+	RequestCount                int64   `json:"request_count"`
+	ToolCallCount               int64   `json:"tool_call_count"`
+	AgentRunCount               int64   `json:"agent_run_count"`
+	LLMLatencyAvgMs             float64 `json:"llm_latency_avg_ms"`
+	IndexingCount               int64   `json:"indexing_count"`
+	ApprovalCount               int64   `json:"approval_count"`
+	SandboxOps                  int64   `json:"sandbox_ops"`
+	IncidentCount               int64   `json:"incident_count"`
+	ErrorCount                  int64   `json:"error_count"`
+	TaskPersistenceFailureCount int64   `json:"task_persistence_failure_count"`
+	CacheHits                   int64   `json:"cache_hits"`
+	CacheMisses                 int64   `json:"cache_misses"`
 
 	// Product success — key metrics
 	TokenReductionPct float64 `json:"token_reduction_pct"`
@@ -415,6 +442,7 @@ type Snapshot struct {
 	KernAdoptionRouted int64   `json:"kern_adoption_routed"`
 	KernAdoptionTotal  int64   `json:"kern_adoption_total"`
 	KernAdoptionPct    float64 `json:"kern_adoption_pct"`
+	RawFastPath        int64   `json:"raw_fast_path"`
 
 	// Governance — populated from external sources via SnapshotWithGovernance
 	AgentCount      int     `json:"agent_count"`
@@ -460,6 +488,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	s.SandboxOps = r.sandboxOps
 	s.IncidentCount = r.incidentCount
 	s.ErrorCount = r.errorCount
+	s.TaskPersistenceFailureCount = r.taskPersistenceFailures
 	s.CacheHits = r.cacheHits
 	s.CacheMisses = r.cacheMisses
 
@@ -483,6 +512,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	// Kern-first adoption
 	s.KernAdoptionRouted = r.kernAdoptionRouted
 	s.KernAdoptionTotal = r.kernAdoptionTotal
+	s.RawFastPath = r.kernRawFastPath
 	if r.kernAdoptionTotal > 0 {
 		s.KernAdoptionPct = float64(r.kernAdoptionRouted) / float64(r.kernAdoptionTotal) * 100
 	}
@@ -546,7 +576,7 @@ func (r *Recorder) Render() string {
 	fmt.Fprintf(&b, "\nproduct success (F-56):\n")
 	fmt.Fprintf(&b, "  token reduction    : %.1f%%\n", s.TokenReductionPct)
 	fmt.Fprintf(&b, "  coder prompt tokens: %d runs (fixed %d -> final %d)\n", s.PromptTokenRuns, s.PromptTokenFixed, s.PromptTokenFinal)
-	fmt.Fprintf(&b, "  kern-first adoption: %.1f%% (kern-routed %d / total %d)\n", s.KernAdoptionPct, s.KernAdoptionRouted, s.KernAdoptionTotal)
+	fmt.Fprintf(&b, "  kern-first adoption: %.1f%% (kern-routed %d / total %d; intentional raw fast paths %d)\n", s.KernAdoptionPct, s.KernAdoptionRouted, s.KernAdoptionTotal, s.RawFastPath)
 	fmt.Fprintf(&b, "  analyses           : %d\n", s.AnalysisCount)
 	fmt.Fprintf(&b, "  false positive rate: %.1f%%\n", s.FalsePositiveRate*100)
 	fmt.Fprintf(&b, "  impact accuracy    : %.1f%%\n", s.ImpactAccuracyPct)
@@ -599,6 +629,7 @@ func (r *Recorder) Reset() {
 	r.promptTokenFinal = 0
 	r.kernAdoptionRouted = 0
 	r.kernAdoptionTotal = 0
+	r.kernRawFastPath = 0
 }
 
 // --- Report ---
@@ -752,6 +783,7 @@ func (r *Recorder) Load(path string) error {
 	r.sandboxOps += s.SandboxOps
 	r.incidentCount += s.IncidentCount
 	r.errorCount += s.ErrorCount
+	r.taskPersistenceFailures += s.TaskPersistenceFailureCount
 
 	// Merge product-success metrics. Token usage: add the implied before/after
 	// from the reduction percentage (best-effort approximation).
@@ -775,6 +807,7 @@ func (r *Recorder) Load(path string) error {
 	// Merge kern-first adoption counters (plain counters, add directly).
 	r.kernAdoptionRouted += s.KernAdoptionRouted
 	r.kernAdoptionTotal += s.KernAdoptionTotal
+	r.kernRawFastPath += s.RawFastPath
 
 	return nil
 }

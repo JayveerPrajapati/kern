@@ -23,6 +23,11 @@ func SaveSQLiteDelta(root string, ix *Index, plan *deltaPlan) error {
 	if err := indexdb.ApplyDelta(s.db, buildDelta(ix, plan)); err != nil {
 		return err
 	}
+	// F-C4 (2026-11-22 dogfood): every delta deletes+reinserts the touched
+	// files' symbols_fts rows; the fts5 tombstones that leaves behind are
+	// live pages the vacuum freelist trigger cannot see. Compact on a
+	// bounded churn budget so the drift between full rebuilds stays capped.
+	indexdb.MaybeCompactFTS(s.db, s.path, len(plan.changed)+len(plan.removed))
 	return s.maybeCheckpoint()
 }
 
@@ -57,7 +62,7 @@ func buildDelta(ix *Index, plan *deltaPlan) *indexdb.Delta {
 			Kind: sym.Kind, Name: sym.Name, Receiver: sym.Receiver, File: sym.File, Line: sym.Line, End: sym.End,
 			Lang: sym.Lang, Entry: entry, Framework: sym.Framework, Route: sym.Route,
 			Params: indexdb.MarshalJSONBlob(sym.Params), Returns: indexdb.MarshalJSONBlob(sym.Returns),
-			Confidence: string(sym.Confidence), Outer: sym.Outer,
+			Confidence: string(sym.Confidence), Outer: sym.Outer, Alias: sym.Alias,
 		})
 	}
 	for caller, edges := range ix.Calls {
@@ -109,17 +114,18 @@ func buildDelta(ix *Index, plan *deltaPlan) *indexdb.Delta {
 // sqliteMeta is the meta table content; Save and SaveDelta share it.
 func sqliteMeta(ix *Index) map[string]string {
 	meta := map[string]string{
-		"root":                 ix.Root,
-		"version":              fmt.Sprintf("%d", ix.Version),
-		"updated_at":           ix.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"max_mtime":            fmt.Sprintf("%d", ix.MaxMtime),
-		"index_kind":           "symbols",
-		"go_types":             fmt.Sprintf("%t", ix.GoTypes),
-		"java_compiler":        fmt.Sprintf("%t", ix.JavaCompiler),
-		"java_classpath":       ix.JavaClasspath,
-		"promoted_low_edges":   fmt.Sprintf("%d", ix.PromotedLowEdges),
-		"unresolved_low_edges": fmt.Sprintf("%d", ix.UnresolvedLowEdges),
-		"generation":           indexGeneration(ix),
+		"root":                     ix.Root,
+		"version":                  fmt.Sprintf("%d", ix.Version),
+		"updated_at":               ix.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"max_mtime":                fmt.Sprintf("%d", ix.MaxMtime),
+		"index_kind":               "symbols",
+		"go_types":                 fmt.Sprintf("%t", ix.GoTypes),
+		"java_compiler":            fmt.Sprintf("%t", ix.JavaCompiler),
+		"java_classpath":           ix.JavaClasspath,
+		"promoted_low_edges":       fmt.Sprintf("%d", ix.PromotedLowEdges),
+		"unresolved_low_edges":     fmt.Sprintf("%d", ix.UnresolvedLowEdges),
+		"dropped_symbol_conflicts": fmt.Sprintf("%d", ix.DroppedSymbolConflicts),
+		"generation":               indexGeneration(ix),
 	}
 	if ix.Identity != nil {
 		meta["identity"] = indexdb.MarshalJSONBlob(*ix.Identity)

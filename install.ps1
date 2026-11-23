@@ -15,14 +15,18 @@
 #     zip instead (also the automatic fallback when no -full asset exists).
 #   * Adds the install dir to the user PATH (persisted via User environment).
 #   * Verifies `kern.exe version` and performs an MCP JSON-RPC initialize handshake.
-#   * Wires kern ONCE, machine-wide (`kern setup --global-only --global-rules`):
+#   * Wiring is opt-in (`-Wire`, or $env:KERN_AUTO_WIRE="1" —
+#     `kern setup --global-only --global-rules`):
 #     user-level MCP + hooks + rules for every agent, NO file written in any
 #     repo. A repo initializes itself when an agent first works in it.
-#     Set $env:KERN_AUTO_WIRE="0" to install the binaries only.
+#     The default installs binaries only.
 #   * Supports actions: install (default), upgrade, status, uninstall.
-#   * uninstall is prefix-scoped by default (binaries + this prefix's User
-#     PATH entry); -Machine (or KERN_UNINSTALL_MACHINE=1) also removes the
-#     ~/AGENTS.md kern block, machine secrets (%APPDATA%\kern), and caches.
+#   * uninstall is the FULL reversal by default: agent wiring + user data
+#     (~/.kern, ~/AGENTS.md kern block, machine secrets %APPDATA%\kern,
+#     caches) + binaries + this prefix's User PATH entry. -Machine (or
+#     KERN_UNINSTALL_MACHINE=1) is a compatibility alias of that default;
+#     -PrefixOnly (or KERN_UNINSTALL_PREFIX_ONLY=1) keeps it to binaries +
+#     PATH (CI/scratch installs).
 #   * upgrade re-runs the install path; a running kern.exe/kern-mcp.exe
 #     is moved aside (unique .old name) before the copy — Windows cannot
 #     overwrite a running binary, but it can rename it. If the copy fails,
@@ -32,8 +36,10 @@
 # (or run scripts/retarget.sh which rewrites this file for you).
 
 param(
-    [string]$Action = "install",
-    [switch]$Machine
+[string]$Action = "install",
+[switch]$Machine,
+[switch]$PrefixOnly,
+[switch]$Wire
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +51,7 @@ $Version = $env:KERN_VERSION
 if (-not $Version) { $Version = "latest" }
 $Prefix = $env:KERN_INSTALL_DIR
 if (-not $Prefix) { $Prefix = Join-Path $HOME ".local\bin" }
+if ($Wire) { $env:KERN_AUTO_WIRE = "1" }
 
 # --- Output style -----------------------------------------------------------
 # Colour via Write-Host -ForegroundColor (NO_COLOR and KERN_PLAIN respected).
@@ -236,15 +243,15 @@ function Show-WiredSummary {
         "kern doctor       check wiring and index health",
         "kern setup        add shared config to a team repo",
         "",
-        "Opt out of auto-wiring: KERN_AUTO_WIRE=0 when installing"
+        "Opt in to wiring: rerun install with -Wire"
     ) + $(if (-not $PathWasSet) { @("", "Open a NEW terminal so the updated PATH applies.") } else { @() }))
 }
 
 # Wire-Kern registers kern ONCE, machine-wide: user-level MCP for every agent,
 # global hooks, global rules and global git ignore (`kern setup --global-only
 # --global-rules`). It writes NO file in any repo and does not index anything:
-# a repo initializes itself when an agent first works in it. KERN_AUTO_WIRE=0
-# installs the binaries only. An upgrade refreshes the same user-level assets.
+# a repo initializes itself when an agent first works in it. Wiring is opt-in
+# via -Wire or KERN_AUTO_WIRE=1. An upgrade refreshes user-level assets.
 function Wire-Kern {
     $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($oldPath -notlike "*$Prefix*") {
@@ -257,7 +264,7 @@ function Wire-Kern {
         Write-Host "  run 'kern setup --global-only' manually."
         return
     }
-    if ($env:KERN_AUTO_WIRE -eq "0") {
+    if ($env:KERN_AUTO_WIRE -ne "1") {
         Show-NextSteps
         return
     }
@@ -351,9 +358,43 @@ function Remove-KernSection {
 }
 
 function Uninstall-Kern {
-    # Env fallback mirrors install.sh (KERN_UNINSTALL_MACHINE=1), so
-    # scripted uninstalls and test harnesses can opt in without the switch.
+    # Env fallbacks mirror install.sh (KERN_UNINSTALL_MACHINE=1 /
+    # KERN_UNINSTALL_PREFIX_ONLY=1), so scripted uninstalls and test
+    # harnesses can opt in without the switches. -Machine is now a
+    # compatibility alias: the full uninstall below is the default.
     if ($env:KERN_UNINSTALL_MACHINE -eq "1") { $Machine = $true }
+    if ($env:KERN_UNINSTALL_PREFIX_ONLY -eq "1") { $PrefixOnly = $true }
+
+    # Wiring + user data BEFORE deleting the binaries: hooks that outlive
+    # the binary block every agent session, and `kern setup` needs it.
+    # Fail-closed: a failed removal exits before anything is deleted, with
+    # the repair command. A binary that predates --data falls back to plain
+    # wiring removal; the direct data cleanup below then guarantees the end
+    # state either way.
+    if (-not $PrefixOnly) {
+        $kernBin = Join-Path $Prefix "kern.exe"
+        if (-not (Test-Path $kernBin)) {
+            $onPath = Get-Command kern -ErrorAction SilentlyContinue
+            if ($onPath) { $kernBin = $onPath.Source }
+        }
+        if (Test-Path $kernBin) {
+            & $kernBin setup --remove --data --yes --plain
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  removed kern wiring and user data"
+            } else {
+                & $kernBin setup --remove --yes --plain
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  installed kern predates --data — wiring removed; removing user data directly" -ForegroundColor Yellow
+                } else {
+                    Write-Host "kern: setup --remove failed (exit $LASTEXITCODE) — nothing was deleted; repair with: $kernBin setup --remove --data --yes (then re-run this uninstall)" -ForegroundColor Red
+                    exit 1
+                }
+            }
+        } else {
+            Write-Host "  no kern binary found — removing user data directly (agent wiring edits are skipped)" -ForegroundColor Yellow
+        }
+    }
+
     Write-Host "kern: uninstalling from $Prefix..."
     foreach ($b in @("kern.exe", "kern-mcp.exe")) {
         $p = Join-Path $Prefix $b
@@ -362,30 +403,34 @@ function Uninstall-Kern {
             Write-Host "  removed $p"
         }
     }
-    if (-not $Machine) {
-        # F4 (2026-10-28): a default uninstall is prefix-scoped — machine
-        # state belonging to another install must survive a scratch-prefix
-        # uninstall. Mirrors install.sh's scoped mode.
-        Write-Host "  (prefix-scoped: this prefix's User PATH entry only — pass -Machine to also"
-        Write-Host "   remove ~/AGENTS.md, machine secrets, and caches)"
-    } else {
+    if (-not $PrefixOnly) {
     # Machine secrets live under os.UserConfigDir() (%APPDATA%\kern on
     # Windows): audit-chain key, approval signing key/HMAC, consumed ledger.
-    # The cache dir (%LOCALAPPDATA%\kern) is removed with it.
+    # The cache dir (%LOCALAPPDATA%\kern) is removed with it, plus the
+    # ~/.kern state home — a full uninstall leaves the machine as if kern
+    # never existed. The guards make each step a quiet no-op when
+    # `setup --remove --data` above already removed it.
     foreach ($d in @((Join-Path $env:APPDATA "kern"), (Join-Path $env:LOCALAPPDATA "kern"))) {
         if ($d -and (Test-Path $d)) {
             Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
             Write-Host "  removed $d (machine secrets)"
         }
     }
+    $stateHome = Join-Path $HOME ".kern"
+    if (Test-Path $stateHome) {
+        Remove-Item -Recurse -Force $stateHome -ErrorAction SilentlyContinue
+        Write-Host "  removed $stateHome (kern state home)"
     }
+    }
+    # F4 (2026-10-28): the User PATH edit is prefix-scoped — machine state
+    # belonging to another install must survive a scratch-prefix uninstall.
     $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($oldPath -like "*$Prefix*") {
         $newPath = (($oldPath -split ";" | Where-Object { $_ -ne $Prefix -and $_.Trim() -ne "" }) -join ";")
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "  removed $Prefix from User PATH"
     }
-    if ($Machine) {
+    if (-not $PrefixOnly) {
     # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
     # (both formats), preserving every non-kern byte. Messages are honest:
     # the file is only deleted when it contained nothing but the kern block,
@@ -424,7 +469,11 @@ function Uninstall-Kern {
         }
     }
     }
-    Write-Host "kern: uninstalled successfully." -ForegroundColor Green
+    if ($PrefixOnly) {
+        Write-Host "kern: prefix removed (binaries + User PATH only — agent wiring and machine state untouched)." -ForegroundColor Green
+    } else {
+        Write-Host "kern: uninstalled successfully. Per-project cleanup (each repo): kern setup --remove --project --root <dir>." -ForegroundColor Green
+    }
 }
 
 function Copy-Binary {

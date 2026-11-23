@@ -104,6 +104,13 @@ func renderPlanText(p domain.Plan) string {
 		}
 	}
 	fmt.Fprintf(&b, "Rollback: %s\n", p.Rollback)
+	if p.ExpectedTestCommand != "" {
+		fmt.Fprintf(&b, "Expected test command: %s\n", p.ExpectedTestCommand)
+	}
+	if p.ApprovalRequirement != "" {
+		fmt.Fprintf(&b, "Approval requirement: %s\n", p.ApprovalRequirement)
+	}
+
 	if len(p.Tests) > 0 {
 		fmt.Fprintf(&b, "Tests:\n")
 		for _, t := range p.Tests {
@@ -420,6 +427,15 @@ func renderImpactText(r domain.ImpactReport) string {
 	}
 	fmt.Fprintln(&b, whatCallsLine)
 	renderImpactList(&b, r.WhoCalls)
+	if len(r.WhoCalls) == 0 && r.UnboundCallers > 0 {
+		// Name the BARE symbol: the target may be a qualified FullName, and the
+		// ambiguity is about the bare name the call sites use.
+		bare := r.Target
+		if i := strings.LastIndexByte(bare, '.'); i >= 0 {
+			bare = bare[i+1:]
+		}
+		fmt.Fprintf(&b, "WARN: %d call site(s) use the bare name %q, which is declared in more than one file — the call graph cannot attribute them, so this is missing coverage, not an all-clear.\n", r.UnboundCallers, bare)
+	}
 	fmt.Fprintf(&b, "What it calls: %d\n", len(r.WhatItCalls))
 	renderWhatItCalls(&b, r.WhatItCalls)
 	fmt.Fprintf(&b, "Services that depend on it: %d\n", len(r.ServicesDepend))
@@ -482,6 +498,30 @@ func renderImpactText(r domain.ImpactReport) string {
 	if r.Evidence != "" {
 		fmt.Fprintf(&b, "\n%s\n", r.Evidence)
 	}
+	return b.String()
+}
+
+// RenderImpactSummary renders the concise `kern impact` block: counts + risk
+// only. target is the display label (the caller's change string; the report's
+// Target may be a decl:<hash> anchor). It is the default text output; `--mode
+// evidence` keeps the full renderImpactText report byte-identical.
+// "dependents" is the transitive caller count that drove the risk tier when
+// RiskDetail carries it, else the direct graph-node caller count.
+func RenderImpactSummary(target string, r domain.ImpactReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "IMPACT: %s\n", target)
+	fmt.Fprintf(&b, "risk: %s\n", r.Risk)
+	dependents := len(r.WhoCalls)
+	if n, ok := transitiveDependentsFromRiskDetail(r.RiskDetail); ok {
+		dependents = n
+	}
+	fmt.Fprintf(&b, "dependents: %d\n", dependents)
+	fmt.Fprintf(&b, "files: %d\n", len(r.Files))
+	fmt.Fprintf(&b, "tests: %d\n", len(r.TestsCover))
+	fmt.Fprintf(&b, "services: %d\n", len(r.ServicesDepend))
+	fmt.Fprintf(&b, "apis: %d\n", len(r.APIsAffected))
+	fmt.Fprintf(&b, "stores: %d\n", len(r.DataStoresAffected))
+	fmt.Fprintf(&b, "events: %d", len(r.EventsAffected))
 	return b.String()
 }
 

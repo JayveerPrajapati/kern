@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
+	"github.com/JayveerPrajapati/kern/internal/indexwatch"
 )
 
 // IndexIdentity is the build-time content identity of an index. ContentRoot
@@ -99,19 +100,19 @@ type FreshnessSnapshot struct {
 // re-serves while the tree stays unchanged). Retention is bounded: every
 // subsequent staleness check either replaces it (content walk) or clears it
 // (no walk ran).
-func (ix *Index) retainStaleSnapshot(obs walkObservation, wasFresh bool) {
+func (ix *Index) retainStaleSnapshot(obs indexwatch.WalkObservation, wasFresh bool) {
 	mu := ix.staleMuRef()
 	mu.Lock()
-	if obs.hashes == nil {
+	if obs.Hashes == nil {
 		ix.staleSnapshot = nil
 		mu.Unlock()
 		return
 	}
 	ix.staleSnapshot = &FreshnessSnapshot{
-		Hashes:     obs.hashes,
-		Mtimes:     obs.mtimes,
-		Sizes:      obs.sizes,
-		WalkCount:  obs.walkCount,
+		Hashes:     obs.Hashes,
+		Mtimes:     obs.Mtimes,
+		Sizes:      obs.Sizes,
+		WalkCount:  obs.WalkCount,
 		VerifiedAt: time.Now(),
 		WasFresh:   wasFresh,
 	}
@@ -137,17 +138,17 @@ type persistedFreshness struct {
 
 // persistFreshnessSnapshot writes the completed content walk beside the index.
 // Best-effort: a failure only costs the next process a full walk.
-func (ix *Index) persistFreshnessSnapshot(obs walkObservation) {
-	if ix == nil || ix.Root == "" || obs.hashes == nil {
+func (ix *Index) persistFreshnessSnapshot(obs indexwatch.WalkObservation) {
+	if ix == nil || ix.Root == "" || obs.Hashes == nil {
 		return
 	}
 	data, err := json.Marshal(persistedFreshness{
 		Root:        ix.Root,
-		ContentRoot: aggregateHash(obs.hashes),
-		Hashes:      obs.hashes,
-		Mtimes:      obs.mtimes,
-		Sizes:       obs.sizes,
-		WalkCount:   obs.walkCount,
+		ContentRoot: aggregateHash(obs.Hashes),
+		Hashes:      obs.Hashes,
+		Mtimes:      obs.Mtimes,
+		Sizes:       obs.Sizes,
+		WalkCount:   obs.WalkCount,
 		VerifiedAt:  time.Now(),
 	})
 	if err != nil {
@@ -604,12 +605,10 @@ var proofMemoInit sync.Mutex
 
 // proofMemo returns the index's freshness memo, allocating it on first use.
 func (ix *Index) proofMemo() *proofMemo {
+	proofMemoInit.Lock()
+	defer proofMemoInit.Unlock()
 	if ix.freshnessMemo == nil {
-		proofMemoInit.Lock()
-		if ix.freshnessMemo == nil {
-			ix.freshnessMemo = &proofMemo{}
-		}
-		proofMemoInit.Unlock()
+		ix.freshnessMemo = &proofMemo{}
 	}
 	return ix.freshnessMemo
 }
@@ -681,7 +680,7 @@ func (ix *Index) FreshnessProofStrict(root string) FreshnessProof {
 	}()
 	go func() {
 		defer wg.Done()
-		cur, walkErr = indexableHashes(root, ignore.Load(root))
+		cur, walkErr = indexwatch.IndexableHashes(root, ignore.Load(root), proofWalkMaxBytes())
 	}()
 	wg.Wait()
 	proof.Current = IndexIdentity{BuiltAt: time.Now().UTC(), GitCommit: commit}
@@ -823,7 +822,7 @@ func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessPro
 		}
 		return proof
 	}
-	obs, err := indexableHashesObserved(root, ignore.LoadCached(root))
+	obs, err := indexwatch.IndexableHashesObserved(root, ignore.LoadCached(root), proofWalkMaxBytes())
 	if err != nil {
 		// The walk failed and freshnessBaseline left Current.TreeOID lazy
 		// (empty on dirty/unavailable trees): only now is the expensive
@@ -840,7 +839,7 @@ func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessPro
 		proof.Verdict = FreshnessUnknown
 		return proof
 	}
-	proof.Current.ContentRoot = aggregateHash(obs.hashes)
+	proof.Current.ContentRoot = aggregateHash(obs.Hashes)
 	ix.retainStaleSnapshot(obs, proof.Current.ContentRoot == proof.Recorded.ContentRoot)
 	if proof.Current.ContentRoot == proof.Recorded.ContentRoot {
 		proof.Verdict = FreshnessFresh

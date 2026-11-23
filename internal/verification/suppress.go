@@ -140,6 +140,16 @@ var defaultSuppressions = []Suppression{
 		Reason: "benchmark harness: re-executes the kern binary (exe from os.Executable()) with the fixed argument vectors declared in the harness's own query table plus the operator's --root — argv only, no shell, no user-controlled command string.",
 	},
 	{
+		File:   "cmd/kern/cmd_arch_drift.go",
+		Rule:   "unsafe-exec",
+		Reason: "headroom gate's HEAD ledger read: git -C <root> show HEAD:ARCHITECTURE.md — fixed argv (no shell), the only variable is the operator's own project root, and no part of the revision spec or file name comes from tool input.",
+	},
+	{
+		File:   "internal/daemon/daemon.go",
+		Rule:   "unsafe-exec",
+		Reason: "daemon spawn: re-executes the current binary (exe from os.Executable()) with the fixed `daemon serve --root <root>` argv; the only variable is the operator's own project root, argv only with no shell, and the child is detached by design (binary-namespaced socket, P6 lifecycle). File-wide so it does not rot when the spawn site moves.",
+	},
+	{
 		File:   ".github/workflows/ci.yml",
 		Rule:   "hardcoded-secret",
 		Label:  "EMAIL",
@@ -211,7 +221,7 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "evaluate/bench/main.go",
-		Line:   503,
+		Line:   506,
 		Rule:   "unsafe-http",
 		Reason: "benchmark fixture code, not a real HTTP flow: the Client and its variable base URL live inside the fixtureMicroservice raw-string const (evaluate/bench harness corpus) — synthetic sample code the scanner matches as file bytes, never compiled or executed.",
 	},
@@ -223,13 +233,13 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/commitmsg/commitmsgcmd.go",
-		Line:   225,
+		Line:   230,
 		Rule:   "unsafe-exec",
 		Reason: "kern commit's git wrappers (gitDiff/gitOutput/gitCommit/shortHash): fixed literal argv (diff --cached, add -A, commit -F -...) with no shell interpolation — the only inputs are the operator's own repo and the generated message fed over stdin; the operator CLI is the trusted principal (same class as cmd/kern/helpers.go:571).",
 	},
 
 	{
-		File:   "internal/mcp/server.go",
+		File:   "internal/mcp/server_session.go",
 		Func:   "commit",
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the server resolves the short HEAD with literal args (git -C <root> rev-parse --short HEAD); the only variable is the trusted project root, with no shell and no user-controlled command string.",
@@ -254,10 +264,9 @@ var defaultSuppressions = []Suppression{
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
-		File:   "internal/deployment/deployment.go",
-		Line:   111,
+		File:   "internal/execshell/execshell.go",
 		Rule:   "unsafe-exec",
-		Reason: "ShellDeployer runs the operator-authored KERN_DEPLOY_COMMAND (env/config), fail-closed behind KERN_ALLOW_DEPLOY=1 and the TaskService governance firewall (approval-gated, ErrApprovalRequired on CRITICAL/HIGH); NoopDeployer skips the gate — audited in the 2026-10-05 exec-firewall pass.",
+		Reason: "execshell.CommandContext is the single argv choke point every shell-backed caller now routes through: ShellArgs splits the caller's command into a fixed interpreter name plus argv (no additional shell interpolation here), and the callers that pass an operator/agent-authored command (deploy, sampler, verify, optimize) each gate it upstream with governance.CheckExecCommand. Severity is INFO: exec.CommandContext hands argv straight to execve.",
 	},
 	{
 		File:   "internal/diffgate/diffgate.go",
@@ -314,33 +323,51 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/intel/churn.go",
-		Line:   59,
+		Line:   62,
 		Rule:   "unsafe-exec",
 		Reason: "intel churn: git argv assembled internally (rev-list/log with literal subcommands and internally derived ranges) — no user-controlled command string.",
 	},
 	{
 		File:   "internal/intel/cochange.go",
-		Line:   61,
+		Line:   64,
 		Rule:   "unsafe-exec",
 		Reason: "intel co-change: git argv assembled internally — same class as churn.go.",
 	},
 	{
 		File:   "internal/intel/intel.go",
-		Line:   29,
+		Line:   31,
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
 		File:   "internal/intel/intel.go",
-		Line:   32,
+		Line:   34,
 		Rule:   "unsafe-exec",
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
 		File:   "internal/intel/intel.go",
-		Line:   53,
+		Line:   79,
 		Rule:   "unsafe-exec",
 		Reason: "git diff --name-only with an internally derived commit range — no user-controlled command string.",
+	},
+	{
+		File:   "cmd/kern/cmd_uninstall.go",
+		Func:   "runInstallerUninstall",
+		Rule:   "unsafe-exec",
+		Reason: "kern uninstall runs the embedded uninstaller with a fixed literal argv (PowerShell flags plus the temporary script and uninstall subcommand) — no shell and no user-controlled command string.",
+	},
+	{
+		File:   "internal/diagnostics/repolaunch/repolaunch.go",
+		Func:   "commandVersion",
+		Rule:   "unsafe-exec",
+		Reason: "repo-launcher doctor runs `kern version` against a resolved binary path — fixed argv, no shell, no user-controlled command string.",
+	},
+	{
+		File:   "internal/verifycmd/run_reuse.go",
+		Func:   "repoFingerprint",
+		Rule:   "unsafe-exec",
+		Reason: "git status with a fixed literal argv and the operator's own repo root — trusted path only, no shell and no user-controlled command string.",
 	},
 	{
 		File:   "internal/langparse/java_compiler_bindings.go",
@@ -427,12 +454,6 @@ var defaultSuppressions = []Suppression{
 		Reason: "fixed-argv git plumbing: the only variables are the trusted repo root and internally derived paths/commit ranges — no shell, no user-controlled command string.",
 	},
 	{
-		File:   "internal/mcp/sampling.go",
-		Line:   201,
-		Rule:   "unsafe-exec",
-		Reason: "runHostSamplerCommand: the sampler command is operator configuration, executed behind governance.CheckExecCommand at the MCP boundary (2026-10-05 exec-firewall audit).",
-	},
-	{
 		File:   "internal/mcpclient/client.go",
 		Line:   146,
 		Rule:   "unsafe-exec",
@@ -452,7 +473,7 @@ var defaultSuppressions = []Suppression{
 	},
 	{
 		File:   "internal/optimize/optimize.go",
-		Line:   528,
+		Line:   544,
 		Rule:   "unsafe-exec",
 		Reason: "RunBuild IS the governed command wrapper: every invocation passes governance.CheckExecCommand (fail-closed without KERN_TOOLS/KERN_ALLOW_EXEC) and children run under the exec firewall — the command string is the operator/agent-authored build command by definition.",
 	},
@@ -538,8 +559,8 @@ var defaultSuppressions = []Suppression{
 		Reason: "git config --global core.hooksPath <hooksDir>: fixed argv, operator-invoked setup.",
 	},
 	{
-		File:   "internal/setup/remove.go",
-		Line:   199,
+		File:   "internal/setupundo/remove.go",
+		Line:   203,
 		Rule:   "unsafe-exec",
 		Reason: "uninstall probe: fixed binary path with internally derived args — operator-invoked teardown surface.",
 	},
@@ -572,12 +593,6 @@ var defaultSuppressions = []Suppression{
 		Line:   442,
 		Rule:   "unsafe-exec",
 		Reason: "git show HEAD:<manifest>: the manifest path comes from kern's own resolved manifest list — no user-controlled command string.",
-	},
-	{
-		File:   "internal/verifycmd/verify_command.go",
-		Line:   216,
-		Rule:   "unsafe-exec",
-		Reason: "kern verify --command: the operator/agent-supplied command under the same governed wrapper; the CLI is the trusted principal and the MCP mirror gates at its boundary.",
 	},
 	{
 		File:   "internal/webhook/webhook.go",

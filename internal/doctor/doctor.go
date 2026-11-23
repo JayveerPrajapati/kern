@@ -23,11 +23,14 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/auditdiag"
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/daemon"
+	"github.com/JayveerPrajapati/kern/internal/diagnostics/repolaunch"
 	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"github.com/JayveerPrajapati/kern/internal/guardstats"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/indexdb"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/projectstate"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/setup"
@@ -38,7 +41,7 @@ import (
 // Finding is a single diagnostic result.
 type Finding struct {
 	Check  string `json:"check"`
-	Level  string `json:"level"` // ok, warn, fail
+	Level  string `json:"level"` // ok, info, warn, fail
 	Detail string `json:"detail"`
 }
 
@@ -48,6 +51,7 @@ func Run(root string) []Finding {
 	out = append(out, checkBinary())
 	out = append(out, checkVersion())
 	out = append(out, checkParity(root))
+	out = append(out, checkRepoLauncher(root))
 	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
 	out = append(out, checkExec(setup.Bin()))
@@ -58,6 +62,7 @@ func Run(root string) []Finding {
 	}
 	out = append(out, checkGuardTelemetry())
 	out = append(out, checkConfig(root))
+	out = append(out, checkProjectManagement(root))
 	out = append(out, checkCache())
 	out = append(out, checkSandboxes(root))
 	for _, d := range auditdiag.Findings(root) {
@@ -71,6 +76,7 @@ func Run(root string) []Finding {
 	out = append(out, checkIndex(root))
 	out = append(out, checkIndexFreshness(root))
 	out = append(out, checkIndexShadow(root))
+	out = append(out, checkDaemonIdentity(root))
 	out = append(out, checkPrecision(root))
 	out = append(out, checkRuntime(root))
 	out = append(out, checkLLM())
@@ -99,7 +105,7 @@ func checkCapabilities() Finding {
 		parts = append(parts, "sqlite: off (in-memory; build with -tags sqlite)")
 	}
 	if index.TreesitterEnabled() {
-		parts = append(parts, "treesitter: on (13 grammars)")
+		parts = append(parts, fmt.Sprintf("treesitter: on (%d grammars)", index.TreesitterGrammarCount()))
 	} else {
 		parts = append(parts, "treesitter: off (regex fallback; rebuild without -tags notreesitter)")
 	}
@@ -335,6 +341,13 @@ func checkVersion() Finding {
 	}
 }
 
+// checkRepoLauncher diagnoses the source-checkout convenience launcher through
+// the diagnostics leaf so doctor remains under its architecture cap.
+func checkRepoLauncher(root string) Finding {
+	r := repolaunch.Check(root)
+	return Finding{Check: r.Check, Level: r.Level, Detail: r.Detail}
+}
+
 // kernModulePath is the go module path of the kern repository — the ONLY
 // checkout the binary/HEAD parity comparison is meaningful against. Running a
 // stamped kern binary inside a foreign repo must never compare the binary's
@@ -451,6 +464,11 @@ func checkConfig(root string) Finding {
 		return Finding{Check: "config", Level: "warn", Detail: strings.Join(warns, "; ")}
 	}
 	return Finding{Check: "config", Level: "ok", Detail: path + " (valid JSON)"}
+}
+
+func checkProjectManagement(root string) Finding {
+	r := projectstate.Diagnostic(root)
+	return Finding{Check: r.Check, Level: r.Level, Detail: r.Detail}
 }
 
 // checkCache scans the kern cache directory for corruption markers: any
@@ -707,9 +725,8 @@ func checkPluginSync() []Finding {
 }
 
 func checkIndex(root string) Finding {
-	files, err := os.ReadDir(cache.Path("index"))
 	n := 0
-	if err == nil {
+	if files, err := os.ReadDir(cache.Path("index")); err == nil {
 		for _, f := range files {
 			if strings.HasSuffix(f.Name(), ".json") {
 				n++
@@ -717,8 +734,7 @@ func checkIndex(root string) Finding {
 		}
 	}
 	if ix, err := index.Load(root); err == nil && ix != nil {
-		fresh, verdict := indexVerdict(root, ix)
-		_ = fresh
+		_, verdict := indexVerdict(root, ix)
 		detail := fmt.Sprintf("%s: %d symbols, %d files, %s (%d cached projects)",
 			index.StorePath(root), len(ix.Symbols), len(ix.FileHashes), verdict, n)
 		level := "ok"
@@ -733,13 +749,16 @@ func checkIndex(root string) Finding {
 	if index.HasIndexableSources(root) {
 		return Finding{Check: "index", Level: "warn", Detail: "no cached index for this project — run `kern index .`"}
 	}
+	// F-A4: outside any project (no git worktree, no store) a missing index is expected, not a defect.
+	if nearestGitRoot(root) == "" && !hasIndexStore(root) {
+		return Finding{Check: "index", Level: "info", Detail: "not a project directory — run kern doctor inside a project, or `kern index .` here to index one"}
+	}
 	return Finding{Check: "index", Level: "fail", Detail: "no source files indexed in this project"}
 }
 
 // indexVerdict reports the freshness of a loaded index: "fresh"/"stale"
-// ("unknown" for nil). The git tree-OID probe decides when it can.
-// legacy indexes without a recorded tree OID — the same decision order
-// `kern index` uses.
+// ("unknown" for nil); loose content proof covers legacy indexes with no
+// recorded tree OID (the same decision order `kern index` uses).
 func indexVerdict(root string, ix *index.Index) (fresh bool, verdict string) {
 	if ix == nil {
 		return false, "unknown"
@@ -846,6 +865,39 @@ func hasIndexStore(dir string) bool {
 // parent's index is classified (fresh/stale/empty/unreadable) so the
 // remediation names the side that is actually wrong: only a fresh parent is
 // worth serving — a stale/empty/unreadable parent is itself the problem.
+// checkDaemonIdentity reports live daemons serving a DIFFERENT binary identity
+// than this executable. The socket name embeds the binary key, so a rebuilt
+// binary never talks to an old daemon — but the old process keeps a hydrated
+// index in memory until its idle timeout (15 min by default). That residue is
+// invisible without this check: the current build looks perfectly healthy while
+// an orphan process burns memory. `kern daemon stop` retires them (StopAll),
+// and the next read-only command auto-starts a fresh daemon.
+func checkDaemonIdentity(root string) Finding {
+	if !daemon.Supported() {
+		return Finding{Check: "daemon", Level: "ok", Detail: "not a unix-socket platform; no daemon to check"}
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	stale := daemon.StaleDaemons(root, version.Version)
+	var state string
+	if resp, err := daemon.Status(root); err == nil {
+		state = fmt.Sprintf("current daemon running pid=%d version=%s socket=%s log=%s", resp.Pid, resp.Version, daemon.SocketPath(root), daemon.LogPath(root))
+	} else {
+		state = fmt.Sprintf("no current daemon running (socket=%s log=%s); read-only commands auto-start it or fall back in-process", daemon.SocketPath(root), daemon.LogPath(root))
+	}
+	if len(stale) == 0 {
+		return Finding{Check: "daemon", Level: "ok", Detail: state + "; no live daemon serving a stale binary identity"}
+	}
+	var parts []string
+	for _, d := range stale {
+		parts = append(parts, fmt.Sprintf("pid=%d version=%s", d.Pid, d.Version))
+	}
+	return Finding{Check: "daemon", Level: "warn",
+		Detail: fmt.Sprintf("%s; %d stale daemon(s) from a previous build still holding an index (%s) — run `kern daemon stop --root %s` to retire them; the next read-only command auto-starts a fresh daemon",
+			state, len(stale), strings.Join(parts, ", "), root)}
+}
+
 func checkIndexShadow(root string) Finding {
 	if !hasIndexStore(root) {
 		return Finding{Check: "index-shadow", Level: "ok", Detail: "no nested index at this root"}
@@ -891,11 +943,13 @@ func classifyParentIndex(parent string) (state string, symbols int) {
 }
 
 // checkPrecision reports the per-language edge-precision tier recorded on the
-// cached index (resolved / ast / heuristic). In the default dependency-free
-// build only Go and Java reach "resolved"; the other indexed languages are
-// regex-based and their call edges are skipped under --precision strict. This
-// surfaces that honestly instead of letting "17 indexed languages" imply
-// uniform precision, and points at the opt-in tree-sitter build for AST.
+// cached index (resolved / ast / heuristic). Go and Java reach "resolved"; in
+// the default tree-sitter build the other indexed languages reach "ast"
+// (structural extraction, call edges best-effort and skipped under
+// --precision strict), while -tags notreesitter falls back to regex
+// heuristics. The counts are languages DETECTED IN THIS INDEX, not the
+// supported set — hence "detected" in the ok line: the supported set is
+// langparse.SupportedLanguages() and its size is documented in the README.
 func checkPrecision(root string) Finding {
 	ix, err := index.Load(root)
 	if err != nil || ix == nil {
@@ -925,7 +979,7 @@ func checkPrecision(root string) Finding {
 	}
 	if index.TreesitterEnabled() {
 		return Finding{Check: "precision", Level: "ok",
-			Detail: fmt.Sprintf("tree-sitter extraction: %d languages at AST level (%d resolved call graphs; non-Go/Java call edges are best-effort)", resolvedCount+astCount, resolvedCount)}
+			Detail: fmt.Sprintf("tree-sitter extraction: %d detected languages at AST level (%d resolved call graphs; non-Go/Java call edges are best-effort)", resolvedCount+astCount, resolvedCount)}
 	}
 	return Finding{Check: "precision", Level: "ok",
 		Detail: fmt.Sprintf("%d languages resolved (Go + Java); other languages are best-effort", resolvedCount)}

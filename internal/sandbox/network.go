@@ -215,7 +215,7 @@ func seatbeltProfileFor(home string, fsConfine bool, allowLoopbackBind bool) str
 // and the allows after the deny. An empty writeRoot keeps the profile
 // byte-identical to the pre-confinement shape.
 func seatbeltProfileWithWriteRoot(home string, fsConfine bool, allowLoopbackBind bool, writeRoot string) string {
-	base := seatbeltProfileBase(home, fsConfine, allowLoopbackBind)
+	base := seatbeltProfileBase(home, fsConfine, allowLoopbackBind, writeRoot)
 	if writeRoot == "" || !fsConfine {
 		return base
 	}
@@ -265,7 +265,7 @@ func writeConfinementRoots(writeRoot, home string) []string {
 
 // seatbeltProfileBase is the pre-write-contract profile: network isolation
 // plus the optional read blocklist and loopback-bind relaxation.
-func seatbeltProfileBase(home string, fsConfine bool, allowLoopbackBind bool) string {
+func seatbeltProfileBase(home string, fsConfine bool, allowLoopbackBind bool, readRoot string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))")
 	if allowLoopbackBind {
@@ -280,6 +280,10 @@ func seatbeltProfileBase(home string, fsConfine bool, allowLoopbackBind bool) st
 		b.WriteString("\n(allow network-bind (local unix-socket))\n(allow network-inbound (local unix-socket))\n(allow network-outbound (remote unix-socket))")
 	}
 	if fsConfine {
+		b.WriteString("\n(deny file-read*)")
+		for _, root := range readConfinementRoots(readRoot, home) {
+			fmt.Fprintf(&b, "\n(allow file-read* (subpath %q))", root)
+		}
 		// System credential files are denied regardless of $HOME (NEW-1):
 		// the home-relative list cannot cover /etc. The canonical spelling
 		// is derived via the PARENT directory because the file itself may
@@ -312,6 +316,44 @@ func seatbeltProfileBase(home string, fsConfine bool, allowLoopbackBind bool) st
 		}
 	}
 	return b.String()
+}
+
+func readConfinementRoots(readRoot, home string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+		if canon, err := filepath.EvalSymlinks(p); err == nil && canon != p && !seen[canon] {
+			seen[canon] = true
+			out = append(out, canon)
+		}
+	}
+	if readRoot == "" {
+		if wd, err := os.Getwd(); err == nil {
+			readRoot = wd
+		}
+	}
+	add(readRoot)
+	add(os.TempDir())
+	for _, env := range []string{"TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH", "GOTMPDIR", "XDG_CACHE_HOME", "GOROOT", "HOMEBREW_PREFIX"} {
+		add(os.Getenv(env))
+	}
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		add(p)
+	}
+	if home != "" {
+		add(filepath.Join(home, "Library", "Caches"))
+		add(filepath.Join(home, ".cache"))
+		add(filepath.Join(home, "go"))
+	}
+	for _, p := range []string{"/bin", "/sbin", "/usr", "/System", "/Library", "/etc", "/dev"} {
+		add(p)
+	}
+	return out
 }
 
 // canonicalSensitivePath resolves the canonical spelling of an absolute

@@ -22,65 +22,14 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/guardpaths"
 	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"github.com/JayveerPrajapati/kern/internal/guardrule"
+	"github.com/JayveerPrajapati/kern/internal/guardrulecache"
+	"github.com/JayveerPrajapati/kern/internal/guardtelemetry"
+	"github.com/JayveerPrajapati/kern/internal/projectstate"
+	"github.com/JayveerPrajapati/kern/internal/toolkind"
 )
-
-// codeExt is the extension set of the read arm: files outside it serve raw.
-var codeExt = map[string]bool{
-	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
-	".mjs": true, ".cjs": true, ".py": true, ".rs": true, ".java": true,
-	".c": true, ".h": true, ".cpp": true, ".hpp": true, ".cc": true,
-	".hh": true, ".rb": true, ".sh": true, ".bash": true, ".kt": true,
-	".kts": true, ".swift": true, ".php": true, ".cs": true, ".scala": true,
-	".lua": true, ".m": true, ".mm": true, ".sql": true, ".zig": true,
-	".ex": true, ".exs": true, ".erl": true, ".hrl": true, ".hs": true,
-	".clj": true, ".cljs": true, ".dart": true, ".vue": true, ".svelte": true,
-}
-
-func isReadTool(t string) bool {
-	switch t {
-	case "read", "read_file", "view_file":
-		return true
-	}
-	return false
-}
-
-func isGrepTool(t string) bool {
-	switch t {
-	case "grep", "grep_file", "grep_search":
-		return true
-	}
-	return false
-}
-
-func isGlobTool(t string) bool {
-	switch t {
-	case "glob", "find_by_name", "list_files":
-		return true
-	}
-	return false
-}
-
-func isBashTool(t string) bool {
-	switch t {
-	case "bash", "run_shell_command", "shell", "execute_bash", "run_command":
-		return true
-	}
-	return false
-}
 
 // env is the env-var seam for tests.
 var env = os.Getenv
-
-// projectRoot resolves the working root the hook guards.
-func projectRoot() string {
-	if r := env("CLAUDE_PROJECT_DIR"); r != "" {
-		return r
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
-	return "."
-}
 
 // kernBin resolves the serving binary: KERN_BIN → os.Executable → PATH.
 func kernBin() string {
@@ -148,6 +97,54 @@ func (p *payload) grepPattern() string {
 		return g
 	}
 	return pick(p.rawMap, "pattern", "Pattern")
+}
+
+// globPattern resolves the native Glob/list-files pattern.
+func (p *payload) globPattern() string {
+	if g := pick(p.toolInput, "pattern"); g != "" {
+		return g
+	}
+	args, _ := p.toolCall["args"].(map[string]any)
+	if g := pick(args, "pattern", "Pattern", "query"); g != "" {
+		return g
+	}
+	if g := pick(p.input, "pattern"); g != "" {
+		return g
+	}
+	return pick(p.rawMap, "pattern", "Pattern")
+}
+
+// symbolGrepPattern reports whether a native Grep pattern is symbol-shaped.
+// Only this narrow form is steered to kern_search. Regex, prose, includes, and
+// other text-search patterns have no index equivalent and run raw.
+func symbolGrepPattern(s string) bool {
+	if s == "" || strings.ContainsFunc(s, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return false
+		case r == '_', r == '.', r == ':', r == '$':
+			return false
+		default:
+			return true
+		}
+	}) {
+		return false
+	}
+	return true
+}
+
+// readLineWindow reports whether the host requested an exact line/window
+// read. Those reads have no useful symbol summary; the exact host output is
+// faster and more faithful than a compact/index round trip.
+func readLineWindow(p *payload) bool {
+	for _, m := range []map[string]any{p.toolInput, p.toolCall, p.input, p.rawMap} {
+		for _, key := range []string{"start_line", "end_line", "offset", "limit", "line_start", "line_end"} {
+			if _, ok := m[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // bashCommand resolves the bash arm's command subject.
@@ -238,7 +235,7 @@ func Run(stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// --- bypass (env-only, audited; tty-gated confirm) ---
 	if env("KERN_ENFORCE") == "0" || env("KERN_BYPASS") == "1" {
-		if isReadTool(tool) || isGrepTool(tool) || isGlobTool(tool) || isBashTool(tool) {
+		if toolkind.IsRead(tool) || toolkind.IsGrep(tool) || toolkind.IsGlob(tool) || toolkind.IsBash(tool) {
 			mode := env("KERN_BYPASS_MODE")
 			if mode == "" {
 				mode = "refused:no-tty"
@@ -273,16 +270,16 @@ func Run(stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	root := projectRoot()
+	root := toolkind.ProjectRoot()
 
 	switch {
-	case isReadTool(tool):
+	case toolkind.IsRead(tool):
 		return runReadArm(p, root, stdout, stderr)
-	case isGrepTool(tool):
+	case toolkind.IsGrep(tool):
 		return runGrepArm(p, root, stdout, stderr)
-	case isGlobTool(tool):
+	case toolkind.IsGlob(tool):
 		return runGlobArm(p, root, stdout, stderr)
-	case isBashTool(tool):
+	case toolkind.IsBash(tool):
 		return runBashArm(p, root, stdout, stderr)
 	}
 	if p.hasToolCall {
@@ -298,7 +295,12 @@ func runReadArm(p *payload, root string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fpath := p.readPath()
-	if fpath != "" && !codeExt[strings.ToLower(filepath.Ext(fpath))] {
+	if fpath != "" && !toolkind.CodeExt[strings.ToLower(filepath.Ext(fpath))] {
+		guardtelemetry.AppendFastPath("read", "non-code", root)
+		return 0
+	}
+	if reason := guardtelemetry.ReadReason(readLineWindow(p), fpath); reason != "" {
+		guardtelemetry.AppendFastPath("read", reason, root)
 		return 0
 	}
 	if fpath != "" && governance.ConsumeAllowOnce(fpath) {
@@ -319,6 +321,14 @@ func runGrepArm(p *payload, root string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	gpat := p.grepPattern()
+	if gpat == "" {
+		subjHash := governance.HashSubject(gpat)
+		return deny(p, stdout, stderr, grepDenyReason(subjHash), gpat)
+	}
+	if !symbolGrepPattern(gpat) {
+		guardtelemetry.AppendFastPath("grep", "text-search", root)
+		return 0
+	}
 	if gpat != "" && governance.ConsumeAllowOnce(gpat) {
 		auditAllowOnceConsumed(gpat)
 		if p.hasToolCall {
@@ -335,6 +345,13 @@ func runGlobArm(p *payload, root string, stdout, stderr io.Writer) int {
 	if pauseActive(root) {
 		return 0
 	}
+	if pattern := p.globPattern(); pattern != "" {
+		// Native Glob is a read-only file-list operation. Running it directly
+		// is both faster and more accurate than replacing it with a repo
+		// digest; deny is reserved for malformed/no-pattern calls.
+		guardtelemetry.AppendFastPath("glob", "native-glob", root)
+		return 0
+	}
 	return deny(p, stdout, stderr, globDenyReason(), "")
 }
 
@@ -348,7 +365,7 @@ func runBashArm(p *payload, root string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	subjHash := governance.HashSubject(cmd)
-	classified := guardrule.ClassifyCommandInRoots(cmd, root, guardpaths.ExtraRootsFromEnv(env))
+	classified := guardrulecache.ClassifyCommandInRoots(cmd, root, guardpaths.ExtraRootsFromEnv(env))
 	if classified.Hash != "" {
 		subjHash = classified.Hash
 	}
@@ -441,21 +458,46 @@ func kernUnavailable() bool {
 	if env("KERN_DISABLED") == "1" {
 		return true
 	}
-	root := projectRoot()
+	root := toolkind.ProjectRoot()
 	if _, err := os.Stat(filepath.Join(root, ".kern", "off")); err == nil {
 		return true
+	}
+	if indexingMarkerFresh(root) {
+		return true
+	}
+	return !projectManaged(root)
+}
+
+// indexingMarkerFresh reports whether the mid-flight index-build marker is
+// active. File and directory markers are both accepted, but only a marker
+// touched within the last 15 minutes opens the guard.
+func indexingMarkerFresh(root string) bool {
+	info, err := os.Stat(filepath.Join(root, ".kern", "indexing"))
+	if err != nil {
+		return false
+	}
+	cutoff := time.Now().Add(-15 * time.Minute)
+	if !info.IsDir() {
+		return info.ModTime().After(cutoff)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, ".kern", "indexing"))
 	if err != nil {
 		return false
 	}
-	cutoff := time.Now().Add(-15 * time.Minute)
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && info.ModTime().After(cutoff) {
+	for _, entry := range entries {
+		if entryInfo, err := entry.Info(); err == nil && entryInfo.ModTime().After(cutoff) {
 			return true
 		}
 	}
 	return false
+}
+
+// projectManaged reports whether root, or an ancestor, has a kern index.
+// Global hooks must not govern repositories that never opted into kern; an
+// index is the canonical signal that this project was set up (SQLite primary,
+// legacy JSON fallback).
+func projectManaged(root string) bool {
+	return projectstate.Inspect(root).Managed
 }
 
 // pauseActive consults the pause registry (read/grep/glob steering only).

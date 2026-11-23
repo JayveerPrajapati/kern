@@ -178,6 +178,13 @@ func Build(root string, opts Options) (*Bundle, error) {
 			contentStr = string(code.Fold(rel, content))
 		} else if opts.Tier == code.TierSummary {
 			contentStr = code.Summarize(rel, content, 200).Render()
+			// Non-indexable files have no symbolic summary to contribute (the
+			// summary model returns "" for them); packing an empty body would
+			// only inflate the bundle with a path and zero tokens.
+			if strings.TrimSpace(contentStr) == "" {
+				b.Ignored++
+				return nil
+			}
 		}
 		f := File{
 			Path:    rel,

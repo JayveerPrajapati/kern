@@ -37,6 +37,7 @@ type contextFlags struct {
 	json      bool
 	jsonSet   bool
 	terseCode bool
+	mode      string
 }
 
 // parseContextFlags replicates the unified cmd/kern parser's semantics for
@@ -69,6 +70,8 @@ func parseContextFlags(args []string) (contextFlags, []string, error) {
 			f.jsonSet = true
 		case "--terse-code":
 			p.SetBool(&f.terseCode, "--terse-code", inline, hasInline)
+		case "--mode":
+			p.SetStr(&f.mode, inline, hasInline)
 		case "--help", "-h":
 		default:
 			p.Unknown(name)
@@ -83,15 +86,25 @@ func RunContext(rest []string) int {
 	return run(func() int { runContextCLI(rest); return 0 })
 }
 
+// contextSummaryFor builds the count-only concise summary (no evidence
+// slice, no explore report). It is a package variable so the fallback tests
+// can force the summary path to fail deterministically.
+var contextSummaryFor = intel.ContextSummaryFor
+
 func runContextCLI(rest []string) {
 	f, args, err := parseContextFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
+	mode, merr := cliflags.ParseOutputMode(f.mode)
+	if merr != nil {
+		fatalUsage("context: %v", merr)
+	}
 	if len(args) < 1 {
-		fatalUsage("usage: kern context <symbol> [root] [--lines N] [--etag H]")
+		fatalUsage("usage: kern context <symbol> [root] [--lines N] [--etag H] [--mode concise|evidence|full]")
 	}
 	symbol := args[0]
+	origSymbol := symbol
 	// Empty/whitespace symbols are usage errors, not no-match results —
 	// MCP rejects symbol:"" with "symbol is required" (blind-critique
 	// Phase 3.3 CLI/MCP alignment).
@@ -105,6 +118,19 @@ func runContextCLI(rest []string) {
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Context: %v", err)
+	}
+	// Concise fast path (post-optimization Phase 2): the default output only
+	// needs counts + risk, so build a summary and skip the source/evidence
+	// slice and the full explore report. Only the plain concise shape
+	// qualifies — JSON/lens/profile/terse-code/etag all shape the evidence
+	// and keep the full path. Any summary error falls through silently to the
+	// existing path below, preserving its errors and did-you-mean output.
+	if mode == cliflags.ModeConcise && !f.jsonSet && f.lens == "" && f.profile == "" && !f.terseCode && f.etag == "" {
+		if summary, serr := contextSummaryFor(ix, origSymbol); serr == nil && summary != nil {
+			clietag.PrintIndexStamp(ix)
+			fmt.Println(renderContextConciseSummary(summary, origSymbol))
+			return
+		}
 	}
 	// Symbol resolution (F12): resolve like `kern what-if` — an exact index
 	// hit wins, a unique strong fuzzy match auto-resolves (e.g.
@@ -169,6 +195,19 @@ func runContextCLI(rest []string) {
 		}
 		ctxText = profiles.ApplyProfile(p, ctxText)
 	}
+	// Concise mode is the new default: counts + risk only. lens/profile/
+	// terse-code shape the full evidence, so their presence keeps evidence
+	// mode (a set flag is never silently dropped).
+	if mode == cliflags.ModeConcise && f.lens == "" && f.profile == "" && !f.terseCode {
+		if concise, ok := conciseContext(ix, origSymbol, symbol, ctxText); ok {
+			clietag.PrintIndexStamp(ix)
+			if clietag.EtagResponse("kern_context", f.etag, concise) {
+				return
+			}
+			fmt.Println(concise)
+			return
+		}
+	}
 	// Conditional fetch (B1, ADR-0012): --etag matches the fresh etag →
 	// print `unchanged (etag <E>)` and exit 0; otherwise print the full
 	// context and an `etag: <hash>` footer on stderr. The index freshness
@@ -189,6 +228,56 @@ func runContextCLI(rest []string) {
 			cliout.PrintSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken(), fmt.Sprintf("file read raw (%s)", def.File))
 		}
 	}
+}
+
+// conciseContext builds the concise `kern context` block (counts + risk) from
+// an explore report, prepending a resolved note when the user's input
+// resolved to a different symbol. ok=false means the report could not be
+// built (the caller then falls back to the full evidence slice).
+func conciseContext(ix *index.Index, orig, resolved, evidence string) (string, bool) {
+	depth, maxN := intel.DefaultExploreBounds(-1, 0)
+	rep, err := intel.ExploreBudgeted(ix, resolved, depth, maxN, "", 0)
+	if err != nil {
+		return "", false
+	}
+	out := intel.RenderExploreConcise(rep)
+	if orig != "" && orig != resolved {
+		out = fmt.Sprintf("# resolved %s -> %s\n%s", orig, resolved, out)
+	}
+	if footer := intel.TokenFooter(evidence, out); footer != "" {
+		out += "\n" + footer
+	}
+	return out, true
+}
+
+// renderContextConciseSummary renders the fast-path concise block from a
+// count-only summary. After the optional resolved note the lines are
+// byte-identical to intel.RenderExploreConcise for the same data. It
+// deliberately prints no token footer: the context slice it used to compare
+// against is never built on this path, so omitting the footer is the honest
+// default.
+func renderContextConciseSummary(s *intel.ContextSummary, orig string) string {
+	if s == nil {
+		return ""
+	}
+	name := s.Resolved
+	if name == "" {
+		name = s.Definition.FullName()
+	}
+	var b strings.Builder
+	if orig != "" && orig != name {
+		fmt.Fprintf(&b, "# resolved %s -> %s\n", orig, name)
+	}
+	fmt.Fprintf(&b, "# %s (%s) — %s:%d", name, s.Definition.Kind, s.Definition.File, s.Definition.Line)
+	if s.Definition.End > s.Definition.Line {
+		fmt.Fprintf(&b, "-%d", s.Definition.End)
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "callers: %d\n", s.Callers)
+	fmt.Fprintf(&b, "callees: %d\n", s.Callees)
+	fmt.Fprintf(&b, "blast: %d symbols / %d files\n", s.Blast, s.Files)
+	fmt.Fprintf(&b, "risk: %s", s.Risk)
+	return b.String()
 }
 
 // resolveContextSymbol resolves the `kern context` symbol argument with the

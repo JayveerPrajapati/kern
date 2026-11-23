@@ -1,5 +1,7 @@
 // Package exec is the single governance gate that the execution tools
-// (kern_exec, kern_sandbox, kern_execute) pass through. It fails closed.
+// (kern_exec, kern_sandbox, kern_execute) pass through. It fails closed on
+// errors and firewall denials; the default exec posture is "ask" (see
+// execAllowlistGate).
 
 package governance
 
@@ -14,14 +16,19 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/execclassify"
+	"github.com/JayveerPrajapati/kern/internal/guardrule"
 )
 
 // Execution surfaces (kern_exec, kern_sandbox, kern_execute) run arbitrary
 // host commands, so this file is the single governance gate those tools pass
-// through. It fails closed — any error or denial refuses to run. Three
-// independent gates apply:
-// 1. An empty (unset) KERN_TOOLS allowlist means "all tools allowed", so exec
-// is refused unless the operator opts in via KERN_ALLOW_EXEC=1.
+// through. Three independent gates apply:
+// 1. The exec posture (KERN_EXEC_POSTURE, default "ask"): an empty (unset)
+// KERN_TOOLS allowlist does NOT itself refuse exec — the command falls
+// through to the risk firewall (gate 3), so LOW/MEDIUM commands run audited
+// and HIGH/CRITICAL commands mint a resolvable approval. No agent-facing
+// denial is a dead end. KERN_EXEC_POSTURE=closed restores the original
+// strict posture: an empty allowlist refuses exec unless the operator opts
+// in via KERN_ALLOW_EXEC=1.
 // 2. When KERN_TOOLS is set, the specific exec tool being invoked must be
 // named in it; a non-empty but unrelated allowlist does not re-enable exec.
 // 3. The change firewall authorizes the command via the risk model, so a
@@ -203,29 +210,45 @@ func checkExecCommandCore(command, root string) error {
 // (verified live: a denied compound's prefix never runs — no marker file was
 // created), so a denied compound runs NO segment. Only compounds (shell
 // operators && / || / ;) get the sentence — a single command has no segments
-// to clarify, and the sentence would be noise there.
+// to clarify, and the sentence would be noise there. When the guard
+// classifier can name the first segment that tripped the gate, the sentence
+// says which one — the agent sees the offending segment, not just a
+// whole-command denial.
 func compoundPreExecNote(command string) string {
 	if strings.Contains(command, "&&") || strings.Contains(command, "||") || strings.Contains(command, ";") {
+		if seg := guardrule.FirstGateSegment(command); seg != "" {
+			return "; the denial is pre-execution — no segment of the compound has run; the triggering segment was: " + seg
+		}
 		return "; the denial is pre-execution — no segment of the compound has run"
 	}
 	return ""
 }
 
 // execAllowlistGate enforces the KERN_TOOLS allowlist (gates 1 and 2 above).
-// It fails closed: an empty allowlist without KERN_ALLOW_EXEC is refused, and a
-// non-empty allowlist must actually name the exec tool (or at least one exec
-// tool when no specific tool is given).
+//
+// Posture (2026-11-10, operator-approved): the default is ASK. An empty
+// allowlist no longer hard-denies before any risk assessment — that left
+// agent-driven builds (kern build, kern verify, the plugin's governed tier)
+// dead on default installs with no resolvable path. Under ask, the gate
+// falls through and the risk firewall decides: LOW/MEDIUM commands run
+// audited, HIGH/CRITICAL commands mint a resolvable approval (the deny
+// carries the approval ID, the resolution command, and the byte-identical
+// retry text). KERN_EXEC_POSTURE=closed restores the original strict
+// behavior for operators who want blanket fail-closed exec.
 func execAllowlistGate(tool string) error {
 	allowlist := parseToolAllowlist(os.Getenv("KERN_TOOLS"))
 
-	// 1. Empty-allowlist gate: an unset KERN_TOOLS means "all tools allowed",
-	// which must not implicitly allow host command execution. Strict parsing:
-	// only KERN_ALLOW_EXEC=1 opts in; any other value is treated as unset.
-	// The opt-in is framed as operator-at-process-start (F2): the env is
-	// fixed when the server launches, so the hint addresses the human who
-	// owns the terminal, not the calling agent (which cannot change it).
+	// 1. Empty-allowlist gate: strict only under KERN_EXEC_POSTURE=closed.
+	// Under the default ask posture an unset KERN_TOOLS means "fall through to
+	// the risk model" (LOW/MEDIUM run, HIGH/CRITICAL mint a resolvable
+	// approval). KERN_ALLOW_EXEC=1 remains the total opt-in and skips this
+	// gate entirely; strict parsing: only "1" opts in, any other value is
+	// treated as unset.
 	if len(allowlist) == 0 && os.Getenv("KERN_ALLOW_EXEC") != "1" {
-		return errors.New("command execution blocked: no KERN_TOOLS allowlist is set and KERN_ALLOW_EXEC is not enabled; refusing to run ungoverned host commands (an operator can opt in at process start with KERN_ALLOW_EXEC=1, or list the tool in KERN_TOOLS)")
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("KERN_EXEC_POSTURE")), "closed") {
+			return errors.New("command execution blocked: exec posture is closed (KERN_EXEC_POSTURE=closed): no KERN_TOOLS allowlist is set and KERN_ALLOW_EXEC is not enabled; refusing to run ungoverned host commands (an operator can opt in at process start with KERN_ALLOW_EXEC=1, list the tool in KERN_TOOLS, or unset KERN_EXEC_POSTURE to restore the default ask posture — LOW/MEDIUM run audited, HIGH/CRITICAL require approval)")
+		}
+		return nil
 	}
 
 	// 2. Allowlist-contents gate. Only enforced when an allowlist is configured.

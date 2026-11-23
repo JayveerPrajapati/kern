@@ -123,6 +123,43 @@ func isKernHookEntry(h map[string]any) bool {
 	return strings.Contains(cmd, "kern-guard.sh") || strings.Contains(cmd, " guard hook") || kernHookCmdRe.MatchString(cmd) || strings.HasPrefix(name, "kern-")
 }
 
+// HasKernHook reports whether text contains an actual kern hook entry. It
+// supports both the standard settings.hooks.<event> shape and Antigravity's
+// top-level "kern-guard" object. A malformed file is an error so status
+// callers can say "unparseable" instead of silently reporting absent.
+func HasKernHook(text string) (bool, error) {
+	m, err := decodeObject(text)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := m["kern-guard"]; ok {
+		return true, nil
+	}
+	hooks, _ := m["hooks"].(map[string]any)
+	for _, v := range hooks {
+		groups, ok := v.([]any)
+		if !ok {
+			continue
+		}
+		for _, g := range groups {
+			gm, ok := g.(map[string]any)
+			if !ok {
+				continue
+			}
+			inner, ok := gm["hooks"].([]any)
+			if !ok {
+				continue
+			}
+			for _, h := range inner {
+				if hm, ok := h.(map[string]any); ok && isKernHookEntry(hm) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
 // Hooks removes kern-owned hook commands from settings.hooks.<event>[],
 // dropping groups, events and the hooks object itself when they end up empty.
 func Hooks(text string) (string, bool, error) {

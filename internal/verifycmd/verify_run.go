@@ -33,7 +33,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cliout"
 	"github.com/JayveerPrajapati/kern/internal/gitrun"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
@@ -495,15 +494,14 @@ func runVerify(rest []string) {
 	if runVerifyMode(f, args, root) {
 		return
 	}
-	// A bare `kern verify` (no checks requested at all) would default to a full
-	// build+test run (~minutes) before reporting anything — a usage error
-	// instead, consistent with search/explore/impact (audit L1). The mode flags
-	// above and the compliance trio below are explicit requests and keep working
-	// with no positional.
+	// A bare `kern verify` (no checks requested at all) defaults to the
+	// build check only — seconds, not the ~minutes a full build+test run
+	// costs, and matching the MCP surface's bare-path default
+	// (highlevel.Verify: types "" → "build"). The mode flags above and the
+	// compliance trio below are explicit requests and keep working with no
+	// positional.
 	if f.types == "" && len(args) == 0 && !f.fast && !f.cve && !f.license && !f.secrets && f.changedSince == "" && !f.staged && !f.changed {
-		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]\n"+
-			"  no checks requested — try 'kern verify build,test', or run your own gate with\n"+
-			"  'kern verify --command \"go test ./...\"'; valid types: %s", strings.Join(catalog.VerifyTypesKnown, ", "))
+		f.types = "build"
 	}
 	// Two forms share this subcommand. The high-level form is
 	// `kern verify <types>` (or `kern verify --types ...`); a bare

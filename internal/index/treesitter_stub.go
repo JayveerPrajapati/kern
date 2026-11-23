@@ -17,6 +17,10 @@ func treesitterEnabled() bool { return false }
 // out and falls back to regex heuristics.
 func TreesitterEnabled() bool { return treesitterEnabled() }
 
+// TreesitterGrammarCount reports how many canonical languages this build's
+// tree-sitter grammars cover — zero without tree-sitter compiled in.
+func TreesitterGrammarCount() int { return 0 }
+
 // TreeSitterAvailable always returns false when tree-sitter is not enabled.
 func TreeSitterAvailable(lang string) bool {
 	return false

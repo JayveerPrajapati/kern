@@ -46,7 +46,6 @@ var patterns = map[string][]struct {
 		{regexp.MustCompile(`^const\s+[A-Za-z_]\w*\s*=`), regexp.MustCompile(`^const\s+([A-Za-z_]\w*)\s*=`)},
 		{regexp.MustCompile(`^var\s*\(`), nil},
 		{regexp.MustCompile(`^var\s+[A-Za-z_]\w*\s*=`), regexp.MustCompile(`^var\s+([A-Za-z_]\w*)\s*=`)},
-		{regexp.MustCompile(`^package\s+`), regexp.MustCompile(`^package\s+([A-Za-z_]\w*)`)},
 	},
 	"python": {
 		{regexp.MustCompile(`^\s*(?:async\s+)?def\s+`), regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)`)},
@@ -207,14 +206,15 @@ func Summarize(path string, content []byte, maxSymbols int) Summary {
 }
 
 // Render renders a summary as compact text for agent consumption.
+//
+// An undetectable language returns the EMPTY string. That is a machine signal,
+// not a display bug: the interception surfaces (the opencode plugin and
+// kern-guard.sh) serve a raw read precisely when `kern compact` yields nothing.
+// When a human needs an explanation, presentation layers call
+// NotIndexableNote instead.
 func (s Summary) Render() string {
 	if s.Language == "" {
-		// No detectable language: the file is not indexable code (e.g.
-		// README.md, go.mod, LICENSE, config prose). Return an explicit note
-		// instead of an EMPTY "success" — an agent reading an empty
-		// kern_compact_file result cannot tell "no symbols" from "tool
-		// broken". The line count keeps the note useful.
-		return fmt.Sprintf("%s [no symbol summary — not indexable code (no detectable language), %d lines]", s.Path, s.Lines)
+		return ""
 	}
 	var b strings.Builder
 	b.WriteString(s.Path)
@@ -239,6 +239,15 @@ func (s Summary) Render() string {
 		b.WriteString("\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// NotIndexableNote is the human-facing explanation Render deliberately does not
+// emit. Presentation layers (the `kern compact` CLI, the kern_compact_file MCP
+// handler) print it when a summary renders empty, so an operator can tell
+// "no symbols" from "tool broken" while the machine signal stays empty.
+func NotIndexableNote(path string, content []byte) string {
+	lines := len(strings.Split(string(content), "\n"))
+	return fmt.Sprintf("%s [no symbol summary — not indexable code (no detectable language), %d lines]", path, lines)
 }
 
 func paramSnippet(line string) string {

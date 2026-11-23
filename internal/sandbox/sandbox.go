@@ -11,11 +11,12 @@
 // as an undo button for the project tree, not a security boundary.
 //
 // Stage-1 FS confinement (defense-in-depth, NOT a boundary): when
-// KERN_SANDBOX_FS_CONFINEMENT is on (the default), the sensitive-path
-// blocklist (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.netrc, cloud credentials)
-// is blocked from READS — on macOS by the Seatbelt profile, and on Linux by
-// the Landlock allowlist when the kernel supports it (the trampoline in
-// internal/sandbox/landlock). KERN_SANDBOX_WRITE_CONFINEMENT (default on)
+// KERN_SANDBOX_FS_CONFINEMENT is on (the default), reads are confined to an
+// explicit allowlist (workspace, temp, toolchain/cache, and system runtime
+// roots) on macOS by the Seatbelt profile, and on Linux by Landlock when the
+// kernel supports it (the trampoline in internal/sandbox/landlock). Sensitive
+// paths (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.netrc, cloud credentials) are
+// additionally denied on top of the allowlist. KERN_SANDBOX_WRITE_CONFINEMENT (default on)
 // additionally confines Linux writes to the workspace, temp and cache dirs.
 // Where Landlock is unavailable the Linux behavior is unchanged
 // (degrade-safe).
@@ -36,12 +37,11 @@
 //	          Not seccomp: Landlock relies on PR_SET_NO_NEW_PRIVS, and a
 //	          seccomp-filtered runner can break the trampoline. Landlock
 //	          unavailable -> unchanged behavior (degrade-safe).
-//	macOS     mechanism: Apple Seatbelt (sandbox-exec) — deny-list on top of
-//	          (allow default). Blocks: network egress except loopback (loopback
-//	          bind requires RunOptions.AllowLoopbackBind), plus reads of the
-//	          sensitive-path blocklist (~/.ssh, ~/.aws, ~/.gnupg,
-//	          ~/.config/gcloud, ~/.kube, ~/.docker/config.json,
-//	          ~/Library/Cookies, ~/.netrc). Overrides: KERN_SANDBOX_FS_CONFINEMENT=0
+//	macOS     mechanism: Apple Seatbelt (sandbox-exec) — explicit read
+//	          allowlist plus sensitive-path denies. Blocks: network egress except
+//	          loopback (loopback bind requires RunOptions.AllowLoopbackBind), and
+//	          reads outside workspace/temp/toolchain/cache/system roots.
+//	          Overrides: KERN_SANDBOX_FS_CONFINEMENT=0
 //	          or KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1. Nested runs
 //	          (KERN_SANDBOX_ACTIVE=1) inherit the OUTER profile — a second
 //	          sandbox-exec cannot apply.

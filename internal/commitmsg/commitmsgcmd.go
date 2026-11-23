@@ -130,6 +130,11 @@ func runCommit(rest []string) {
 			fatal("commit: %v", perr)
 		}
 		if len(strings.TrimSpace(preview)) == 0 {
+			if f.all {
+				// --all was already passed; telling the user to pass it is
+				// noise on a clean tree (2026-11-10 campaign).
+				fatal("nothing to commit (working tree clean — --all staged nothing)")
+			}
 			fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
 		}
 		msg := Generate(preview)

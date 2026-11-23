@@ -827,6 +827,13 @@ func isQualifiedCodeValue(src []byte, start, end int) bool {
 	if end < len(src) && (src[end] == '.' || src[end] == '(') {
 		return true
 	}
+	// A Rust/Elixir module path collides with the IPV6 pattern: the `::` in
+	// `toml::de::Error` reads as a compressed address. A match that starts at
+	// a `::` separator and is followed by another `::` is a path segment
+	// chain, never a credential.
+	if end < len(src) && src[end] == ':' && start+1 < len(src) && src[start] == ':' && src[start+1] == ':' {
+		return true
+	}
 	return false
 }
 

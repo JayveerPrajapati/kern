@@ -140,6 +140,24 @@ func Diff(from, to string) (string, error) {
 	return compressDiff(string(out)), nil
 }
 
+// DiffWorktree returns the compressed diff of the working tree against HEAD —
+// what "uncommitted" means for `kern hook diff`. Diff(from, to) keeps the
+// history-range semantics the post-commit store path depends on
+// (HEAD~1..HEAD by default), so the two defaults must not be conflated: a
+// clean tree previously reported the previous commit's diff as if it were
+// pending work.
+func DiffWorktree() (string, error) {
+	out, err := exec.Command("git", "diff", "--unified=0", "HEAD").Output()
+	if err != nil {
+		// Unborn HEAD (no commits yet): plain working-tree diff.
+		out, err = exec.Command("git", "diff").Output()
+		if err != nil {
+			return "", fmt.Errorf("git diff failed: %w", err)
+		}
+	}
+	return compressDiff(string(out)), nil
+}
+
 func compressDiff(d string) string {
 	var b strings.Builder
 	n := 0

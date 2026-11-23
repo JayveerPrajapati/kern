@@ -47,18 +47,21 @@ var skipDirs = map[string]bool{
 // (docs/architecture/ledger-details.md) fills Dir + Imports; CheckArchDocParity
 // joins the two halves by Dir and fails if they diverge.
 type ArchRow struct {
-	Dir     string
-	Cap     int
-	Imports map[string]bool // allowed kern-internal paths (each a subtree root)
+	Dir      string
+	Baseline int // recorded non-test LOC at baseline (informational; the cap is the contract)
+	Cap      int
+	Imports  map[string]bool // allowed kern-internal paths (each a subtree root)
 }
 
-// archRowRe matches table rows whose dir cell is an internal or cmd path,
-// allowing nested dirs (internal/mcp/doc, internal/diffgate, cmd/kern) — the `/` and `.` are legal in package paths and the nested rows
-// must be parsed or their cap enforcement silently vanishes. Rows carry four
+// archRowRe matches table rows whose dir cell is an internal, cmd or evaluate
+// path, allowing nested dirs (internal/mcp/doc, internal/diffgate, cmd/kern,
+// evaluate/bench) — the `/`, `.` and `-` are legal in package paths and the nested rows
+// must be parsed or their cap enforcement silently vanishes (the `-` matters:
+// cmd/kern-mcp would otherwise be invisible to the gate). Rows carry four
 // cells (dir | LOC baseline | cap); a trailing allowed-deps cell from the
 // pre-split single-file format is tolerated and ignored — deps now live in
 // ledger-details.md.
-var archRowRe = regexp.MustCompile(`^\|\s*` + "`" + `((?:internal|cmd)/[A-Za-z0-9_/.]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|(?:.*\|)?\s*$`)
+var archRowRe = regexp.MustCompile(`^\|\s*` + "`" + `((?:internal|cmd|evaluate)/[A-Za-z0-9_/.-]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|(?:.*\|)?\s*$`)
 
 // ParseArchDoc parses the cap half of the ledger out of <root>/ARCHITECTURE.md:
 // one row per subsystem (dir + cap; the LOC baseline cell is informational and
@@ -72,6 +75,14 @@ func ParseArchDoc(root string) ([]ArchRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseArchDocBytes(b)
+}
+
+// ParseArchDocBytes parses the cap table out of the verbatim ARCHITECTURE.md
+// content — the file form for the working tree, and the blob form for a git
+// revision (the headroom gate compares today's measurement against HEAD's
+// recorded baselines). Fails closed on a table with fewer than 10 rows.
+func ParseArchDocBytes(b []byte) ([]ArchRow, error) {
 	var rows []ArchRow
 	for _, line := range strings.Split(string(b), "\n") {
 		m := archRowRe.FindStringSubmatch(line)
@@ -79,14 +90,8 @@ func ParseArchDoc(root string) ([]ArchRow, error) {
 			continue
 		}
 		row := ArchRow{Dir: m[1], Imports: map[string]bool{}}
-		cap := 0
-		for _, ch := range m[3] {
-			if ch < '0' || ch > '9' {
-				break
-			}
-			cap = cap*10 + int(ch-'0')
-		}
-		row.Cap = cap
+		row.Baseline = atoiDigits(m[2])
+		row.Cap = atoiDigits(m[3])
 		rows = append(rows, row)
 	}
 	if len(rows) < 10 {
@@ -95,11 +100,24 @@ func ParseArchDoc(root string) ([]ArchRow, error) {
 	return rows, nil
 }
 
+// atoiDigits converts a digit string to an int (regexp-matched, so the input
+// is digits only).
+func atoiDigits(s string) int {
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n
+}
+
 // ledgerRowRe matches table rows in the ledger-details table, whose cells are
 // subsystem | dir | allowed deps — the subsystem identity column IS the dir
 // (the same identity part 1 uses), and the deps cell is the verbatim
 // allowed-deps set, each entry a subtree root.
-var ledgerRowRe = regexp.MustCompile(`^\|\s*` + "`" + `((?:internal|cmd)/[A-Za-z0-9_/.]+)` + "`" + `\s*\|\s*` + "`" + `((?:internal|cmd)/[A-Za-z0-9_/.]+)` + "`" + `\s*\|(.*)\|\s*$`)
+var ledgerRowRe = regexp.MustCompile(`^\|\s*` + "`" + `((?:internal|cmd|evaluate)/[A-Za-z0-9_/.-]+)` + "`" + `\s*\|\s*` + "`" + `((?:internal|cmd|evaluate)/[A-Za-z0-9_/.-]+)` + "`" + `\s*\|(.*)\|\s*$`)
 
 // ParseLedgerDetails parses the allowed-deps half of the ledger out of
 // <root>/docs/architecture/ledger-details.md: one row per subsystem with the
@@ -210,6 +228,93 @@ type ArchDocReport struct {
 	ImportPaths int // distinct kern-internal import paths validated
 	Decls       int // internal-import declarations seen (all forms)
 	Findings    []ArchDrift
+	Unlisted    []string // Go package dirs with no row of their own and no ancestor row — ungoverned packages
+}
+
+// governableRoots are the top-level trees the ledger claims: every directory
+// under them holding at least one .go file must have a row of its own or sit
+// under an ancestor's row (the ancestor's subtree measurement governs it).
+// A package outside these trees is out of the ledger's scope by contract.
+var governableRoots = []string{"internal", "cmd", "evaluate"}
+
+// walkGoDirs returns every directory under the governable roots (skipping
+// skipDirs, mirroring MeasureDir's generation rules) that contains at least
+// one .go file — test-only directories included (internal/integration is a
+// listed 0-LOC test-only suite, so "has tests" counts as "exists").
+func walkGoDirs(root string) ([]string, error) {
+	haveGo := map[string]bool{}
+	for _, top := range governableRoots {
+		base := filepath.Join(root, top)
+		if _, err := os.Stat(base); err != nil {
+			continue // that tree does not exist in this checkout
+		}
+		err := filepath.WalkDir(base, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if p != base && skipDirs[d.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(d.Name(), ".go") {
+				haveGo[filepath.Dir(p)] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	dirs := make([]string, 0, len(haveGo))
+	for dir := range haveGo {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			return nil, err
+		}
+		dirs = append(dirs, filepath.ToSlash(rel))
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+// unlistedGoDirs returns the sorted subset of dirs that is governed by no
+// ledger row: neither the dir itself nor any proper ancestor has a row. This
+// is the reverse direction of the parity gate — the direction that let
+// internal/duplication ship without a row (listed-dir-must-exist was checked;
+// existing-dir-must-be-listed was not).
+func unlistedGoDirs(root string, rows []ArchRow) ([]string, error) {
+	dirs, err := walkGoDirs(root)
+	if err != nil {
+		return nil, err
+	}
+	rowSet := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		rowSet[row.Dir] = true
+	}
+	var unlisted []string
+	for _, dir := range dirs {
+		if rowSet[dir] {
+			continue
+		}
+		governed := false
+		for anc := dir; ; {
+			i := strings.LastIndexByte(anc, '/')
+			if i < 0 {
+				break
+			}
+			anc = anc[:i]
+			if rowSet[anc] {
+				governed = true
+				break
+			}
+		}
+		if !governed {
+			unlisted = append(unlisted, dir)
+		}
+	}
+	return unlisted, nil
 }
 
 // CheckArchDocParity runs the same validation TestArchitectureDocParity
@@ -218,13 +323,17 @@ type ArchDocReport struct {
 // ARCHITECTURE.md) and collect internal imports that fall outside the
 // documented allowed deps (parsed from docs/architecture/ledger-details.md;
 // a subsystem's own subpackages are always allowed). The two halves must
-// name exactly the same subsystems — divergence fails closed. Every row is
-// reported (LOC current vs cap), with Violations non-empty only where drift
-// exists. Hard failures — an unreadable ARCHITECTURE.md or ledger-details.md,
-// a table that no longer parses, or half-divergence — are returned as an
-// error; per-row structural problems (missing directory, unmeasurable
-// source) are carried on the row's Err field so the caller can surface them
-// without losing the rest of the report.
+// name exactly the same subsystems — divergence fails closed. The check is
+// BIDIRECTIONAL: every Go package directory under the governable roots must
+// be governed by a row (its own, or an ancestor's whose subtree measurement
+// includes it); ungoverned dirs land in Unlisted — the direction that let
+// internal/duplication ship without a row. Every row is reported (LOC
+// current vs cap), with Violations non-empty only where drift exists. Hard
+// failures — an unreadable ARCHITECTURE.md or ledger-details.md, a table
+// that no longer parses, or half-divergence — are returned as an error;
+// per-row structural problems (missing directory, unmeasurable source) are
+// carried on the row's Err field so the caller can surface them without
+// losing the rest of the report.
 func CheckArchDocParity(root string) (*ArchDocReport, error) {
 	rows, err := ParseArchDoc(root)
 	if err != nil {
@@ -283,6 +392,11 @@ func CheckArchDocParity(root string) (*ArchDocReport, error) {
 			sort.Strings(drift.Violations)
 		}
 		report.Findings = append(report.Findings, drift)
+	}
+	if unlisted, err := unlistedGoDirs(root, rows); err != nil {
+		return nil, fmt.Errorf("unlisted-package walk failed: %w", err)
+	} else {
+		report.Unlisted = unlisted
 	}
 	return report, nil
 }

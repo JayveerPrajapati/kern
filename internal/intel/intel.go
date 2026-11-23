@@ -4,10 +4,12 @@
 package intel
 
 import (
+	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/langparse"
 	"log"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -44,11 +46,35 @@ func ChangedFiles(root string) ([]string, error) {
 	return files, nil
 }
 
+// rangeSideRe bounds one side of a git rev range before it is passed to
+// `git diff` as a single argv element. It cannot start with "-" — which
+// kills flag injection (`--output=<path>` wrote the repo diff to arbitrary
+// paths, `--ext-diff=<cmd>` attempted command execution; black-box audit
+// finding F1, 2026-11-21) — and excludes whitespace/shell metacharacters
+// as defense in depth (there is no shell, but the belt costs nothing).
+var rangeSideRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~^/@%+=-]*$`)
+
+// validateRangeSides rejects rev-range sides that are not bare revisions.
+// Empty sides are valid (they mean working tree). Reflog forms like
+// HEAD@{1} are deliberately not supported by kern's ranged surfaces.
+func validateRangeSides(from, to string) error {
+	for _, s := range []struct{ name, v string }{{"from", from}, {"to", to}} {
+		if s.v == "" || rangeSideRe.MatchString(s.v) {
+			continue
+		}
+		return fmt.Errorf("invalid git range %s side %q: must be a bare revision (letters, digits, . _ ~ ^ / @ %% + = -), not a flag or metacharacter string", s.name, s.v)
+	}
+	return nil
+}
+
 // FilesForRange returns the files changed between from..to. An empty range
 // means the working tree (ChangedFiles).
 func FilesForRange(root, from, to string) ([]string, error) {
 	if from == "" && to == "" {
 		return ChangedFiles(root)
+	}
+	if err := validateRangeSides(from, to); err != nil {
+		return nil, err
 	}
 	cmd := exec.Command("git", "-C", root, "diff", "--name-only", from+".."+to)
 	out, err := cmd.Output()
@@ -302,7 +328,7 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 // ix.CallersFor(sym) resolves each recorded caller of a symbol to the
 // symbols that really call it (package-qualified keys plus same-package bare
 // buckets — never a bare-name merge of every same-named definition), and
-// findCallerDef resolves each caller endpoint to the concrete symbol with
+// FindCallerDefinition resolves each caller endpoint to the concrete symbol with
 // the parent as context (same-package, then import-based). Because the
 // visited set is keyed by declaration, a same-named wrapper remains distinct
 // from its core and its real transitive callers are included. Source-owned
@@ -360,7 +386,7 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool, maxNodes int,
 		if r == "" {
 			continue
 		}
-		sym, ok := findDef(ix, r)
+		sym, ok := FindDefinition(ix, r)
 		if !ok {
 			sym, ok = ix.ResolveName(r)
 		}
@@ -465,7 +491,7 @@ func blastRadiusWalk(ix *index.Index, roots []string, strict bool, maxNodes int,
 	// contract the doc comment above promises and ExploreBudgeted's depth
 	// cap indexes radiusSyms[i] against it. A radius member that resolves to
 	// no indexed symbol (the Python/JS heuristic-caller case: blast-radius
-	// leaves are raw endpoints findCallerDef cannot resolve) keeps its
+	// leaves are raw endpoints FindCallerDefinition cannot resolve) keeps its
 	// zero-value slot here; the pre-fix filtered append shifted every later
 	// symbol one left, which both misattributed BlastFiles and panicked
 	// with "index out of range" on non-Go symbols (live campaign 2026-10-04:

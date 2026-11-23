@@ -216,6 +216,27 @@ func (s *FileStore) AddPending(a domain.Approval) error {
 	})
 }
 
+// PruneOlderThan removes PENDING approvals requested before cutoff and
+// returns the number removed. Decided records are never touched: they are the
+// policy signal and the audit history. This exists so a mint-storm (the guard
+// re-minting the same request on every blocked retry) cannot leave a queue of
+// hundreds of identical rows forever (2026-11-10 campaign).
+func (s *FileStore) PruneOlderThan(cutoff time.Time) (int, error) {
+	removed := 0
+	err := s.mutate(func(approvals []domain.Approval) []domain.Approval {
+		kept := approvals[:0]
+		for _, a := range approvals {
+			if (a.Status == "pending" || a.Status == "") && a.RequestedAt.Before(cutoff) {
+				removed++
+				continue
+			}
+			kept = append(kept, a)
+		}
+		return kept
+	})
+	return removed, err
+}
+
 // Consume atomically removes the approval with the given ID and reports
 // whether it was present (claimed). The removal runs inside the single
 // flock'd load-modify-save critical section (mutate), so two concurrent

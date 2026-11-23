@@ -279,23 +279,24 @@ const CODE_EXTENSIONS = new Set([
   "hs", "clj", "cljs", "dart", "vue", "svelte",
 ])
 
-// isSimpleRead reports whether a read needs no kern routing: only non-code
-// files (kern compact returns empty for them anyway) serve raw. Code files
-// are ALWAYS routed to kern regardless of size — even a one-line source file
-// is part of the symbol context and can be served/grepped via kern's AST
-// tools. The stat below is an existence probe only: a missing or unreadable
-// code file fails closed (governed) instead of serving raw.
-async function isSimpleRead(filePath: string): Promise<boolean> {
+// readFastPathReason reports why a read needs no kern routing: non-code files
+// (kern compact returns empty for them), missing files (let the host return
+// its real error), and tiny regular code files. An empty string keeps the read
+// governed.
+async function readFastPathReason(filePath: string): Promise<string> {
 const dot = filePath.lastIndexOf(".")
 const sep = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"))
 const ext = dot > sep ? filePath.slice(dot + 1).toLowerCase() : ""
-if (!CODE_EXTENSIONS.has(ext)) return true
+if (!CODE_EXTENSIONS.has(ext)) return "non-code"
 try {
-await stat(filePath) // existence probe — unreadable/missing stays governed
+const s = await stat(filePath)
+if (s.isFile() && s.size <= 2048) return "tiny"
 } catch {
-// missing/unreadable: still governed — never raw.
+// Missing/unreadable: let the host return its real error; a successful read
+// cannot bypass this path.
+return "missing"
 }
-return false
+return ""
 }
 
 // Content-free git subcommands, read-only kern diagnostics, and trivial
@@ -516,13 +517,14 @@ function splitCommandSegments(cmd: string): string[] {
 //   READ_CMDS — content-READING commands that are SERVED, never denied: a pure
 //   read has no write/network/destructive surface, so the guard's job is to
 //   answer it via kern's fast paths (Tier 1/2) or the readonly sandbox (Tier
-//   3), not to police it.
+//   3), not to police it. awk and sed are intentionally excluded: both can
+//   execute commands from a "read" script.
 //   GATE_CMDS — writes/destructive/network/installers (the risky axis): a
 //   command containing ANY gate segment is hard-denied (the guard's exit-3
 //   blocked contract) unless an operator allow-once unlocks it. Mirrors the
 //   Go-side dangerous-class classifier (internal/governance/exec_classify.go)
 //   so the plugin and the firewall agree on what is risky.
-const READ_CMDS = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
+const READ_CMDS = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less"])
 const SHELL_WRAPPER_CMDS = new Set(["sh", "bash", "zsh", "dash", "ksh"])
 // Flat gate names: ANY invocation is write/destructive/network.
 const GATE_CMDS = new Set(["rm", "mv", "cp", "dd", "mkfs", "wipefs", "diskutil", "shred", "truncate", "chmod", "chown", "curl", "wget", "fetch"])
@@ -698,8 +700,8 @@ function scopedGrep(args: string[]): { pattern: string; path: string } | null {
 //   tier 2: read head + bounded simple tail (| wc -l, | head N, | tail N,
 //     | grep -v P, | grep P) — serve the head from the index, apply the tail
 //     in-process, return the COMPUTED answer.
-//   tier 3: everything else pure-read (regex greps, scoped greps, awk/sed
-//     transforms, compounds of reads) → kern exec --readonly (sandboxed,
+//   tier 3: everything else pure-read (regex greps, scoped greps, compounds of
+//     reads) → kern exec --readonly (sandboxed,
 //     masked).
 function readPipeline(cmd: string): { tier: number; head?: string; pattern?: string; path?: string; file?: string; tails?: string[] } | null {
   // One level of sh -c "..." / bash -c "..." wrapper unwrapping (mirrors
@@ -750,12 +752,20 @@ function readPipeline(cmd: string): { tier: number; head?: string; pattern?: str
       if (scoped) return { tier: 1, head: name, pattern: scoped.pattern, path: scoped.path }
       return { tier: 3 } // regex/punctuation/include or unsafe scope → sandboxed read
     }
-    if (name === "cat" || name === "head" || name === "tail" || name === "less" || name === "more") {
-      const file = args.filter((a) => !a.startsWith("-")).pop() || ""
+    if (name === "cat") {
+      // Only a BARE `cat FILE` maps to the compact summary: `cat -n` adds line
+      // numbers and multiple targets concatenate — a summary would destroy
+      // both. Everything else stays a verbatim Tier-3 read.
+      const file = args.length === 1 && !args[0].startsWith("-") ? args[0] : ""
       if (file !== "") return { tier: 1, head: name, file }
       return { tier: 3 }
     }
-    // sed/awk transform a stream — never a plain file read → Tier 3.
+    if (name === "head" || name === "tail" || name === "less" || name === "more") {
+      // Windowed/paged reads must preserve the requested slice (head -3,
+      // tail -2): serve them verbatim as Tier 3.
+      return { tier: 3 }
+    }
+    // Other read commands that are not index-translatable stay Tier 3.
     return { tier: 3 }
   }
   // tier 2: read head + bounded simple tails (| wc -l, | head N, | tail N,
@@ -838,54 +848,35 @@ kern_arch: "explore",
   kern_plan: "plan",
   kern_plan_context: "plan",
   kern_probe: "explore",
+  kern_research: "explore",
   kern_project_map: "explore",
   kern_review: "verify",
   kern_run: "cross",
   kern_search: "explore",
   kern_semcache: "cross",
+  kern_skill: "cross",
   kern_stats: "cross",
   kern_swap: "plan",
   kern_verify: "verify",
   kern_why: "explore",
 }
-// defaultTools mirrors internal/mcp/toolpolicy.go's 32-tool default surface (the
-// full catalog since 2026-10-23) so the
+// defaultTools mirrors internal/mcp/toolpolicy.go's direct eleven-tool surface
+// so the
 // plugin advertises the same tools the MCP server does when no env vars are
-// set. KERN_MCP_FULL=1, KERN_MCP_PHASE, and KERN_TOOLS all lift the default
-// (matching the server's behavior).
+// set. KERN_MCP_FULL=1 restores the full 34-tool catalog; KERN_MCP_PHASE and
+// KERN_TOOLS remain filters (matching the server's behavior).
 const DEFAULT_TOOLS = new Set([
-  "kern_meta", // NL router → all sub-tools
-  "kern_explore", // symbol source + callers/callees + blast radius
-  "kern_impact", // blast radius of a change
-  "kern_apply", // safe edit path: transactional apply + verify + rollback
+  "kern_buddy", // session onboarding and repo digest
   "kern_search", // ranked symbol search
+  "kern_explore", // symbol source + callers/callees + blast radius
+  "kern_context", // minimal relevant source slice
+  "kern_probe", // task-driven multi-symbol context bundle
+  "kern_research", // read-only multi-symbol research bundle
+  "kern_impact", // transitive blast radius
+  "kern_graph", // one-hop call graph context
+  "kern_review", // token-optimised review context
   "kern_verify", // unified verification
-  "kern_buddy", // session onboarding digest
-  "kern_exec", // governed execution — fails closed without KERN_ALLOW_EXEC/KERN_TOOLS (D5)
-  "kern_compact_file", // compact symbolic file summary (tier=full verbatim)
-  "kern_run", // run an intent through the full task pipeline
-  "kern_optimize", // compress context: action=prompt|log|output
-  "kern_context", // minimal relevant source slice for a symbol
-  "kern_memory", // project brain memory (add/list/recall/remove)
-  "kern_evidence", // signed-evidence toolkit (verify/explain/export/anchor)
-  "kern_probe", // micro-context router: task → symbol bundle
-  "kern_plan", // deterministic implementation plan for a change
-  "kern_doc", // project docs: action=search|fetch|index
-  "kern_project_map", // compressed whole-project symbol map
-  "kern_ast_search", // AST-level symbol search
-  "kern_stats", // before/after token savings and cost estimates
-  "kern_why", // rationale and doc-reference report for a symbol
-  "kern_heal", // self-correction loop on failing files (snapshot)
-  "kern_fit_context", // fit files/symbols into a token budget
-  "kern_plan_context", // deterministically plan which context to include
-  "kern_path", // shortest call path between two symbols
-  "kern_semcache", // inspect/manage the semantic cache
-  "kern_swap", // swap fenced code blocks to per-file signatures
-  "kern_mask_pii", // locally scan text for secrets/PII
-  "kern_fetch_raw_anchor", // re-read truncated anchor output
-  "kern_review", // token-optimised code-review context
-  "kern_graph", // one-call graph context (callers/callees/blast radius)
-  "kern_arch", // architecture overview from call-graph communities
+  "kern_meta", // optional natural-language router → advertised sub-tools
 ])
 
 // filterToolSurface applies the same advertisement rules as the MCP server's
@@ -907,7 +898,7 @@ function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial
     const p = TOOL_PHASES[name] ?? ""
     if (active && p !== "meta" && p !== "cross" && p !== active) continue
     if (allowlist.length > 0 && !allowlist.includes(name)) continue
-// No env override → default to the full 32-tool catalog (same as the MCP
+// No env override → default to the full 34-tool catalog (same as the MCP
 // server, standing mandate 2026-10-23). Shadow built-ins (read/glob/grep/bash)
 // are not kern_* tools
 // and must always stay advertised to keep precedence over the
@@ -1013,7 +1004,7 @@ export default (async ({ directory, $ }) => {
   function etagKey(args: string[]): string {
     const c = callerALS.getStore()
     const caller = c ? `${c.session}/${c.agent}` : ""
-    return JSON.stringify([caller, ...args.filter((a, i) => a !== "--etag" && args[i - 1] !== "--etag")])
+    return JSON.stringify([caller, ...args.filter((a, i) => a !== "--etag" && args[i - 1] !== "--etag" && a !== "--machine")])
   }
   // Record an etag learned from a CLI stderr footer (a line `etag: <64-hex>`)
   // under the call's canonical key. A full response refreshes the entry; a
@@ -1134,12 +1125,14 @@ export default (async ({ directory, $ }) => {
   // the call (operator bypass, glob/grep metachar fallback, or kern
   // unavailable). Best-effort: failures are swallowed so metrics can never
   // break a tool call. Set KERN_ADOPTION_LOG=0 to opt out.
-  const logAdoption = (tool: string, routed: boolean): void => {
+  const logAdoption = (tool: string, routed: boolean, reason?: string): void => {
     if (process.env.KERN_ADOPTION_LOG === "0") return
     try {
       const dir = resolve(directory, ".kern")
       mkdirSync(dir, { recursive: true })
-      appendFileSync(resolve(dir, "adoption.log"), JSON.stringify({ ts: Date.now(), tool, routed }) + "\n")
+      const event: { ts: number; tool: string; routed: boolean; reason?: string } = { ts: Date.now(), tool, routed }
+      if (reason !== undefined) event.reason = reason
+      appendFileSync(resolve(dir, "adoption.log"), JSON.stringify(event) + "\n")
     } catch {
       /* swallow — adoption metrics must never break the tool call */
     }
@@ -1562,9 +1555,10 @@ return run(flags)
       }),
       kern_explore: tool({
         description:
-          "Single-call explore: a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. Replaces three separate calls for 'what touches this and how'.",
+          "Single-call explore: concise symbol summary by default (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns verbatim source, direct call flow, and transitive blast radius in one shot.",
         args: {
           symbol: tool.schema.string(),
+          mode: tool.schema.string().optional(),
           depth: tool.schema.string().optional(),
           max: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
@@ -1596,6 +1590,7 @@ return run(flags)
             return out.join("\n")
           }
           const flags: string[] = ["explore", args.symbol]
+          if (args.mode) flags.push("--mode", args.mode)
           if (args.depth !== undefined) flags.push("--depth", String(args.depth))
           if (args.max !== undefined) flags.push("--max", String(args.max))
           if (args.root) flags.push(args.root)
@@ -1693,6 +1688,25 @@ kern_probe: tool({
           return run(flags)
         },
       }),
+      kern_research: tool({
+        description:
+          "Read-only multi-symbol research: rank task keywords, combine definitions, callers, callees, tests, impact and affected files into one compact evidence bundle. No execution, writes, or network.",
+        args: {
+          task: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          max_tokens: tool.schema.string().optional(),
+          min_confidence: tool.schema.string().optional(),
+          json: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["research", args.task]
+          if (args.max_tokens) flags.push("--max", String(args.max_tokens))
+          if (args.min_confidence) flags.push("--min-confidence", args.min_confidence)
+          if (truthy(args.json)) flags.push("--json")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
       kern_plan_context: tool({
         description:
           "Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable — use json=true for the structured plan.",
@@ -1758,6 +1772,26 @@ kern_probe: tool({
               if (args.root) lflags.push("--root", args.root)
               return run(lflags)
           }
+        },
+      }),
+      kern_skill: tool({
+        description:
+          "Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills).",
+        args: {
+          action: tool.schema.string().describe("catalog|load"),
+          skill: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          if (args.action === "load") {
+            if (!args.skill) return "error: kern_skill action=load requires skill"
+            const flags: string[] = ["skills", "show", args.skill]
+            if (args.root) flags.push("--root", args.root)
+            return run(flags)
+          }
+          const flags: string[] = ["skills", "list"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
         },
       }),
       kern_mask_pii: tool({
@@ -2049,11 +2083,12 @@ kern_run: tool({
           }
 // Simple reads are exempt from kern routing: only non-code files, which
 // kern compact returns empty for anyway.
-if (await isSimpleRead(args.filePath)) {
-            logAdoption("read", false)
+const fastReason = await readFastPathReason(args.filePath)
+if (fastReason !== "") {
+            logAdoption("read", false, fastReason)
             return readFallback(args.filePath)
           }
-          const flags: string[] = ["compact"]
+          const flags: string[] = ["compact", "--machine"]
           if (truthy(args.full) && process.env.KERN_BYPASS === "1") flags.push("--tier", "full")
           flags.push(args.filePath)
           // Same canonical key as kern_compact_file (compact|<path>), so a
@@ -2066,7 +2101,7 @@ if (await isSimpleRead(args.filePath)) {
             // config, data) — never silently show the agent nothing. Fall
             // back to the raw read so the content is always visible.
             if (!compacted || compacted.trim() === "") {
-              logAdoption("read", false)
+              logAdoption("read", false, "non-code")
               return readFallback(args.filePath)
             }
             logAdoption("read", true)
@@ -2089,7 +2124,12 @@ return readFallback(args.filePath)
 // mode: unchanged, the deny below stays.
 if (process.env.KERN_GUARD_MODE === "auto-redirect") {
 try {
-const out = await run(["compact", args.filePath])
+const out = await run(["compact", "--machine", args.filePath])
+if (out.trim() === "") {
+// Not indexable code — serve the raw read rather than an empty redirect.
+logAdoption("read", false, "non-code")
+return readFallback(args.filePath)
+}
 logAdoption("read", true)
 return `${out}\n[kern] read redirected to kern_compact_file`
 } catch {
@@ -2118,7 +2158,7 @@ throw new Error(`Use kern_explore with the file path as symbol (symbolic summary
           // project symbol map — route it to the raw glob so the pattern is
           // honored instead of silently dropped.
           if (/[*?[\]{}]/.test(args.pattern)) {
-            logAdoption("glob", false)
+            logAdoption("glob", false, "native-glob")
             return globFallback(args.pattern, args.path ?? ".")
           }
           try {
@@ -2288,11 +2328,21 @@ bash: tool({
             const subjHash = classify.hash || hashSubject(cmd)
             throw new Error(`kern guard: blocked '${clippedCmd}' — GATE command (write/destructive/network/installer). Ask the operator, then retry byte-identical: run \`kern guard grant '<the exact blocked command>'\` (mints approval appr-<id>), the operator answers \`kern approval ask appr-<id> --root ${root}\` with [1] accept once / [2] accept prefix this session / [3] reject, await the decision with \`kern approval wait appr-<id> --timeout 30m\`, then retry the exact command. Escapes: KERN_BYPASS=1 / KERN_ENFORCE=0. Operator allow-once: kern guard allow ${subjHash} (tty-gated), then retry.`)
           }
+          // ALLOW verdicts run RAW (2026-11-10 guard campaign): a command the
+          // Go source of truth cleared as raw — a version/help probe (go
+          // version, X --help), a compound of content-free segments, or a
+          // path-aware in-tree write — only reached the classifier because
+          // the fast TS isSimpleCommand pre-check missed it. Routing it into
+          // kern build would pay the governed round-trip (and, before the ask
+          // posture, deny it outright) for a command already cleared as raw.
+          if (classify.verdict === "allow") {
+            logAdoption("bash", false)
+            return runRaw(args.command, args.workdir, args.timeout)
+          }
           // READ commands (P1) are SERVED, never denied: a pure-read pipeline
           // has no write/network/destructive surface, so the guard answers it
           // from kern's index (Tier 1/2) or the readonly sandbox (Tier 3).
           // KERN_GUARD_MODE=deny skips the serve and falls to the deny below.
-          // An "allow" verdict (simple content-free) also falls through raw.
           const plan = process.env.KERN_GUARD_MODE === "deny" || classify.verdict !== "serve" ? null : classify
           if (plan) {
             // Tier 1: single translatable read — symbol grep → kern ast
@@ -2305,7 +2355,12 @@ bash: tool({
                 } else if (plan.pattern !== undefined) {
                   out = plan.path ? await run(["search", plan.pattern, "--path", plan.path]) : await run(["ast", plan.pattern])
                 } else if (plan.file !== undefined) {
-                  out = await run(["compact", plan.file])
+                  // --machine: non-indexable code (README, go.mod, a
+                  // CODE_EXTENSIONS file with no grammar) yields an EMPTY
+                  // answer, which must fall through to the raw Tier-3 read
+                  // instead of returning an empty "served" result.
+                  out = await run(["compact", "--machine", plan.file])
+                  if (out.trim() === "") throw new Error("not indexable")
                 }
                 logAdoption("bash", true)
                 return `${out}\n[kern] bash served from kern index (Tier 1: ${plan.head})`
@@ -2351,7 +2406,7 @@ bash: tool({
             try {
               const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
               const wd = args.workdir || directory
-              const { text, exitCode } = await runWithExit(["exec", "--readonly", "--lang", "sh", `cd ${q(wd)} && ${cmd}`], args.timeout)
+              const { text, exitCode } = await runWithExit(["exec", "--readonly", "--quiet", "--lang", "sh", `cd ${q(wd)} && ${cmd}`], args.timeout)
               logAdoption("bash", true)
               const body = exitCode === 0 ? text : `[exit ${exitCode}]\n${text}`
               return `${body}\n[kern] bash read served sandboxed (kern exec --readonly, Tier 3)`

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
-	"github.com/JayveerPrajapati/kern/internal/astrefs"
 	"github.com/JayveerPrajapati/kern/internal/calibrate"
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -21,7 +20,9 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/qualify"
 	"github.com/JayveerPrajapati/kern/internal/refscan"
+	"github.com/JayveerPrajapati/kern/internal/typealias"
 	"github.com/JayveerPrajapati/kern/internal/typeimpact"
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
@@ -421,7 +422,7 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	if ix = s.platform.Index(); ix != nil {
 		if _, d, ok := intel.ResolveEntry(ix, change); ok && d != nil {
 			def = d
-			if tr, exp, isType := typeimpact.TypeImpactRoots(d, ix.Symbols); isType && len(tr) > 0 {
+			if tr, exp, isType := typeimpact.TypeImpactRootsWithIndex(ix, d); isType && len(tr) > 0 {
 				roots = tr
 				typeExpansion = exp
 			}
@@ -460,6 +461,9 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	}
 	classifyCriticality(&rep, dependents)
 	applyReferenceSafetyNet(&rep, ix, def)
+	if len(rep.WhoCalls) == 0 && def != nil {
+		rep.UnboundCallers = qualify.UnboundCallers(ix, *def)
+	}
 	t, rep, text, err := s.finalizeImpact(t, &rep)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
@@ -728,14 +732,19 @@ func classifyCriticality(rep *domain.ImpactReport, dependents []domain.Node) {
 // other packages, and it is the honest interim answer until AST reference
 // edges are persisted in the index (audit P0-1 stage 2).
 func applyReferenceSafetyNet(rep *domain.ImpactReport, ix *index.Index, d *index.Symbol) {
-	if rep == nil || ix == nil || d == nil || rep.Risk != "low" || !refscan.ReferenceOnlyKind(d.Kind) {
+	if rep == nil || ix == nil || d == nil || !refscan.ReferenceOnlyKind(d.Kind) {
 		return
 	}
-	// AST references are the real answer for Go symbols (comments and other
-	// same-named packages cannot inflate them); the file count grades risk on
-	// the same tiers as transitive dependents. Textual is the fallback for
-	// non-Go kinds and for a Go symbol the AST scan cannot see.
-	r := astrefs.Lookup(ix, *d)
+	// AST references are the real answer for kinds the call graph cannot
+	// attribute (types, consts, vars, fields); alias-aware so a Go type alias
+	// reports the aliased declaration's references too. The file count grades
+	// risk on the same tiers as transitive dependents, and it can only RAISE a
+	// graph-derived verdict — never lower it (a type with a couple of callers
+	// but 166 referencing files is not a low-risk change).
+	r := typealias.Lookup(ix, d)
+	if r.Confidence == "" {
+		return
+	}
 	rep.ReferenceFiles = r.Files
 	rep.ReferenceCount = r.Count
 	rep.ReferenceConfidence = r.Confidence
@@ -743,12 +752,17 @@ func applyReferenceSafetyNet(rep *domain.ImpactReport, ix *index.Index, d *index
 		switch {
 		case len(r.Files) >= 10:
 			rep.Risk = "high"
-		case len(r.Files) >= 3:
+		case len(r.Files) >= 3 && rep.Risk == "low":
 			rep.Risk = "medium"
-		default:
-			rep.Risk = "low"
 		}
-		rep.RiskDetail = fmt.Sprintf("%d AST-verified %s reference(s) in %d file(s)", r.Count, d.Kind, len(r.Files))
+		if rep.RiskDetail == "" {
+			rep.RiskDetail = fmt.Sprintf("%d AST-verified %s reference(s) in %d file(s)", r.Count, d.Kind, len(r.Files))
+		}
+		return
+	}
+	// Textual is the fallback for non-Go kinds and for a Go symbol the AST
+	// scan cannot see; it is never stated as resolved.
+	if rep.Risk != "low" {
 		return
 	}
 	rep.Risk = "unknown"
@@ -1010,6 +1024,8 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 
 	// Tests: required validation + covering tests from the packet.
 	plan.Tests = append(plan.Tests, pkt.RequiredValidation...)
+	plan.ExpectedTestCommand = expectedTestCommand(pkt, targetDir)
+	plan.ApprovalRequirement = approvalRequirement(pkt, plan.Risk)
 
 	// Rollback: deterministic from risk level.
 	switch plan.Risk {
@@ -1036,6 +1052,63 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	}
 
 	return plan
+}
+
+// expectedTestCommand derives a bounded, deterministic Go test command from the
+// affected packet files (plus a concrete target directory when the intent names
+// one). More than five affected packages collapses to ./... rather than
+// producing an unbounded command line. Non-Go plans leave the field empty.
+func expectedTestCommand(pkt domain.ContextPacket, targetDir string) string {
+	dirs := map[string]bool{}
+	if targetDir != "" {
+		dirs[targetDir] = true
+	}
+	for _, f := range pkt.Files {
+		if !strings.HasSuffix(f.Path, ".go") {
+			continue
+		}
+		if i := strings.LastIndexByte(f.Path, '/'); i >= 0 {
+			dirs[f.Path[:i]] = true
+		} else {
+			dirs["."] = true
+		}
+	}
+	if len(dirs) == 0 {
+		return ""
+	}
+	pkgs := make([]string, 0, len(dirs))
+	for dir := range dirs {
+		if dir == "." {
+			pkgs = append(pkgs, ".")
+		} else {
+			pkgs = append(pkgs, "./"+dir)
+		}
+	}
+	sort.Strings(pkgs)
+	if len(pkgs) > 5 {
+		return "go test -count=1 ./..."
+	}
+	return "go test -count=1 " + strings.Join(pkgs, " ")
+}
+
+// approvalRequirement states the governance-facing requirement without changing
+// any gate: an explicit HIGH/CRITICAL risk or ApprovalRequired flag means human
+// approval before execution; lower tiers still run through the normal command
+// firewall, hooks, and audit path.
+func approvalRequirement(pkt domain.ContextPacket, risk string) string {
+	for _, r := range pkt.Risks {
+		if r.ApprovalRequired || r.Level == domain.RiskHigh || r.Level == domain.RiskCritical {
+			return "approval required before governed execution"
+		}
+	}
+	switch risk {
+	case "high":
+		return "approval required before governed execution"
+	case "medium":
+		return "approval required for commands outside the configured allowlist; all governance gates remain active"
+	default:
+		return "no pre-approval required; governed execution still passes command, hook, and audit gates"
+	}
 }
 
 // intentRenameRe detects an explicit rename intent ("rename X to Y") so the

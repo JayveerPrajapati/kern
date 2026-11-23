@@ -35,6 +35,32 @@ func treesitterEnabled() bool { return true }
 // out and falls back to regex heuristics.
 func TreesitterEnabled() bool { return treesitterEnabled() }
 
+// tsGrammarCanonicalCount is the number of distinct CANONICAL languages the
+// compiled grammar map covers — the count behind the README's "13 of the 18
+// languages use deep tree-sitter grammars" claim and the doctor's
+// capabilities line. It is derived from tsLanguageMap, not hardcoded: the map
+// has more keys than canonical languages because typescript/tsx are one
+// language and bash is the grammar for shell. Computed once at init.
+var tsGrammarCanonicalCount = func() int {
+	canonical := map[string]bool{}
+	for lang := range tsLanguageMap {
+		switch lang {
+		case "tsx":
+			canonical["typescript"] = true
+		case "bash":
+			canonical["shell"] = true
+		default:
+			canonical[lang] = true
+		}
+	}
+	return len(canonical)
+}()
+
+// TreesitterGrammarCount reports how many canonical languages this build's
+// tree-sitter grammars cover (0 when tree-sitter is not compiled in). The
+// doctor renders it, so the capabilities line can never drift from the map.
+func TreesitterGrammarCount() int { return tsGrammarCanonicalCount }
+
 // tsLanguageMap maps kern language IDs to tree-sitter Language pointers.
 var tsLanguageMap = map[string]*sitter.Language{"go": sitter.NewLanguage(tree_sitter_go.Language()),
 	"python":     sitter.NewLanguage(tree_sitter_python.Language()),
@@ -403,6 +429,15 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 				if symKind != "method" && symKind != "func" {
 					sym.Outer = langparse.FindReceiver(n, node, src)
 				}
+				// Rust impl blocks: identity is the implemented type plus the
+				// normalized header, so several impls for one type in one file
+				// stay distinct (see langparse.ImplIdentity).
+				if kind == "impl_item" {
+					if selfType, disc := langparse.ImplNodeIdentity(n, src); selfType != "" {
+						sym.Name = selfType
+						sym.Outer = disc
+					}
+				}
 				// Find the receiver for methods; promote class-contained funcs.
 				if symKind == "method" || symKind == "func" {
 					if recv := langparse.FindReceiver(n, node, src); recv != "" {
@@ -411,6 +446,13 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 						// The receiver class's own parent (WD-6d): same-named
 						// nested classes hold same-named methods.
 						sym.Outer = outerOfClass(n, node, src)
+						// A method in a Rust impl block inherits that block's
+						// discriminator: several `impl From<X> for Failure`
+						// blocks each hold `fn from`, distinct declarations
+						// with the same receiver type.
+						if disc := langparse.EnclosingImplDisc(n, node, src); disc != "" {
+							sym.Outer = disc
+						}
 					} else if symKind == "method" {
 						sym.Kind = "func"
 					}

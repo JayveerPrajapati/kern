@@ -180,14 +180,12 @@ func isAgentPresent(root string, d agentDetector) bool {
 // wireInstructions writes the kern-first policy block into each detected
 // agent's instruction file, creating the file if missing. Each written
 // file receives an idempotency marker so re-running setup doesn't duplicate.
-// The variant matches WireAgentRules: when the instruction file's host GLOBAL
-// slot carries the kern-managed block (the full rules then load once
-// globally), the thin wiring-only text is used so the same rules are not
-// loaded twice in one session; otherwise the full rules are written. wired
-// names the agents this run wired, used by the thin variant's wiring-facts
-// line. explicitThin mirrors WireAgentRules: a thin variant resolved by the
-// global-managed DEFAULT never downgrades an existing FULL rules file
-// (keep-full contract); only an explicit choice does.
+// T-05 compact policy (2026-11-19): the thin core text is the default
+// everywhere — it is self-sufficient, so the instruction files match the
+// AGENTS.md variant. wired names the agents this run wired, used by the
+// thin variant's wiring-facts line. explicitThin mirrors WireAgentRules:
+// a thin variant resolved by default never downgrades an existing FULL
+// rules file (keep-full contract); only an explicit choice does.
 func wireInstructions(root string, agents []string, wired string, explicitThin bool) []Status {
 	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
 	if err != nil {
@@ -205,10 +203,7 @@ func wireInstructions(root string, agents []string, wired string, explicitThin b
 			out = append(out, Status{Agent: agent + "-instruction", Note: err.Error()})
 			continue
 		}
-		text := rulesText
-		if agentwire.HostGlobalManaged(file) {
-			text = agentwire.ThinAGENTSmd(wired)
-		}
+		text := agentwire.ThinAGENTSmd(wired)
 		// Keep-full contract: a thin variant resolved by the global-managed default must
 		// not downgrade an existing FULL rules file — an unrequested default
 		// never silently deletes the full usage rules.

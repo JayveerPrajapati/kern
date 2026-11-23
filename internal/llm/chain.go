@@ -3,7 +3,10 @@ package llm
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ChainProvider tries a list of providers in order and returns the first
@@ -12,6 +15,22 @@ import (
 type ChainProvider struct {
 	providers []Provider
 	names     []string
+}
+
+func chainTimeout() time.Duration {
+	if v := os.Getenv("KERN_LLM_CHAIN_TIMEOUT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 30 * time.Second
+}
+
+func chainContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, chainTimeout())
 }
 
 // NewChainProvider builds a chain over the given providers.
@@ -30,6 +49,8 @@ func (c *ChainProvider) Providers() []Provider { return c.providers }
 // provider fails, the error names each one's failure so callers (and users)
 // see exactly what was tried — the opposite of a silent no-op.
 func (c *ChainProvider) Generate(ctx context.Context, system, user string, opts Options) (string, error) {
+	ctx, cancel := chainContext(ctx)
+	defer cancel()
 	if len(c.providers) == 0 {
 		return "", fmt.Errorf("llm: no provider available in the chain")
 	}
@@ -55,6 +76,8 @@ func (c *ChainProvider) Generate(ctx context.Context, system, user string, opts 
 // Embed tries each provider in order (only providers with embedding
 // capability can succeed).
 func (c *ChainProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+	ctx, cancel := chainContext(ctx)
+	defer cancel()
 	var errs []string
 	for i, p := range c.providers {
 		if !p.Capabilities().Embed {
@@ -78,6 +101,8 @@ func (c *ChainProvider) Embed(ctx context.Context, text string) ([]float32, erro
 // instead of thousands. When no chained provider batches, the error makes the
 // caller fall back to per-text embedding.
 func (c *ChainProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	ctx, cancel := chainContext(ctx)
+	defer cancel()
 	if len(texts) == 0 {
 		return nil, nil
 	}

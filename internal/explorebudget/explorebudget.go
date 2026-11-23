@@ -29,12 +29,12 @@ func Render(r *intel.ExploreReport, maxTokens int) string {
 	// real sizes.
 	var notes strings.Builder
 	if r.Symbol != r.Resolved {
-		how := "fuzzy match"
-		switch {
-		case r.Resolved == r.Symbol || strings.HasSuffix(r.Resolved, "."+r.Symbol):
+		how := r.ResolveHow
+		if how == "" {
+			how = "fuzzy match"
+		}
+		if r.Resolved == r.Symbol || strings.HasSuffix(r.Resolved, "."+r.Symbol) {
 			how = "exact name"
-		case strings.ContainsAny(r.Symbol, "./") && strings.HasSuffix(r.Symbol, "."+simpleName(r.Resolved)):
-			how = "package-qualified match"
 		}
 		fmt.Fprintf(&notes, "resolved %s -> %s (%s)\n", r.Symbol, r.Resolved, how)
 	}
@@ -48,8 +48,12 @@ func Render(r *intel.ExploreReport, maxTokens int) string {
 	}
 	head := fmt.Sprintf("symbol: %s (%s %s:%d)\n\n", r.Resolved, r.Definition.Kind, r.Definition.File, r.Definition.Line)
 	callees := filterNoiseCallees(r, r.Callees)
+	callers := r.Callers
+	if len(callers) == 0 && r.UnboundCallers > 0 {
+		callers = []string{fmt.Sprintf("(none attributed — %d call site(s) use the bare name %q, which is declared in more than one file; pass a qualified name)", r.UnboundCallers, r.Definition.Name)}
+	}
 	lists := []*listSec{
-		newListSec(fmt.Sprintf("== callers (%d, unique simple names of direct callers) ==\n", len(r.Callers)), r.Callers, r.CallerConf, r.CallerSynth, r.CallerLocs),
+		newListSec(fmt.Sprintf("== callers (%d, unique simple names of direct callers) ==\n", len(r.Callers)), callers, r.CallerConf, r.CallerSynth, r.CallerLocs),
 		newListSec(fmt.Sprintf("== callees (%d) ==\n", len(callees)), callees, r.CalleeConf, r.CalleeSynth, nil),
 		newListSec(fmt.Sprintf("== blast radius (%d symbols, %d files) ==\n", len(r.BlastRadius), len(r.BlastFiles)), r.BlastRadius, nil, nil, nil),
 		newListSec("== affected files ==\n", r.BlastFiles, nil, nil, nil),

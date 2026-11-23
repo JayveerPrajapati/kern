@@ -234,32 +234,10 @@ func TildePath(p string) string {
 // exists — setup never creates new rule files unprompted.
 var HostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
 
-// HostGlobalManaged reports whether the GLOBAL slot corresponding to a
-// project rule file name carries an INTACT kern-managed block — not just
-// the markers (deep-verify L5-8: a gutted-but-marked slot used to count as
-// managed, the repo AGENTS.md then went thin, and no rules loaded anywhere,
-// silently). The content between the markers must match the canonical
-// condensed rules modulo the version stamp; a mismatch degrades to "not
-// managed" so the repo file carries the full rules (safe: they load,
-// merely redundantly) and doctor flags the slot. The mapping follows file
-// basenames: CLAUDE.md → ~/.claude/CLAUDE.md, GEMINI.md →
-// ~/.gemini/GEMINI.md, AGENTS.md → both AGENTS-named global slots
-// (~/.codex/AGENTS.md and the opencode global AGENTS.md — all of those
-// hosts merge global + project AGENTS.md, so any intact managed slot
-// justifies the thin repo file). Files without a matching global slot
-// (kern.md, instruction docs) report false and always carry the full
-// rules.
-func HostGlobalManaged(name string) bool {
-	for _, p := range GlobalRulesPaths() {
-		if filepath.Base(p) != name {
-			continue
-		}
-		if GlobalSlotCarriesCanonicalRules(p) {
-			return true
-		}
-	}
-	return false
-}
+// (HostGlobalManaged was removed with the T-05 compact policy: the repo
+// file no longer depends on the host global slot's state — THIN is the
+// default everywhere. GlobalSlotCarriesCanonicalRules remains as the
+// doctor-facing global-slot integrity check.)
 
 // GlobalSlotCarriesCanonicalRules verifies a global slot's managed block is
 // intact: markers present AND the content between them matching the
@@ -309,21 +287,19 @@ func NormalizeManagedBlock(s string) string {
 	return strings.TrimRight(StampLineRe.ReplaceAllString(s, ""), "\n")
 }
 
-// RulesVariant resolves the variant for ONE project rule file: an explicit
-// choice (--agents-md flag or a persisted .kern/config.json preference) wins;
-// the default writes thin only when the corresponding host global slot
-// carries the kern-managed block — the full rules then load once via the
-// global slot, so a thin repo file avoids loading the same rules twice — and
-// full otherwise (an absent or unmanaged global slot means the repo file is
-// the only delivery, so the full rules must be there).
-func RulesVariant(name, mode string, explicitThin bool) string {
+// RulesVariant resolves the variant for a project rule file. The T-05
+// compact policy (2026-11-19): THIN is the default everywhere — the core
+// block (ThinAGENTSmd) is self-sufficient, so the repo file stays <=2KB
+// regardless of whether the host's global slot carries the managed rules.
+// Only a persisted/explicit "full" (the --agents-md choice) opts a repo
+// into the long policy. An existing FULL rules file is still never
+// downgraded without an explicit choice (WireThinRulesFile's keep-full
+// contract), so this default changes only fresh wires.
+func RulesVariant(mode string) string {
 	if mode == "full" {
 		return "full"
 	}
-	if explicitThin || HostGlobalManaged(name) {
-		return "thin"
-	}
-	return "full"
+	return "thin"
 }
 
 // WireRuleVariant writes one project rule file in the resolved variant. The
@@ -334,7 +310,7 @@ func RulesVariant(name, mode string, explicitThin bool) string {
 // across `kern setup` runs); an explicit thin choice still downgrades, and a
 // fresh root in a global-managed environment still wires thin.
 func WireRuleVariant(root, name, mode, wired string, explicitThin bool) Status {
-	if RulesVariant(name, mode, explicitThin) == "thin" {
+	if RulesVariant(mode) == "thin" {
 		return WireThinRulesFile(root, name, wired, explicitThin)
 	}
 	return WireRulesFile(root, name)

@@ -47,7 +47,17 @@ func (ix *Index) callersViaCatalog(symbol Symbol) []string {
 	// them directly is equivalent and allocation-free.
 	for _, position := range catalog.byEndpoint[identity] {
 		call := catalog.records[position]
-		if (call.edge.SourceFile != "" || call.edge.Synth != "") && call.to.ID == identity && call.from.ID != identity {
+		// An edge counts when the catalog bound it uniquely to this
+		// declaration (to.ID == identity is set only for a single-candidate
+		// binding). No SourceFile/Synth requirement: unsourced name-level
+		// edges (e.g. Python calls extracted from default-arg expressions
+		// such as FastAPI Depends(get_db)) bind here exactly as the graph
+		// path (Index.Neighborhood via byEndpoint) renders them — requiring
+		// provenance made impact/explore answer "0 callers, low risk" for
+		// a symbol every route depends on while graph listed all callers
+		// (F-C1, 2026-11-22 dogfood campaign). Ambiguous bindings keep
+		// their ref: IDs and stay excluded.
+		if call.to.ID == identity && call.from.ID != identity {
 			callers = append(callers, call.from.Name)
 		}
 	}

@@ -49,6 +49,9 @@ func CoChangeContext(ctx context.Context, root, from, to string) (*CoChangeRepor
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := validateRangeSides(from, to); err != nil {
+		return nil, err
+	}
 	args := []string{"-C", root, "log", "--name-only", "--pretty=format:"}
 	if from != "" || to != "" {
 		if to == "" {

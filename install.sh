@@ -7,10 +7,13 @@
 #   install.sh [install]   download + verify + install (fail-loud per step)
 #   install.sh upgrade      compare installed vs target, swap if older
 #   install.sh update       alias of upgrade
-#   install.sh uninstall    remove binaries (+ prefix-scoped PATH lines);
-#                           --machine also removes ~/AGENTS.md kern block,
-#                           machine secrets (<UserConfigDir>/kern), and
-#                           ~/.cache/kern; --yes skips prompt
+#   install.sh uninstall    the full reversal: agent/git hooks, MCP, rules,
+#                           skills, editor wiring, ~/AGENTS.md kern block,
+#                           ~/.kern, machine secrets, cache, binaries and
+#                           this prefix's PATH lines; --prefix-only keeps it
+#                           to binaries + PATH (CI/scratch installs);
+#                           --machine is a compatibility alias of the
+#                           default; --yes skips prompt
 #   install.sh status       installed version, path, platform
 #
 # Every step prints a "✔ ..." line as it succeeds, so a `curl | sh` run
@@ -59,11 +62,14 @@
 #   KERN_FORCE_PUREGO=1     skip the prebuilt `-full` (tree-sitter) asset probe
 #                           and use the pure-Go prebuilt asset
 #                           (kern-<os>-<arch>.tar.gz / .zip) instead.
+#   KERN_AUTO_WIRE=1        opt in to machine-wide agent wiring after install;
+#                           --wire does the same for one invocation. Wiring is
+#                           never implicit: the default installs binaries only.
 #
 # Behavior kept from the previous installer: prebuilt tarballs with a
 # `go install` fallback when no asset exists for the platform, both old
-# (kern-<os>-<arch>/ subdirectory) and new (archive-root) layouts, PATH
-# rc management, and agent auto-wiring after install.
+# (kern-<os>-<arch>/ subdirectory) and new (archive-root) layouts, and PATH
+# rc management. Agent wiring is an explicit opt-in.
 #
 # macOS Gatekeeper: after every copy the installer re-signs (adhoc) and
 # strips quarantine/provenance xattrs, then PROBES kern-mcp with a real
@@ -84,11 +90,15 @@ API_URL="${KERN_API_URL:-https://api.github.com/repos/${REPO}}"
 OP="install"
 ASSUME_YES=0
 MACHINE="${KERN_UNINSTALL_MACHINE:-0}"
+PREFIX_ONLY="${KERN_UNINSTALL_PREFIX_ONLY:-0}"
+WIRE="${KERN_AUTO_WIRE:-0}"
 for arg in "$@"; do
   case "$arg" in
     install|upgrade|update|uninstall|status) OP="$arg" ;;
     --yes|-y) ASSUME_YES=1 ;;
     --machine) MACHINE=1 ;;
+    --prefix-only) PREFIX_ONLY=1 ;;
+    --wire) WIRE=1 ;;
     *) echo "kern: unknown argument '$arg' (operations: install | upgrade | update | uninstall | status)" >&2; exit 1 ;;
   esac
 done
@@ -550,7 +560,7 @@ wired_summary() {
   box_line "kern doctor       check wiring and index health"
   box_line "kern setup        add shared config to a team repo"
   box_line ""
-  box_line "Opt out of auto-wiring: KERN_AUTO_WIRE=0 when installing"
+  box_line "Opt in to wiring: rerun install with --wire"
   if [ "$PATH_WAS_SET" != "1" ]; then
     box_line ""
     box_line "Open a NEW terminal so the updated PATH applies."
@@ -562,8 +572,8 @@ wired_summary() {
 # global hooks, global rules and global git ignore (`kern setup --global-only
 # --global-rules`). It writes NO file in any repo — a repo initializes itself
 # when an agent first works in it (the global rules tell the agent to call
-# kern_buddy, and the MCP server builds the index on first use). Set
-# KERN_AUTO_WIRE=0 to install the binaries only. Idempotent; an upgrade
+# kern_buddy, and the MCP server builds the index on first use). Wiring is
+# opt-in via --wire or KERN_AUTO_WIRE=1. Idempotent; an upgrade
 # refreshes the same user-level assets (plugin and hook scripts ship inside
 # the binary). $1 = kern binary, $2 = install | upgrade.
 wire() {
@@ -573,7 +583,7 @@ wire() {
     warn "binary not executable at $kern_bin; skipping auto-wire — run 'kern setup --global-only' manually"
     return 0
   fi
-  if [ "${KERN_AUTO_WIRE:-1}" = "0" ]; then
+  if [ "$WIRE" != "1" ]; then
     next_steps
     return 0
   fi
@@ -859,8 +869,10 @@ cmd_status() {
 cmd_uninstall() {
   # Call-time env re-read: sourcing harnesses invoke `KERN_UNINSTALL_MACHINE=1
   # cmd_uninstall` the same way they use ASSUME_YES (the arg parser only runs
-  # when the script is dispatched, not sourced).
+  # when the script is dispatched, not sourced). --machine is a compatibility
+  # alias: the full uninstall below is the default now.
   if [ "${KERN_UNINSTALL_MACHINE:-0}" = "1" ]; then MACHINE=1; fi
+  if [ "${KERN_UNINSTALL_PREFIX_ONLY:-0}" = "1" ]; then PREFIX_ONLY=1; fi
   platform="$(os_arch 2>/dev/null)" || platform=""
   os="${platform%-*}"
   if [ "$os" = "windows" ]; then
@@ -868,18 +880,34 @@ cmd_uninstall() {
   else
     exe=""
   fi
+  # Locate the kern binary BEFORE anything else: the wiring and data removal
+  # must run while it still exists (command -v first, then this prefix).
+  kern_bin=""
+  if ! kern_bin="$(command -v kern 2>/dev/null)"; then
+    [ -x "$PREFIX/kern" ] && kern_bin="$PREFIX/kern"
+  fi
   echo "kern uninstall — removes:"
   for b in kern kern-mcp; do
     [ -f "$PREFIX/$b${exe}" ] && echo "  $PREFIX/$b${exe}"
   done
-  if [ "$MACHINE" = "1" ]; then
-    [ -f "$HOME/AGENTS.md" ] && grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null && echo "  kern-managed block in ~/AGENTS.md"
+  if [ "$PREFIX_ONLY" = "1" ]; then
+    echo "  PATH rc lines for this prefix only"
+    echo "  (CI/scratch mode: agent wiring, ~/.kern, machine secrets and caches stay —"
+    echo "   removing those is the default uninstall)"
+  else
+    if [ -n "$kern_bin" ]; then
+      echo "  global agent/git hooks, MCP, rules, skills, editor wiring"
+      echo "  kern-managed block in ~/AGENTS.md (non-kern content preserved, backup first)"
+    fi
+    [ -d "$HOME/.kern" ] && echo "  ~/.kern (indexes, approvals, audit, memory)"
     [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/kern" ] && echo "  ${XDG_CONFIG_HOME:-$HOME/.config}/kern"
     [ -d "$HOME/.cache/kern" ] && echo "  ~/.cache/kern"
     [ -d "$HOME/Library/Application Support/kern" ] && echo "  ~/Library/Application Support/kern (machine secrets)"
-  else
-    echo "  (prefix-scoped: PATH rc lines for this prefix only — pass --machine to also"
-    echo "   remove ~/AGENTS.md, machine secrets, and ~/.cache/kern)"
+    echo "  PATH rc lines for this prefix only (another prefix's lines always survive)"
+    echo ""
+    echo "requires separate project cleanup (never auto-discovered):"
+    echo "  each repository's .kern/, .mcp.json and AGENTS.md wiring — e.g. this one:"
+    echo "    kern setup --remove --project --root \"$PWD\""
   fi
   if [ "$ASSUME_YES" != "1" ]; then
     printf 'Proceed? [y/N] '
@@ -889,14 +917,35 @@ cmd_uninstall() {
       *) echo "aborted — nothing removed"; exit 0 ;;
     esac
   fi
+  if [ "$PREFIX_ONLY" != "1" ]; then
+    # Wiring + user data BEFORE deleting the binary: hooks that outlive the
+    # binary block every agent session, and `kern setup` needs the binary.
+    # Fail-closed: a failed removal aborts before anything is deleted, with
+    # the repair command — never a half-uninstall without its repair tool.
+    # A binary that predates --data falls back to plain wiring removal; the
+    # direct data cleanup below then guarantees the end state either way.
+    if [ -n "$kern_bin" ]; then
+      if "$kern_bin" setup --remove --data --yes --plain; then
+        step "removed kern wiring and user data"
+      elif "$kern_bin" setup --remove --yes --plain; then
+        warn "installed kern predates --data — wiring removed; removing user data directly"
+      else
+        die "kern setup --remove failed — nothing was deleted; repair with: $kern_bin setup --remove --data --yes (then re-run this uninstall)"
+      fi
+    else
+      warn "no kern binary found — removing user data directly (agent wiring edits are skipped; re-run this uninstall after a fresh install if any remain)"
+    fi
+  fi
   for b in kern kern-mcp; do
     rm -f "$PREFIX/$b${exe}" && step "removed $PREFIX/$b${exe}"
   done
-  if [ "$MACHINE" = "1" ]; then
+  if [ "$PREFIX_ONLY" != "1" ]; then
     # ~/AGENTS.md: back up first, then excise EXACTLY the kern-managed block
     # (both formats), preserving every non-kern byte. Messages are honest: the
     # file is only deleted when it contained nothing but the kern block, and
-    # the backup path is always reported.
+    # the backup path is always reported. (A modern `setup --remove --data`
+    # above already did this — the guards make it a quiet no-op then; this
+    # direct pass guarantees the end state for old and missing binaries.)
     if [ -f "$HOME/AGENTS.md" ]; then
       if grep -qE "^# kern usage rules|^<!-- kern:global-rules begin" "$HOME/AGENTS.md" 2>/dev/null; then
         if ! cp "$HOME/AGENTS.md" "$HOME/AGENTS.md.kern-uninstall.bak"; then
@@ -929,41 +978,44 @@ cmd_uninstall() {
     if [ -d "$HOME/.cache/kern" ]; then
       rm -rf "$HOME/.cache/kern" && step "removed ~/.cache/kern"
     fi
+    # ~/.kern: the state home (indexes, approvals, audit, memory, git hooks).
+    # Same belt-and-braces contract as the blocks above: `setup --remove
+    # --data` removes it first when it can; this direct pass guarantees the
+    # end state regardless of the installed binary's vintage.
+    if [ -d "$HOME/.kern" ]; then
+      rm -rf "$HOME/.kern" && step "removed ~/.kern (kern state home)"
+    fi
   fi
-  # PATH rc lines — best-effort, idempotent. F4 (2026-10-28): a prefix-scoped
-  # uninstall must only remove the marker/export pair that names THIS prefix
-  # (a scratch KERN_INSTALL_DIR uninstall previously stripped marker lines
-  # belonging to the real install, orphaning its exports). --machine keeps
-  # the historical sweep: every kern-installer marker plus this prefix's
-  # exports.
+  # PATH rc lines — best-effort, idempotent. F4 (2026-10-28): the uninstall
+  # only removes the marker/export pair that names THIS prefix (a scratch
+  # KERN_INSTALL_DIR uninstall previously stripped marker lines belonging to
+  # the real install, orphaning its exports). This holds in full mode too:
+  # another prefix's lines always survive.
   pfx_line_prefix="export PATH=\"$PREFIX:"
   for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
     [ -f "$rc" ] || continue
-    if [ "$MACHINE" = "1" ]; then
-      if grep -qF "# added by kern installer" "$rc" 2>/dev/null; then
-        grep -vF "# added by kern installer" "$rc" | grep -vF "$pfx_line_prefix" > "$rc.kern-new" 2>/dev/null \
-          && mv "$rc.kern-new" "$rc" \
-          && step "removed kern PATH lines from $rc"
-      fi
-    else
-      # Scoped: only rewrite an rc that actually references this prefix, and
-      # drop a marker line only when its adjacent export names this prefix.
-      if grep -qF "$pfx_line_prefix" "$rc" 2>/dev/null; then
-        awk -v pfx="$pfx_line_prefix" '
-          { L[NR] = $0 }
-          END {
-            for (i = 1; i <= NR; i++) {
-              if (substr(L[i], 1, length(pfx)) == pfx) continue
-              if (L[i] == "# added by kern installer" && substr(L[i+1], 1, length(pfx)) == pfx) continue
-              print L[i]
-            }
-          }' "$rc" > "$rc.kern-new" 2>/dev/null \
-          && mv "$rc.kern-new" "$rc" \
-          && step "removed kern PATH lines for $PREFIX from $rc"
-      fi
+    # Scoped: only rewrite an rc that actually references this prefix, and
+    # drop a marker line only when its adjacent export names this prefix.
+    if grep -qF "$pfx_line_prefix" "$rc" 2>/dev/null; then
+      awk -v pfx="$pfx_line_prefix" '
+        { L[NR] = $0 }
+        END {
+          for (i = 1; i <= NR; i++) {
+            if (substr(L[i], 1, length(pfx)) == pfx) continue
+            if (L[i] == "# added by kern installer" && substr(L[i+1], 1, length(pfx)) == pfx) continue
+            print L[i]
+          }
+        }' "$rc" > "$rc.kern-new" 2>/dev/null \
+        && mv "$rc.kern-new" "$rc" \
+        && step "removed kern PATH lines for $PREFIX from $rc"
     fi
   done
-  echo "kern uninstalled. (Per-project wiring: delete .mcp.json / AGENTS.md in each project root.)"
+  if [ "$PREFIX_ONLY" = "1" ]; then
+    echo "kern prefix removed (binaries + PATH lines only — agent wiring and machine state untouched)."
+  else
+    echo "kern uninstalled. Per-project cleanup (each repo): kern setup --remove --project --root <dir>."
+    echo "Re-install any time: the install.sh one-liner, then kern setup."
+  fi
 }
 
 # preflight_shim is the deliberately dumb fallback for OLD kern binaries

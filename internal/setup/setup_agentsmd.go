@@ -15,10 +15,9 @@ func agentsMDConfigPath(root string) string {
 }
 
 // agentsMDMode resolves the repo AGENTS.md variant for a run: a missing or
-// malformed config file and an absent key all fall back to "thin" — which
-// agentwire.WireAgentRules then resolves PER FILE (agentwire.RulesVariant):
-// thin when the corresponding host's global slot carries the kern-managed
-// block, full otherwise. Only a persisted "full" forces the full variant.
+// malformed config file and an absent key all fall back to "thin" — the
+// T-05 compact core policy, the default everywhere. A persisted "full"
+// opts the repo into the long policy.
 func agentsMDMode(root string) string {
 	b, err := os.ReadFile(agentsMDConfigPath(root))
 	if err != nil {

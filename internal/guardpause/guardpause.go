@@ -419,7 +419,46 @@ type Diagnostic struct {
 // DoctorFindings returns the guard state checks (disable switches, active
 // pauses) as diagnostics — doctor renders them without owning the logic.
 func DoctorFindings(root string) []Diagnostic {
-	return []Diagnostic{CheckSwitches(root), CheckPause(root)}
+	return []Diagnostic{CheckSwitches(root), CheckPause(root), CheckStale()}
+}
+
+// CheckStale reports expired records still on disk. They are ignored by the
+// runtime and pruned on the next registry mutation; this makes that hygiene
+// visible instead of leaving a misleading expired JSONL line behind.
+func CheckStale() Diagnostic {
+	path, err := Path()
+	if err != nil {
+		return Diagnostic{Check: "guard-pause-registry", Level: "warn", Detail: "could not locate pause registry: " + err.Error()}
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Diagnostic{Check: "guard-pause-registry", Level: "ok", Detail: "pause registry has no stale records"}
+	}
+	if err != nil {
+		return Diagnostic{Check: "guard-pause-registry", Level: "warn", Detail: "could not inspect pause registry: " + err.Error()}
+	}
+	now := time.Now().UTC()
+	stale := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var p Pause
+		if json.Unmarshal([]byte(line), &p) != nil || p.Schema != Schema {
+			continue
+		}
+		exp, perr := time.Parse(time.RFC3339, p.Expires)
+		if perr != nil {
+			continue
+		}
+		if !exp.After(now) {
+			stale++
+		}
+	}
+	if stale == 0 {
+		return Diagnostic{Check: "guard-pause-registry", Level: "ok", Detail: "pause registry has no stale records"}
+	}
+	return Diagnostic{Check: "guard-pause-registry", Level: "warn", Detail: fmt.Sprintf("%d expired pause record(s) remain on disk; they are ignored and pruned on the next registry write", stale)}
 }
 
 // CheckSwitches reports the un-audited agent-hook disable switches. It keeps
@@ -434,8 +473,13 @@ func CheckSwitches(root string) Diagnostic {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Diagnostic{Check: "guard-switches", Level: "warn", Detail: "could not inspect .kern/off: " + err.Error()}
 	}
-	if _, err := os.Stat(filepath.Join(root, ".kern", "indexing")); err == nil {
-		warns = append(warns, filepath.Join(root, ".kern", "indexing")+" (first index in progress; hook guard intentionally fails open)")
+	indexingPath := filepath.Join(root, ".kern", "indexing")
+	if info, err := os.Stat(indexingPath); err == nil {
+		if indexingMarkerActive(indexingPath, info) {
+			warns = append(warns, indexingPath+" (first index in progress; hook guard intentionally fails open)")
+		} else {
+			warns = append(warns, indexingPath+" (stale marker from a crashed build; ignored by the 15-minute guard — remove it to silence this warning)")
+		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Diagnostic{Check: "guard-switches", Level: "warn", Detail: "could not inspect .kern/indexing: " + err.Error()}
 	}
@@ -443,6 +487,28 @@ func CheckSwitches(root string) Diagnostic {
 		return Diagnostic{Check: "guard-switches", Level: "ok", Detail: "no agent hook disable switches active"}
 	}
 	return Diagnostic{Check: "guard-switches", Level: "warn", Detail: strings.Join(warns, " | ")}
+}
+
+// indexingMarkerActive reports whether a .kern/indexing marker is fresh enough
+// to open the agent hook guard. The marker is normally a file; older releases
+// also wrote a directory. Both shapes are accepted so doctor and the guard use
+// the same 15-minute rule.
+func indexingMarkerActive(path string, info os.FileInfo) bool {
+	cutoff := time.Now().Add(-15 * time.Minute)
+	if !info.IsDir() {
+		return info.ModTime().After(cutoff)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		entryInfo, err := entry.Info()
+		if err == nil && entryInfo.ModTime().After(cutoff) {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckPause reports an active pause without implying that exec governance

@@ -213,10 +213,36 @@ func EnsureMDCFrontmatter(s string) string {
 // a kern whose rules changed) is flagged for a `kern setup --global-rules`
 // refresh — marker presence alone used to hide rules-less slots from
 // doctor (deep-verify L5-8).
+// globalRulesHostTag names the host whose global instructions slot a path is,
+// so per-slot status rows are distinguishable without printing full paths.
+func globalRulesHostTag(path string) string {
+	p := filepath.ToSlash(path)
+	switch {
+	case strings.Contains(p, "/.claude/"):
+		return "claude"
+	case strings.Contains(p, "/.codex/"):
+		return "codex"
+	case strings.Contains(p, "/opencode/"):
+		return "opencode"
+	case strings.Contains(p, "/.cursor/"):
+		return "cursor"
+	case strings.Contains(p, "/.gemini/"):
+		return "gemini"
+	case strings.Contains(p, "/.codeium/"):
+		return "windsurf"
+	case strings.Contains(p, "/.github/"):
+		return "copilot"
+	}
+	return filepath.Base(path)
+}
+
 func GlobalRulesStatus() []Status {
 	var out []Status
 	for _, p := range GlobalRulesPaths() {
-		st := FileStatus(p, "global rules")
+		// Label each slot by its host: seven identical "global rules" rows
+		// made `kern setup --check` look like it printed duplicates
+		// (2026-11-10 campaign).
+		st := FileStatus(p, "global rules ("+globalRulesHostTag(p)+")")
 		if st.Installed {
 			if b, err := os.ReadFile(p); err == nil && strings.Contains(string(b), GlobalRulesMarkerOpen) &&
 				!GlobalSlotCarriesCanonicalRules(p) {

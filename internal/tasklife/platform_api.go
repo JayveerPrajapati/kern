@@ -28,9 +28,22 @@ import (
 // The composition root (internal/app.Platform) satisfies it without method
 // changes; the interface is the ONLY coupling between the two packages.
 type PlatformAPI interface {
+	PlatformRoot
+	PlatformReader
+	PlatformAnalysis
+	PlatformCorrelation
+	PlatformCodeContext
+}
+
+// PlatformRoot is the minimal constructor surface needed by stores.
+type PlatformRoot interface {
 	// Root returns the project root the platform was built for.
 	Root() string
-	// Index returns the shared prebuilt index (read-only).
+}
+
+// PlatformReader exposes the read-only shared platform state used by
+// analysis and correlation.
+type PlatformReader interface {
 	Index() *index.Index
 	// Graph returns the shared twin-merged knowledge graph (read-only).
 	Graph() *intel.Graph
@@ -40,26 +53,35 @@ type PlatformAPI interface {
 	Firewall() *governance.Firewall
 	// RuntimeSource returns the optional runtime source (may be nil).
 	RuntimeSource() runtime.Source
-	// ContextEngine returns the shared context engine.
 	ContextEngine() *context.Engine
+}
+
+// PlatformAnalysis runs deterministic analysis and verification.
+type PlatformAnalysis interface {
 	// Analyze runs the context engine against a proposed change.
 	Analyze(change string) (domain.ContextPacket, string, error)
 	// Risk runs the context engine and returns the focused risk view.
 	Risk(change string) (domain.ContextPacket, string, error)
 	// WhatIf simulates a hypothetical change against the knowledge graph.
 	WhatIf(kind whatif.ChangeKind, change, newTarget string) (whatif.Impact, string, error)
-	// Verify runs the verification engine against the requested types.
 	Verify(types []string, opts ...verification.Option) verdict.VerificationResult
+}
+
+// PlatformCorrelation links runtime alerts to code.
+type PlatformCorrelation interface {
 	// CorrelateCode runs the incident→twin→code correlation.
 	CorrelateCode(alert domain.Alert) (Correlation, error)
-	// CodeContext assembles the grounded project context for the coder.
+}
+
+// PlatformCodeContext assembles the grounded context consumed by the coder.
+type PlatformCodeContext interface {
 	CodeContext(intent, plan string) (string, error)
 }
 
 // resolveSymbol normalizes a change description into a bare symbol name. It is
 // the tasklife-side copy of the platform's resolver (moved with the cluster so
 // tasklife stays self-contained); it operates on the PlatformAPI surface only.
-func resolveSymbol(api PlatformAPI, change string) (string, bool, error) {
+func resolveSymbol(api PlatformReader, change string) (string, bool, error) {
 	if !strings.ContainsAny(change, " \t") {
 		if api.Graph() == nil {
 			return change, false, nil

@@ -276,11 +276,18 @@ func (s *TaskService) engineForTask(t *agent.Task) *agent.WorkflowEngine {
 // gate was resolved out-of-band (e.g. `kern approve`) — and drives the
 // remaining steps to completion.
 func (s *TaskService) RunWorkflowResume(taskID string) (*agent.Task, error) {
+	return s.RunWorkflowResumeContext(context.Background(), taskID)
+}
+
+// RunWorkflowResumeContext is RunWorkflowResume with caller cancellation. The
+// in-process and cross-process paths both thread ctx into WorkflowEngine so a
+// disconnected caller cannot leave post-approval execution steps running.
+func (s *TaskService) RunWorkflowResumeContext(ctx context.Context, taskID string) (*agent.Task, error) {
 	s.wfMu.Lock()
 	run, ok := s.workflowRuns[taskID]
 	s.wfMu.Unlock()
 	if ok {
-		return s.runWorkflow(run.task, run.engine)
+		return s.runWorkflowContext(ctx, run.task, run.engine)
 	}
 	// Cross-process resume: recover the task from the TaskStore.
 	stored, err := s.store.Get(taskID)
@@ -289,7 +296,7 @@ func (s *TaskService) RunWorkflowResume(taskID string) (*agent.Task, error) {
 	}
 	task := stored
 	eng := s.engineForTask(&task)
-	return s.runWorkflow(&task, eng)
+	return s.runWorkflowContext(ctx, &task, eng)
 }
 
 // runStoredWorkflowContext is runStoredWorkflow with caller cancellation,
