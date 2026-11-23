@@ -62,14 +62,23 @@ func TestSummaryRender(t *testing.T) {
 }
 
 func TestSummaryRenderUnknownLang(t *testing.T) {
-	// a file with no detectable language is NOT indexable
-	// code — Render must say so explicitly instead of returning empty (an
-	// agent reading an empty kern_compact_file result cannot tell "no
-	// symbols" from "tool broken").
+	// A file with no detectable language is NOT indexable code. Render returns
+	// the EMPTY string: the interception surfaces (plugin + guard) use empty
+	// output as the "serve this read raw" signal, so a human-facing note here
+	// would silently break every non-code read.
 	sum := Summary{Path: "notes.txt", Language: "", Lines: 3}
-	out := sum.Render()
-	if !strings.Contains(out, "notes.txt") || !strings.Contains(out, "not indexable code") || !strings.Contains(out, "3 lines") {
-		t.Fatalf("expected an explicit not-indexable note, got %q", out)
+	if out := sum.Render(); out != "" {
+		t.Fatalf("expected an empty machine signal for non-indexable input, got %q", out)
+	}
+}
+
+func TestNotIndexableNote(t *testing.T) {
+	// The human explanation lives in the presentation helper, not in Render.
+	note := NotIndexableNote("notes.txt", []byte("a\nb\nc"))
+	for _, want := range []string{"notes.txt", "not indexable code", "3 lines"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("expected %q in not-indexable note, got %q", want, note)
+		}
 	}
 }
 

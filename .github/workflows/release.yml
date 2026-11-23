@@ -36,6 +36,14 @@ jobs:
     # release binaries must carry — see the top of this file).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Release manifest matches tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python3 scripts/check-release-manifest.py
+            exit 0
+          fi
+          tag="${GITHUB_REF#refs/tags/}"
+          python3 scripts/check-release-manifest.py --tag "$tag"
       - name: Changelog entry exists for tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -221,6 +229,7 @@ jobs:
               -e "s|__KERN_SHA256__|${sha}|" \
               -e "s|JayveerPrajapati/kern|${{ github.repository }}|g" \
               homebrew/kern.rb > kern.rb
+          python3 scripts/check-release-manifest.py --tag "$tag" --brew-formula kern.rb
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 

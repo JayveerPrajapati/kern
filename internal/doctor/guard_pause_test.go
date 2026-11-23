@@ -56,3 +56,42 @@ func TestCheckGuardPause(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckGuardStalePauseRegistry(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var finding Finding
+	for _, d := range guardpause.DoctorFindings(root) {
+		if d.Check == "guard-pause-registry" {
+			finding = Finding{Check: d.Check, Level: d.Level, Detail: d.Detail}
+		}
+	}
+	if finding.Check != "guard-pause-registry" || finding.Level != "ok" || !strings.Contains(finding.Detail, "no stale records") {
+		t.Fatalf("clean registry finding = %+v", finding)
+	}
+
+	registry := filepath.Join(home, ".kern", "guard", "pauses.jsonl")
+	if err := os.MkdirAll(filepath.Dir(registry), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := fmt.Sprintf(
+		`{"schema_version":%q,"scope":"repo","root":%q,"reason":"stale","expires":%q,"recorded":%q}`+"\n",
+		guardpause.Schema,
+		root,
+		time.Now().Add(-time.Minute).Format(time.RFC3339),
+		time.Now().Add(-time.Hour).Format(time.RFC3339),
+	)
+	if err := os.WriteFile(registry, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	finding = Finding{}
+	for _, d := range guardpause.DoctorFindings(root) {
+		if d.Check == "guard-pause-registry" {
+			finding = Finding{Check: d.Check, Level: d.Level, Detail: d.Detail}
+		}
+	}
+	if finding.Level != "warn" || !strings.Contains(finding.Detail, "1 expired pause record") {
+		t.Fatalf("stale registry finding = %+v", finding)
+	}
+}

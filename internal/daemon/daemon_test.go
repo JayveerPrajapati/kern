@@ -1,12 +1,63 @@
 package daemon
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain lets this test binary double as the `kern daemon serve` child
+// that Ensure's production spawn path detaches: Ensure execs os.Executable()
+// with "daemon serve --root ROOT", and under `go test` that executable is
+// this binary. KERN_TEST_DAEMON_VERSION carries the identity version the
+// child must serve with (the real child takes it from its build stamp);
+// KERN_DAEMON_IDLE, set by the spawning test, bounds the child's life if
+// the test dies before stopping it.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "daemon" && os.Getenv("KERN_TEST_DAEMON_VERSION") != "" {
+		root := ""
+		for i := 1; i < len(os.Args)-1; i++ {
+			if os.Args[i] == "--root" {
+				root = os.Args[i+1]
+			}
+		}
+		if root == "" {
+			os.Exit(2)
+		}
+		if err := Serve(root, os.Getenv("KERN_TEST_DAEMON_VERSION"), func([]string) Response { return Response{Exit: 0} }); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// captureStderr swaps os.Stderr for the duration of fn and returns what was
+// written to it. The implicit-autostart notice is stderr-only, so its
+// regression test has to observe the real stream the production code uses.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+		_ = r.Close()
+	}()
+	fn()
+	_ = w.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
 
 // waitSocket blocks until Serve answers a ping (or the test times out). A
 // bare os.Stat is not enough: a stale socket FILE from a crash must not count
@@ -156,5 +207,67 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return")
+	}
+}
+
+// TestEnsureImplicitStartNotifiesOnce pins F-C2: an implicitly auto-started
+// daemon announces itself with exactly one stderr line naming the pid and
+// the stop command, and a warm daemon (second invocation) emits nothing.
+func TestEnsureImplicitStartNotifiesOnce(t *testing.T) {
+	if !Supported() {
+		t.Skip("daemon unsupported on this platform")
+	}
+	t.Setenv("KERN_DAEMON_IDLE", "30s") // leak bound: the child self-exits even if this test dies
+	t.Setenv("KERN_TEST_DAEMON_VERSION", "v-ensure")
+	root := t.TempDir()
+	out := captureStderr(t, func() {
+		if err := Ensure(root, "v-ensure"); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "[kern] background daemon started (pid ") {
+		t.Fatalf("implicit autostart must emit exactly one notice line, got %d: %q", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "`kern daemon stop` to stop") {
+		t.Fatalf("notice must name the stop command: %q", lines[0])
+	}
+	resp, err := Status(root)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(lines[0], "pid "+FormatPid(resp.Pid)) {
+		t.Fatalf("notice pid does not match the running daemon: %q vs pid %d", lines[0], resp.Pid)
+	}
+	// Second Ensure finds the warm daemon: no second notice.
+	quiet := captureStderr(t, func() {
+		if err := Ensure(root, "v-ensure"); err != nil {
+			t.Fatalf("second Ensure: %v", err)
+		}
+	})
+	if quiet != "" {
+		t.Fatalf("warm daemon must not re-notify, got %q", quiet)
+	}
+	if err := Stop(root); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// TestServeExplicitStartIsSilent pins the other half of F-C2: an explicit
+// `kern daemon serve` (what a user types) never prints the autostart notice.
+func TestServeExplicitStartIsSilent(t *testing.T) {
+	if !Supported() {
+		t.Skip("daemon unsupported on this platform")
+	}
+	root := t.TempDir()
+	out := captureStderr(t, func() {
+		go Serve(root, "v-explicit", func([]string) Response { return Response{Exit: 0} })
+		waitSocket(t, root)
+	})
+	if strings.Contains(out, "background daemon started") {
+		t.Fatalf("explicit Serve must stay silent, got %q", out)
+	}
+	if err := Stop(root); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 }

@@ -187,3 +187,34 @@ func TestScanFilePythonSliceNotIPV6(t *testing.T) {
 		t.Fatalf("public IPv6 in real code must still be flagged, got %+v", real)
 	}
 }
+
+func TestScanFileModulePathNotIPV6(t *testing.T) {
+	t.Parallel()
+	// Rust module paths share the `::` separator with compressed IPv6.
+	src := []byte(`use std::path::PathBuf;
+pub enum Error {
+	#[error("failed to parse config at {path}: {source}")]
+	ParseConfig {
+		path: PathBuf,
+		#[source]
+		source: toml::de::Error,
+	},
+}
+`)
+	for _, f := range ScanFile("crates/densic-core/src/error.rs", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "IPV6") {
+			t.Fatalf("rust module path flagged as ipv6 secret: %+v", f)
+		}
+	}
+	// Positive control: a full IPv6 literal in code still fires.
+	real := ScanFile("net.go", []byte("upstream := 2001:db8:85a3::8a2e:370:7334\n"))
+	caught := false
+	for _, f := range real {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IPV6") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("full IPv6 in real code must still be flagged, got %+v", real)
+	}
+}

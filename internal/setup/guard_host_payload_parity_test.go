@@ -47,13 +47,19 @@ func hostPayloadContracts(readme, source string) []hostPayloadContract {
 		{name: "antigravity non-code read", payload: antigravityPayload("view_file", "AbsolutePath", readme), wantExit: 0},
 		{name: "kiro non-code read", payload: standardPayload("read", "path", readme), wantExit: 0},
 
+		{name: standardHosts + " exact line read", payload: strings.Replace(standardPayload("Read", "file_path", source), `}`, `,"start_line":1,"end_line":1}`, 1), wantExit: 0},
+		{name: "gemini missing read", payload: standardPayload("read_file", "file_path", filepath.Join(filepath.Dir(source), "missing.go")), wantExit: 0},
+
 		{name: standardHosts + " grep", payload: standardPayload("Grep", "pattern", "Alpha"), env: deny, wantExit: 2, wantStderr: "kern_search", wantEvent: "kern-guard-deny", wantSubject: "Alpha"},
 		{name: "gemini grep", payload: standardPayload("grep", "pattern", "Alpha"), env: deny, wantExit: 2, wantStderr: "kern_search", wantEvent: "kern-guard-deny", wantSubject: "Alpha"},
 		{name: "antigravity grep", payload: antigravityPayload("grep_search", "Pattern", "Alpha"), env: deny, wantExit: 2, wantStderr: "kern_search", wantEvent: "kern-guard-deny", wantSubject: "Alpha"},
+		{name: standardHosts + " regex grep", payload: standardPayload("Grep", "pattern", "func [A-Z]"), wantExit: 0},
+		{name: "gemini regex grep", payload: standardPayload("grep", "pattern", "kern usage rules"), wantExit: 0},
+		{name: "antigravity regex grep", payload: antigravityPayload("grep_search", "Pattern", "func [A-Z]"), wantExit: 0},
 
-		{name: standardHosts + " glob", payload: standardPayload("Glob", "pattern", "**/*.go"), env: deny, wantExit: 2, wantStderr: "kern_buddy", wantEvent: "kern-guard-deny"},
-		{name: "gemini list_files", payload: standardPayload("list_files", "pattern", "**/*.go"), env: deny, wantExit: 2, wantStderr: "kern_buddy", wantEvent: "kern-guard-deny"},
-		{name: "antigravity find_by_name", payload: antigravityPayload("find_by_name", "Pattern", "**/*.go"), env: deny, wantExit: 2, wantStderr: "kern_buddy", wantEvent: "kern-guard-deny"},
+		{name: standardHosts + " glob", payload: standardPayload("Glob", "pattern", "**/*.go"), wantExit: 0},
+		{name: "gemini list_files", payload: standardPayload("list_files", "pattern", "**/*.go"), wantExit: 0},
+		{name: "antigravity find_by_name", payload: antigravityPayload("find_by_name", "Pattern", "**/*.go"), wantExit: 0},
 
 		{name: standardHosts + " safe bash", payload: standardPayload("Bash", "command", "pwd"), wantExit: 0},
 		{name: "gemini safe bash", payload: standardPayload("run_shell_command", "command", "git status"), wantExit: 0},
@@ -85,7 +91,7 @@ func TestGuardHostPayloadParity(t *testing.T) {
 	if err := os.WriteFile(readme, []byte("# fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(source, []byte("package fixture\n"), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte("package fixture\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	script := writeGuardScriptFile(t)

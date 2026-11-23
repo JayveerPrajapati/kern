@@ -364,12 +364,12 @@ func TestDocsStateMCPToolCount(t *testing.T) {
 	// it states the count once, in the KERN_MCP_FULL line. The embedded
 	// asset stays the FAT template `kern setup` writes to projects — both of
 	// its count claims stay pinned against the live catalog too.
-	check("AGENTS thin full-mode note", agents, `KERN_MCP_FULL=1 for all `+want+`\b`)
+	check("AGENTS thin full-mode note", agents, "KERN_MCP_FULL=1` for all "+want+" individual")
 	emb, err := rulesFS.ReadFile("assets/AGENTS.md")
 	if err != nil {
 		t.Fatalf("read embedded AGENTS.md: %v", err)
 	}
-	check("AGENTS asset kern_meta section", string(emb), `among `+want+` individual `+"`kern_\\*`"+` tools`)
+	check("AGENTS asset direct-tool section", string(emb), "KERN_MCP_FULL=1` for all "+want+" individual `kern_\\*` tools")
 	check("AGENTS asset catalog section", string(emb), `ships `+want+` `+"`kern_\\*`"+` MCP tools`)
 }
 
@@ -502,7 +502,7 @@ func TestDocToolCountsDerived(t *testing.T) {
 					continue
 				}
 				switch n {
-				case full, def, hl:
+				case full, def, hl, 1:
 					// live-derived: the only numbers allowed in a
 					// tool-count position
 				default:
@@ -549,7 +549,7 @@ func TestDocToolCountsDerived(t *testing.T) {
 // default surface, from the "focused N-tool default surface" claim to
 // the "full N-tool catalog" sentence that follows it.
 func readmeDefaultSection(readme string) string {
-	begin := regexp.MustCompile(`advertises the \*\*full \d+-tool catalog\*\*`)
+	begin := regexp.MustCompile(`advertises a \*\*direct eleven-tool surface\*\*`)
 	end := regexp.MustCompile(`\*The \d+ \*\*\(default\)\*\* tools are`)
 	b := begin.FindStringIndex(readme)
 	if b == nil {
@@ -1128,6 +1128,44 @@ func TestMCPDocumentationCountsParity(t *testing.T) {
 func TestWireScaffoldsKernConfig(t *testing.T) {
 	dir := t.TempDir()
 	Wire(dir, nil, false, false)
+
+	markerPath := filepath.Join(dir, ".kern", "config.json")
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("missing explicit managed-project marker: %v", err)
+	}
+	var cfg struct {
+		SchemaVersion int  `json:"schema_version"`
+		Managed       bool `json:"managed"`
+		Guard         struct {
+			Enabled bool `json:"enabled"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal(marker, &cfg); err != nil {
+		t.Fatalf("malformed managed-project marker: %v", err)
+	}
+	if !cfg.Managed || !cfg.Guard.Enabled || cfg.SchemaVersion != 1 {
+		t.Fatalf("marker = %s, want schema 1, managed=true, guard.enabled=true", marker)
+	}
+	// The marker must upgrade an existing config without clobbering custom keys.
+	if err := os.WriteFile(markerPath, []byte(`{"schema_version":1,"llm":{"model":"custom"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Wire(dir, nil, false, false)
+	marker, _ = os.ReadFile(markerPath)
+	var upgraded struct {
+		Managed bool `json:"managed"`
+		Guard   struct {
+			Enabled bool `json:"enabled"`
+		} `json:"guard"`
+		LLM map[string]string `json:"llm"`
+	}
+	if err := json.Unmarshal(marker, &upgraded); err != nil {
+		t.Fatalf("malformed upgraded marker: %v", err)
+	}
+	if !upgraded.Managed || !upgraded.Guard.Enabled || upgraded.LLM["model"] != "custom" {
+		t.Fatalf("upgraded marker = %s, want managed/guard enabled and custom llm preserved", marker)
+	}
 
 	profilesPath := filepath.Join(dir, ".kern", "profiles.json")
 	b, err := os.ReadFile(profilesPath)

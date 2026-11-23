@@ -2,15 +2,15 @@
 # cover-floor — enforce the aggregate statement-coverage floor from a profile.
 #
 # Codecov's project status is advisory here (fail_ci_if_error: false and the
-# status is not in ci-ok), so this is the enforceable floor. It is set a few
-# points under the measured baseline (71.3% on 2026-10-28) so ordinary
+# status is not in ci-ok), so this is the enforceable floor. It is set just
+# under the measured baseline (71.3% on 2026-10-28) so ordinary
 # platform noise does not trip it, while a wholesale deleted package does.
 #
 # Usage: bash scripts/cover-floor.sh [coverage.out]
 set -euo pipefail
 
 profile=${1:-coverage.out}
-floor=${KERN_COVER_FLOOR:-68}
+floor=${KERN_COVER_FLOOR:-70}
 
 if [ ! -f "$profile" ]; then
   echo "cover-floor: missing profile $profile" >&2

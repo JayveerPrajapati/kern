@@ -1,3 +1,8 @@
+//go:build !race
+
+// Performance gates are excluded from -race builds: race instrumentation
+// distorts the wall-clock and CPU budgets these tests are calibrated against.
+
 package intel
 
 // latency_budget_test.go makes the "sub-100ms index-backed query" claim

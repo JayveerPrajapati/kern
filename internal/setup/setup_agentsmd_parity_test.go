@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,11 +76,50 @@ func TestAgentRulesToolListMatchesCatalog(t *testing.T) {
 		}
 		// The count literals in the same paragraph must match the live sets:
 		// the full catalog size and the default-surface size.
-		if !strings.Contains(text, fmt.Sprintf("among %d individual", full)) {
-			t.Errorf("%s: AGENTS.md missing \"among %d individual\" count (catalog is %d tools)", label, full, full)
+		if !strings.Contains(text, fmt.Sprintf("for all %d individual", full)) {
+			t.Errorf("%s: AGENTS.md missing \"for all %d individual\" count (catalog is %d tools)", label, full, full)
 		}
 		if cm := surfaceCountRe.FindStringSubmatch(text); cm == nil || cm[1] != fmt.Sprintf("%d", len(toolsurface.Default)) {
 			t.Errorf("%s: \"Default surface: N tools\" count = %v, want %d", label, cm, len(toolsurface.Default))
+		}
+	}
+}
+
+// TestAgentRulesExecPostureMatchesSource pins the exec-posture sentences to
+// internal/governance/exec.go's documented default: KERN_EXEC_POSTURE=ask
+// (LOW/MEDIUM audited, HIGH/CRITICAL mint an approval), with closed restoring
+// the strict fail-closed posture. The previous text claimed exec "fails
+// closed without KERN_ALLOW_EXEC" — that describes only the closed posture
+// and told every installed agent the wrong safety model. The repo copy must
+// also stay byte-identical to the embedded asset, or `kern setup` silently
+// rewrites it on the next run.
+func TestAgentRulesExecPostureMatchesSource(t *testing.T) {
+	emb, err := agentwire.RulesFS().ReadFile("assets/AGENTS.md")
+	if err != nil {
+		t.Fatalf("read embedded AGENTS.md: %v", err)
+	}
+	repo, err := os.ReadFile(filepath.Join("..", "..", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read repo AGENTS.md: %v", err)
+	}
+	// The repo root may intentionally use the thin variant while the embedded
+	// asset remains the full template (see TestAGENTSMdParity). Only a full
+	// root must stay byte-identical; a thin root still carries the same
+	// execution-posture contract checked below.
+	thin := bytes.Contains(repo, []byte("kern usage rules — thin"))
+	if !thin && !bytes.Equal(emb, repo) {
+		t.Fatal("repo AGENTS.md and embedded asset diverged — kern setup would rewrite the repo copy; edit the asset and copy it")
+	}
+	sources := map[string]string{"embedded": string(emb), "repo": string(repo)}
+	for label, text := range sources {
+		if !strings.Contains(text, "KERN_EXEC_POSTURE=ask") {
+			t.Errorf("%s: rules never name the default KERN_EXEC_POSTURE=ask", label)
+		}
+		if !strings.Contains(text, "KERN_EXEC_POSTURE=closed") {
+			t.Errorf("%s: rules never name KERN_EXEC_POSTURE=closed as the strict posture", label)
+		}
+		if strings.Contains(text, "fails closed without") {
+			t.Errorf("%s: rules still claim exec fails closed by default (closed-posture wording)", label)
 		}
 	}
 }

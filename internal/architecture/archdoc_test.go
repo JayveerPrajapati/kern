@@ -57,6 +57,13 @@ func TestArchitectureDocParity(t *testing.T) {
 				f.Subsystem, f.Violations)
 		}
 	}
+	// Bidirectional gate: a Go package dir with no row of its own and no
+	// ancestor row is an ungoverned subsystem — the exact hole that let
+	// internal/duplication ship unlisted (one-directional parity would have
+	// kept passing forever).
+	if len(report.Unlisted) > 0 {
+		t.Errorf("Go package dirs missing from the ledger (no own row, no ancestor row): %v — add rows to ARCHITECTURE.md + docs/architecture/ledger-details.md, or nest under a listed subsystem", report.Unlisted)
+	}
 	// Sanity: the ast parser captures every import form (grouped, single,
 	// aliased, dot) and every nested path, so it must validate strictly more
 	// internal-import declarations than the old bare-quoted-line scan (~855
@@ -225,6 +232,50 @@ func TestCheckArchDocParityTwoFileLedger(t *testing.T) {
 	}
 	if beta.LOC > beta.Cap || len(beta.Violations) != 0 {
 		t.Errorf("beta should be healthy, got LOC %d/%d violations %v", beta.LOC, beta.Cap, beta.Violations)
+	}
+}
+
+// TestCheckArchDocParityUnlistedDirs proves the bidirectional half of the
+// gate: a Go package dir with no row of its own and no ancestor row is
+// reported as Unlisted (the internal/duplication hole), while a subpackage
+// under a listed subsystem and a test-only dir that IS listed stay silent.
+func TestCheckArchDocParityUnlistedDirs(t *testing.T) {
+	root := writeLedgerFixture(t)
+	// internal/orphan: a real package with no row anywhere → unlisted.
+	if err := os.MkdirAll(filepath.Join(root, "internal", "orphan"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "orphan", "o.go"), []byte("package orphan\n\nvar X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// internal/alpha/leaf: a subpackage whose ancestor internal/alpha HAS a
+	// row — governed by the subtree measurement, must NOT be unlisted.
+	if err := os.MkdirAll(filepath.Join(root, "internal", "alpha", "leaf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "alpha", "leaf", "l.go"), []byte("package leaf\n\nvar Y = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// cmd/binary: a cmd tree package with no row → unlisted (cmd/kern-mcp
+	// was exactly this before it got a row).
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cmd", "binary", "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := CheckArchDocParity(root)
+	if err != nil {
+		t.Fatalf("fixture with orphan dirs must parse cleanly: %v", err)
+	}
+	want := []string{"cmd/binary", "internal/orphan"}
+	if len(report.Unlisted) != len(want) {
+		t.Fatalf("Unlisted = %v, want %v", report.Unlisted, want)
+	}
+	for i := range want {
+		if report.Unlisted[i] != want[i] {
+			t.Fatalf("Unlisted = %v, want %v", report.Unlisted, want)
+		}
 	}
 }
 

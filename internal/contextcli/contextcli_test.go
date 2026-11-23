@@ -2,12 +2,16 @@ package contextcli
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // These tests cover the `kern context` and `kern guard` command families
@@ -511,7 +515,7 @@ func (b *Bus) enqueueDeadLetter(e string) {}
 				t.Fatalf("unexpected panic: %v", r)
 			}
 		}()
-		out = captureStdout(t, func() { runContextCLI([]string{"enqueue", root}) })
+		out = captureStdout(t, func() { runContextCLI([]string{"enqueue", root, "--mode", "evidence"}) })
 	}()
 	if !strings.Contains(out, "enqueueDeadLetter") {
 		t.Fatalf("expected auto-resolved symbol context, got:\n%s", out)
@@ -565,4 +569,210 @@ func (b *Bus) enqueueDeadLetter(e string) {}
 		}()
 		runContextCLI([]string{"zzz_nonexistent_symbol", root})
 	}()
+}
+
+// TestContextConciseModeCountsAndRisk pins the new concise default: counts +
+// risk only, no line-numbered source.
+func TestContextConciseModeCountsAndRisk(t *testing.T) {
+	root := contextSymbolFixture(t, `// enqueueDeadLetter routes an event to the dead-letter queue.
+func (b *Bus) enqueueDeadLetter(e string) {}
+`)
+	out := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root}) })
+	for _, want := range []string{"callers:", "callees:", "blast:", "risk:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("concise context missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestContextEvidenceModeKeepsFullSlice pins the evidence passthrough: the
+// full line-numbered slice is still available behind --mode evidence.
+func TestContextEvidenceModeKeepsFullSlice(t *testing.T) {
+	root := contextSymbolFixture(t, `// enqueueDeadLetter routes an event to the dead-letter queue.
+func (b *Bus) enqueueDeadLetter(e string) {}
+`)
+	out := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root, "--mode", "evidence"}) })
+	if !strings.Contains(out, "enqueueDeadLetter") || !strings.Contains(out, "callers:") {
+		t.Fatalf("evidence context missing expected content:\n%s", out)
+	}
+	if !strings.Contains(out, "1: ") {
+		t.Fatalf("evidence context should include line-numbered source:\n%s", out)
+	}
+}
+
+// TestGuardCheckCommandShapedRootHint pins the usage guard for the common
+// `kern guard check '<command>'` typo: check takes a ROOT path, so a
+// command-shaped positional must exit 2 with the classify hint instead of
+// indexing the command string as a root.
+func TestGuardCheckCommandShapedRootHint(t *testing.T) {
+	defer func() {
+		r := recover()
+		e, ok := r.(exitError)
+		if !ok || e.code != 2 {
+			t.Fatalf("expected exitError{code:2} for a command-shaped root, got %v", r)
+		}
+	}()
+	runGuardCLI([]string{"check", "rm -rf /tmp/x"})
+}
+
+func TestCommandShapedRoot(t *testing.T) {
+	for _, s := range []string{".", "./web", "/abs/path", "sub/dir", "a-b_c"} {
+		if commandShapedRoot(s) {
+			t.Errorf("%q: plain path misread as a command", s)
+		}
+	}
+	for _, s := range []string{"rm -rf x", "git commit -m 'x'", "echo $HOME", "cat <f", "--json"} {
+		if !commandShapedRoot(s) {
+			t.Errorf("%q: command-shaped string not detected", s)
+		}
+	}
+}
+
+// oldConciseNoFooter rebuilds the pre-fast-path concise output (report +
+// optional rename + token footer) and strips the footer, giving the exact
+// text the fast path must reproduce byte-for-byte.
+func oldConciseNoFooter(t *testing.T, root, orig string) string {
+	t.Helper()
+	ix, err := loadOrBuild(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, ok := resolveContextSymbol(ix, orig)
+	if !ok {
+		resolved = orig
+	}
+	evidence := ix.Context(resolved, 12)
+	if evidence == "" {
+		t.Fatalf("fixture broken: ix.Context(%q) is empty", resolved)
+	}
+	out, ok := conciseContext(ix, orig, resolved, evidence)
+	if !ok {
+		t.Fatalf("fixture broken: conciseContext(%q) failed", resolved)
+	}
+	if i := strings.LastIndex(out, "\ntokens: "); i >= 0 {
+		out = out[:i]
+	}
+	return out
+}
+
+// TestContextConciseFastPathMatchesFullRenderer pins the fast path to the
+// existing concise renderer: same header, counts, risk and resolved note
+// byte-for-byte, with the old evidence-slice token footer intentionally
+// omitted (the slice is never built).
+func TestContextConciseFastPathMatchesFullRenderer(t *testing.T) {
+	root := contextSymbolFixture(t, `func (b *Bus) enqueueDeadLetter(e string) {}`)
+	out := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root}) })
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("output missing trailing newline: %q", out)
+	}
+	got := strings.TrimSuffix(out, "\n")
+	if got != oldConciseNoFooter(t, root, "enqueueDeadLetter") {
+		t.Fatalf("fast-path concise output diverged from renderer:\n--- fast ---\n%s\n--- old ---\n%s",
+			got, oldConciseNoFooter(t, root, "enqueueDeadLetter"))
+	}
+	if strings.Contains(got, "tokens:") {
+		t.Errorf("fast concise must omit the evidence token footer:\n%s", got)
+	}
+	if strings.Contains(got, "1: ") {
+		t.Errorf("fast concise must not include a line-numbered source slice:\n%s", got)
+	}
+	for _, want := range []string{"# resolved", "callers:", "callees:", "blast:", "risk:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fast concise missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestContextConciseFastPathFallsBackOnSummaryError forces the summary builder
+// to fail and asserts the command still returns the existing concise output
+// (including its token footer) instead of erroring or printing nothing.
+func TestContextConciseFastPathFallsBackOnSummaryError(t *testing.T) {
+	root := contextSymbolFixture(t, `func (b *Bus) enqueueDeadLetter(e string) {}`)
+	orig := contextSummaryFor
+	contextSummaryFor = func(*index.Index, string) (*intel.ContextSummary, error) {
+		return nil, errors.New("forced summary failure")
+	}
+	defer func() { contextSummaryFor = orig }()
+
+	out := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root}) })
+	if !strings.Contains(out, "callers:") || !strings.Contains(out, "risk:") {
+		t.Fatalf("fallback path did not render concise counts:\n%s", out)
+	}
+	ix, err := loadOrBuild(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := resolveContextSymbol(ix, "enqueueDeadLetter")
+	want, ok := conciseContext(ix, "enqueueDeadLetter", resolved, ix.Context(resolved, 12))
+	if !ok {
+		t.Fatal("fixture broken: fallback conciseContext failed")
+	}
+	// Compare the render body; the footer's baseline token count includes the
+	// disambiguation header the real run prepends, which this direct
+	// reconstruction does not model.
+	stripFooter := func(s string) string {
+		if i := strings.LastIndex(s, "\ntokens: "); i >= 0 {
+			return s[:i]
+		}
+		return strings.TrimSuffix(s, "\n")
+	}
+	if stripFooter(out) != stripFooter(want) {
+		t.Fatalf("fallback output diverged from existing path:\n--- got ---\n%q\n--- want ---\n%q", out, want)
+	}
+}
+
+// TestContextFastPathRoutingExclusions proves the summary path is never
+// entered for modes that shape or transport the evidence: JSON, lens,
+// profile, terse-code, etag, evidence and full.
+func TestContextFastPathRoutingExclusions(t *testing.T) {
+	root := contextSymbolFixture(t, `func (b *Bus) enqueueDeadLetter(e string) {}`)
+	orig := contextSummaryFor
+	calls := 0
+	contextSummaryFor = func(ix *index.Index, s string) (*intel.ContextSummary, error) {
+		calls++
+		return orig(ix, s)
+	}
+	defer func() { contextSummaryFor = orig }()
+
+	cases := [][]string{
+		{"enqueueDeadLetter", root, "--json"},
+		{"enqueueDeadLetter", root, "--lens", "security"},
+		{"enqueueDeadLetter", root, "--profile", "action-first"},
+		{"enqueueDeadLetter", root, "--terse-code"},
+		{"enqueueDeadLetter", root, "--etag", "deadbeef"},
+		{"enqueueDeadLetter", root, "--mode", "evidence"},
+		{"enqueueDeadLetter", root, "--mode", "full"},
+	}
+	for _, args := range cases {
+		calls = 0
+		out := captureStdout(t, func() { runContextCLI(args) })
+		if calls != 0 {
+			t.Errorf("%v entered the summary fast path (%d call(s))", args, calls)
+		}
+		if strings.TrimSpace(out) == "" {
+			t.Errorf("%v produced no output", args)
+		}
+	}
+
+	// JSON keeps the full evidence slice inside the "context" field.
+	calls = 0
+	jsonOut := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root, "--json"}) })
+	m := assertValidJSON(t, jsonOut)
+	ctx, _ := m["context"].(string)
+	if !strings.Contains(ctx, "1: ") {
+		t.Errorf("--json context must keep the evidence slice:\n%s", ctx)
+	}
+	if calls != 0 {
+		t.Errorf("--json entered the summary fast path")
+	}
+
+	// Evidence mode keeps the line-numbered slice.
+	calls = 0
+	ev := captureStdout(t, func() { runContextCLI([]string{"enqueueDeadLetter", root, "--mode", "evidence"}) })
+	if !strings.Contains(ev, "1: ") {
+		t.Errorf("--mode evidence must keep the line-numbered slice:\n%s", ev)
+	}
+	if calls != 0 {
+		t.Errorf("--mode evidence entered the summary fast path")
+	}
 }

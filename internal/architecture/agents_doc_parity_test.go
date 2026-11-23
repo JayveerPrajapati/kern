@@ -19,7 +19,7 @@ import (
 // surface this guard pins.
 var (
 	surfaceRe = regexp.MustCompile(`Default surface:\s*(\d+)\s*tools?\s*\(([^)]*)\)`)
-	fullRe    = regexp.MustCompile(`KERN_MCP_FULL=1 for all\s+(\d+)`)
+	fullRe    = regexp.MustCompile("`KERN_MCP_FULL=1` for all\\s+(\\d+)")
 )
 
 // TestAgentsDocToolCountMatchesCatalog guards the thin AGENTS.md's two

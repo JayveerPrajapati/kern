@@ -79,7 +79,9 @@ func TestGuardHookParity(t *testing.T) {
 
 	dir := t.TempDir()
 	fixture := filepath.Join(dir, "fixture.go")
-	os.WriteFile(fixture, []byte("package p\n\nfunc Hello() {}\n"), 0o644)
+	if err := os.WriteFile(fixture, []byte("package p\n\nfunc Hello() {}\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mdFixture := filepath.Join(dir, "notes.md")
 	os.WriteFile(mdFixture, []byte("# notes\n"), 0o644)
 
@@ -146,7 +148,11 @@ func TestGuardHookParity(t *testing.T) {
 // and tool/subject fields the script writes.
 func TestGuardHookParityAuditRecords(t *testing.T) {
 	bin := buildCurrentKern(t)
-	payload := `{"tool_name":"Read","tool_input":{"path":"/tmp/parity-fixture.go"}}`
+	fixture := filepath.Join(t.TempDir(), "fixture.go")
+	if err := os.WriteFile(fixture, []byte("package p\n\nfunc Hello() {}\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"tool_name":"Read","tool_input":{"path":"` + fixture + `"}}`
 
 	home := t.TempDir()
 	code, _, _ := runGoHook(t, bin, payload, []string{"HOME=" + home})
@@ -158,7 +164,7 @@ func TestGuardHookParityAuditRecords(t *testing.T) {
 		t.Fatalf("audit file missing: %v", err)
 	}
 	line := strings.TrimSpace(string(data))
-	for _, want := range []string{`"event":"kern-guard-deny"`, `"tool":"read"`, `"/tmp/parity-fixture.go"`} {
+	for _, want := range []string{`"event":"kern-guard-deny"`, `"tool":"read"`, `"` + fixture + `"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("audit record missing %s in %s", want, line)
 		}

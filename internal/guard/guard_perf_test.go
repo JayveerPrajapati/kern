@@ -1,3 +1,8 @@
+//go:build !race
+
+// Performance gates are excluded from -race builds: race instrumentation
+// distorts the wall-clock and CPU budgets these tests are calibrated against.
+
 package guard
 
 import (
@@ -16,6 +21,14 @@ import (
 // gate builds 20k symbols / 30k qualified call edges: a regression to the
 // full-map scan blows far past the budget, while the precomputed simple-name
 // index stays in the tens of milliseconds.
+//
+// The budget is asserted on CPU time when the platform exposes it: the check
+// is ~40ms isolated but ~0.9s wall while 200+ parallel test binaries compete
+// for 8 cores (audit-closure, 2026-11-03 — the full ./... pass failed on the
+// wall-clock budget while the same code passed 3/3 isolated). CPU time is
+// load-independent, so the gate keeps its 150ms signal; off unix it falls
+// back to a relaxed wall-clock budget (best of 3) that still catches the
+// full-meta-scan regression this gate exists for (seconds of work per run).
 func TestCheckBoundariesPreciseScalesLinearly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("performance gate: skipped in -short")
@@ -58,10 +71,31 @@ func TestCheckBoundariesPreciseScalesLinearly(t *testing.T) {
 		From: "app", To: "infra", Action: "forbid",
 	}}}
 
-	start := time.Now()
-	_, _ = CheckBoundariesPrecise(ix, b, files, false)
-	elapsed := time.Since(start)
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("CheckBoundariesPrecise on 20k symbols / 30k edges took %s (budget 150ms) — the full-meta scan is back", elapsed)
+	// Best of 3 on both clocks: a single sample can straddle a GC assist, and
+	// the regression under test is uniform across runs.
+	bestWall, bestCPU := time.Duration(1<<62-1), time.Duration(1<<62-1)
+	cpuAvailable := false
+	for i := 0; i < 3; i++ {
+		cpuBefore, ok := processCPUTime()
+		cpuAvailable = ok
+		start := time.Now()
+		_, _ = CheckBoundariesPrecise(ix, b, files, false)
+		if elapsed := time.Since(start); elapsed < bestWall {
+			bestWall = elapsed
+		}
+		if cpuAfter, ok := processCPUTime(); ok {
+			if spent := cpuAfter - cpuBefore; spent < bestCPU {
+				bestCPU = spent
+			}
+		}
+	}
+	if cpuAvailable {
+		if bestCPU > 150*time.Millisecond {
+			t.Fatalf("CheckBoundariesPrecise on 20k symbols / 30k edges burned %s CPU (best of 3; budget 150ms) — the full-meta scan is back", bestCPU)
+		}
+		return
+	}
+	if bestWall > 1500*time.Millisecond {
+		t.Fatalf("CheckBoundariesPrecise on 20k symbols / 30k edges took %s wall (best of 3; relaxed budget 1500ms off unix) — the full-meta scan is back", bestWall)
 	}
 }

@@ -34,6 +34,40 @@ func TestRenderImpactTextNoWarnWhenResolved(t *testing.T) {
 	}
 }
 
+// TestRenderImpactSummary pins the concise impact block: counts + risk, with
+// no per-section evidence lists and the 8 compact fields in order.
+func TestRenderImpactSummary(t *testing.T) {
+	out := RenderImpactSummary("writeTree", domain.ImpactReport{
+		Target:             "decl:abc",
+		Risk:               "high",
+		RiskDetail:         "936 transitive dependents",
+		WhoCalls:           []string{"a", "b"},
+		Files:              []string{"x.go", "y.go"},
+		TestsCover:         []string{"TestA", "TestB", "TestC"},
+		ServicesDepend:     []string{"svc"},
+		APIsAffected:       []string{"GET /x"},
+		DataStoresAffected: []string{"db"},
+	})
+	want := "IMPACT: writeTree\nrisk: high\ndependents: 936\nfiles: 2\ntests: 3\nservices: 1\napis: 1\nstores: 1\nevents: 0"
+	if out != want {
+		t.Fatalf("summary = %q, want %q", out, want)
+	}
+}
+
+// TestRenderImpactSummaryFallsBackToDirectCallers pins the dependents
+// fallback when RiskDetail is not a transitive count.
+func TestRenderImpactSummaryFallsBackToDirectCallers(t *testing.T) {
+	out := RenderImpactSummary("leaf", domain.ImpactReport{
+		Target:     "decl:leaf",
+		Risk:       "low",
+		RiskDetail: "1 direct callers",
+		WhoCalls:   []string{"main", "init"},
+	})
+	if !strings.Contains(out, "dependents: 2") {
+		t.Fatalf("expected direct-caller fallback (2), got:\n%s", out)
+	}
+}
+
 func TestRenderImpactTruncatesLongLists(t *testing.T) {
 	var callers []string
 	for i := 0; i < 30; i++ {

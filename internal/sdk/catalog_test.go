@@ -15,11 +15,16 @@ func testCatalogEnv(t *testing.T) {
 	for _, v := range []string{
 		"KERN_TOOLS", "KERN_MCP_ROOTS", "KERN_MCP_PERMISSIVE", "KERN_MCP_NO_CONFINE",
 		"KERN_RBAC_DEFAULT_DENY", "KERN_MCP_FULL", "KERN_MCP_HIGH_LEVEL_ONLY",
-		"KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_MCP_CATEGORY",
+		"KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_MCP_CATEGORY", "KERN_MCP_ALLOW_UNADVERTISED",
 	} {
 		t.Setenv(v, "")
 	}
 	t.Setenv("KERN_MCP_CACHE", "0")
+	// The SDK exposes the full catalog by contract; the default MCP surface is
+	// intentionally narrower and must not turn a dispatch-table miss into a
+	// surface denial in these passthrough tests.
+	t.Setenv("KERN_MCP_FULL", "1")
+	t.Setenv("KERN_MCP_ALLOW_UNADVERTISED", "1")
 	t.Setenv("KERN_MCP_AUDIT_DIR", t.TempDir())
 }
 

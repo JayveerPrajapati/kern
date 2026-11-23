@@ -209,6 +209,85 @@ func TestExplorePythonClassNoPanic(t *testing.T) {
 	}
 }
 
+// TestPythonDependsCallCountedAsCaller pins F-C1 (2026-11-22 dogfood
+// campaign): a Python call inside a default-argument expression (FastAPI
+// Depends(get_db)) is extracted as an unsourced name-level edge, and the
+// export catalog binds it uniquely through the caller file's import — so
+// CallersFor/explore/impact must count it, exactly like kern graph always
+// rendered it. Pre-fix, impact/explore answered "0 callers, low risk" for
+// a factory every route depends on.
+func TestPythonDependsCallCountedAsCaller(t *testing.T) {
+	dir := t.TempDir()
+	writeNonGoTree(t, dir, map[string]string{
+		"backend/app/database.py": `def get_db():
+    return "session"
+`,
+		"backend/app/api/stocks.py": `from ..database import get_db
+
+class Depends:
+    def __init__(self, fn):
+        self.fn = fn
+
+def get_alerts(db=Depends(get_db)):
+    return db
+`,
+		// Duplicate tree: a second get_db definition makes the name
+		// ambiguous for the legacy (Go-package-oriented) caller fallback —
+		// the exact TradingApp structure that surfaced F-C1.
+		"enhanced/backend/app/database.py": `def get_db():
+    return "session"
+`,
+	})
+	ix := buildNonGoIndex(t, dir)
+
+	sym, ok := ix.ResolveName("get_db")
+	if !ok {
+		t.Fatalf("ResolveName(get_db) not found in fixture index")
+	}
+	if callers := ix.CallersFor(sym); len(callers) == 0 {
+		t.Errorf("CallersFor(get_db) = 0 callers; want the Depends(get_db) default-arg caller counted (F-C1)")
+	}
+
+	// The graph path (Index.Neighborhood via the export catalog) must see
+	// the edge too — this proves the fixture reproduces the extraction.
+	neighborhood, found := ix.Neighborhood(sym.DeclarationID())
+	if !found {
+		t.Fatalf("Neighborhood(get_db) not found")
+	}
+	graphCallers := 0
+	for _, e := range neighborhood.Edges {
+		if e.To == sym.DeclarationID() {
+			graphCallers++
+		}
+	}
+	if graphCallers == 0 {
+		t.Fatalf("fixture does not reproduce: graph reports 0 incoming edges for get_db")
+	}
+
+	rep, err := intel.ExploreBudgeted(ix, "get_db", 2, 30, "", 0)
+	if err != nil {
+		t.Fatalf("ExploreBudgeted(get_db) error = %v", err)
+	}
+	if len(rep.Callers) == 0 {
+		t.Errorf("ExploreBudgeted(get_db) Callers is empty; want the default-arg caller (F-C1 surface parity with graph's %d edges)", graphCallers)
+	}
+	if len(rep.BlastRadius) < 2 {
+		t.Errorf("ExploreBudgeted(get_db) BlastRadius = %v; want at least the caller in the radius (F-C1)", rep.BlastRadius)
+	}
+
+	// The impact path (intel.Graph adjacency via FromIndex → closure): the
+	// Depends edge must reach the resolved declaration's dependents walk —
+	// this is the exact query `kern impact` drives (F-C1's impact surface).
+	g := intel.FromIndex(ix)
+	entry, d, ok := intel.ResolveEntry(ix, "get_db")
+	if !ok || d == nil {
+		t.Fatalf("ResolveEntry(get_db) failed on fixture index (entry=%v)", entry)
+	}
+	if deps := g.WhatDependsOnPrecise(d.DeclarationID(), false); len(deps) == 0 {
+		t.Errorf("WhatDependsOnPrecise(get_db) = 0 dependents; want the Depends(get_db) caller counted (F-C1 impact path)")
+	}
+}
+
 // TestExploreJSFunctionNoPanic is F1's other live case: exploring a
 // TypeScript function must return a report, not panic.
 func TestExploreJSFunctionNoPanic(t *testing.T) {

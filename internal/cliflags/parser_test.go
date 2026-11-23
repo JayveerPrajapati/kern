@@ -116,6 +116,35 @@ func TestParserHelpForms(t *testing.T) {
 	}
 }
 
+// TestParseOutputMode pins the read-path output-mode contract, including the
+// balanced middle ground between concise and full evidence.
+func TestParseOutputMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want OutputMode
+	}{
+		{"", ModeConcise},
+		{"concise", ModeConcise},
+		{"balanced", ModeBalanced},
+		{"evidence", ModeEvidence},
+		{"full", ModeFull},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := ParseOutputMode(tc.in)
+			if err != nil {
+				t.Fatalf("ParseOutputMode(%q) error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ParseOutputMode(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	if _, err := ParseOutputMode("bogus"); err == nil || !strings.Contains(err.Error(), "balanced") {
+		t.Fatalf("invalid mode must name balanced in the valid set, got %v", err)
+	}
+}
+
 // TestTimeoutSeconds pins the shared cliTimeout fold (the execution, sandbox
 // and heal families used to carry byte-identical copies): the 120s default
 // for an unset --timeout, zero for an explicit "--timeout 0", and the given

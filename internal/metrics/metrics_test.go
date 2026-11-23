@@ -1,10 +1,39 @@
 package metrics
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRecordTaskPersistenceFailure(t *testing.T) {
+	var nilRecorder *Recorder
+	nilRecorder.RecordTaskPersistenceFailure()
+
+	r := New()
+	r.RecordTaskPersistenceFailure()
+	if got := r.Snapshot().TaskPersistenceFailureCount; got != 1 {
+		t.Fatalf("TaskPersistenceFailureCount = %d, want 1", got)
+	}
+}
+
+func TestTaskPersistenceFailureCountSurvivesLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	r := New()
+	r.RecordTaskPersistenceFailure()
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded := New()
+	if err := loaded.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loaded.Snapshot().TaskPersistenceFailureCount; got != 1 {
+		t.Fatalf("loaded TaskPersistenceFailureCount = %d, want 1", got)
+	}
+}
 
 func TestRecorderPerformance(t *testing.T) {
 	r := New()

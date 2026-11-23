@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -211,5 +212,24 @@ func TestLoadOrBuildConcurrentDebounce(t *testing.T) {
 	// The build lock file must exist (the mechanism left its marker).
 	if _, err := os.Stat(filepath.Join(root, ".kern", "locks", buildLockScope+".lock")); err != nil {
 		t.Fatalf("build lock file missing: %v", err)
+	}
+}
+
+// TestHolderDescNamesTheLockStampsPID: the wait/timeout diagnostics must name
+// the holder — the PID internal/lock stamps at acquisition — so a 60s
+// BuildLockWait points at its culprit instead of "another process".
+func TestHolderDescNamesTheLockStampsPID(t *testing.T) {
+	root := t.TempDir()
+	if got := holderDesc(root); got != "pid unknown" {
+		t.Fatalf("holderDesc with no lock file = %q, want pid unknown", got)
+	}
+	l, err := lock.Acquire(root, buildLockScope)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer l.Release()
+	want := fmt.Sprintf("pid %d", os.Getpid())
+	if got := holderDesc(root); got != want {
+		t.Fatalf("holderDesc = %q, want %q", got, want)
 	}
 }

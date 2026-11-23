@@ -57,6 +57,9 @@ func TestSeatbeltWriteConfinementLive(t *testing.T) {
 	if err != nil {
 		t.Skip("sandbox-exec not available")
 	}
+	if !networkIsolationAvailable() {
+		t.Skip("this host's sandbox-exec rejects the generated confinement profile")
+	}
 	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "")
 
 	root := t.TempDir()

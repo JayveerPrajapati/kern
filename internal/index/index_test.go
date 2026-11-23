@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
+	"github.com/JayveerPrajapati/kern/internal/indexwatch"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -424,7 +425,7 @@ func TestWatchDetectsChanges(t *testing.T) {
 	prev := map[string]string{"main.go": cacheHash(content)}
 
 	// Deletion detected.
-	changes := diff(prev, map[string]string{})
+	changes := indexwatch.Diff(prev, map[string]string{})
 	if len(changes) != 1 || changes[0].Kind != ChangeRemoved {
 		t.Fatalf("expected 1 removal, got %+v", changes)
 	}
@@ -432,13 +433,13 @@ func TestWatchDetectsChanges(t *testing.T) {
 	// Modification detected.
 	newContent := []byte(strings.ReplaceAll(string(content), "greet(\"world\")", "greet(\"again\")"))
 	cur := map[string]string{"main.go": cacheHash(newContent)}
-	changes = diff(prev, cur)
+	changes = indexwatch.Diff(prev, cur)
 	if len(changes) != 1 || changes[0].Kind != ChangeModified {
 		t.Fatalf("expected 1 modification, got %+v", changes)
 	}
 
 	// No change detected.
-	changes = diff(prev, map[string]string{"main.go": cacheHash(content)})
+	changes = indexwatch.Diff(prev, map[string]string{"main.go": cacheHash(content)})
 	if len(changes) != 0 {
 		t.Fatalf("expected no changes, got %+v", changes)
 	}
@@ -458,7 +459,7 @@ func TestStaleGate(t *testing.T) {
 	}
 
 	// The stat gate must match the content manifest count exactly.
-	if maxMtime, count, err := indexableMaxMtime(dir, ignore.Load(dir)); err != nil || count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
+	if maxMtime, count, err := indexwatch.IndexableMaxMtime(dir, ignore.Load(dir)); err != nil || count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
 		t.Fatalf("gate mismatch: count %d vs %d, mtime %d vs %d (err %v)", count, len(ix.FileHashes), maxMtime, ix.MaxMtime, err)
 	}
 

@@ -23,7 +23,7 @@ import (
 
 // TestMain redirects the audit-chain HMAC secret to a temp dir for the whole
 // package test run, so audit tests never create
-// <UserConfigDir>/kern/audit-chain.key on the developer's machine and the
+// <UserHomeDir>/.kern/secrets/audit-chain.key on the developer's machine and the
 // key is deterministic across tests (chains recorded in one test verify in
 // the next).
 func TestMain(m *testing.M) {
@@ -68,6 +68,20 @@ func resetAuditChainSecret() {
 	auditChainSecretKey = nil
 	auditChainSecretErr = nil
 	auditChainSecretDegraded = sync.Once{}
+}
+
+func TestAuditChainSecretPathIsOutsideUserConfig(t *testing.T) {
+	p, err := auditChainSecretPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		t.Skipf("user config dir unavailable: %v", err)
+	}
+	if strings.HasPrefix(p, cfg+string(os.PathSeparator)) {
+		t.Fatalf("audit-chain key must not live under the user config tree: %s", p)
+	}
 }
 
 func entry(id, agentID string) AuditEntry {

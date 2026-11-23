@@ -138,13 +138,16 @@ func TestFailureDrillAgentTimeout(t *testing.T) {
 }
 
 // TestFailureDrillToolFailure: a governed tool that errors is surfaced and has
-// no side effect (fail-closed).
+// no side effect (fail-closed). Uses the strict closed posture so the drill
+// still exercises a refusal (the default ask posture falls through to the
+// risk model instead of refusing).
 func TestFailureDrillToolFailure(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 
 	if err := governance.CheckExec("kern_exec"); err == nil {
-		t.Fatal("governed exec tool should be refused when not allowlisted")
+		t.Fatal("governed exec tool should be refused when not allowlisted under the closed posture")
 	}
 }
 

@@ -265,7 +265,7 @@ func TestDirectCallersNamesAuthorizeContextScenario(t *testing.T) {
 
 // TestBlastRadiusPackageAware is the Defect B regression: the blast radius
 // BFS must walk the same package-aware edges explore's direct-caller list
-// uses (ix.CallersFor + findCallerDef) instead of the raw bare-name
+// uses (ix.CallersFor + FindCallerDefinition) instead of the raw bare-name
 // ix.Callers map. The wrapper "AuthorizeContext" is a real caller of the
 // core and remains distinct from it, so its own callers
 // (TestAuthorizeContextDenial) enter the core's transitive radius, and the
@@ -293,7 +293,7 @@ func TestBlastRadiusPackageAware(t *testing.T) {
 // TestBlastRadiusParallelSymbols is the F1 regression (live campaign
 // 2026-10-04): a radius member that resolves to no indexed symbol — the
 // Python/JS heuristic-caller case, where blast-radius leaves are raw
-// endpoints findCallerDef cannot resolve — must keep its outSyms slot as a
+// endpoints FindCallerDefinition cannot resolve — must keep its outSyms slot as a
 // zero-value Symbol instead of shifting every later entry. The pre-fix
 // filtered append broke the positional out[i]↔outSyms[i] contract, which
 // both misattributed BlastFiles and made ExploreBudgeted's depth cap panic

@@ -209,11 +209,17 @@ func TestRunAuditWarnsOnTamperedChain(t *testing.T) {
 	if err := os.WriteFile(chainPath, []byte(tampered), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	code := 0
 	captureStdout(t, func() {
-		stderr = captureStderr(t, func() { RunAudit([]string{"--root", root}) })
+		stderr = captureStderr(t, func() { code = RunAudit([]string{"--root", root}) })
 	})
 	if !strings.Contains(stderr, "tamper chain verification FAILED") {
 		t.Fatalf("tampered chain must warn on stderr, got:\n%s", stderr)
+	}
+	// A broken chain is a finding, not a successful observation: exit 1 so
+	// CI/scripts cannot treat it as success (2026-11-10 campaign).
+	if code != 1 {
+		t.Fatalf("tampered chain must exit 1, got %d\nstderr:\n%s", code, stderr)
 	}
 }
 

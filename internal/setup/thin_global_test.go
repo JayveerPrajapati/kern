@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // writeHostFiles seeds the repo with per-host rule files so the per-host
@@ -31,18 +33,18 @@ func assertVariant(t *testing.T, root, name, want string) {
 	}
 	if want == "thin" {
 		if !strings.Contains(string(b), "# kern usage rules — thin (repo)") {
-			t.Fatalf("%s not thin (managed global slot):\n%s", name, b)
+			t.Fatalf("%s not thin:\n%s", name, b)
 		}
 		if strings.Contains(string(b), "kern usage rules for agents") {
-			t.Fatalf("%s carries the FULL rules despite a managed global slot:\n%s", name, b)
+			t.Fatalf("%s carries the FULL rules:\n%s", name, b)
 		}
 		return
 	}
 	if !strings.Contains(string(b), "kern usage rules for agents") {
-		t.Fatalf("%s not full (no managed global slot):\n%s", name, b)
+		t.Fatalf("%s not full:\n%s", name, b)
 	}
 	if strings.Contains(string(b), "# kern usage rules — thin (repo)") {
-		t.Fatalf("%s is thin despite no managed global slot:\n%s", name, b)
+		t.Fatalf("%s is thin:\n%s", name, b)
 	}
 }
 
@@ -72,11 +74,13 @@ func TestProjectRulesThinWhenGlobalManaged(t *testing.T) {
 	assertVariant(t, root, "GEMINI.md", "thin")
 }
 
-// TestProjectRulesFullWithoutGlobalSlot pins the fallback: with a sandboxed
-// HOME carrying NO kern-managed global rules, the project rule files get the
-// FULL rules — the repo file is the only delivery, so a thin file would leave
-// agents without the kern-first policy.
-func TestProjectRulesFullWithoutGlobalSlot(t *testing.T) {
+// TestProjectRulesThinByDefaultWithoutGlobalSlot pins the T-05 compact
+// policy (2026-11-19): with a sandboxed HOME carrying NO kern-managed global
+// rules, the project rule files STILL get the THIN (core) variant — the
+// core block is self-sufficient (routing, blast radius, verify, fallback,
+// guard boundaries), so the default repo policy stays <=2KB everywhere.
+// The long policy is opt-in via --agents-md full.
+func TestProjectRulesThinByDefaultWithoutGlobalSlot(t *testing.T) {
 	testEnv(t)
 	root := t.TempDir()
 	writeHostFiles(t, root)
@@ -84,7 +88,7 @@ func TestProjectRulesFullWithoutGlobalSlot(t *testing.T) {
 	Wire(root, []string{"mcp"}, false, false)
 
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"} {
-		assertVariant(t, root, name, "full")
+		assertVariant(t, root, name, "thin")
 	}
 }
 
@@ -119,7 +123,7 @@ func TestProjectRulesRerunStable(t *testing.T) {
 			t.Fatalf("thin managed content not updated on a changed run:\n%s", third)
 		}
 	})
-	t.Run("full-without-global", func(t *testing.T) {
+	t.Run("thin-without-global", func(t *testing.T) {
 		testEnv(t)
 		root := t.TempDir()
 		Wire(root, []string{"mcp"}, false, false)
@@ -130,28 +134,31 @@ func TestProjectRulesRerunStable(t *testing.T) {
 		Wire(root, []string{"mcp"}, false, false)
 		second, _ := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 		if string(first) != string(second) {
-			t.Fatalf("full re-run not byte-identical:\n--- first ---\n%s--- second ---\n%s", first, second)
+			t.Fatalf("thin re-run not byte-identical:\n--- first ---\n%s--- second ---\n%s", first, second)
 		}
 	})
 }
 
-// TestProjectRulesKeepFullWhenGlobalManaged pins the keep-full contract: once the
-// host global slot carries the kern-managed block, the DEFAULT run still
-// never downgrades an existing FULL rules file — a tracked full AGENTS.md
-// (e.g. the kern repo's own) must stay byte-stable across `kern setup` runs.
-// The dedup remediation applies only to fresh wires; an explicit thin choice
-// still downgrades (TestThinReplacesFullRules).
+// TestProjectRulesKeepFullWhenGlobalManaged pins the keep-full contract: the
+// DEFAULT run never downgrades an existing FULL rules file — a tracked full
+// AGENTS.md (e.g. the kern repo's own, or a repo wired by a pre-T-05 setup)
+// must stay byte-stable across `kern setup` runs. Downgrade requires an
+// explicit choice (TestThinReplacesFullRules); a fresh root gets thin.
 func TestProjectRulesKeepFullWhenGlobalManaged(t *testing.T) {
 	testEnv(t)
 	root := t.TempDir()
 	writeHostFiles(t, root)
 
-	// Full default run first (no global slot yet).
-	Wire(root, []string{"mcp"}, false, false)
-	assertVariant(t, root, "AGENTS.md", "full")
-	assertVariant(t, root, "CLAUDE.md", "full")
+	// Seed the full variant the pre-T-05 default would have written (a full
+	// header + marker-managed block), then verify default runs keep it.
+	full := agentwire.FullRulesHeader + "\npre-T-05 full wiring\n"
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(full), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	// Global wiring arrives; the next default run KEEPS the existing full
+	// Default run (with the global slot managed): KEEPS the existing full
 	// rules (only --agents-md thin / a persisted choice downgrades).
 	WireGlobalRules()
 	Wire(root, []string{"mcp"}, false, false)
@@ -159,8 +166,8 @@ func TestProjectRulesKeepFullWhenGlobalManaged(t *testing.T) {
 	assertVariant(t, root, "CLAUDE.md", "full")
 	assertVariant(t, root, "GEMINI.md", "full")
 
-	// A FRESH root wired while the global slot is managed still gets thin
-	// (the dedup default; mirrors TestProjectRulesThinWhenGlobalManaged).
+	// A FRESH root wired by the default still gets thin (the T-05 compact
+	// default; mirrors TestProjectRulesThinWhenGlobalManaged).
 	fresh := t.TempDir()
 	writeHostFiles(t, fresh)
 	Wire(fresh, []string{"mcp"}, false, false)

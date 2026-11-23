@@ -48,3 +48,78 @@ func TestTypeImpactRootsLeavesFunctionsAlone(t *testing.T) {
 		t.Fatalf("function must not expand: roots=%v exp=%q ok=%v", roots, exp, ok)
 	}
 }
+
+// TestTypeImpactRootsWithIndexSeesThroughAlias pins the audit fix: a query on
+// `type A = B` must carry B's methods and constructors, and the expansion must
+// name the aliased package so the report is never ambiguous.
+func TestTypeImpactRootsWithIndexSeesThroughAlias(t *testing.T) {
+	symbols := []index.Symbol{
+		{Kind: "struct", Name: "Thing", File: "internal/base/base.go", Line: 3, Lang: "go"},
+		{Kind: "method", Name: "Do", Receiver: "Thing", File: "internal/base/base.go", Line: 5, Lang: "go"},
+		{Kind: "func", Name: "NewThing", File: "internal/base/base.go", Line: 9, Lang: "go"},
+		{Kind: "type", Name: "T", Alias: "base.Thing", File: "internal/alias/a.go", Line: 5, Lang: "go"},
+	}
+	ix := &index.Index{Root: "/kern", Symbols: symbols, Pkgs: map[string]*index.Pkg{
+		"internal/base":  {Name: "base", Path: "internal/base", Lang: "go"},
+		"internal/alias": {Name: "alias", Path: "internal/alias", Lang: "go"},
+	}}
+	roots, exp, ok := TypeImpactRootsWithIndex(ix, &ix.Symbols[3])
+	if !ok {
+		t.Fatal("alias type not recognized")
+	}
+	want := map[string]bool{"T": true, "Thing.Do": true, "NewThing": true}
+	for _, r := range roots {
+		delete(want, r)
+	}
+	if len(want) > 0 {
+		t.Fatalf("alias expansion missed roots %v (got %v)", want, roots)
+	}
+	if !strings.Contains(exp, "alias of base.Thing") {
+		t.Fatalf("expansion = %q; want it to name the aliased package", exp)
+	}
+}
+
+// TestTypeImpactRootsMethodlessTypeStillHandled pins that a type with no
+// methods or constructors is still handled (roots=[type], ok=true, empty
+// expansion) — the caller can then apply the reference-unknown safety net
+// instead of treating it as an unattributable kind.
+func TestTypeImpactRootsMethodlessTypeStillHandled(t *testing.T) {
+	d := index.Symbol{Kind: "struct", Name: "Bare", File: "pkg/bare.go", Line: 1, Lang: "go"}
+	roots, exp, ok := TypeImpactRoots(&d, []index.Symbol{d})
+	if !ok {
+		t.Fatal("type must be handled even with no methods/constructors")
+	}
+	if len(roots) != 1 || roots[0] != "Bare" {
+		t.Fatalf("roots = %v, want [Bare]", roots)
+	}
+	if exp != "" {
+		t.Fatalf("expansion = %q, want empty for a methodless type", exp)
+	}
+}
+
+// TestIsTypeKindPinsUnattributableKinds pins exactly which declaration kinds
+// are types (aggregated) vs which are unattributable and must fall back to
+// the reference safety net.
+func TestIsTypeKindPinsUnattributableKinds(t *testing.T) {
+	for _, kind := range []string{"struct", "interface", "class", "type", "enum", "record"} {
+		if !IsTypeKind(kind) {
+			t.Errorf("IsTypeKind(%q) = false, want true", kind)
+		}
+	}
+	for _, kind := range []string{"func", "method", "const", "var", "field", ""} {
+		if IsTypeKind(kind) {
+			t.Errorf("IsTypeKind(%q) = true, want false", kind)
+		}
+	}
+}
+
+// TestReturnsTypeStripsDecoration pins constructor detection across pointer,
+// package-qualified and slice return types.
+func TestReturnsTypeStripsDecoration(t *testing.T) {
+	if !ReturnsType([]string{"*FileStore", "pkg.FileStore", "[]*FileStore"}, "FileStore") {
+		t.Fatal("ReturnsType must strip pointer/qualifier/slice decoration")
+	}
+	if ReturnsType([]string{"Store"}, "FileStore") {
+		t.Fatal("ReturnsType must not match a different type name")
+	}
+}

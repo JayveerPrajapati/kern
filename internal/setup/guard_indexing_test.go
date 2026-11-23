@@ -1,9 +1,11 @@
 package setup
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,12 +26,22 @@ func TestKernGuardAllowsWhileFirstIndexBuilds(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "kern"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	read := `{"tool_name":"Read","tool_input":{"file_path":"/tmp/x/main.go"}}`
+	project := t.TempDir()
+	readFile := filepath.Join(project, "main.go")
+	if err := os.WriteFile(readFile, []byte("package main\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, readFile)
 	envFor := func(project string) []string {
 		return []string{"KERN_GUARD_ASSUME_KERN=0", "PATH=/usr/bin:/bin", "HOME=" + home, "CLAUDE_PROJECT_DIR=" + project}
 	}
 
-	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".kern", "index.sqlite"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(project, ".kern", "indexing")
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 		t.Fatal(err)
@@ -58,7 +70,14 @@ func TestKernGuardAllowsWhileFirstIndexBuilds(t *testing.T) {
 	if err := os.Chtimes(marker, time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if code, _ := runGuard(t, script, read, envFor(t.TempDir())); code != 2 {
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, ".kern", "index.sqlite"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := runGuard(t, script, read, envFor(other)); code != 2 {
 		t.Errorf("another project must stay guarded, got exit %d", code)
 	}
 }

@@ -1,3 +1,8 @@
+//go:build !race
+
+// Performance gates are excluded from -race builds: race instrumentation
+// distorts the wall-clock and CPU budgets these tests are calibrated against.
+
 package intel
 
 // impact_budget_test.go is the perf regression guard for the impact query

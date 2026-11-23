@@ -74,6 +74,20 @@ jobs:
       - name: Run governance gate
         run: go run ./cmd/kern verify --types security,architecture
 
+  # Advisory headroom check (ARCHITECTURE.md § Headroom policy): fails only
+  # when THIS change moved a subsystem from >2% to <2% cap headroom, forcing
+  # the author to record an extraction item. Deliberately NOT part of ci-ok —
+  # the ledger gate above is the hard contract; this is a scheduling prompt.
+  headroom-advisory:
+    name: headroom (advisory, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: ./.github/actions/go-env
+      - name: Report tight-subsystem crossings
+        run: go run ./cmd/kern doctor --headroom-gate
+
   # A2: full (non-short) E2E gate. The reusable `test` job runs -short, which
   # skips 115 test functions (measured 2026-10-28 — the old "~25" count was
   # stale): the 20-step vertical slice, acceptance matrix, replay/resume,
@@ -181,7 +195,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test, lint-and-vuln, actionlint, kern-gate, e2e, global-install-smoke, platform-tests]
+    needs: [test, lint-and-vuln, actionlint, kern-gate, headroom-advisory, e2e, global-install-smoke, platform-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

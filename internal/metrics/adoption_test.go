@@ -49,9 +49,10 @@ func TestAggregateAdoptionLog(t *testing.T) {
 		`{"ts":1,"tool":"read","routed":true}`,
 		`{"ts":2,"tool":"grep","routed":true}`,
 		`{"ts":3,"tool":"bash","routed":false}`,
+		`{"ts":4,"tool":"read","routed":false,"reason":"tiny"}`,
 		``,         // blank line — skipped
 		`not json`, // malformed line — skipped
-		`{"ts":4,"tool":"glob","routed":true}`,
+		`{"ts":5,"tool":"glob","routed":true}`,
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -61,14 +62,17 @@ func TestAggregateAdoptionLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AggregateAdoptionLog: %v", err)
 	}
-	if c.Total != 4 {
-		t.Errorf("Total = %d, want 4", c.Total)
+	if c.Total != 5 {
+		t.Errorf("Total = %d, want 5", c.Total)
 	}
 	if c.Routed != 3 {
 		t.Errorf("Routed = %d, want 3", c.Routed)
 	}
-	if want := 75.0; abs(c.Pct()-want) > 1e-9 {
+	if want := 60.0; abs(c.Pct()-want) > 1e-9 {
 		t.Errorf("Pct = %v, want %v", c.Pct(), want)
+	}
+	if c.RawFastPath != 1 {
+		t.Errorf("RawFastPath = %d, want 1", c.RawFastPath)
 	}
 }
 
@@ -86,7 +90,8 @@ func TestIngestAdoptionLog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "adoption.log")
 	log := "{\"ts\":1,\"tool\":\"read\",\"routed\":true}\n" +
-		"{\"ts\":2,\"tool\":\"read\",\"routed\":false}\n"
+		"{\"ts\":2,\"tool\":\"read\",\"routed\":false,\"reason\":\"tiny\"}\n" +
+		"{\"ts\":3,\"tool\":\"read\",\"routed\":false}\n"
 	if err := os.WriteFile(path, []byte(log), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +101,8 @@ func TestIngestAdoptionLog(t *testing.T) {
 		t.Fatalf("IngestAdoptionLog: %v", err)
 	}
 	s := r.Snapshot()
-	if s.KernAdoptionTotal != 2 || s.KernAdoptionRouted != 1 {
-		t.Errorf("ingested counts = routed %d / total %d, want 1 / 2", s.KernAdoptionRouted, s.KernAdoptionTotal)
+	if s.KernAdoptionTotal != 3 || s.KernAdoptionRouted != 1 || s.RawFastPath != 1 {
+		t.Errorf("ingested counts = routed %d / raw-fast-path %d / total %d, want 1 / 1 / 3", s.KernAdoptionRouted, s.RawFastPath, s.KernAdoptionTotal)
 	}
 
 	// Empty log → no-op.
@@ -105,7 +110,24 @@ func TestIngestAdoptionLog(t *testing.T) {
 		t.Errorf("IngestAdoptionLog missing file: %v", err)
 	}
 	s = r.Snapshot()
-	if s.KernAdoptionTotal != 2 {
+	if s.KernAdoptionTotal != 3 {
 		t.Errorf("ingest of missing file should not change counts, got total %d", s.KernAdoptionTotal)
+	}
+}
+
+func TestRecordRawFastPath(t *testing.T) {
+	r := New()
+	r.RecordRawFastPath()
+	s := r.Snapshot()
+	if s.KernAdoptionTotal != 1 || s.KernAdoptionRouted != 0 || s.RawFastPath != 1 {
+		t.Fatalf("raw fast path counters = routed %d / total %d / raw %d, want 0 / 1 / 1", s.KernAdoptionRouted, s.KernAdoptionTotal, s.RawFastPath)
+	}
+	if !strings.Contains(r.Render(), "intentional raw fast paths 1") {
+		t.Fatalf("render missing raw fast-path count:\n%s", r.Render())
+	}
+	r.Reset()
+	s = r.Snapshot()
+	if s.KernAdoptionTotal != 0 || s.RawFastPath != 0 {
+		t.Fatalf("Reset did not clear raw fast-path counters: %+v", s)
 	}
 }

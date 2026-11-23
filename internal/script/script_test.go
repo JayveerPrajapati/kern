@@ -29,8 +29,11 @@ func TestPythonStdoutOnly(t *testing.T) {
 	if strings.TrimSpace(res.Stdout) != "42" {
 		t.Errorf("stdout = %q, want 42", res.Stdout)
 	}
-	if res.Stderr != "" {
-		t.Errorf("stderr must be empty on success, got %q", res.Stderr)
+	// Success-path stderr is a warning channel (audit F5, 2026-11-21): it
+	// is surfaced (trimmed), not swallowed — the handler appends it under a
+	// marker downstream.
+	if !strings.Contains(res.Stderr, "err-to-stderr") {
+		t.Errorf("success stderr must be surfaced as a warning, got %q", res.Stderr)
 	}
 }
 

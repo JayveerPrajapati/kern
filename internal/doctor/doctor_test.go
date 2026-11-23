@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/auditdiag"
+	"github.com/JayveerPrajapati/kern/internal/daemon"
 	"github.com/JayveerPrajapati/kern/internal/guardpause"
 	"sync/atomic"
 	"testing"
@@ -163,6 +165,104 @@ func TestCheckParitySkipsForeignRepo(t *testing.T) {
 	}
 }
 
+// TestCheckRepoLauncher pins the stale-launcher diagnosis without depending
+// on a real kern build: matching stubs are ok, a different target version is
+// fail, a missing target is warn, and a non-executable launcher is fail.
+func TestCheckRepoLauncher(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module github.com/JayveerPrajapati/kern\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeScript := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	launcher := filepath.Join(root, "kern")
+	target := filepath.Join(root, "bin", "kern")
+
+	writeScript(launcher, "echo kern test-version")
+	writeScript(target, "echo kern test-version")
+	if f := checkRepoLauncher(root); f.Level != "ok" || !strings.Contains(f.Detail, "test-version") {
+		t.Fatalf("checkRepoLauncher(match) = %+v, want ok matching version", f)
+	}
+
+	writeScript(target, "echo kern newer-version")
+	if f := checkRepoLauncher(root); f.Level != "fail" || !strings.Contains(f.Detail, "stale") {
+		t.Fatalf("checkRepoLauncher(stale) = %+v, want fail stale", f)
+	}
+
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkRepoLauncher(root); f.Level != "warn" || !strings.Contains(f.Detail, "make build") {
+		t.Fatalf("checkRepoLauncher(missing target) = %+v, want warn build", f)
+	}
+
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkRepoLauncher(root); f.Level != "warn" || !strings.Contains(f.Detail, "missing") {
+		t.Fatalf("checkRepoLauncher(missing launcher) = %+v, want warn missing", f)
+	}
+
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\ntrue\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkRepoLauncher(root); f.Level != "fail" || !strings.Contains(f.Detail, "not executable") {
+		t.Fatalf("checkRepoLauncher(non-executable) = %+v, want fail not executable", f)
+	}
+}
+
+// TestCheckProjectManagement pins explicit consent, legacy compatibility,
+// explicit opt-out, and malformed-marker diagnosis.
+func TestCheckProjectManagement(t *testing.T) {
+	root := t.TempDir()
+	kernDir := filepath.Join(root, ".kern")
+	if err := os.MkdirAll(kernDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(kernDir, "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(marker, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"schema_version":1,"managed":true,"guard":{"enabled":true}}`)
+	if f := checkProjectManagement(root); f.Level != "ok" || !strings.Contains(f.Detail, "explicit") {
+		t.Fatalf("explicit = %+v, want ok explicit", f)
+	}
+	if err := os.WriteFile(filepath.Join(kernDir, "index.sqlite"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write(`{"schema_version":1,"managed":false,"guard":{"enabled":true}}`)
+	if f := checkProjectManagement(root); f.Level != "ok" || !strings.Contains(f.Detail, "disabled") {
+		t.Fatalf("disabled = %+v, want ok disabled", f)
+	}
+	if err := os.Remove(filepath.Join(kernDir, "index.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kernDir, "index.sqlite"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write(`{`)
+	f := checkProjectManagement(root)
+	if f.Level != "warn" || !strings.Contains(f.Detail, "legacy") || !strings.Contains(f.Detail, "malformed") {
+		t.Fatalf("legacy malformed = %+v, want warn legacy+malformed", f)
+	}
+	if err := os.Remove(filepath.Join(kernDir, "index.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkProjectManagement(root); f.Level != "fail" || !strings.Contains(f.Detail, "malformed") {
+		t.Fatalf("malformed = %+v, want fail malformed", f)
+	}
+}
+
 func TestRunReturnsFindings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -185,6 +285,26 @@ func TestRunReturnsFindings(t *testing.T) {
 	}
 }
 
+// TestCheckDaemonIdentity pins the P6 lifecycle check's clean case: a root
+// with no daemon sockets reports ok, and the check never fails the doctor (a
+// stale daemon is residue, not a broken install).
+func TestCheckDaemonIdentity(t *testing.T) {
+	root := t.TempDir()
+	f := checkDaemonIdentity(root)
+	if f.Level != "ok" {
+		t.Fatalf("no-daemon root must be ok, got %s: %s", f.Level, f.Detail)
+	}
+	if f.Check != "daemon" {
+		t.Fatalf("check name = %q, want daemon", f.Check)
+	}
+	if !strings.Contains(f.Detail, "socket=") || !strings.Contains(f.Detail, "log=") {
+		t.Fatalf("daemon detail must expose diagnostic paths, got %q", f.Detail)
+	}
+	if !strings.Contains(f.Detail, daemon.SocketPath(root)) || !strings.Contains(f.Detail, daemon.LogPath(root)) {
+		t.Fatalf("daemon detail must name this root's socket and log, got %q", f.Detail)
+	}
+}
+
 func TestCheckCapabilities(t *testing.T) {
 	f := checkCapabilities()
 	if f.Level != "ok" {
@@ -192,6 +312,18 @@ func TestCheckCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(f.Detail, "sqlite: ") || !strings.Contains(f.Detail, "treesitter: ") {
 		t.Fatalf("capabilities detail missing both tags: %q", f.Detail)
+	}
+	// The grammar count must be DERIVED from the compiled grammar map, never a
+	// literal: the line was hardcoded "13 grammars" and silently drifted
+	// whenever the map changed (P5, audit closure 2026-11-03).
+	if index.TreesitterEnabled() {
+		want := fmt.Sprintf("treesitter: on (%d grammars)", index.TreesitterGrammarCount())
+		if !strings.Contains(f.Detail, want) {
+			t.Fatalf("capabilities detail must render the derived grammar count %q, got %q", want, f.Detail)
+		}
+		if index.TreesitterGrammarCount() != 13 {
+			t.Fatalf("TreesitterGrammarCount() = %d, want 13 canonical languages (the README's \"13 of the 18\" claim)", index.TreesitterGrammarCount())
+		}
 	}
 }
 
@@ -961,6 +1093,86 @@ func TestCheckIndexReportsStorePath(t *testing.T) {
 	}
 	if !strings.Contains(f.Detail, index.StorePath(root)) {
 		t.Fatalf("checkIndex detail missing resolved store path %q: %q", index.StorePath(root), f.Detail)
+	}
+}
+
+// TestCheckIndexNonProjectDirNotAFailure pins F-A4: a non-project directory
+// (no git worktree, no project marker, no index store — e.g. the neutral
+// cwd a fresh install runs its first `kern doctor` in) must not report
+// [fail] for having no index nor drag the verdict to "failures"; at most it
+// gets an info line with guidance.
+func TestCheckIndexNonProjectDirNotAFailure(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	f := checkIndex(root)
+	if f.Level != "info" || !strings.Contains(f.Detail, "run kern doctor inside a project") {
+		t.Fatalf("non-project dir = %+v, want info with guidance", f)
+	}
+	// The full report must not say "failures" merely because the cwd is not
+	// a project. Host-dependent checks (binary-exec probes a kern-mcp that
+	// this unit test cannot guarantee on every machine) are excluded from
+	// the rendered verdict; the index finding itself is asserted above.
+	var cwdDependent []Finding
+	for _, x := range Run(root) {
+		if x.Check != "binary-exec" && x.Check != "kern-mcp" && x.Check != "launch" {
+			cwdDependent = append(cwdDependent, x)
+		}
+	}
+	for _, x := range cwdDependent {
+		if x.Level == "fail" {
+			t.Fatalf("non-project dir produced [fail] %s: %s", x.Check, x.Detail)
+		}
+	}
+	if out := Render(root, cwdDependent); strings.Contains(out, "verdict: failures") {
+		t.Fatalf("non-project dir rendered a failures verdict:\n%s", out)
+	}
+}
+
+// TestCheckIndexProjectSemanticsUnchanged pins the other half of F-A4: a
+// real project (git worktree) keeps its current semantics — a missing index
+// with sources is a warn, and a project with nothing indexable still fails.
+func TestCheckIndexProjectSemanticsUnchanged(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withSources := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(withSources, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGoFile(t, withSources, "a.go")
+	if f := checkIndex(withSources); f.Level != "warn" || !strings.Contains(f.Detail, "kern index .") {
+		t.Fatalf("project with sources but no cached index = %+v, want warn", f)
+	}
+	bare := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bare, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkIndex(bare); f.Level != "fail" {
+		t.Fatalf("bare git project = %+v, want fail", f)
+	}
+}
+
+// TestCheckIndexStaleProjectStillFlagged pins that a project whose cached
+// index is stale still gets the warn (doctor must not go quiet on real
+// projects while softening non-project directories).
+func TestCheckIndexStaleProjectStillFlagged(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGoFile(t, root, "a.go")
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	writeGoFile(t, root, "b.go") // changed after build → stale
+	if f := checkIndexFreshness(root); f.Level != "warn" || !strings.Contains(f.Detail, "STALE") {
+		t.Fatalf("stale project index = %+v, want warn/STALE", f)
+	}
+	if f := checkIndex(root); f.Level == "info" {
+		t.Fatalf("project with a (stale) cached index must not report info: %+v", f)
 	}
 }
 
