@@ -9,22 +9,14 @@ import (
 )
 
 // TestDefaultSurfaceAcceptanceGate is the L6 acceptance fixture: a fresh
-// agent that sees the full 32-tool default surface (the original L3+D5 set —
-// kern_meta, kern_explore, kern_impact, kern_search, kern_verify, kern_buddy,
-// kern_exec — plus the 25 usage-curated additions: kern_compact_file,
-// kern_run, kern_optimize, kern_context, kern_memory, kern_evidence,
-// kern_probe, kern_plan, kern_doc, kern_project_map, kern_ast_search,
-// kern_plan_context, kern_path, kern_semcache, kern_swap, kern_mask_pii,
-// kern_fetch_raw_anchor, kern_review, kern_graph, kern_arch) must be able to
-// complete a scoped codebase task using only those tools, with every catalog
-// tool advertised (the surface is the full catalog, standing mandate
-// 2026-10-23).
+// agent that sees the direct eleven-tool surface must complete a scoped
+// codebase task using those tools alone. KERN_MCP_FULL=1 remains the explicit
+// full-catalog mode.
 func TestDefaultSurfaceAcceptanceGate(t *testing.T) {
-	// The default surface must be exactly the toolsurface.Default set — the
-	// full 32-tool catalog (standing mandate 2026-10-23: agents use ALL
-	// available tools). If this drifts, the acceptance gate itself is broken.
-	if len(toolsurface.Default) != 32 {
-		t.Fatalf("default surface = %d tools, want 32: %v", len(toolsurface.Default), toolsurface.Default)
+	// The default surface must be exactly the toolsurface.Default set — eleven
+	// direct workflow tools. If this drifts, the acceptance gate itself is broken.
+	if len(toolsurface.Default) != 11 {
+		t.Fatalf("default surface = %d tools, want 11: %v", len(toolsurface.Default), toolsurface.Default)
 	}
 
 	root := fixtureRoot(t) // real fixture repo: symbols NewServer, UserService, ...
@@ -63,37 +55,40 @@ func TestDefaultSurfaceAcceptanceGate(t *testing.T) {
 	if !strings.Contains(exploreOut, "NewServer") {
 		t.Fatalf("kern_explore did not return NewServer context: %q", exploreOut)
 	}
-	// 2c. kern_impact reports the blast radius of changing it.
+	// 2c. kern_probe builds a task-level bundle across the named symbols.
+	probeOut := mcpAssertOK(t, "kern_probe", map[string]any{"root": root, "task": "NewServer and UserService"})
+	if !strings.Contains(probeOut, "NewServer") || !strings.Contains(probeOut, "UserService") {
+		t.Fatalf("kern_probe did not return task context: %q", probeOut)
+	}
+	// 2c-2. kern_research returns a read-only multi-symbol research bundle.
+	researchOut := mcpAssertOK(t, "kern_research", map[string]any{"root": root, "task": "NewServer and UserService"})
+	if !strings.Contains(researchOut, "NewServer") || !strings.Contains(researchOut, "UserService") {
+		t.Fatalf("kern_research did not return task research: %q", researchOut)
+	}
+	// 2d. kern_impact reports the blast radius of changing it.
 	impactOut := mcpAssertOK(t, "kern_impact", map[string]any{"root": root, "change": "NewServer"})
 	if !strings.Contains(impactOut, "NewServer") {
 		t.Fatalf("kern_impact did not report NewServer impact: %q", impactOut)
 	}
-	// 2d. kern_verify gives a build/test verdict for the repo.
+	// 2e. kern_verify gives a build/test verdict for the repo.
 	verifyOut := mcpAssertOK(t, "kern_verify", map[string]any{"root": root})
 	if !strings.Contains(verifyOut, "PASS") && !strings.Contains(verifyOut, "FAIL") {
 		t.Fatalf("kern_verify did not return a verdict: %q", verifyOut)
 	}
-	// 2e. kern_meta routes a natural-language request (the default router).
+	// 2f. kern_meta routes a natural-language request (the default router).
 	metaOut := mcpAssertOK(t, "kern_meta", map[string]any{"root": root, "request": "find the NewServer function"})
 	if !strings.Contains(metaOut, "NewServer") {
 		t.Fatalf("kern_meta routing did not reach NewServer: %q", metaOut)
 	}
-	// 2f. kern_buddy returns the onboarding digest (repo layout entry point).
+	// 2g. kern_buddy returns the onboarding digest (repo layout entry point).
 	buddyOut := mcpAssertOK(t, "kern_buddy", map[string]any{"root": root})
 	if !strings.Contains(buddyOut, "NewServer") && !strings.Contains(buddyOut, "UserService") {
 		t.Fatalf("kern_buddy did not return the onboarding digest: %q", buddyOut)
 	}
 
-	// 3. The surface is an ADVERTISEMENT gate (tools/list), not an execution
-	// firewall: precheckTool validates against the full catalog by design so
-	// kern_meta's NL router can reach every sub-tool internally; execution
-	// gating lives in KERN_TOOLS/governance (pinned by their own tests). The
-	// full 32-tool catalog is the default surface (standing mandate
-	// 2026-10-23), so every catalog tool must be advertised.
-	// ...while kern_meta (the default router) can still reach any sub-tool
-	// internally — the router's contract. The agent sees the full 32-tool
-	// catalog by default; kern_meta routes to every sub-tool behind the
-	// governance firewall.
+	// 3. The surface is both an ADVERTISEMENT gate and an execution boundary:
+	// kern_meta routes only within the same filtered set tools/list serves.
+	// KERN_TOOLS/governance still apply to every advertised sub-tool.
 	subOut := mcpAssertOK(t, "kern_meta", map[string]any{"root": root, "request": "run a full verification of this repo"})
 	if !strings.Contains(subOut, "kern_verify") && !strings.Contains(subOut, "verdict") {
 		t.Fatalf("kern_meta did not route to a deep-catalog sub-tool: %q", subOut)

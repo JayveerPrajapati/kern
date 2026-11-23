@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -21,7 +22,15 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	_ = os.Setenv("KERN_MCP_AUDIT_DIR", auditDir)
+	_ = os.Setenv("KERN_TOOL_CACHE_KEY", filepath.Join(auditDir, "tool-cache.key"))
 	_ = os.Setenv("KERN_PRELOAD", "0")
+	// This suite exercises every handler family directly through tools/call,
+	// including tools that are not on the default advertised surface (the
+	// advertised==invocable gate from audit F3, 2026-11-21, would otherwise
+	// answer "unknown tool"). The gate itself has dedicated tests that flip
+	// this escape off; the surface tests (server_filter_test.go) clear it
+	// via clearMCPSurfaceEnv.
+	_ = os.Setenv("KERN_MCP_ALLOW_UNADVERTISED", "1")
 	if os.Getenv("XDG_CACHE_HOME") == "" {
 		dir, err := os.MkdirTemp("", "kern-test-mcp-*")
 		if err != nil {

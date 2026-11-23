@@ -193,7 +193,7 @@ func TestHandleExploreDefaultBounds(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
 
-	def, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "L0"})
+	def, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "L0", "mode": "evidence"})
 	if err != nil {
 		t.Fatalf("handleExplore: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestHandleExploreDefaultBounds(t *testing.T) {
 	if strings.Contains(defRadius, "Top") {
 		t.Errorf("default depth=2 must exclude depth-4 Top:\n%s", defRadius)
 	}
-	full, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "L0", "depth": "0", "max": "0"})
+	full, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "L0", "mode": "evidence", "depth": "0", "max": "0"})
 	if err != nil {
 		t.Fatalf("handleExplore depth=0: %v", err)
 	}

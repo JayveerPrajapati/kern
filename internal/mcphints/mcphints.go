@@ -10,6 +10,14 @@
 // that crosses GapThreshold read calls without touching any top-ranked
 // underused tool gets one nudge naming the most underused one). Every hint
 // fires at most once per session, so the footer can never nag.
+//
+// Hints are SURFACE-AWARE (F-B4, dogfood 2026-11-22 lane B): a hint may only
+// advertise tools callable on the active MCP surface. The default install
+// serves the eleven-tool surface, so the explore hint that names kern_why
+// (a KERN_MCP_FULL=1 tool) previously sent default-surface agents to a
+// JSON-RPC -32602 "unknown tool" error. Callers pass the availability probe
+// (the server's advertised-tool membership); nil means every tool is
+// available (full catalog).
 package mcphints
 
 import (
@@ -37,14 +45,41 @@ const (
 // nudge may fire (10 read-phase calls with no underused-tool usage).
 const GapThreshold = 10
 
-// hintTable maps (tool, outcome) to the single hint line to append. Each
-// entry fires at most once per session. The tool set follows the Step-0
+// hintAlt is one renderable form of a (tool, outcome) hint: the advisory
+// line and the advertised tools the line names. Alternatives are ordered
+// most-complete first; Select serves the first whose advertised tools are
+// all callable on the active surface, so the full line rides KERN_MCP_FULL
+// installs while a default install gets a reduced line that only names
+// tools the agent can actually call. When no alternative survives, no hint
+// fires — silence beats advertising an uncallable tool.
+type hintAlt struct {
+	tools []string
+	line  string
+}
+
+// hintTable maps (tool, outcome) to the alternative hint lines to append.
+// Each entry fires at most once per session. The tool set follows the Step-0
 // usage evidence and the campaign's known-underused set.
-var hintTable = map[string]map[Outcome]string{
-	"kern_explore": {OutcomeSuccess: "next: kern_why names who depends on this; kern_impact before editing"},
-	"kern_plan":    {OutcomeSuccess: "next: recall prior lessons (kern_memory recall) before implementing"},
-	"kern_verify":  {OutcomeFailure: "next: kern_heal can auto-repair failing files in a snapshot"},
-	"kern_search":  {OutcomeNoMatch: "try kern_meta (NL router) or kern_buddy for orientation"},
+var hintTable = map[string]map[Outcome][]hintAlt{
+	"kern_explore": {OutcomeSuccess: {
+		{tools: []string{"kern_why", "kern_impact"}, line: "next: kern_why names who depends on this; kern_impact before editing"},
+		{tools: []string{"kern_impact"}, line: "next: kern_impact before editing"},
+	}},
+	"kern_plan": {OutcomeSuccess: {
+		{tools: []string{"kern_memory"}, line: "next: recall prior lessons (kern_memory recall) before implementing"},
+	}},
+	"kern_verify": {OutcomeFailure: {
+		{tools: []string{"kern_heal"}, line: "next: kern_heal can auto-repair failing files in a snapshot"},
+	}},
+	"kern_search": {OutcomeNoMatch: {
+		{tools: []string{"kern_meta", "kern_buddy"}, line: "try kern_meta (NL router) or kern_buddy for orientation"},
+	}},
+}
+
+// toolAvailable reports whether name is callable on the active surface.
+// A nil probe treats every tool as available (full catalog).
+func toolAvailable(available func(string) bool, name string) bool {
+	return available == nil || available(name)
 }
 
 // gapHint is one usage-gap nudge: the underused tool and the one-line why.
@@ -92,14 +127,34 @@ func (h *Hints) Enabled() bool {
 }
 
 // Select returns the (tool, outcome) table-hint line for a session — or ""
-// when disabled, the hint already fired this session, or the table has no
-// entry. Each (tool, outcome) hint fires at most once per session.
-func (h *Hints) Select(sessionKey, tool string, outcome Outcome) string {
+// when disabled, the hint already fired this session, or no alternative's
+// advertised tools are all callable on the active surface. Each (tool,
+// outcome) hint fires at most once per session. The available probe reports
+// whether a tool name is callable (the server's advertised set); nil treats
+// every tool as available.
+func (h *Hints) Select(sessionKey, tool string, outcome Outcome, available func(string) bool) string {
 	if !h.Enabled() {
 		return ""
 	}
-	line, ok := hintTable[tool][outcome]
+	alts, ok := hintTable[tool][outcome]
 	if !ok {
+		return ""
+	}
+	line := ""
+	for _, alt := range alts {
+		ok := true
+		for _, name := range alt.tools {
+			if !toolAvailable(available, name) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			line = alt.line
+			break
+		}
+	}
+	if line == "" {
 		return ""
 	}
 	id := tool + "\x00" + strconv.Itoa(int(outcome))
@@ -119,15 +174,17 @@ func (h *Hints) Select(sessionKey, tool string, outcome Outcome) string {
 
 // Gap returns the usage-gap hint for a session — or "" when disabled, the
 // session's read-call count is below GapThreshold, every top-ranked
-// underused tool was already used, or the chosen tool's gap hint already
-// fired this session. readCalls counts the session's read-phase tool calls;
-// usedTools is the set of tool names the session has called.
-func (h *Hints) Gap(sessionKey string, readCalls int, usedTools map[string]bool) string {
+// underused tool was already used, the chosen tool's gap hint already fired
+// this session, or no underused tool is callable on the active surface (the
+// available probe; nil treats every tool as available). readCalls counts the
+// session's read-phase tool calls; usedTools is the set of tool names the
+// session has called.
+func (h *Hints) Gap(sessionKey string, readCalls int, usedTools map[string]bool, available func(string) bool) string {
 	if !h.Enabled() || readCalls < GapThreshold {
 		return ""
 	}
 	for _, g := range gapOrder {
-		if usedTools[g.tool] {
+		if usedTools[g.tool] || !toolAvailable(available, g.tool) {
 			continue
 		}
 		id := "gap:" + g.tool

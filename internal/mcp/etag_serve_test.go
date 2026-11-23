@@ -16,7 +16,7 @@ import (
 // exploreEtagParams builds a tools/call params blob for kern_explore on root,
 // optionally carrying the conditional-fetch etag from a previous response.
 func exploreEtagParams(root, symbol string, e string) json.RawMessage {
-	args := map[string]any{"root": root, "symbol": symbol}
+	args := map[string]any{"root": root, "symbol": symbol, "mode": "evidence"}
 	if e != "" {
 		args["etag"] = e
 	}

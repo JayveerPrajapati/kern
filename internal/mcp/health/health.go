@@ -102,6 +102,9 @@ func Health(ctx context.Context, info ServerInfo, args map[string]any) (string, 
 			"incidents":          snap.IncidentCount,
 			"errors":             snap.ErrorCount,
 		},
+		"tasks": map[string]any{
+			"persistence_failures": snap.TaskPersistenceFailureCount,
+		},
 		"server": map[string]any{
 			"transport": info.Transport,
 			"version":   info.Version,

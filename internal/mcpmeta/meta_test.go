@@ -516,3 +516,90 @@ func TestHandleQuestionExactSymbolKeepsExplore(t *testing.T) {
 		t.Errorf("output missing explore classification: %q", out)
 	}
 }
+
+// argsRecorder captures the routed tool name AND its arguments, for the
+// F-B3 regression tests below (routeRecorder discards args).
+type argsRecorder struct {
+	called bool
+	tool   string
+	args   map[string]any
+}
+
+func (r *argsRecorder) route(ctx context.Context, name string, args map[string]any) (string, error) {
+	r.called = true
+	r.tool = name
+	r.args = args
+	return "routed:" + name, nil
+}
+
+// TestHandleSemanticFallbackExtractsSymbol (F-B3 regression, dogfood
+// 2026-11-22 lane B): the exact live repro — "show me the ServeStdio symbol
+// definition" classifies to kern_context via the SEMANTIC fallback, which
+// fabricates `symbol` from the raw sentence and returns a successful
+// "no symbol found: show me the ServeStdio symbol definition" for a symbol
+// that exists. Handle must extract the real symbol instead, so the routed
+// kern_context call receives symbol "ServeStdio".
+func TestHandleSemanticFallbackExtractsSymbol(t *testing.T) {
+	r := &argsRecorder{}
+	out, err := meta.Handle(context.Background(), meta.Hooks{RouteTool: r.route}, map[string]any{
+		"request": "show me the ServeStdio symbol definition",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !r.called {
+		t.Fatalf("the semantic route must still dispatch (never a silent refusal): %q", out)
+	}
+	if r.tool != "kern_context" {
+		t.Fatalf("expected the semantic route to kern_context, got %q (out=%q)", r.tool, out)
+	}
+	if got := r.args["symbol"]; got != "ServeStdio" {
+		t.Fatalf("routed symbol must be extracted from the request, got %q (args=%v)", got, r.args)
+	}
+	if !strings.Contains(out, "classified as: kern_context (semantic fallback)") {
+		t.Errorf("output must keep the semantic-fallback classification header: %q", out)
+	}
+}
+
+// TestHandleSemanticFallbackNoSymbolGuidanceNotFabrication (F-B3): when the
+// semantic fallback routes to a symbol-taking tool but the request names no
+// extractable symbol, Handle must NOT dispatch the fabricated raw-sentence
+// symbol — it answers with what was tried and asks for a symbol name, never
+// a false "no symbol found" for a symbol that exists.
+func TestHandleSemanticFallbackNoSymbolGuidanceNotFabrication(t *testing.T) {
+	r := &argsRecorder{}
+	out, err := meta.Handle(context.Background(), meta.Hooks{RouteTool: r.route}, map[string]any{
+		"request": "show the symbol definition for the thing being routed",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if r.called {
+		t.Fatalf("no extractable symbol: the doomed symbol lookup must not dispatch, got %s(%v)", r.tool, r.args)
+	}
+	for _, want := range []string{"semantic fallback", "no symbol name could be extracted", "kern_search"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("guidance must say what was tried and ask for a symbol name (missing %q): %q", want, out)
+		}
+	}
+	if strings.Contains(out, "no symbol found") {
+		t.Errorf("guidance must never read as a lookup miss: %q", out)
+	}
+}
+
+// TestHandlePassthroughSymbolBeatsExtraction (F-B3 edge): an explicit
+// passthrough symbol is authoritative — the fabrication guard must not
+// overwrite it with its own extraction.
+func TestHandlePassthroughSymbolBeatsExtraction(t *testing.T) {
+	r := &argsRecorder{}
+	_, err := meta.Handle(context.Background(), meta.Hooks{RouteTool: r.route}, map[string]any{
+		"request": "show me the ServeStdio symbol definition",
+		"args":    map[string]any{"symbol": "ExplicitSymbol"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !r.called || r.args["symbol"] != "ExplicitSymbol" {
+		t.Fatalf("passthrough symbol must win, got called=%v symbol=%v", r.called, r.args["symbol"])
+	}
+}

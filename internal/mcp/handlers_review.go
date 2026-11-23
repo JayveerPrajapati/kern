@@ -18,7 +18,11 @@ func (s *Server) handleChanges(ctx context.Context, args map[string]any) (string
 }
 
 func (s *Server) handleReview(ctx context.Context, args map[string]any) (string, error) {
-	return review.Review(ctx, s.reviewHooks(), args)
+	text, err := review.Review(ctx, s.reviewHooks(), args)
+	if err != nil {
+		return "", err
+	}
+	return s.appendContextGuidance(args, text), nil
 }
 
 func (s *Server) handleHubs(ctx context.Context, args map[string]any) (string, error) {

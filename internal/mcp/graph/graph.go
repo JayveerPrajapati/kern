@@ -859,6 +859,14 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 	if symbol == "" {
 		return "", fmt.Errorf("symbol is required")
 	}
+	mode := strings.ToLower(strings.TrimSpace(mcpargs.ArgString(args, "mode")))
+	switch mode {
+	case "", "concise":
+	case "balanced":
+	case "evidence":
+	default:
+		return "", fmt.Errorf("explore: mode must be concise, balanced, or evidence")
+	}
 	depth := 2
 	if v := mcpargs.ArgString(args, "depth"); v != "" {
 		n, err := mcpargs.AtoiArg(v, depth)
@@ -958,6 +966,11 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		effectiveMax = maxTokens - 32
 	}
 	rendered := intel.RenderExplore(rep)
+	if mode == "balanced" && maxTokens == 0 {
+		rendered = intel.RenderExploreBalanced(rep)
+	} else if mode != "evidence" && maxTokens == 0 {
+		rendered = intel.RenderExploreConcise(rep)
+	}
 	if maxTokens > 0 {
 		rendered = explorebudget.Render(rep, effectiveMax)
 	}

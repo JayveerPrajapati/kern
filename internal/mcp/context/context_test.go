@@ -53,6 +53,26 @@ func TestCompactSummaryTier(t *testing.T) {
 	}
 }
 
+func TestCompactNonIndexableExplainsInsteadOfEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(p, []byte("# Title\n\nprose\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Compact(context.Background(), Hooks{}, map[string]any{
+		"root": dir,
+		"path": "README.md",
+	})
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+	for _, want := range []string{"README.md", "not indexable code", "4 lines"} {
+		if !strings.Contains(res, want) {
+			t.Fatalf("expected %q in MCP compact result, got %q", want, res)
+		}
+	}
+}
+
 func TestCompactFullTier(t *testing.T) {
 	dir := t.TempDir()
 	writeSample(t, dir)

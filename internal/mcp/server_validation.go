@@ -16,6 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcpserve"
+	"github.com/JayveerPrajapati/kern/internal/serveoutput"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
@@ -118,6 +119,18 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 	if !knownTool(p.Name) {
 		return errorResponse(id, -32602, "unknown tool: "+p.Name)
 	}
+	// Advertised == invocable (audit F3, operator decision Q1=A, 2026-11-21):
+	// a tool absent from this connection's advertised surface (the same
+	// filteredTools() list tools/list serves) must not be callable — a
+	// client-side surface audit otherwise misses capabilities like kern_exec
+	// entirely. Internal routing (kern_meta, the governed Go API) does not
+	// pass through here, so no capability is lost; the operator escape is
+	// KERN_MCP_ALLOW_UNADVERTISED=1 (or advertising via KERN_MCP_FULL=1).
+	// The message is deliberately identical to the unknown-tool case so the
+	// response never reveals hidden-surface names.
+	if !s.advertisedForCall(p.Name) {
+		return errorResponse(id, -32602, "unknown tool: "+p.Name)
+	}
 	// A generous 30-minute per-call ceiling so a hung subprocess (an
 	// unresponsive Ollama during plan/analyze, or a slow index build) can
 	// never wedge the server goroutine forever; long legitimate operations
@@ -149,7 +162,7 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 	}()
 	// Cap every tool response at the output budget so a large result cannot
 	// flood the agent's context. Overridable per call with max_output=N and
-	// per tool by the R7 per-tool table (mcpserve.CallOutputBudget). A
+	// per tool by the R7 per-tool table (serveoutput.CallOutputBudget). A
 	// truncated response retains its FULL pre-sandbox text under an anchor
 	// (retainOutput) and the marker advertises slice=<anchor>:lines:A-B|tail:N
 	// to read the elided part without re-running the tool (R7 "more" cursor,
@@ -161,19 +174,19 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 	// points at the next) instead of flooding, and never re-executes the tool.
 	if err == nil {
 		var budget int
-		budget, err = mcpserve.CallOutputBudget(p.Name, p.Arguments)
+		budget, err = serveoutput.CallOutputBudget(p.Name, p.Arguments)
 		if err == nil && budget > 0 && len(text) > budget {
 			if scope.sliced {
 				// Chained cursor: retain only the elided remainder (text[cut:])
 				// of this slice under a fresh anchor, so the marker's slice=
 				// advice reads the part the caller has NOT seen yet — never the
 				// whole retained entry.
-				cut := mcpserve.OutputCut(text, budget)
+				cut := serveoutput.OutputCut(text, budget)
 				anchor := retainOutput(text[cut:])
-				text = mcpserve.SandboxOutputRetained(text, budget, p.Name, anchor)
+				text = serveoutput.SandboxOutputRetained(text, budget, p.Name, anchor)
 			} else {
 				anchor := retainOutput(text)
-				text = mcpserve.SandboxOutputRetained(text, budget, p.Name, anchor)
+				text = serveoutput.SandboxOutputRetained(text, budget, p.Name, anchor)
 			}
 		}
 		// The structured provenance must respect the same per-call output
@@ -255,7 +268,7 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 		}
 		etag.Default.Record(argString(p.Arguments, "agent_id"), etag.Entry{
 			Tool:     p.Name,
-			Args:     etag.CanonicalArgsKey(p.Arguments),
+			Args:     etag.CanonicalArgsKey(p.Name, p.Arguments),
 			ETag:     scope.etag,
 			Stamp:    time.Now(),
 			Identity: ident,
@@ -310,7 +323,7 @@ func (s *Server) toolCallResponseDecoded(id json.RawMessage, p toolCallParams) a
 	// pre-tool denials — they return before this point). The same final
 	// response text the client sees is what gets counted, so the ledger
 	// answers "which tools return the most tokens to my context".
-	mcpserve.RecordToolCall(p.Name, p.Arguments, tokensOut, s.clientNameFor())
+	serveoutput.RecordToolCall(p.Name, p.Arguments, tokensOut, s.clientNameFor())
 	mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, tokensOut)
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
@@ -368,13 +381,27 @@ var governancePassthroughParams = map[string]bool{
 	"agent_id": true, "agent_token": true, "task": true, "scope": true,
 }
 
+// universalSandboxParams are the output-sandbox controls the SERVER honors for
+// EVERY tool (serveoutput.CallOutputBudget reads max_output; the slice cursor
+// short-circuit intercepts before dispatch), regardless of what the tool's own
+// handler declares. They are therefore never "ignored", and flagging them as
+// unknown was actively wrong: a kern_project_map call with max_output=400 was
+// truncated to that budget while the response carried
+// "max_output — ignored" (audit-closure black-box case, 2026-11-03). Only 9 of
+// 32 schemas advertise them (payload-budget trade-off), so the declaration
+// cannot be the test — server behavior is.
+var universalSandboxParams = map[string]bool{
+	"slice": true, "max_output": true,
+}
+
 // unknownParamsHint names arguments the tool's schema does not declare
 // (W10, 2026-10-26 black-box audit): a typo like 'roots' for 'root' used to
 // run against the default root with isError:false — the argument was silently
 // dropped and the caller never learned. The hint lists the ignored keys and
 // the declared parameter names so the fix is visible on the very next call.
 // It fires only for non-error results (an error response already has the
-// caller's attention) and never for governance passthrough keys.
+// caller's attention) and never for governance passthrough keys or the
+// universal sandbox controls the server honors for every tool.
 func unknownParamsHint(name string, args map[string]any) string {
 	t, ok := toolByName[name]
 	if !ok || len(args) == 0 {
@@ -383,7 +410,7 @@ func unknownParamsHint(name string, args map[string]any) string {
 	props, _ := t.InputSchema["properties"].(map[string]any)
 	var unknown []string
 	for k := range args {
-		if _, declared := props[k]; !declared && !governancePassthroughParams[k] {
+		if _, declared := props[k]; !declared && !governancePassthroughParams[k] && !universalSandboxParams[k] {
 			unknown = append(unknown, k)
 		}
 	}

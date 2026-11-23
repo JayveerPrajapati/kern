@@ -316,6 +316,16 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 		return "", fmt.Errorf("kern_exec: %s", pii.Mask(res.Err.Error()).Text)
 	}
 	masked := pii.Mask(res.Stdout)
+	// Success-path stderr is a warning channel (audit F5, 2026-11-21):
+	// dropping it made scripts un-debuggable — warnings, deprecation notices
+	// and partial-failure context vanished whenever the script exited 0.
+	// It is appended under an explicit marker and PII-masked like stdout,
+	// so shaping (output= summary/tail/lines) treats it as part of the
+	// payload and the anchor covers it.
+	if s := strings.TrimSpace(res.Stderr); s != "" {
+		maskedStderr := pii.Mask(s)
+		masked = pii.Result{Text: masked.Text + "\n--- stderr ---\n" + maskedStderr.Text, Replaced: masked.Replaced + maskedStderr.Replaced, Mapping: masked.Mapping}
+	}
 	// Keep the full (masked) output: in-memory anchor + on-disk copy, so a
 	// shaped call can always be widened (output=full) or re-windowed later
 	// without re-running the script.

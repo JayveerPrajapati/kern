@@ -17,11 +17,18 @@ import (
 )
 
 // ArgString reads an optional string tool argument, trimmed. Missing or nil
-// returns "".
+// returns "". JSON numbers are rendered positionally: %v switches to exponent
+// notation for large floats (999999999 -> "9.99999999e+08"), which made
+// integer-arg errors self-contradictory ("invalid integer \"9.99999999e+08\""
+// — audit F7, 2026-11-21); strconv.FormatFloat keeps the value as the client
+// sent it.
 func ArgString(args map[string]any, key string) string {
 	v, ok := args[key]
 	if !ok || v == nil {
 		return ""
+	}
+	if f, isFloat := v.(float64); isFloat {
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }

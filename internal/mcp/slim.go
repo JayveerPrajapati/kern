@@ -54,7 +54,7 @@ func slimTools(ts []catalog.Tool) []catalog.Tool {
 		}
 		t.Description = firstSentence(t.Description, 140)
 		if t.Name == "kern_meta" {
-			t.Description += " Routes to every kern tool (the rest are not advertised in slim mode)."
+			t.Description += " Routes within the advertised kern tool surface."
 		}
 		if slimmed, ok := dropSchemaDescriptions(t.InputSchema).(map[string]any); ok {
 			t.InputSchema = slimmed

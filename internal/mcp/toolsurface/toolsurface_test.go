@@ -16,12 +16,26 @@ func TestIsDefault(t *testing.T) {
 }
 func TestAnnotate(t *testing.T) {
 	got := Annotate([]string{"kern_explore", "kern_graph", "kern_verify", "kern_exec"})
-	want := "kern_explore, kern_graph, kern_verify, kern_exec"
+	want := "kern_explore, kern_graph, kern_verify, kern_exec (KERN_MCP_FULL)"
 	if got != want {
 		t.Fatalf("Annotate = %q, want %q", got, want)
 	}
 	if got := Annotate(nil); got != "" {
 		t.Fatalf("Annotate(nil) = %q, want empty", got)
+	}
+}
+
+func TestMode(t *testing.T) {
+	if got := Mode(); got != "direct" {
+		t.Fatalf("Mode() = %q, want direct", got)
+	}
+	t.Setenv("KERN_MCP_FULL", "1")
+	if got := Mode(); got != "full" {
+		t.Fatalf("Mode() with KERN_MCP_FULL=1 = %q, want full", got)
+	}
+	t.Setenv("KERN_MCP_SINGLE_TOOL", "1")
+	if got := Mode(); got != "single" {
+		t.Fatalf("Mode() with KERN_MCP_SINGLE_TOOL=1 = %q, want single", got)
 	}
 }
 

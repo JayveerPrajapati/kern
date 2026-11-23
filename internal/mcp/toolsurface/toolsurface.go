@@ -10,47 +10,29 @@
 // agent cannot call it (it is KERN_MCP_FULL=1 / CLI-gated).
 package toolsurface
 
-// Default is the full 32-tool catalog advertised on a default install
-// (toolpolicy.go defaultTools). The first seven are the original core surface;
-// the remaining tools are usage-curated additions. Order is deterministic.
-// The full catalog is the default surface (standing mandate 2026-10-23: agents
-// should use ALL available kern tools — kern_graph and kern_arch moved out of
-// KERN_MCP_FULL-only gating because they are low-risk, cacheable, explore-phase
-// tools with no execution surface). KERN_MCP_FULL=1 and KERN_MCP_PHASE remain
-// available to lift the surface further or phase-filter it.
+import (
+	"os"
+	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
+)
+
+// Default is the direct eleven-tool surface advertised on a default install.
+// These are the common code-intelligence and verification routes agents need
+// without first learning the full catalog. KERN_MCP_FULL=1 opts into the full
+// 34-tool catalog; KERN_MCP_PHASE and KERN_MCP_SINGLE_TOOL remain supported.
 var Default = []string{
-	"kern_meta",             // NL router → all sub-tools
-	"kern_explore",          // symbol source + callers/callees + blast radius
-	"kern_impact",           // blast radius of a change
-	"kern_apply",            // safe edit path: transactional apply + verify + rollback
-	"kern_search",           // ranked symbol search
-	"kern_verify",           // unified verification
-	"kern_buddy",            // session onboarding digest
-	"kern_exec",             // governed execution (fails closed: KERN_ALLOW_EXEC/KERN_TOOLS still gate every call — D5)
-	"kern_compact_file",     // compact symbolic file summary (tier=full verbatim)
-	"kern_run",              // run an intent through the full task pipeline
-	"kern_optimize",         // compress context: action=prompt|log|output
-	"kern_context",          // minimal relevant source slice for a symbol
-	"kern_memory",           // project brain memory (add/list/recall/remove)
-	"kern_evidence",         // signed-evidence toolkit (verify/explain/export/anchor)
-	"kern_probe",            // micro-context router: task → symbol bundle
-	"kern_plan",             // deterministic implementation plan for a change
-	"kern_doc",              // project docs: action=search|fetch|index
-	"kern_project_map",      // compressed whole-project symbol map
-	"kern_ast_search",       // AST-level symbol search
-	"kern_stats",            // before/after token savings and cost estimates
-	"kern_why",              // rationale and doc-reference report for a symbol
-	"kern_heal",             // self-correction loop on failing files (snapshot)
-	"kern_fit_context",      // fit files/symbols into a token budget
-	"kern_plan_context",     // deterministically plan which context to include
-	"kern_path",             // shortest call path between two symbols
-	"kern_semcache",         // inspect/manage the semantic cache
-	"kern_swap",             // swap fenced code blocks to per-file signatures
-	"kern_mask_pii",         // locally scan text for secrets/PII
-	"kern_fetch_raw_anchor", // re-read truncated anchor output
-	"kern_review",           // token-optimised code-review context
-	"kern_graph",            // one-call graph context (callers/callees/blast radius)
-	"kern_arch",             // architecture overview from call-graph communities
+	"kern_buddy",    // session onboarding and repo digest
+	"kern_search",   // ranked symbol search
+	"kern_explore",  // symbol source + callers/callees + blast radius
+	"kern_context",  // minimal relevant source slice
+	"kern_probe",    // task-driven multi-symbol context bundle
+	"kern_research", // read-only multi-symbol research bundle
+	"kern_impact",   // transitive blast radius
+	"kern_graph",    // one-hop call graph context
+	"kern_review",   // token-optimised review context
+	"kern_verify",   // unified verification
+	"kern_meta",     // optional natural-language router → advertised sub-tools
 }
 
 // Set returns the default surface as a membership map (the shape
@@ -96,4 +78,37 @@ func Annotate(tools []string) string {
 		joined += t
 	}
 	return joined
+}
+
+// Mode returns the active advertisement surface for local telemetry. It is
+// deliberately privacy-safe: only the mode name, never roots, paths, commands,
+// arguments, or file contents. Direct is the default; explicit environment
+// modes take precedence in the same broad order the plugin and server use.
+func Mode() string {
+	switch {
+	case os.Getenv("KERN_MCP_SINGLE_TOOL") == "1":
+		return "single"
+	case os.Getenv("KERN_MCP_FULL") == "1":
+		return "full"
+	case os.Getenv("KERN_MCP_HIGH_LEVEL_ONLY") == "1":
+		return "high-level"
+	case validPhase(os.Getenv("KERN_MCP_PHASE")):
+		return "phase"
+	case os.Getenv("KERN_MCP_CATEGORY") != "" && catalog.ValidCategory(strings.ToLower(strings.TrimSpace(os.Getenv("KERN_MCP_CATEGORY")))):
+		return "category"
+	case strings.TrimSpace(os.Getenv("KERN_TOOLS")) != "":
+		return "allowlist"
+	case os.Getenv("KERN_MCP_SLIM") == "1":
+		return "slim"
+	default:
+		return "direct"
+	}
+}
+
+func validPhase(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "explore", "plan", "edit", "verify":
+		return true
+	}
+	return false
 }

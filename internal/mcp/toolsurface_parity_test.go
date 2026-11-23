@@ -13,8 +13,8 @@ import (
 // leaf, advertisement filters against this map; drift would make the
 // annotation lie).
 func TestDefaultToolsMatchToolsurface(t *testing.T) {
-	if len(defaultTools) != 32 {
-		t.Fatalf("defaultTools size = %d, want 32", len(defaultTools))
+	if len(defaultTools) != 11 {
+		t.Fatalf("defaultTools size = %d, want 11", len(defaultTools))
 	}
 	if len(toolsurface.Default) != len(defaultTools) {
 		t.Fatalf("toolsurface.Default size = %d, defaultTools size = %d — surface drift", len(toolsurface.Default), len(defaultTools))
@@ -37,11 +37,11 @@ func TestDefaultToolsMatchToolsurface(t *testing.T) {
 // that pin the downstream copies.
 func TestSurfaceCountsPinned(t *testing.T) {
 	full := ToolNames()
-	if len(full) != 32 {
-		t.Fatalf("full catalog = %d tools, want 32 — an unapproved surface change (updating this pin is a deliberate act)", len(full))
+	if len(full) != 34 {
+		t.Fatalf("full catalog = %d tools, want 34 — an unapproved surface change (updating this pin is a deliberate act)", len(full))
 	}
-	if len(defaultTools) != 32 {
-		t.Fatalf("default surface = %d, want 32 — an unapproved surface change", len(defaultTools))
+	if len(defaultTools) != 11 {
+		t.Fatalf("default surface = %d, want 11 — an unapproved surface change", len(defaultTools))
 	}
 	var fullOnly []string
 	for _, n := range full {
@@ -50,8 +50,13 @@ func TestSurfaceCountsPinned(t *testing.T) {
 		}
 	}
 	slices.Sort(fullOnly)
-	want := []string{}
+	want := []string{
+		"kern_apply", "kern_arch", "kern_ast_search", "kern_compact_file", "kern_doc", "kern_evidence",
+		"kern_exec", "kern_fetch_raw_anchor", "kern_fit_context", "kern_heal", "kern_mask_pii", "kern_memory",
+		"kern_optimize", "kern_path", "kern_plan", "kern_plan_context", "kern_project_map",
+		"kern_run", "kern_semcache", "kern_skill", "kern_stats", "kern_swap", "kern_why",
+	}
 	if !slices.Equal(fullOnly, want) {
-		t.Fatalf("full-only tools = %v, want %v — the default surface IS the full catalog (standing mandate 2026-10-23); any full-only tool is unapproved drift", fullOnly, want)
+		t.Fatalf("full-only tools = %v, want the 23 catalog tools outside the direct surface", fullOnly)
 	}
 }

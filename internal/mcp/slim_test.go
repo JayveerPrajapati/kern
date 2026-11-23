@@ -56,7 +56,7 @@ func TestSlimToolsFitsBudget(t *testing.T) {
 	// The router must stay advertised: it is how the unadvertised 24 are reached.
 	var router bool
 	for _, got := range slimDoc.Tools {
-		if got.Name == "kern_meta" && strings.Contains(got.Description, "Routes to every kern tool") {
+		if got.Name == "kern_meta" && strings.Contains(got.Description, "Routes within the advertised kern tool surface") {
 			router = true
 		}
 	}

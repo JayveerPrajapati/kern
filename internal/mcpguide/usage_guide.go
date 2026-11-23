@@ -1,13 +1,13 @@
 package mcpguide
 
-// Guide returns a concise guide to kern's current 32-tool MCP surface. It
+// Guide returns a concise guide to kern's current 34-tool MCP surface. It
 // intentionally defers detailed per-tool guidance to the generated
 // docs/tool-selection.md and avoids duplicating tool lists that can drift.
 func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
-kern exposes a 32-tool MCP catalog and advertises the full catalog by default
-(standing mandate 2026-10-23: agents use all available tools).
+kern exposes a 34-tool MCP catalog and advertises a direct eleven-tool surface by
+default. Set KERN_MCP_FULL=1 to advertise the full catalog directly.
 
 For the authoritative current surface, risk counts, and intent-to-tool mapping,
 see the generated Tool Selection Guide in docs/tool-selection.md.
@@ -15,8 +15,8 @@ see the generated Tool Selection Guide in docs/tool-selection.md.
 ## Phase-aware selection
 
 - Explore: kern_buddy, kern_search, kern_explore, kern_context,
-  kern_compact_file, kern_project_map, kern_why, kern_path
-- Plan: kern_plan, kern_plan_context, kern_impact, kern_probe
+  kern_compact_file, kern_project_map, kern_why, kern_path, kern_probe, kern_research
+- Plan: kern_plan, kern_plan_context, kern_impact
 - Edit: kern_run and kern_heal (both governed and fail closed)
 - Verify: kern_review, kern_verify, kern_evidence
 - Cross-phase utilities: kern_meta, kern_optimize, kern_memory, kern_doc,

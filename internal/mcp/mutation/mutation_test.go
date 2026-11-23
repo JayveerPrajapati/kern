@@ -33,15 +33,18 @@ func mutationFixture(t *testing.T, dir string) {
 	}
 }
 
-// TestMutationTestCommandDeniedWithoutExecAllowlist locks the exec-gate
+// TestMutationTestCommandDeniedUnderClosedPosture locks the exec-gate
 // requirement (finding: kern_mutate_test's test_command executed arbitrary
 // client-supplied commands with NO governance gate): a client-supplied
-// test_command must fail closed without KERN_ALLOW_EXEC=1 or a KERN_TOOLS
-// allowlist naming the tool — the same gate kern_exec/kern_sandbox pass.
-func TestMutationTestCommandDeniedWithoutExecAllowlist(t *testing.T) {
+// test_command must fail closed under KERN_EXEC_POSTURE=closed without
+// KERN_ALLOW_EXEC=1 or a KERN_TOOLS allowlist naming the tool — the same
+// gate kern_exec/kern_sandbox pass. (Default ask posture risk-assesses
+// LOW/MEDIUM commands instead of denying.)
+func TestMutationTestCommandDeniedUnderClosedPosture(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
 	t.Setenv("KERN_EXEC_RISK", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	dir := t.TempDir()
 	mutationFixture(t, dir)
 

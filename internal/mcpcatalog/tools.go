@@ -80,7 +80,7 @@ var All = []Tool{{
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "cross",
 		RiskLevel:     "medium",
-		Description:   "Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one public docs page into the index (kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).",
+		Description:   "Project documentation: action=search queries the local doc index (n-gram + optional semantic), action=fetch pulls one operator-approved public docs page into the index (KERN_DOC_FETCH_DOMAINS; kern's ONLY network call), action=index pre-indexes the docs tree (semantic=true adds Ollama embeddings).",
 		InputSchema: schema(map[string]any{
 			"action":   enumProp("Doc operation", "search", "fetch", "index"),
 			"query":    strProp("Natural-language or keyword query (action=search)"),
@@ -89,6 +89,18 @@ var All = []Tool{{
 			"name":     strProp("Optional index name for the fetched page (action=fetch; default derived from the URL host+path)"),
 			"semantic": boolProp("Add dense Ollama embeddings (action=fetch/index; requires a local Ollama)"),
 			"root":     rootProp(),
+		}, []string{"action"}),
+	},
+	{
+		Name: "kern_skill", Category: CategoryMeta,
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "cross",
+		RiskLevel:     "low",
+		Description:   "Bundled agent-skill catalog: action=catalog lists available runbooks, action=load returns one skill body (bundled first, then <root>/.kern/skills).",
+		InputSchema: schema(map[string]any{
+			"action": enumProp("Skill operation", "catalog", "load"),
+			"skill":  strProp("Skill name (action=load; bundled skill or user skill under <root>/.kern/skills)"),
+			"root":   rootProp(),
 		}, []string{"action"}),
 	},
 	{
@@ -324,6 +336,21 @@ var All = []Tool{{
 		}, []string{"task"}),
 	},
 	{
+		Name: "kern_research", Category: CategoryGraph,
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "explore",
+		RiskLevel:     "low",
+		Cacheable:     true,
+		Description:   "Read-only multi-symbol research: deterministically rank task keywords, combine definitions, callers, callees, tests, impact and affected files, then fit one compact evidence bundle. No execution, writes, or network.",
+		InputSchema: schema(map[string]any{
+			"task":           strProp("Natural-language research task or question"),
+			"root":           rootProp(),
+			"max_tokens":     intProp("Token budget for the bundle (default 6000)"),
+			"min_confidence": enumProp("Prune anchor call rows below this provenance tier (default: keep all)", "EXTRACTED", "INFERRED", "AMBIGUOUS"),
+			"no_cache":       noCacheProp(),
+		}, []string{"task"}),
+	},
+	{
 		Name: "kern_plan_context", Category: CategoryAnalyze,
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "plan",
@@ -342,7 +369,7 @@ var All = []Tool{{
 		Phase:         "edit",
 		Slow:          true,
 		RiskLevel:     "critical",
-		Description:   "One-off runs instead of raw bash: network-isolated, stdout only. Code runs in a discarded temp dir; a shell command runs in the workdir with writes confined to it + build caches (darwin). Credential reads denied; fails closed without isolation unless KERN_ALLOW_UNISOLATED=1.",
+		Description:   "One-off runs instead of raw bash: network-isolated; stdout verbatim, stderr appended under a marker. Code runs in a discarded temp dir; shell commands run in the workdir, writes confined there + build caches (darwin). Credentials denied; fails closed unisolated without KERN_ALLOW_UNISOLATED=1.",
 		InputSchema: schema(map[string]any{
 			"code":       strProp("The script body (required)"),
 			"lang":       strProp("Language override (e.g. python3, node, bash, go); otherwise from the shebang"),
@@ -362,10 +389,11 @@ var All = []Tool{{
 		Phase:         "explore",
 		RiskLevel:     "low",
 		Cacheable:     true,
-		Description:   "Use instead of reading a whole file: one-call symbol exploration — definition source, callers, callees, and blast radius up to N hops; optional why-rationale.",
+		Description:   "Use instead of reading a whole file: one-call symbol exploration. Default is concise (definition + caller/callee/blast counts + risk); mode=balanced adds top callers/callees/affected files; mode=evidence returns source, callers, callees, and blast radius.",
 		InputSchema: schema(outputProps(map[string]any{
 			"symbol":         strProp("Symbol name, e.g. 'User.Login'"),
 			"root":           rootProp(),
+			"mode":           strProp("Output mode: concise (default), balanced (top callers/callees/files), or evidence"),
 			"depth":          intProp("Blast-radius hop cap (default 2, 0 = unlimited)"),
 			"max":            intProp("Max blast-radius symbols (default 30)"),
 			"explain":        boolProp("Append the why-rationale section"),

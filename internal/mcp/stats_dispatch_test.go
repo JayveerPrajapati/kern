@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/serveoutput"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
@@ -69,6 +69,9 @@ func TestToolCallRecordsPerToolEntry(t *testing.T) {
 	if found.Session != "sess-1" {
 		t.Fatalf("session not stamped, got %q", found.Session)
 	}
+	if found.Surface != "direct" {
+		t.Fatalf("expected direct surface telemetry, got %q", found.Surface)
+	}
 	if found.Agent != "mcp" {
 		t.Errorf("no initialize / no agent_id must fall back to the neutral %q bucket, got %q", "mcp", found.Agent)
 	}
@@ -85,8 +88,8 @@ func TestRecordToolCallSkipsSelfRecording(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	mcpserve.RecordToolCall("kern_search", nil, tokenize.Count("a returned payload"), "")
-	mcpserve.RecordToolCall("kern_optimize", nil, tokenize.Count("must not be recorded at dispatch"), "")
+	serveoutput.RecordToolCall("kern_search", nil, tokenize.Count("a returned payload"), "")
+	serveoutput.RecordToolCall("kern_optimize", nil, tokenize.Count("must not be recorded at dispatch"), "")
 
 	rec, err := stats.NewRecorder()
 	if err != nil {
@@ -111,7 +114,7 @@ func TestRenderStatsByTool(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	mcpserve.RecordToolCall("kern_search", nil, tokenize.Count("hello world payload for the ledger"), "")
+	serveoutput.RecordToolCall("kern_search", nil, tokenize.Count("hello world payload for the ledger"), "")
 
 	out, err := renderStatsByTool("", "")
 	if err != nil {

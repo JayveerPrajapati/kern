@@ -44,6 +44,7 @@ func init() {
 		"kern_memory":           simple((*Server).handleMemory),
 		"kern_mask_pii":         simple((*Server).handleMaskPII),
 		"kern_doc":              simple((*Server).handleDoc),
+		"kern_skill":            simple((*Server).handleSkill),
 		"kern_swap":             simple((*Server).handleSwap),
 		"kern_heal":             (*Server).handleHeal,
 		"kern_compact_file":     simple((*Server).handleCompact),
@@ -63,6 +64,7 @@ func init() {
 		"kern_graph":            simple((*Server).handleGraph),
 		"kern_explore":          simple((*Server).handleExplore),
 		"kern_probe":            simple((*Server).handleProbe),
+		"kern_research":         simple((*Server).handleResearch),
 		"kern_plan_context":     simple((*Server).handlePlanContext),
 		"kern_exec":             simple((*Server).handleExec),
 		"kern_plan":             simple((*Server).handlePlan),
@@ -175,7 +177,7 @@ func (s *Server) CallToolGovernedResult(ctx context.Context, name string, args m
 		}
 		etag.Default.Record(argString(args, "agent_id"), etag.Entry{
 			Tool:     name,
-			Args:     etag.CanonicalArgsKey(args),
+			Args:     etag.CanonicalArgsKey(name, args),
 			ETag:     scope.etag,
 			Stamp:    time.Now(),
 			Identity: ident,

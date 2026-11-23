@@ -310,19 +310,24 @@ func TestServerSelfRegistersCommandSamplerFromEnv(t *testing.T) {
 
 // TestRegisterHostSamplerDeniedWithoutExecAllowlist locks the exec-gate
 // requirement (finding: kern_register_host_sampler executed arbitrary
-// client-supplied commands with NO governance gate): registering a command
-// must fail closed without KERN_ALLOW_EXEC=1 or a KERN_TOOLS allowlist naming
-// the tool — the same gate kern_exec/kern_sandbox pass. An empty command
-// (unregister) executes nothing and stays allowed.
+// client-supplied commands with NO governance gate): under the closed
+// posture (KERN_EXEC_POSTURE=closed, the operator opt-in restoring the
+// pre-ask fail-closed default) registering a command must fail without
+// KERN_ALLOW_EXEC=1 or a KERN_TOOLS allowlist naming the tool — the same
+// gate kern_exec/kern_sandbox pass. Under the default ask posture the
+// risk firewall decides instead (LOW/MEDIUM run audited). An empty
+// command (unregister) executes nothing and stays allowed either way.
 func TestRegisterHostSamplerDeniedWithoutExecAllowlist(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	s := newTestServer()
 	ctx := context.Background()
 
 	_, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": "echo hi"})
 	if err == nil {
-		t.Fatal("registration must be denied without KERN_ALLOW_EXEC=1 or an exec allowlist")
+		t.Fatal("registration must be denied under the closed posture without KERN_ALLOW_EXEC=1 or an exec allowlist")
 	}
 	if !strings.Contains(err.Error(), "command execution blocked") {
 		t.Fatalf("expected the governance exec-gate denial, got: %v", err)

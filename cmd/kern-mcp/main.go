@@ -43,6 +43,14 @@ var version = "dev"
 
 func init() {
 	version = kversion.Adopt(version)
+	// F-B1 (dogfood 2026-11-22): never report a bare "dev". Release builds
+	// are ldflags-stamped (Makefile LDFLAGS/RELEASE_LDFLAGS, the release
+	// workflow's release-assets action) and pass through unchanged; a plain
+	// `go build` from a checkout derives its commit via Describe, so
+	// --version, the MCP initialize serverInfo and the health handler all
+	// identify the build the way the sibling kern CLI does
+	// (`kern 9693283 (dev)`).
+	version = kversion.Describe(version)
 }
 
 type stringList []string

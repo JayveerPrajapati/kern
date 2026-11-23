@@ -63,7 +63,7 @@ type Hooks struct {
 // kern_meta itself is routable: routing to the router would recurse, so it
 // is deliberately excluded. Deriving the set instead of hand-maintaining a
 // fixed name map keeps the drift gate (TestMetaRouterCatalogCoverage) and the
-// plugin's "NL router → all sub-tools" promise honest as the catalog grows.
+// plugin's "NL router → advertised sub-tools" promise honest as the catalog grows.
 // The set is built once at package init; it is not sorted (Handle only
 // membership-tests it, and RoutableTools sorts on return). Names the
 // classifier produces that are NOT in this set — a classified name that is
@@ -306,6 +306,28 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	for _, k := range []string{"agent_id", "task", "scope"} {
 		if v, ok := args[k]; ok {
 			subArgs[k] = v
+		}
+	}
+	// Semantic-route symbol fabrication guard (F-B3, dogfood 2026-11-22):
+	// the semantic router cannot synthesize symbol arguments —
+	// SemanticMetaRoute places the RAW request under the routed tool's first
+	// query-ish parameter, so a symbol-taking tool (kern_context /
+	// kern_explore / kern_why / kern_graph) receives the whole sentence as
+	// `symbol` and answers a confident "no symbol found" for a symbol that
+	// exists. When the semantic route fabricated the symbol (its value is
+	// exactly the raw request — an explicit passthrough symbol never
+	// matches this), extract the symbol with the same extractor the
+	// deterministic routes use; when the request names no symbol at all,
+	// refuse to dispatch the doomed lookup and answer with what was tried
+	// and a request for the symbol name, never a false negative.
+	if viaSemantic {
+		if sym, ok := subArgs["symbol"].(string); ok && sym == request {
+			if extracted := ExtractSymbol(request, strings.ToLower(request)); extracted != "" {
+				subArgs["symbol"] = extracted
+			} else {
+				return fmt.Sprintf("[kern] classified as: %s (semantic fallback) — no symbol name could be extracted from %q, so no symbol lookup was run (a raw-sentence lookup would falsely report the symbol missing even when it exists). Re-ask naming the symbol (quoted, CamelCase or dotted — e.g. request=\"show me the ServeStdio definition\" routes symbol ServeStdio), or call kern_search to locate it by keywords.",
+					tool, clipEcho(request)), nil
+			}
 		}
 	}
 	// B1 workingset route (ADR-0012): a request classified to the workingset

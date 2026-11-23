@@ -21,7 +21,17 @@ func hintExplore(t *testing.T, s *Server, id int, root, symbol string) string {
 	return contentText(resp)
 }
 
-const exploreHint = "next: kern_why names who depends on this; kern_impact before editing"
+// exploreHint is the kern_explore success hint ON THE DEFAULT SURFACE
+// (F-B4, dogfood 2026-11-22): cacheTestServer serves the default eleven-tool
+// surface, where kern_why is not callable — advertising it sent agents to a
+// JSON-RPC -32602 unknown-tool error — so the hint falls back to its
+// kern_impact-only alternative. The full-surface variant is pinned by
+// TestHintsFullSurfaceNamesKernWhy below.
+const exploreHint = "next: kern_impact before editing"
+
+// fullExploreHint is the same hint under KERN_MCP_FULL=1, where kern_why is
+// advertised and callable.
+const fullExploreHint = "next: kern_why names who depends on this; kern_impact before editing"
 
 // TestHintsOnExploreSuccessOnce (B6): a successful kern_explore response
 // carries the explore hint exactly once per session — the second explore
@@ -121,5 +131,20 @@ func TestHintForSuppressedByLoopMarker(t *testing.T) {
 	// Fresh session WITH the loop marker: suppressed.
 	if line := s.hintFor(context.Background(), "kern_explore", map[string]any{"agent_id": "bob", "symbol": "foo"}, "some payload", "[kern loop-suspect] resembles call #1"); line != "" {
 		t.Fatalf("the loop marker must suppress the hint even for a fresh session, got %q", line)
+	}
+}
+
+// TestHintsFullSurfaceNamesKernWhy (F-B4, dogfood 2026-11-22 lane B): with
+// KERN_MCP_FULL=1 set at server construction, the advertised set widens and
+// the explore hint advertises kern_why again — the surface gate follows the
+// active surface, it never hardcodes the default one.
+func TestHintsFullSurfaceNamesKernWhy(t *testing.T) {
+	t.Setenv("KERN_MCP_FULL", "1")
+	root := mcpProject(t)
+	s := cacheTestServer(t)
+	defer s.Close()
+	t1 := hintExplore(t, s, 1, root, "Greet")
+	if !strings.Contains(t1, fullExploreHint) {
+		t.Fatalf("full-surface explore response must carry the kern_why hint, got %q", t1)
 	}
 }

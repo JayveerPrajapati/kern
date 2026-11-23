@@ -10,7 +10,7 @@ import (
 // each test exercises exactly the env it sets, regardless of the host shell.
 func clearMCPSurfaceEnv(t *testing.T) {
 	t.Helper()
-	for _, v := range []string{"KERN_MCP_FULL", "KERN_MCP_HIGH_LEVEL_ONLY", "KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_MCP_CATEGORY", "KERN_TOOLS"} {
+	for _, v := range []string{"KERN_MCP_FULL", "KERN_MCP_HIGH_LEVEL_ONLY", "KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_MCP_CATEGORY", "KERN_TOOLS", "KERN_MCP_ALLOW_UNADVERTISED"} {
 		t.Setenv(v, "")
 	}
 }
@@ -101,12 +101,14 @@ func TestFilteredToolsKernToolsAllowlist(t *testing.T) {
 	}
 }
 
-// TestCallToolResolvesUnadvertisedHandler is the correctness invariant for
-// the filtered surface: kern_meta's NL router must still reach sub-tool
-// handlers that are NOT advertised in the active surface. Under
-// KERN_MCP_PHASE=plan, kern_graph (explore-phase) is not advertised, yet the
-// tools/call dispatch must resolve it to its real handler (which errors on a
-// missing symbol arg) rather than failing with "unknown tool".
+// TestCallToolResolvesUnadvertisedHandler pins the advertised==invocable
+// contract (audit F3, operator decision Q1=A, 2026-11-21): under
+// KERN_MCP_PHASE=plan, kern_graph (explore-phase) is not advertised, so a
+// direct tools/call for it must fail with "unknown tool" — a client-side
+// surface audit must not miss capabilities. The operator escape
+// KERN_MCP_ALLOW_UNADVERTISED=1 restores direct invocation, and kern_meta
+// routing keeps every sub-tool reachable either way (its internal dispatch
+// does not pass through the tools/call gate).
 func TestCallToolResolvesUnadvertisedHandler(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_PHASE", "plan")
@@ -117,11 +119,83 @@ func TestCallToolResolvesUnadvertisedHandler(t *testing.T) {
 		t.Fatal("test premise broken: kern_graph must not be advertised under phase=plan")
 	}
 	text := mcpToolError(t, "kern_graph", map[string]any{})
+	if !strings.Contains(text, "unknown tool") {
+		t.Fatalf("unadvertised tool must be rejected as unknown, got %q", text)
+	}
+
+	// Operator escape restores the direct call.
+	t.Setenv("KERN_MCP_ALLOW_UNADVERTISED", "1")
+	text = mcpToolError(t, "kern_graph", map[string]any{})
 	if strings.Contains(text, "unknown tool") {
-		t.Fatalf("unadvertised tool was rejected as unknown: %q", text)
+		t.Fatalf("escape env must restore unadvertised invocation, got %q", text)
 	}
 	if !strings.Contains(text, "symbol is required") {
 		t.Fatalf("expected the handler's arg-validation error, got %q", text)
+	}
+}
+
+func TestMetaRoutingObeysAdvertisedSurface(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	if _, ok := toolByName["kern_skill"]; !ok {
+		t.Fatal("premise broken: kern_skill is registered in the full catalog")
+	}
+	s := NewServer(strings.NewReader(""), io.Discard)
+	if _, err := s.precheckTool("kern_skill", nil); err == nil || !strings.Contains(err.Error(), "not advertised on this surface") {
+		t.Fatalf("default surface must block kern_meta routing to kern_skill, got: %v", err)
+	}
+
+	t.Setenv("KERN_MCP_FULL", "1")
+	s = NewServer(strings.NewReader(""), io.Discard)
+	if _, err := s.precheckTool("kern_skill", nil); err != nil {
+		t.Fatalf("full surface must allow kern_meta routing to kern_skill: %v", err)
+	}
+}
+
+// TestAdvertisedEqualsInvocableDefaultSurface (audit F3): on the DEFAULT
+// surface, a security-relevant tool that is registered but not advertised
+// (kern_exec, risk=critical) must answer "unknown tool" through tools/call —
+// previously it executed without ever appearing in tools/list. Advertised
+// tools keep working, and the message is identical to a nonexistent tool's so
+// no hidden-surface name leaks.
+func TestAdvertisedEqualsInvocableDefaultSurface(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	if _, ok := toolByName["kern_exec"]; !ok {
+		t.Fatal("premise broken: kern_exec is registered in the full catalog")
+	}
+	for _, t2 := range NewServer(strings.NewReader(""), io.Discard).filteredTools() {
+		if t2.Name == "kern_exec" {
+			t.Fatal("premise broken: kern_exec must not be on the default advertised surface")
+		}
+	}
+	text := mcpToolError(t, "kern_exec", map[string]any{})
+	if !strings.Contains(text, "unknown tool: kern_exec") {
+		t.Fatalf("unadvertised kern_exec must answer unknown tool, got %q", text)
+	}
+	// An advertised tool must keep working.
+	out := mcpToolError(t, "kern_graph", map[string]any{})
+	if strings.Contains(out, "unknown tool") {
+		t.Fatalf("advertised kern_graph must dispatch, got %q", out)
+	}
+	if !strings.Contains(out, "symbol is required") {
+		t.Fatalf("expected handler arg validation for kern_graph, got %q", out)
+	}
+	// Identical wording to a nonexistent tool — no surface leak.
+	if text == "" {
+		t.Fatal("unadvertised tool must produce an error message")
+	}
+}
+
+// TestAdvertisedEqualsInvocableFullCatalog: under KERN_MCP_FULL=1 the whole
+// catalog is advertised, so every registered tool is invocable.
+func TestAdvertisedEqualsInvocableFullCatalog(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	t.Setenv("KERN_MCP_FULL", "1")
+	text := mcpToolError(t, "kern_exec", map[string]any{})
+	if strings.Contains(text, "unknown tool") {
+		t.Fatalf("kern_exec must be invocable under KERN_MCP_FULL=1, got %q", text)
+	}
+	if !strings.Contains(text, "kern_exec: empty script") {
+		t.Fatalf("expected the kern_exec handler's empty-script error, got %q", text)
 	}
 }
 

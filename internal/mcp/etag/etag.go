@@ -55,7 +55,7 @@ func Eligible(name string) bool { return EligibleTools[name] }
 // HashView computes the etag for a raw pre-sandbox response text served under
 // a specific serve-time view: sha256 hex of the text combined with the tool's
 // catalog schema version, this scheme's version, and the view identifier.
-// The view is the call's effective max_output budget (see mcpserve.CallOutputBudget)
+// The view is the call's effective max_output budget (see serveoutput.CallOutputBudget)
 // — the etag is bound to what the caller was actually served,
 // so a different serve view is different content and mints a different etag
 // even for byte-identical text (F-2). Identical text plus identical versions
@@ -94,6 +94,20 @@ func UnchangedResponseText(e string) string {
 	return "unchanged (etag " + e + ") — identical to your earlier read; reuse your earlier copy. If this content is not in your context, call again without the etag argument to receive the full payload."
 }
 
+// TaskIsContent reports whether `task` is a content-bearing input (the
+// primary query) for the named tool rather than a governed-mode identity
+// param. For these tools the task MUST stay in the canonical args: it is
+// the ask itself, so stripping it would key every call identically and the
+// D1 cache / served ledger would replay the first response for every
+// subsequent different task (black-box audit finding F2, 2026-11-21).
+func TaskIsContent(tool string) bool {
+	switch tool {
+	case "kern_probe", "kern_research":
+		return true
+	}
+	return false
+}
+
 // StripServeTimeArgs returns a copy of args with the identity-only and
 // conditional-fetch arguments removed: etag, no_cache, agent_id, task.
 // max_output is deliberately NOT stripped (F-2): the etag is bound to the
@@ -101,13 +115,18 @@ func UnchangedResponseText(e string) string {
 // key separate D1 and registry entries. It is the ONE source of truth for
 // that exclusion list, shared by the working-set registry key
 // (CanonicalArgsKey) and the D1 cache key (cacheKeyFor in the mcp root) so
-// the two keys can never drift (NIT-10).
-func StripServeTimeArgs(args map[string]any) map[string]any {
+// the two keys can never drift (NIT-10). `task` is stripped only for tools
+// where it is NOT the content (TaskIsContent).
+func StripServeTimeArgs(tool string, args map[string]any) map[string]any {
 	out := make(map[string]any, len(args))
 	for k, v := range args {
 		switch k {
-		case "etag", "no_cache", "agent_id", "task":
+		case "etag", "no_cache", "agent_id":
 			continue
+		case "task":
+			if !TaskIsContent(tool) {
+				continue
+			}
 		}
 		out[k] = v
 	}
@@ -120,9 +139,10 @@ func StripServeTimeArgs(args map[string]any) map[string]any {
 // the F8 set, stripped by StripServeTimeArgs. max_output is part of the key
 // (F-2): the etag is view-bound, so each serve view records its own
 // working-set entry. Identical asks share one registry entry across
-// etag/no_cache/agent_id/task variance.
-func CanonicalArgsKey(args map[string]any) string {
-	canon, _ := json.Marshal(StripServeTimeArgs(args))
+// etag/no_cache/agent_id variance (and task variance for tools where task
+// is identity-only, not content — TaskIsContent).
+func CanonicalArgsKey(tool string, args map[string]any) string {
+	canon, _ := json.Marshal(StripServeTimeArgs(tool, args))
 	h := sha256.New()
 	_, _ = h.Write(canon)
 	return hex.EncodeToString(h.Sum(nil))

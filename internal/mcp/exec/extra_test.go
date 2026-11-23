@@ -51,9 +51,11 @@ func TestDiffFilesRejectsAbsolutePathWithoutRoot(t *testing.T) {
 
 func TestHealFailsClosedWithoutGovernance(t *testing.T) {
 	// heal drives arbitrary host commands, so without an allowlist or
-	// KERN_ALLOW_EXEC the governance gate must refuse before any execution.
+	// KERN_ALLOW_EXEC the closed-posture governance gate must refuse before
+	// any execution (default ask posture risk-assesses instead).
 	t.Setenv("KERN_ALLOW_EXEC", "")
 	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_EXEC_POSTURE", "closed")
 	ctx := context.Background()
 	_, err := Heal(ctx, map[string]any{
 		"root": t.TempDir(),

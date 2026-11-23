@@ -23,4 +23,7 @@ func TestHealthSnapshot(t *testing.T) {
 	if !strings.Contains(res, `"status": "ok"`) {
 		t.Errorf("expected status ok in json, got: %s", res)
 	}
+	if !strings.Contains(res, `"persistence_failures"`) {
+		t.Errorf("expected task persistence health metric, got: %s", res)
+	}
 }

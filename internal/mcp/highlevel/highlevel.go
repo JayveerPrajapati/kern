@@ -26,6 +26,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	rootpkg "github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/toolsurface"
+	verifyorchestration "github.com/JayveerPrajapati/kern/internal/mcp/verifyorchestration"
 	"github.com/JayveerPrajapati/kern/internal/mcpcatalog"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
@@ -389,6 +390,9 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil || v.CVE != nil || v.License != nil || v.Secrets != nil {
 			var vb strings.Builder
 			fmt.Fprintln(&vb, pii.Mask(verdict.RenderCompact(v)).Text)
+			if evidence := verifyorchestration.FailedTestEvidence(p.Index(), v); evidence != "" {
+				fmt.Fprintf(&vb, "%s\n", pii.Mask(evidence).Text)
+			}
 			// Calibration (Feature Batch C): aggregate confidence line on the
 			// fail path too (best-effort; omitted when there is no data).
 			if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
@@ -408,6 +412,9 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if v.Verdict == verdict.VerdictWarn {
 		var vb strings.Builder
 		fmt.Fprintln(&vb, pii.Mask(verdict.RenderCompact(v)).Text)
+		if evidence := verifyorchestration.FailedTestEvidence(p.Index(), v); evidence != "" {
+			fmt.Fprintf(&vb, "%s\n", pii.Mask(evidence).Text)
+		}
 		// Calibration (Feature Batch C): aggregate confidence line at the
 		// end of the rendered report (best-effort; omitted when no data).
 		if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
@@ -760,7 +767,7 @@ func Workflow(ctx context.Context, h Hooks, args map[string]any) (string, error)
 
 	var task *agent.Task
 	if taskID := mcpargs.ArgString(args, "task_id"); taskID != "" {
-		task, err = ts.RunWorkflowResume(taskID)
+		task, err = ts.RunWorkflowResumeContext(ctx, taskID)
 	} else {
 		intent := mcpargs.ArgString(args, "intent")
 		if intent == "" {
