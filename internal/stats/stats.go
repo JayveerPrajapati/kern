@@ -52,6 +52,7 @@ type Entry struct {
 	Tool         string    `json:"tool,omitempty"`
 	Agent        string    `json:"agent,omitempty"`
 	Root         string    `json:"root,omitempty"`
+	Surface      string    `json:"surface,omitempty"`
 	Slice        bool      `json:"slice,omitempty"`
 	Source       string    `json:"source,omitempty"`
 	Model        string    `json:"model,omitempty"`

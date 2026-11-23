@@ -44,6 +44,12 @@ func readApprovalPassphrase(create bool) ([]byte, error) {
 		return nil, err
 	}
 	if create {
+		// First use (or the first approval after a rotation): say what is about
+		// to be created and what it invalidates. A silently minted key orphans
+		// every earlier signature without a word.
+		if p, err := governance.ExecApprovalSigningKeyPath(); err == nil {
+			fmt.Fprintf(tty, "No approval-signing key yet — creating one at %s\nPreviously signed approvals will not verify under a new key; `kern approval key status` shows the current fingerprint.\n", p)
+		}
 		fmt.Fprint(tty, "Set approval-signing passphrase (min 12 chars, input hidden): ")
 		p1, err := readSecretLine(tty)
 		if err != nil {

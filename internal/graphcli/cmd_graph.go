@@ -14,6 +14,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mermaid"
+	"github.com/JayveerPrajapati/kern/internal/research"
 	"github.com/JayveerPrajapati/kern/internal/topology"
 	"github.com/JayveerPrajapati/kern/internal/twin"
 	"io/fs"
@@ -25,6 +26,26 @@ import (
 
 func runGraph(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	// --format one-line is the CLI parity surface for the MCP kern_graph
+	// tool's format=one-line (both render ix.Graph); --mode concise selects
+	// the same compact view. The default/evidence/full modes keep the
+	// adaptive GraphCtxMin render byte-identical.
+	switch f.format {
+	case "":
+	case "one-line":
+		f.oneLine = true
+	default:
+		fatalUsage("graph: invalid --format %q (want one-line)", f.format)
+	}
+	if f.mode != "" {
+		mode, merr := cliflags.ParseOutputMode(f.mode)
+		if merr != nil {
+			fatalUsage("graph: %v", merr)
+		}
+		if mode == cliflags.ModeConcise {
+			f.oneLine = true
+		}
+	}
 	if len(args) >= 1 && args[0] == "dead" {
 		// `kern graph dead [scope...]` is the dead-code report (top-level
 		// `kern dead`); "dead" is a graph-family subcommand name, not a
@@ -371,8 +392,18 @@ func runInherits(rest []string) {
 
 func runWhy(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	// Why's default is the complete rationale report. Explicit concise mode
+	// is opt-in and renders only the doc headline plus graph counts.
+	mode := cliflags.ModeEvidence
+	if strings.TrimSpace(f.mode) != "" {
+		parsed, err := cliflags.ParseOutputMode(f.mode)
+		if err != nil {
+			fatalUsage("why: %v", err)
+		}
+		mode = parsed
+	}
 	if len(args) < 1 {
-		fatalUsage("usage: kern why <symbol> [root] [--json] [--etag H]")
+		fatalUsage("usage: kern why <symbol> [root] [--json] [--etag H] [--mode concise|evidence|full]")
 	}
 	symbol := args[0]
 	// Empty/whitespace symbols are usage errors, not no-match results —
@@ -411,6 +442,9 @@ func runWhy(rest []string) {
 		info.InEdges = len(kept)
 	}
 	out := intel.FormatWhy(*info)
+	if mode == cliflags.ModeConcise {
+		out = formatWhyConcise(*info)
+	}
 	// Conditional fetch (C1/P4, ADR-0012): --etag matches → `unchanged (etag
 	// <E>)` and exit 0; otherwise the full report plus an `etag: <hash>`
 	// footer on stderr.
@@ -420,6 +454,19 @@ func runWhy(rest []string) {
 	}
 	fmt.Println(out)
 
+}
+
+func formatWhyConcise(info intel.WhyInfo) string {
+	s := info.Symbol
+	doc := info.Doc
+	if i := strings.IndexByte(doc, '\n'); i >= 0 {
+		doc = doc[:i]
+	}
+	if doc == "" {
+		doc = "(none)"
+	}
+	return fmt.Sprintf("%s %s  %s:%d\ndoc: %s\nincoming edges: %d, outgoing calls: %d\n",
+		s.Kind, s.FullName(), s.File, s.Line, doc, info.InEdges, info.Callees)
 }
 
 func runWiki(rest []string) {
@@ -844,6 +891,10 @@ func runCochange(rest []string) {
 
 func runExplore(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	mode, merr := cliflags.ParseOutputMode(f.mode)
+	if merr != nil {
+		fatalUsage("explore: %v", merr)
+	}
 	if len(args) < 1 {
 		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain] [--etag H]")
 	}
@@ -903,6 +954,33 @@ func runExplore(rest []string) {
 	}
 	if f.json {
 		printJSON(rep)
+		return
+	}
+	// Concise mode is the new default: counts + risk only. --explain and
+	// --max-tokens shape the full evidence, so either forces evidence mode
+	// (a set flag is never silently dropped).
+	if mode == cliflags.ModeConcise && !f.explain && f.maxTokens <= 0 {
+		conciseOut := intel.RenderExploreConcise(rep)
+		if footer := intel.TokenFooter(intel.RenderExplore(rep), conciseOut); footer != "" {
+			conciseOut += "\n" + footer
+		}
+		clietag.PrintIndexStamp(ix)
+		if clietag.EtagResponse("kern_explore", f.etag, conciseOut) {
+			return
+		}
+		fmt.Println(conciseOut)
+		return
+	}
+	if mode == cliflags.ModeBalanced && !f.explain && f.maxTokens <= 0 {
+		balancedOut := intel.RenderExploreBalanced(rep)
+		if footer := intel.TokenFooter(intel.RenderExplore(rep), balancedOut); footer != "" {
+			balancedOut += "\n" + footer
+		}
+		clietag.PrintIndexStamp(ix)
+		if clietag.EtagResponse("kern_explore", f.etag, balancedOut) {
+			return
+		}
+		fmt.Println(balancedOut)
 		return
 	}
 	out := intel.RenderExplore(rep)
@@ -1072,6 +1150,56 @@ func runProbe(rest []string) {
 	}
 	fmt.Println(text)
 
+}
+
+func runResearch(rest []string) {
+	f, args := parseFlagsOrDie(rest)
+	if len(args) < 1 {
+		fatalUsage("usage: kern research \"<task text>\" [root] [--max N]")
+	}
+	root := "."
+	if len(args) > 1 {
+		root = args[1]
+	}
+	ix, err := intel.ReadIndex(root)
+	if err != nil {
+		fatal("Research: %v", err)
+	}
+	maxTokens := f.max
+	if maxTokens <= 0 {
+		maxTokens = 6000
+	}
+	report := research.Research(ix, args[0], maxTokens)
+	if f.minConfidence != "" {
+		passes := intel.MinConfidenceFilter(f.minConfidence)
+		for i := range report.Anchors {
+			anchor := &report.Anchors[i]
+			keep := func(names []string, confidence func(string) string) []string {
+				out := names[:0]
+				for _, name := range names {
+					if passes(confidence(name)) {
+						out = append(out, name)
+					}
+				}
+				return out
+			}
+			anchor.Callers = keep(anchor.Callers, func(name string) string {
+				return intel.EdgeConfidenceLabel(ix, name, anchor.Resolved)
+			})
+			anchor.Callees = keep(anchor.Callees, func(name string) string {
+				return intel.EdgeConfidenceLabel(ix, anchor.Resolved, name)
+			})
+		}
+	}
+	if f.json {
+		printJSON(report)
+		return
+	}
+	text := research.RenderResearch(report)
+	if report.Truncated {
+		text = research.FitResearch(text, maxTokens)
+	}
+	fmt.Println(text)
 }
 
 func runTrace(rest []string) {

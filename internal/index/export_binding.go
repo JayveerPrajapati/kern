@@ -33,6 +33,16 @@ type exportCall struct {
 func newExportCatalog(ix *Index) *exportCatalog {
 	cache := ix.getCache()
 	cache.bindingOnce.Do(func() {
+		// Sidecar fast path: a catalog persisted for this exact index
+		// identity is decoded instead of rebuilt — the build (byFullName
+		// resolution + per-edge call binding) costs hundreds of ms on a
+		// large repo, the decode a fraction of it. Any miss falls through
+		// to the original build, which then best-effort saves the sidecar
+		// for the next one-shot process.
+		if catalog := loadCatalogSidecar(ix); catalog != nil {
+			cache.bindings = catalog
+			return
+		}
 		catalog := buildExportCatalog(ix)
 		catalog.records = catalog.buildCalls()
 		sort.Slice(catalog.records, func(first, second int) bool {
@@ -49,6 +59,7 @@ func newExportCatalog(ix *Index) *exportCatalog {
 			}
 		}
 		cache.bindings = catalog
+		saveCatalogSidecar(ix, catalog)
 	})
 	return cache.bindings
 }
@@ -216,23 +227,53 @@ func exportEndpoint(name, scope string, candidates []Symbol) GraphNode {
 }
 
 func (catalog *exportCatalog) buildCalls() []exportCall {
-	var result []exportCall
+	callEdges := 0
+	for _, edges := range catalog.index.Calls {
+		callEdges += len(edges)
+	}
+	result := make([]exportCall, 0, callEdges)
+	// Owner resolution (byFullName candidates -> same-file filter -> dedupe)
+	// and the owner endpoint depend only on (owner, sourceFile), and an owner
+	// usually emits several edges from the same file. Memoize both per key so
+	// the per-edge re-resolution — map+sort allocations in
+	// uniqueExportSymbols and the endpoint hash — is paid once per owner/file
+	// instead of once per edge (2026-11-18 read-path profile: buildCalls was
+	// ~8% of a cold `kern impact`/`kern explore`). The cached slices are
+	// read-only downstream (the targets loop iterates them; the
+	// declarationBinding branch reassigns, never mutates).
+	type ownerKey struct{ owner, source string }
+	type ownerResolution struct {
+		owners []Symbol
+		from   GraphNode
+	}
+	ownerMemo := make(map[ownerKey]ownerResolution)
 	for owner, edges := range catalog.index.Calls {
 		for _, edge := range edges {
-			var owners []Symbol
-			for _, symbol := range catalog.byFullName[owner] {
-				if edge.SourceFile == "" || filepath.ToSlash(symbol.File) == filepath.ToSlash(edge.SourceFile) {
-					owners = append(owners, symbol)
+			key := ownerKey{owner, edge.SourceFile}
+			res, memoized := ownerMemo[key]
+			if !memoized {
+				var owners []Symbol
+				sourceSlash := filepath.ToSlash(edge.SourceFile)
+				for _, symbol := range catalog.byFullName[owner] {
+					if edge.SourceFile == "" || filepath.ToSlash(symbol.File) == sourceSlash {
+						owners = append(owners, symbol)
+					}
 				}
+				owners = uniqueExportSymbols(owners)
+				res = ownerResolution{owners: owners, from: exportEndpoint(owner, "owner:"+edge.SourceFile, owners)}
+				ownerMemo[key] = res
 			}
-			owners = uniqueExportSymbols(owners)
+			owners := res.owners
+			var from GraphNode
 			if declarationBinding(edge.Binding) {
 				owners = nil
 				if symbol, found := catalog.byID[edge.FromID]; found && symbol.File == edge.SourceFile && symbol.FullName() == owner {
 					owners = []Symbol{symbol}
 				}
+				from = exportEndpoint(owner, "owner:"+edge.SourceFile, owners)
+			} else {
+				from = res.from
 			}
-			from := exportEndpoint(owner, "owner:"+edge.SourceFile, owners)
 			var targets []Symbol
 			for _, source := range owners {
 				if declarationBinding(edge.Binding) {

@@ -70,7 +70,7 @@ func EdgeConfidenceLabel(ix *index.Index, from, to string) string {
 	}
 	// Fallback: resolution heuristic on the from-side file.
 	fromFile := ""
-	if d, ok := findDef(ix, from); ok {
+	if d, ok := FindDefinition(ix, from); ok {
 		fromFile = d.File
 	} else if s, ok := ix.ResolveName(from); ok {
 		fromFile = s.File

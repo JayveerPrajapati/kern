@@ -87,6 +87,38 @@ func TimeoutSeconds(timeoutSet bool, timeout int) time.Duration {
 	return time.Duration(timeout) * time.Second
 }
 
+// OutputMode is the read-path output verbosity selected by --mode.
+// ModeConcise renders counts + risk only (the new default for the read
+// commands); ModeEvidence renders the full evidence (byte-identical to the
+// pre-mode default); ModeFull is the same complete detail as evidence.
+type OutputMode string
+
+const (
+	ModeConcise  OutputMode = "concise"
+	ModeBalanced OutputMode = "balanced"
+	ModeEvidence OutputMode = "evidence"
+	ModeFull     OutputMode = "full"
+)
+
+// ParseOutputMode validates a --mode value. The empty string selects the
+// concise default; "concise", "balanced", "evidence" and "full" are accepted
+// verbatim (case-insensitive). Any other value is a usage error naming the
+// valid set.
+func ParseOutputMode(s string) (OutputMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", string(ModeConcise):
+		return ModeConcise, nil
+	case string(ModeBalanced):
+		return ModeBalanced, nil
+	case string(ModeEvidence):
+		return ModeEvidence, nil
+	case string(ModeFull):
+		return ModeFull, nil
+	default:
+		return ModeConcise, fmt.Errorf("invalid --mode %q (want concise|balanced|evidence|full)", s)
+	}
+}
+
 // StdlibFlagErr renders a unified-parser error in the stdlib flag package's
 // phrasing for the few handlers whose stderr message is pinned to that
 // format (e.g. synthesize-test's "flag provided but not defined" wording).

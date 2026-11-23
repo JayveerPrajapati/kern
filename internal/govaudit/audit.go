@@ -255,8 +255,24 @@ func (l *AuditLog) storedEntriesLocked() ([]AuditEntry, int) {
 	var entries []AuditEntry
 	maxSeq := 0
 	for _, e := range stored {
+		// Metadata records (the key-rotation envelope {"k":…,"v":…}) live in
+		// the same append log but are NOT audit entries. Unmarshal turns them
+		// into a zero-valued ghost whose Hash can never verify, which pinned
+		// every chain at "broken at entry 1" — even right after a successful
+		// `kern audit repair` (2026-11-10 campaign).
+		if isChainMetadataRecord(e.Value) {
+			continue
+		}
 		var entry AuditEntry
 		if err := json.Unmarshal(e.Value, &entry); err != nil {
+			continue
+		}
+		if entry.ID == "" && entry.Hash == "" && entry.Timestamp.IsZero() {
+			// A persisted zero-valued record (observed as the head line of a
+			// live chain, key "audit-"): it carries no identity and its empty
+			// hash can never verify, so it pinned every chain at "broken at
+			// entry 1" — even right after `kern audit repair` re-chained the
+			// real entries (2026-11-10 campaign).
 			continue
 		}
 		entries = append(entries, entry)
@@ -265,6 +281,27 @@ func (l *AuditLog) storedEntriesLocked() ([]AuditEntry, int) {
 		}
 	}
 	return entries, maxSeq
+}
+
+// isChainMetadataRecord reports whether a raw chain line is a metadata
+// envelope (key-rotation stamp) rather than an audit entry: it carries a
+// "k" (key) field and none of the identity fields a real entry always has.
+func isChainMetadataRecord(raw []byte) bool {
+	var probe struct {
+		K         string `json:"k"`
+		V         string `json:"v"`
+		ID        string `json:"ID"`
+		Hash      string `json:"Hash"`
+		Action    string `json:"Action"`
+		Timestamp string `json:"Timestamp"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	if probe.K == "" {
+		return false
+	}
+	return probe.ID == "" && probe.Hash == "" && probe.Action == "" && probe.Timestamp == ""
 }
 
 // auditWriteOrderLess orders entries from a WriteOrderedStore: legacy per-key
@@ -908,17 +945,16 @@ func (l *AuditLog) RepairChain() (int, error) {
 }
 
 // auditChainSecretPath returns the path of the audit-chain HMAC secret,
-// stored OUTSIDE the client-governed workspace next to the exec-approval
-// secret (same R1 pattern as exec_approval.go), so a governed client with
+// stored OUTSIDE the client-governed workspace and outside the user config
+// tree (same R1 pattern as exec_approval.go), so a governed client with
 // write access to the audit store cannot forge the chain. It is a
-// package-level func so tests can redirect it away from the real user
-// config dir.
+// package-level func so tests can redirect it away from the real secret dir.
 var auditChainSecretPath = func() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "kern", "audit-chain.key"), nil
+	return filepath.Join(dir, ".kern", "secrets", "audit-chain.key"), nil
 }
 
 // The audit secret is generated once per process and cached; the file
@@ -931,7 +967,7 @@ var (
 )
 
 // auditChainSecret returns the 32-byte HMAC secret, creating it once at
-// <UserConfigDir>/kern/audit-chain.key (dir 0700, file 0600) on first use.
+// <UserHomeDir>/.kern/secrets/audit-chain.key (dir 0700, file 0600) on first use.
 // It deliberately uses its OWN key file (not exec-approval.key) so the audit
 // chain's integrity is not coupled to the exec-approval key's lifecycle.
 // The result is cached — success and failure alike — so callers can decide

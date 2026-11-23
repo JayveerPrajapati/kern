@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -23,6 +24,19 @@ var BuildLockWait = 60 * time.Second
 
 // buildLockPoll is the retry cadence while a live process holds the lock.
 var buildLockPoll = 250 * time.Millisecond
+
+// holderDesc names the build lock's holder from the stamp written at
+// acquisition (internal/lock records the PID), so a wait or timeout names
+// its culprit instead of "another process". The flock primitive itself
+// only proves the lock is HELD — the stamp says by whom. "pid unknown" when
+// the stamp is missing or unreadable; never an error (diagnostics only).
+func holderDesc(root string) string {
+	_, pid, err := lock.Held(root, buildLockScope)
+	if err != nil || pid == 0 {
+		return "pid unknown"
+	}
+	return fmt.Sprintf("pid %d", pid)
+}
 
 // tryBuildLock acquires the exclusive cross-process build lock for root
 // without blocking. It returns a release func and true when acquired. When
@@ -103,7 +117,8 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 		// BuildLockWait budget would be a lie and a stall. Rebuild directly.
 		return rebuild(nil)
 	}
-	log.Printf("kern index: another process is rebuilding the index for %s; waiting (up to %s)", root, BuildLockWait)
+	log.Printf("kern index: another process (%s) is rebuilding the index for %s; waiting (up to %s)",
+		holderDesc(root), root, BuildLockWait)
 	deadline := time.Now().Add(BuildLockWait)
 	for time.Now().Before(deadline) {
 		timer := time.NewTimer(buildLockPoll)
@@ -132,6 +147,7 @@ func debouncedRebuildContext[T any](ctx context.Context, root string, check func
 	// Bounded wait exhausted: the holder is either very slow or wedged. Fall
 	// back to rebuilding directly (never hang); the rebuild itself is
 	// concurrency-safe (SQLite WAL with the JSON fallback under contention).
-	log.Printf("kern index: build lock for %s held longer than %s; rebuilding without it", root, BuildLockWait)
+	log.Printf("kern index: build lock for %s still held by %s after %s; rebuilding without it",
+		root, holderDesc(root), BuildLockWait)
 	return rebuild(nil)
 }

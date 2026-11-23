@@ -446,22 +446,24 @@ func (t Task) IsTerminal() bool {
 // deterministically from the analyze context packet, impact report, risk
 // assessment, and architecture rules — the LLM may explain it, but the
 // fields are populated from deterministic sources.
-// The 12 fields mirror the spec's Plan artifact contract (§11): Objective,
+// The 14 fields mirror the spec Plan artifact contract (§11): Objective,
 // Scope, AffectedComponents, ImplementationSteps, Dependencies, Risk,
-// Rollback, Tests, Security, Architecture, Deployment, Evidence.
+// Rollback, Tests, Security, Architecture, Deployment, Evidence, plus the expected test command and approval requirement.
 type Plan struct {
-	Objective           string   `json:"objective"`            // what the change achieves
-	Scope               string   `json:"scope"`                // boundary of the change
-	AffectedComponents  []string `json:"affected_components"`  // symbols/files/packages touched
-	ImplementationSteps []string `json:"implementation_steps"` // ordered steps to implement
-	Dependencies        []string `json:"dependencies"`         // upstream changes required
-	Risk                string   `json:"risk"`                 // low | medium | high (from risk assessment)
-	Rollback            string   `json:"rollback"`             // how to undo
-	Tests               []string `json:"tests"`                // test cases to add/run
-	Security            string   `json:"security"`             // security considerations
-	Architecture        string   `json:"architecture"`         // architecture-rule compliance notes
-	Deployment          string   `json:"deployment"`           // deployment considerations
-	Evidence            []string `json:"evidence"`             // claim/evidence IDs backing the plan
+	Objective           string   `json:"objective"`                       // what the change achieves
+	Scope               string   `json:"scope"`                           // boundary of the change
+	AffectedComponents  []string `json:"affected_components"`             // symbols/files/packages touched
+	ImplementationSteps []string `json:"implementation_steps"`            // ordered steps to implement
+	Dependencies        []string `json:"dependencies"`                    // upstream changes required
+	Risk                string   `json:"risk"`                            // low | medium | high (from risk assessment)
+	Rollback            string   `json:"rollback"`                        // how to undo
+	Tests               []string `json:"tests"`                           // test cases to add/run
+	Security            string   `json:"security"`                        // security considerations
+	Architecture        string   `json:"architecture"`                    // architecture-rule compliance notes
+	Deployment          string   `json:"deployment"`                      // deployment considerations
+	Evidence            []string `json:"evidence"`                        // claim/evidence IDs backing the plan
+	ExpectedTestCommand string   `json:"expected_test_command,omitempty"` // deterministic focused test command
+	ApprovalRequirement string   `json:"approval_requirement,omitempty"`  // explicit governance-facing approval requirement
 }
 
 // ImpactReport answers the 11 deterministic impact questions from the
@@ -497,7 +499,12 @@ type ImpactReport struct {
 	ReferenceFiles      []string `json:"reference_files,omitempty"`
 	ReferenceCount      int      `json:"reference_count,omitempty"`
 	ReferenceConfidence string   `json:"reference_confidence,omitempty"`
-	Evidence            string   `json:"evidence"` // P2 anchor for the target (file:line + certificate)
+	// UnboundCallers counts call sites recorded under the target's bare name
+	// that no declaration can claim (the name exists in more than one file).
+	// "What calls this: 0" with a non-zero count here is missing coverage,
+	// not an all-clear — the same contract as ReferenceCount.
+	UnboundCallers int    `json:"unbound_callers,omitempty"`
+	Evidence       string `json:"evidence"` // P2 anchor for the target (file:line + certificate)
 	// Entities are the twin entity nodes (API / DB table / service /
 	// deployment) implicated by the change's blast radius. Populated by the
 	// app layer which owns the twin graph; empty when no twin entities

@@ -225,6 +225,49 @@ func MaybeVacuum(db *sql.DB, path string) bool {
 	return true
 }
 
+// OptimizeFTS collapses fts5 segment tombstones (F-C4, 2026-11-22 dogfood
+// campaign: TradingApp's 39 MB index for 3,539 symbols — 36 MB of it
+// symbols_fts_data). Delete+reinsert churn — full saves delete all rows and
+// reinsert, per-file deltas delete a file's rows and reinsert — grows fts5
+// segments whose deleted entries are LIVE pages: MaybeVacuum's freelist
+// trigger never sees them, so the store grows without bound. 'optimize'
+// merges the segments into one compact segment, dropping tombstones; a
+// following MaybeVacuum reclaims the file space. Best-effort: a failure is
+// logged and never fatal to the save that called it.
+func OptimizeFTS(db *sql.DB) {
+	if _, err := db.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('optimize')"); err != nil {
+		log.Printf("kern index: fts optimize skipped: %v", err)
+	}
+}
+
+// ftsChurnThreshold is the accumulated delta-churn budget (files whose rows
+// were delete+reinserted by delta saves) between fts compactions. It bounds
+// the tombstone drift between full rebuilds.
+const ftsChurnThreshold = 256
+
+// MaybeCompactFTS accumulates delta churn in the meta table and compacts the
+// fts index (optimize + vacuum) once it crosses ftsChurnThreshold. Called
+// after ApplyDelta commits, never inside its transaction.
+func MaybeCompactFTS(db *sql.DB, path string, touched int) {
+	if touched <= 0 {
+		return
+	}
+	var churn int64
+	err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key='fts_churn'`).Scan(&churn)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	churn += int64(touched)
+	if churn < ftsChurnThreshold {
+		_, _ = db.Exec(`INSERT INTO meta(key,value) VALUES('fts_churn',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			strconv.FormatInt(churn, 10))
+		return
+	}
+	OptimizeFTS(db)
+	_, _ = db.Exec(`INSERT INTO meta(key,value) VALUES('fts_churn','0') ON CONFLICT(key) DO UPDATE SET value='0'`)
+	MaybeVacuum(db, path)
+}
+
 // IsCorrupt reports whether err is a SQLite corruption-class error.
 func IsCorrupt(err error) bool {
 	if err == nil {

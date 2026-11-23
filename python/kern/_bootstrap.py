@@ -115,15 +115,20 @@ def _verify_sha256(tarball, tag):
         req = urllib.request.Request(sums_url, headers={"User-Agent": "kern-pip"})
         with urllib.request.urlopen(req, timeout=20) as r:
             sums = r.read().decode("utf-8", errors="replace")
-    except Exception:
-        # No SHA256SUMS is non-fatal (older/human releases); skip silently.
-        return None
+    except Exception as exc:
+        raise SystemExit(
+            "kern: SHA256SUMS is required but could not be downloaded from {}: {}".format(
+                sums_url, exc
+            )
+        )
     name = os.path.basename(tarball)
     for line in sums.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == name:
             return parts[0].lower()
-    return None
+    raise SystemExit(
+        "kern: SHA256SUMS does not contain an entry for {}".format(name)
+    )
 
 
 def _fetch(tag, os_arch):

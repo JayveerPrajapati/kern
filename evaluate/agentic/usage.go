@@ -3,23 +3,12 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/evaluate/agentbench"
 )
 
 // Usage is the token accounting extracted from a raw agent event stream.
-// The raw file is always retained alongside it, so this heuristic can be
-// improved and old runs rescored without any API spend.
-//
-// Both a per-event sum and the single-event maximum are reported because
-// agents differ: some emit cumulative per-message counters (where the max is
-// the honest number) and some emit per-part deltas (where the sum is).
-type Usage struct {
-	InputSum  *int64 `json:"input_tokens_sum,omitempty"`
-	OutputSum *int64 `json:"output_tokens_sum,omitempty"`
-	InputMax  *int64 `json:"input_tokens_max,omitempty"`
-	OutputMax *int64 `json:"output_tokens_max,omitempty"`
-	Events    int    `json:"events_with_tokens"`
-	Note      string `json:"note,omitempty"`
-}
+type Usage = agentbench.Usage
 
 // extractUsage parses the agent's raw event stream (JSONL, or one
 // concatenated JSON value) and extracts token counts. Recognized shapes,

@@ -140,6 +140,7 @@ type execFlags struct {
 	timeoutSet bool
 	json       bool
 	readonly   bool   // --readonly: skip the KERN_TOOLS/KERN_ALLOW_EXEC allowlist gate (read-only bash fallbacks)
+	quiet      bool   // --quiet: suppress the stderr status/steering footers (machine consumers capture 2>&1)
 	execOutput string // --output (exec: summary|tail:N|lines:A-B|full)
 	execAnchor string // --anchor (exec: re-slice a kept run without re-executing)
 }
@@ -174,6 +175,8 @@ func parseExecFlags(args []string) (execFlags, []string, error) {
 			p.SetBool(&f.json, "--json", inline, hasInline)
 		case "--readonly":
 			p.SetBool(&f.readonly, "--readonly", inline, hasInline)
+		case "--quiet":
+			p.SetBool(&f.quiet, "--quiet", inline, hasInline)
 		case "--output":
 			p.SetStr(&f.execOutput, inline, hasInline)
 		case "--anchor":
@@ -919,6 +922,9 @@ func runExec(rest []string) {
 			fatalUsage("exec: %v", res.Err)
 		}
 		fatal("exec: %v", res.Err)
+	}
+	if f.quiet {
+		return
 	}
 	fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
 	// Post-hoc steering (stderr on the CLI — stdout stays pipe-clean): a

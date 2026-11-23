@@ -109,7 +109,15 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]CallEdge, map[strin
 					case *ast.InterfaceType:
 						kind = "interface"
 					}
-					syms = append(syms, Symbol{Kind: kind, Name: s.Name.Name, File: rel, Line: fset.Position(s.Pos()).Line, End: fset.Position(s.End()).Line, Lang: "go", Confidence: ConfidenceHigh})
+					// `type A = B` (an alias, not a definition) carries the
+					// RHS so type-oriented surfaces can see through it: call
+					// edges and references attach to B's declaration, and a
+					// query on A would otherwise report a confident all-clear.
+					alias := ""
+					if s.Assign.IsValid() {
+						alias = typeRefName(s.Type)
+					}
+					syms = append(syms, Symbol{Kind: kind, Name: s.Name.Name, Alias: alias, File: rel, Line: fset.Position(s.Pos()).Line, End: fset.Position(s.End()).Line, Lang: "go", Confidence: ConfidenceHigh})
 					// Interface embedding ("type Reader interface { io.Reader }")
 					// and struct embedding ("type T struct { Base }") are
 					// inheritance edges.
@@ -239,6 +247,28 @@ func returnTypeNames(fl *ast.FieldList) []string {
 		}
 	}
 	return out
+}
+
+// typeRefName renders the RHS of a type alias as an index reference:
+// "B" for a same-package target, "pkg.B" for a qualified one. Generic
+// instantiations and pointers unwrap to the underlying name. Empty when the
+// RHS is not a simple named type (struct/interface literals, funcs).
+func typeRefName(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		if x, ok := t.X.(*ast.Ident); ok && t.Sel != nil {
+			return x.Name + "." + t.Sel.Name
+		}
+	case *ast.IndexExpr:
+		return typeRefName(t.X)
+	case *ast.IndexListExpr:
+		return typeRefName(t.X)
+	case *ast.StarExpr:
+		return typeRefName(t.X)
+	}
+	return ""
 }
 
 func paramNames(fl *ast.FieldList) []string {

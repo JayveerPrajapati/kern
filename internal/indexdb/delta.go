@@ -10,8 +10,8 @@ import (
 // are plain data on purpose: internal/index builds them from its in-memory
 // index, this package owns the SQL.
 type DeltaSymbol struct {
-	Kind, Name, Receiver, File, Lang, Framework, Route, Params, Returns, Confidence, Outer string
-	Line, End, Entry                                                                       int
+	Kind, Name, Receiver, File, Lang, Framework, Route, Params, Returns, Confidence, Outer, Alias string
+	Line, End, Entry                                                                              int
 }
 
 type DeltaCall struct {
@@ -73,7 +73,7 @@ func ApplyDelta(db *sql.DB, d *Delta) error {
 			return err
 		}
 	}
-	stmtSym, err := tx.Prepare("INSERT INTO symbols(kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+	stmtSym, err := tx.Prepare("INSERT INTO symbols(kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence,outer_name,alias) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func ApplyDelta(db *sql.DB, d *Delta) error {
 	defer func() { _ = stmtFTS.Close() }()
 	for _, sym := range d.Symbols {
 		res, err := stmtSym.Exec(sym.Kind, sym.Name, sym.Receiver, sym.File, sym.Line, sym.End, sym.Lang,
-			sym.Entry, sym.Framework, sym.Route, sym.Params, sym.Returns, sym.Confidence, sym.Outer)
+			sym.Entry, sym.Framework, sym.Route, sym.Params, sym.Returns, sym.Confidence, sym.Outer, sym.Alias)
 		if err != nil {
 			return err
 		}

@@ -60,6 +60,19 @@ confirm_on_tty() {
   # gating, not a second interactive prompt.
 (exec 3</dev/tty) 2>/dev/null
 }
+
+# Project-local adoption telemetry for intentional raw fast paths. The root is
+# captured only after the managed-project check succeeds; the record carries a
+# fixed tool family and reason enum — never a path, command, content, or env.
+managed_root=""
+log_fastpath() {
+  [ "${KERN_ADOPTION_LOG:-1}" != "0" ] || return 0
+  [ -n "$managed_root" ] || return 0
+  (
+    mkdir -p "$managed_root/.kern" 2>/dev/null &&
+    printf '{"ts":%s000,"tool":"%s","routed":false,"reason":"%s"}\n' "$(date +%s)" "$1" "$2" >> "$managed_root/.kern/adoption.log"
+  ) >/dev/null 2>&1
+}
 # Operator one-time allow. The CLI (`kern guard allow
 # <hash>`, tty-gated so only a human can mint an entry) records an
 # allowance for an exact subject string in ~/.kern/guard/allow-once.jsonl;
@@ -142,6 +155,37 @@ kern_unavailable() {
   # answer "still building" right now. The marker expires after 15 minutes so
   # a crashed build can never leave the guard open for good.
   [ -n "$(find "${CLAUDE_PROJECT_DIR:-$PWD}/.kern/indexing" -mmin -15 2>/dev/null)" ] && return 0
+  # A GLOBAL hook also fires in repos that never set up kern. Prefer the
+  # explicit .kern/config.json consent marker; index files remain the legacy
+  # compatibility signal. An ancestor counts so subdirectories stay governed.
+  if command -v kern >/dev/null 2>&1 || [ -x "${KERN_BIN:-$HOME/.local/bin/kern}" ]; then
+    project="${CLAUDE_PROJECT_DIR:-$PWD}"
+    while [ -n "$project" ] && [ "$project" != "/" ]; do
+      if [ -f "$project/.kern/config.json" ]; then
+        marker="$project/.kern/config.json"
+        enabled=$(grep -Ec '"managed"[[:space:]]*:[[:space:]]*true' "$marker" 2>/dev/null || true)
+        guard_on=$(grep -Ec '"guard"[^}]*"enabled"[[:space:]]*:[[:space:]]*true' "$marker" 2>/dev/null || true)
+        managed_off=$(grep -Ec '"managed"[[:space:]]*:[[:space:]]*false' "$marker" 2>/dev/null || true)
+        guard_off=$(grep -Ec '"guard"[^}]*"enabled"[[:space:]]*:[[:space:]]*false' "$marker" 2>/dev/null || true)
+        if [ "$managed_off" -gt 0 ] || [ "$guard_off" -gt 0 ]; then
+          return 0
+        fi
+        if [ "$enabled" -gt 0 ] && [ "$guard_on" -gt 0 ]; then
+          managed_root="$project"
+          return 1
+        fi
+        # A malformed/incomplete marker is not an opt-out. Continue to the
+        # legacy index check so a broken config cannot silently disable a
+        # previously managed project.
+      fi
+      if [ -f "$project/.kern/index.sqlite" ] || [ -f "$project/.kern/index.json" ]; then
+        managed_root="$project"
+        return 1
+      fi
+      project=$(dirname -- "$project")
+    done
+    return 0
+  fi
   command -v kern >/dev/null 2>&1 && return 1
   [ -x "${KERN_BIN:-$HOME/.local/bin/kern}" ] && return 1
   return 0
@@ -194,9 +238,40 @@ if [ -n "$fpath" ]; then
 ;;
 *)
 # non-code (markdown/config/data/dotfile/extensionless) — allow
+log_fastpath read non-code
 exit 0
 ;;
 esac
+fi
+# Exact-window, missing, and tiny reads pass raw. A missing file lets the host
+# return its real error; a windowed read must preserve exact lines; a <=2KB
+# regular file is already smaller than a useful index round trip. Large
+# unwindowed code reads below still steer to kern_explore.
+if [ -n "$fpath" ]; then
+  if printf '%s' "$payload" | grep -Eq '"(start_line|end_line|offset|limit|line_start|line_end)"[[:space:]]*:'; then
+    log_fastpath read window
+    if [ -n "$has_tool_call" ]; then
+      printf '{"decision":"allow"}\n'
+    fi
+    exit 0
+  fi
+  if [ ! -e "$fpath" ]; then
+    log_fastpath read missing
+    if [ -n "$has_tool_call" ]; then
+      printf '{"decision":"allow"}\n'
+    fi
+    exit 0
+  fi
+  if [ -f "$fpath" ]; then
+    size=$(wc -c < "$fpath" 2>/dev/null || echo 999999)
+    if [ "$size" -le 2048 ]; then
+      log_fastpath read tiny
+      if [ -n "$has_tool_call" ]; then
+        printf '{"decision":"allow"}\n'
+      fi
+      exit 0
+    fi
+  fi
 fi
 # A consumed operator allowance for this exact path unlocks the read
 # once; the deny below then names the hash so the operator can mint it.
@@ -228,6 +303,18 @@ if [ -z "$gpat" ]; then
   gpat=$(printf '%s' "$payload" | sed -n 's/.*"pattern"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 fi
 fi
+if [ -n "$gpat" ]; then
+  case "$gpat" in
+    *[!A-Za-z0-9_.,:$]*)
+      # Text/regex search, not a symbol query: no kern_search equivalent.
+      log_fastpath grep text-search
+      if [ -n "$has_tool_call" ]; then
+        printf '{"decision":"allow"}\n'
+      fi
+      exit 0
+      ;;
+  esac
+fi
 if [ -n "$gpat" ] && allow_once_consume "$gpat"; then
 if [ -n "$has_tool_call" ]; then
 printf '{"decision":"allow"}\n'
@@ -239,6 +326,22 @@ reason="Use kern_search (code symbols — patterns are SYMBOL queries, not regex
     ;;
   glob|find_by_name|list_files)
     if guard_pause_active; then
+      if [ -n "$has_tool_call" ]; then
+        printf '{"decision":"allow"}\n'
+      fi
+      exit 0
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      gpat=$(printf '%s' "$payload" | jq -r '.tool_input.pattern // .toolCall.args.pattern // .toolCall.args.Pattern // .toolCall.args.query // .input.pattern // .pattern // empty' 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+      gpat=$(printf '%s' "$payload" | python3 -c 'import json, sys; m=json.load(sys.stdin); ti=m.get("tool_input") or {}; tc=(m.get("toolCall") or {}).get("args") or {}; inp=m.get("input") or {}; print(ti.get("pattern") or tc.get("pattern") or tc.get("Pattern") or tc.get("query") or inp.get("pattern") or m.get("pattern") or "")' 2>/dev/null)
+    else
+      gpat=$(printf '%s' "$payload" | sed -n 's/.*"pattern"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    if [ -n "$gpat" ]; then
+      # Native Glob is read-only. Let the host return the exact file list;
+      # deny only malformed/no-pattern calls.
+      log_fastpath glob native-glob
       if [ -n "$has_tool_call" ]; then
         printf '{"decision":"allow"}\n'
       fi
@@ -507,7 +610,7 @@ installer_cmd_name() {  # $1 = command name
 }
 read_cmd_name() {  # $1 = command name
   case "$1" in
-  grep|egrep|rg|ag|find|cat|head|tail|less|awk|sed) return 0 ;;
+  grep|egrep|rg|ag|find|cat|head|tail|less) return 0 ;;
   esac
   return 1
 }
@@ -680,8 +783,13 @@ read_tier() {
       return
       ;;
     cat|head|tail|less|more)
+      # Only a bare `cat FILE` is compactible: windowed reads (head/tail/less)
+      # must preserve their slice, and `cat -n` / multiple targets change the
+      # output a summary cannot reproduce.
+      nargs=$(printf '%s' "$seg" | awk '{n=0; for(i=2;i<=NF;i++) if($i !~ /^-/) n++; print n}')
+      hflag=$(printf '%s' "$seg" | awk '{h=0; for(i=2;i<=NF;i++) if($i ~ /^-/) h=1; print h}')
       f=$(printf '%s' "$seg" | awk '{for(i=2;i<=NF;i++) if($i !~ /^-/) f=$i} END{print f}')
-      [ -n "$f" ] && printf '1' || printf '3'
+      if [ "$name" = "cat" ] && [ "$nargs" = "1" ] && [ "$hflag" = "0" ] && [ -n "$f" ]; then printf '1'; else printf '3'; fi
       return
       ;;
     find) printf '1' ;;
@@ -791,7 +899,7 @@ esac
 serve_read_tier3() {
   # KERN_DAEMON=0: the sandbox hides .git/.kern, so a daemon started from in
   # there would key its socket on the subdirectory and outlive the read.
-  tier3_out=$(cd "${PWD}" 2>/dev/null && KERN_DAEMON=0 "$kbin" exec --readonly --lang sh "cd '${PWD}' && $cmd" 2>&1; printf '\nKERN_T3_EXIT=%s' "$?")
+  tier3_out=$(cd "${PWD}" 2>/dev/null && KERN_DAEMON=0 "$kbin" exec --readonly --quiet --lang sh "cd '${PWD}' && $cmd" 2>&1; printf '\nKERN_T3_EXIT=%s' "$?")
   # The marker is the LAST line (a leading \n guards against a missing
   # trailing newline in the kern output); the code is the marker's suffix,
   # the body is everything before the marker line.
@@ -887,7 +995,11 @@ case "$tier" in
     # would run it, so a relative path is CWD-relative. Without this, kern
     # resolves it against the project root and a fresh project (no index) turns
     # a legitimate read into a deny.
-    if [ -n "$f" ] && out=$("$kbin" compact --root "${PWD}" "$f" 2>&1); then
+    # --machine: non-indexable input (markdown/config/data) renders EMPTY —
+    # the signal to fall through to the raw Tier-3 read below instead of
+    # printing an empty "served" answer. Only a bare `cat FILE` gets here; the
+    # classifier sends head/tail/less/more (windowed reads) straight to Tier 3.
+    if [ -n "$f" ] && out=$("$kbin" compact --machine --root "${PWD}" "$f" 2>/dev/null) && [ -n "$out" ]; then
       mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "compact $f" "$f" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
       printf '%s\n' "$out"
       exit 0
@@ -1006,21 +1118,39 @@ if [ "$KERN_GUARD_MODE" != "deny" ] && [ -n "$cmd" ] && [ "$gate_denied" != "1" 
         exit 0
       fi
       ;;
-    cat|head|tail|sed|awk|less|more)
-      # subject = file path = last non-flag arg
+    cat)
+      # subject = file path = last non-flag arg; only a bare `cat FILE` compacts
+      # (a summary cannot reproduce a multi-target concatenation or cat -n).
       set -f
+      nargs=0
+      hasflag=0
+      first=1
       for a in $cmd; do
+        if [ "$first" = "1" ]; then first=0; continue; fi
         case "$a" in
-        -*) ;;
-        *) subj="$a" ;;
+        -*) hasflag=1 ;;
+        *) nargs=$((nargs + 1)); subj="$a" ;;
         esac
       done
       set +f
-      if [ -n "$subj" ] && out=$("$kbin" compact "$subj" 2>&1); then
+      if [ "$nargs" = "1" ] && [ "$hasflag" = "0" ] && [ -n "$subj" ] && out=$("$kbin" compact --machine "$subj" 2>/dev/null) && [ -n "$out" ]; then
         mkdir -p "$HOME/.kern/audit" 2>/dev/null && printf '{"ts":"%s","event":"kern-guard-redirect","tool":"%s","kern_cmd":"%s","subject":"%s","pwd":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "compact $subj" "$subj" "$PWD" >> "$HOME/.kern/audit/bypass.jsonl" 2>/dev/null
         printf '%s\n' "$out"
         exit 0
       fi
+      # Not indexable (empty compact) or not a bare cat → serve the raw read.
+      if [ -n "$has_tool_call" ]; then
+        printf '{"decision":"allow"}\n'
+      fi
+      exit 0
+      ;;
+    head|tail|less|more|sed|awk)
+      # Windowed/paged reads and stream transforms must preserve their exact
+      # output — serve them raw rather than serving a compact summary.
+      if [ -n "$has_tool_call" ]; then
+        printf '{"decision":"allow"}\n'
+      fi
+      exit 0
       ;;
     find)
       if out=$("$kbin" buddy 2>&1); then

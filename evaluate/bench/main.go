@@ -24,8 +24,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
@@ -667,13 +670,20 @@ type metric struct {
 
 // classMetrics is the per-task-class metric set the harness reports
 // for a (fixture, task) pair through the deterministic optimize.Prompt surface.
-// Every value is derived offline — no live LLM.
+// Every value is derived offline — no live LLM. before/afterTokens use the
+// ESTIMATOR (historical comparability); exactBefore/After use the exact
+// o200k tokenizer and estimatorDrift shows their divergence on the raw
+// input — exact and estimated counts are reported side by side, never mixed
+// into one number (2026-11-20 remediation).
 type classMetrics struct {
 	fixture              string
 	task                 string
-	beforeTokens         int
-	afterTokens          int
-	tokenReduction       float64 // %
+	beforeTokens         int     // estimator count
+	afterTokens          int     // estimator count
+	exactBefore          int     // exact o200k count (0 = tokenizer unavailable)
+	exactAfter           int     // exact o200k count (0 = tokenizer unavailable)
+	estimatorDrift       float64 // % estimator vs o200k on the raw input
+	tokenReduction       float64 // % (estimator)
 	toolCalls            int     // deterministic tool-call estimate
 	toolCallReduction    float64 // % vs naive baseline
 	retries              int     // deterministic retry estimate
@@ -683,6 +693,23 @@ type classMetrics struct {
 	verifiedSuccess      bool    // first pass AND output non-empty
 	humanIntervention    bool    // flagged for human review
 	postDeployRegression bool    // post-deployment regression flag
+}
+
+// exactTokenizer lazily loads the exact o200k tokenizer once. A nil return
+// means the rank tables are unavailable: callers then report estimator
+// counts only, explicitly labeled, instead of silently mixing.
+var (
+	exactOnce    sync.Once
+	exactCounter tokenize.Counter
+)
+
+func o200kTokenizer() tokenize.Counter {
+	exactOnce.Do(func() {
+		if c, err := tokenize.NewO200kCounter(); err == nil {
+			exactCounter = c
+		}
+	})
+	return exactCounter
 }
 
 // measureClass runs one (fixture, task) pair through optimize.Prompt and
@@ -698,6 +725,17 @@ func measureClass(f fixture, t task, retryFactor int) classMetrics {
 		m.afterTokens = tokenize.Count(res.Output)
 	} else {
 		m.afterTokens = 0
+	}
+	// Exact o200k counts alongside the estimator, with the estimator's drift
+	// on the raw input — labeled separately, never blended.
+	if c := o200kTokenizer(); c != nil {
+		m.exactBefore = c.Count(raw)
+		if err == nil {
+			m.exactAfter = c.Count(res.Output)
+		}
+		if m.exactBefore > 0 {
+			m.estimatorDrift = float64(m.beforeTokens-m.exactBefore) / float64(m.exactBefore) * 100
+		}
 	}
 	if m.beforeTokens > 0 {
 		m.tokenReduction = float64(m.beforeTokens-m.afterTokens) / float64(m.beforeTokens) * 100
@@ -732,13 +770,13 @@ func measureClass(f fixture, t task, retryFactor int) classMetrics {
 	return m
 }
 
-// TaskClassMetrics returns the metric set for the "small change"
-// task class across every fixture, and for a named task class when given. It is
-// the harness's deterministic per-task-class report.
+// taskClassMetrics returns the metric set for EVERY task class across every
+// fixture — the harness's deterministic per-task-class report. (2026-11-20
+// remediation: was tasks[:1], so only the "lookup" class was ever reported.)
 func taskClassMetrics() []classMetrics {
 	var out []classMetrics
 	for _, f := range fixtures {
-		for _, t := range tasks[:1] { // default: the first task class
+		for _, t := range tasks {
 			out = append(out, measureClass(f, t, 0))
 		}
 	}
@@ -754,12 +792,12 @@ func taskClassMetrics() []classMetrics {
 // is pure constants + arithmetic (no LLM, no timing, no randomness), so
 // identical runs produce identical tables.
 //
-// Levels mirror kern_retrieve's progressive disclosure:
+// Levels mirror progressive disclosure:
 //   L1 = index summary, L2 = neighborhood, L3 = source.
 // Strategy A resolves the question in 4-6 small steps with 2 level upgrades;
 // strategy B resolves it with 2 large direct full-context calls. Per-step
-// payload sizes are fixed constants chosen to be representative of each
-// level's output size.
+// payload sizes are the exact o200k token counts of real windows into the
+// plan's fixture corpus (see buildSessionPlan) — measured, not invented.
 //
 // Model: step k's request carries payload_k PLUS the accumulated conversation
 // prefix (the payloads of steps 1..k-1, re-sent verbatim). So
@@ -768,13 +806,145 @@ func taskClassMetrics() []classMetrics {
 //   total tokens = sum(request_k) = sum(payload) + prefix rent
 // ---------------------------------------------------------------------------
 
-// Session level payload constants (deterministic, representative token sizes).
-const (
-	sessionL1     = 120  // L1 index summary payload (tokens)
-	sessionL2     = 400  // L2 neighborhood payload (tokens)
-	sessionL3     = 1800 // L3 source payload (tokens)
-	sessionDirect = 3200 // direct full-context call payload (tokens)
-)
+// Levels mirror progressive disclosure:
+//   L1 = index summary, L2 = neighborhood, L3 = source.
+// Strategy A resolves the question in 4-6 small steps with 2 level upgrades;
+// strategy B resolves it with 2 large direct full-context calls. Payload
+// sizes are NOT invented constants (2026-11-20 remediation): every payload
+// is the EXACT o200k token count of a real window into the plan's fixture
+// corpus — L1 = the corpus head, L2 = a wider view, L3 = successive
+// overlapping source views, direct = the whole corpus.
+//
+// Model: step k's request carries payload_k PLUS the accumulated conversation
+// prefix (the payloads of steps 1..k-1, re-sent verbatim). So
+//   request_k    = payload_k + prefix_k,  prefix_k = sum(payload_i, i<k)
+//   prefix rent  = sum(prefix_k)          (the residual-context rent column)
+//   total tokens = sum(request_k) = sum(payload) + prefix rent
+// ---------------------------------------------------------------------------
+
+// sessionTokensLabel names the counter the session payloads were measured
+// with — "exact o200k" when the rank tables loaded, else "estimator" (the
+// table header carries it so exact and estimated counts are never confused).
+var sessionTokensLabel = "estimator"
+
+// corpusWindow returns up to lines lines of corpus starting at line offset
+// (0-based), clamped to what exists.
+func corpusWindow(corpus string, offset, lines int) string {
+	all := strings.Split(corpus, "\n")
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(all) {
+		offset = len(all)
+	}
+	end := offset + lines
+	if end > len(all) {
+		end = len(all)
+	}
+	return strings.Join(all[offset:end], "\n")
+}
+
+// sessionCount tokens-s with the exact o200k counter when available, else
+// the estimator (sessionTokensLabel records which).
+func sessionCount(c tokenize.Counter, text string) int {
+	if c != nil {
+		return c.Count(text)
+	}
+	return tokenize.Count(text)
+}
+
+// sessionPlanSpec is the scripted task sequence: which levels strategy A
+// walks (strategy B is always 2 direct steps). Payloads are derived, not
+// specified.
+type sessionPlanSpec struct {
+	task    string
+	fixture string
+	a       []string // strategy A levels in order
+}
+
+// sessionPlanSpecs are the 3 scripted questions. Every spec reuses an
+// existing fixture corpus (no new corpus).
+var sessionPlanSpecs = []sessionPlanSpec{
+	{
+		task:    "trace what a POST /users request touches (medium monolith)",
+		fixture: "medium monolith",
+		a:       []string{"L1", "L2", "L3", "L3", "L3", "L3"},
+	},
+	{
+		task:    "what breaks if symbol X changes (large monorepo)",
+		fixture: "large monorepo",
+		a:       []string{"L1", "L2", "L3", "L3", "L3"},
+	},
+	{
+		task:    "why does X exist and who needs it (multi-language repository)",
+		fixture: "multi-language repository",
+		a:       []string{"L1", "L2", "L2", "L2", "L3"},
+	},
+}
+
+// buildSessionPlan derives every step's payload from the plan's real fixture
+// corpus: L1 = the corpus head (~10% of lines), L2 = a ~35% view, L3 =
+// successive overlapping ~60% source views (advancing by half a window and
+// clamped at the tail, so every view is full-width), direct = the whole
+// corpus. Window sizes scale with the corpus, so no fixture degenerates.
+// Pure and deterministic: same corpus, same counts.
+func buildSessionPlan(spec sessionPlanSpec, c tokenize.Counter) sessionPlan {
+	var corpus string
+	for _, f := range fixtures {
+		if f.name == spec.fixture {
+			corpus = f.corpus
+			break
+		}
+	}
+	p := sessionPlan{task: spec.task, fixture: spec.fixture}
+	n := strings.Count(corpus, "\n") + 1
+	l1 := corpusWindow(corpus, 0, maxInt(3, n/10))
+	l2 := corpusWindow(corpus, 0, maxInt(5, n*35/100))
+	w3 := maxInt(10, n*60/100)
+	l3Step := 0
+	for _, level := range spec.a {
+		payload := 0
+		switch level {
+		case "L1":
+			payload = sessionCount(c, l1)
+		case "L2":
+			payload = sessionCount(c, l2)
+		case "L3":
+			start := l3Step * w3 / 2
+			if maxStart := n - w3; start > maxStart {
+				start = maxStart
+			}
+			payload = sessionCount(c, corpusWindow(corpus, start, w3))
+			l3Step++
+		}
+		p.a = append(p.a, sessionStep{level: level, payload: payload})
+	}
+	direct := sessionCount(c, corpus)
+	p.b = []sessionStep{{level: "direct", payload: direct}, {level: "direct", payload: direct}}
+	return p
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// sessionPlans holds the built plans — payloads measured from the real
+// fixture corpora with the exact o200k tokenizer (or the estimator when the
+// tables are unavailable; sessionTokensLabel says which).
+var sessionPlans = func() []sessionPlan {
+	c := o200kTokenizer()
+	if c != nil {
+		sessionTokensLabel = "exact o200k"
+	}
+	var out []sessionPlan
+	for _, spec := range sessionPlanSpecs {
+		out = append(out, buildSessionPlan(spec, c))
+	}
+	return out
+}()
 
 // sessionStep is one scripted retrieval step: a level and its payload size.
 type sessionStep struct {
@@ -782,7 +952,8 @@ type sessionStep struct {
 	payload int    // tokens this step sends
 }
 
-// sessionPlan is one scripted question over an existing fixture corpus.
+// sessionPlan is one scripted question over an existing fixture corpus,
+// with payload-bearing steps (built by buildSessionPlan from a spec).
 type sessionPlan struct {
 	task    string        // the scripted question
 	fixture string        // existing fixture corpus the question targets
@@ -800,43 +971,6 @@ type sessionMetricsRow struct {
 	totalTokens   int     // payloadTokens + prefixRent = total tokens per completed task
 	deltaPct      float64 // (B - A) / A * 100; 0 when not applicable (A row)
 	hasDelta      bool
-}
-
-// sessionPlans are the 3 scripted questions the harness simulates. Every plan
-// reuses an existing fixture corpus (no new corpus). Strategy A always runs
-// 4-6 steps with exactly 2 level upgrades; strategy B always runs 2 direct
-// steps of the direct-tool payload.
-var sessionPlans = []sessionPlan{
-	{
-		task:    "trace what a POST /users request touches (medium monolith)",
-		fixture: "medium monolith",
-		a: []sessionStep{
-			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
-			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
-			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
-		},
-		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
-	},
-	{
-		task:    "what breaks if symbol X changes (large monorepo)",
-		fixture: "large monorepo",
-		a: []sessionStep{
-			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
-			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
-			{level: "L3", payload: sessionL3},
-		},
-		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
-	},
-	{
-		task:    "why does X exist and who needs it (multi-language repository)",
-		fixture: "multi-language repository",
-		a: []sessionStep{
-			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
-			{level: "L2", payload: sessionL2}, {level: "L2", payload: sessionL2},
-			{level: "L3", payload: sessionL3},
-		},
-		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
-	},
 }
 
 // sessionStepCosts returns, for each step k, the total tokens its request
@@ -892,7 +1026,7 @@ func runSessionMetrics() []sessionMetricsRow {
 // reportSessionMetrics prints the "## session metrics" table plus the
 // one-line KPI takeaway. Informational: always returns no gate failures.
 func reportSessionMetrics() []string {
-	fmt.Println("| task | strategy | steps | payload tokens | prefix rent (sum of re-sent prefixes) | total tokens per completed task | delta% (B vs A) |")
+	fmt.Println("| task | strategy | steps | payload tokens (" + sessionTokensLabel + ") | prefix rent (sum of re-sent prefixes) | total tokens per completed task (" + sessionTokensLabel + ") | delta% (B vs A) |")
 	fmt.Println("|---|---|---|---|---|---|---|")
 	for _, p := range sessionPlans {
 		a, b := simulateSession(p)
@@ -997,10 +1131,14 @@ func main() {
 	fmt.Println()
 
 	// Per-task-class metric set: token/tool-call/retry reduction,
-	// latency, cost, and task outcomes — all derived offline.
+	// latency, cost, and task outcomes — all derived offline. Rows are
+	// computed ONCE and shared with the latency distribution so the 48-pair
+	// matrix is not re-run per section.
 	fmt.Println("## task-class metrics")
 	fmt.Println()
-	gates = append(gates, reportClassMetrics()...)
+	classRows := taskClassMetrics()
+	gates = append(gates, reportClassMetrics(classRows)...)
+	reportLatencyDistribution(classRows)
 	fmt.Println()
 
 	// Session-simulation KPI: total tokens per completed task for
@@ -1186,16 +1324,53 @@ func printMatrixCoverage() {
 
 // reportClassMetrics prints the per-task-class metric set and
 // returns any hard-gate failures (informational here, so always empty).
-func reportClassMetrics() []string {
-	fmt.Println("| fixture | task | tokens(before/after) | tok% | tools | tool% | retries | latency(ms) | cost | first-pass | verified | human | regression |")
-	fmt.Println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-	for _, m := range taskClassMetrics() {
-		fmt.Printf("| %s | %s | %d/%d | %.1f%% | %d | %.1f%% | %d | %d | $%.4f | %t | %t | %t | %t |\n",
-			m.fixture, m.task, m.beforeTokens, m.afterTokens, m.tokenReduction,
+// reportClassMetrics prints the per-task-class metric set (estimator tokens
+// AND exact o200k tokens side by side with the estimator's drift — never
+// blended) and returns any hard-gate failures (informational, always empty).
+func reportClassMetrics(rows []classMetrics) []string {
+	fmt.Println("| fixture | task | est tok (b/a) | o200k tok (b/a) | drift% | tok% | tools | tool% | retries | latency(ms) | cost | first-pass | verified | human | regression |")
+	fmt.Println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+	for _, m := range rows {
+		exact := fmt.Sprintf("%d/%d", m.exactBefore, m.exactAfter)
+		if m.exactBefore == 0 {
+			exact = "n/a"
+		}
+		fmt.Printf("| %s | %s | %d/%d | %s | %+.1f%% | %.1f%% | %d | %.1f%% | %d | %d | $%.4f | %t | %t | %t | %t |\n",
+			m.fixture, m.task, m.beforeTokens, m.afterTokens, exact, m.estimatorDrift, m.tokenReduction,
 			m.toolCalls, m.toolCallReduction, m.retries, m.latencyMs, m.cost,
 			m.firstPass, m.verifiedSuccess, m.humanIntervention, m.postDeployRegression)
 	}
+	fmt.Println()
+	fmt.Println("_Token columns: 'est' uses the estimator counter (historical comparability); 'o200k' is the exact tokenizer. tok% is computed on estimator counts; drift% is estimator vs o200k on the raw input._")
 	return nil
+}
+
+// reportLatencyDistribution prints p50/p90/p99/min/max over the per-class
+// latency estimates (2026-11-20 remediation). These are token-arithmetic
+// ESTIMATES, not wall-clock: the wall-clock cold/warm contract belongs to
+// the cmd/kern bench suite (cold-cli vs daemon posture, cold/warm load,
+// ServedBy), which this offline harness deliberately does not duplicate.
+func reportLatencyDistribution(rows []classMetrics) {
+	if len(rows) == 0 {
+		return
+	}
+	lat := make([]int64, 0, len(rows))
+	for _, m := range rows {
+		lat = append(lat, m.latencyMs)
+	}
+	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
+	p := func(pc float64) int64 {
+		idx := int(math.Ceil(pc/100*float64(len(lat)))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(lat) {
+			idx = len(lat) - 1
+		}
+		return lat[idx]
+	}
+	fmt.Printf("_Latency distribution over %d (fixture × task) rows (deterministic estimates, not wall-clock): p50=%dms p90=%dms p99=%dms min=%dms max=%dms. Cold/warm wall-clock split: cmd/kern bench (cold-cli vs daemon posture)._\n",
+		len(lat), p(50), p(90), p(99), lat[0], lat[len(lat)-1])
 }
 
 // tokenizerFixtures are reference token counts from the tiktoken 0.14.0
@@ -1255,11 +1430,20 @@ type recall struct {
 }
 
 // recallQueries target files that exist in this repo, so the harness verifies
-// itself on every run.
+// itself on every run. Expanded 2026-11-20 (remediation): 10 realistic
+// queries across README, contributing, architecture, and docs surfaces; the
+// gate requires ≥0.9 (hit < total-1 fails).
 var recallQueries = []recall{
 	{"how do I optimize a prompt", "README.md"},
 	{"how do I compress a log", "README.md"},
-	{"kern usage rules for agents", "AGENTS.md"},
+	{"call kern tools first before built-ins", "AGENTS.md"},
+	{"contributing quick start go test", "CONTRIBUTING.md"},
+	{"how to add a new cli command", "CONTRIBUTING.md"},
+	{"subsystem ledger loc cap drift gate", "ARCHITECTURE.md"},
+	{"architecture tour entry points index", "architecture-tour.md"},
+	{"mcp tool catalog", "mcp/README.md"},
+	{"cli reference command table", "cli-reference.md"},
+	{"benchmark methodology cold versus warm", "benchmarks/README.md"},
 }
 
 func pctf(hit, total int) float64 {

@@ -186,6 +186,12 @@ func RunProbe(rest []string) int {
 	return run(func() int { runProbe(rest); return 0 })
 }
 
+// RunResearch executes `kern research "<task text>" [root] [--max N]` —
+// read-only multi-symbol research with impact and affected files.
+func RunResearch(rest []string) int {
+	return run(func() int { runResearch(rest); return 0 })
+}
+
 // RunTrace executes `kern trace <file|- for stdin> [root] [--limit N]` —
 // runtime-impact overlay.
 func RunTrace(rest []string) int {

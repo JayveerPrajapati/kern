@@ -308,6 +308,10 @@ func runIndex(rest []string) {
 			fmt.Printf("  languages: %s\n", status.Languages)
 			fmt.Printf("  stale: %v\n", status.Stale)
 			fmt.Printf("  store: %s\n", status.Store)
+			if status.DroppedSymbolConflicts > 0 {
+				fmt.Printf("  dropped duplicate symbols: %d (quarantined, first declaration kept — see the build warning)\n",
+					status.DroppedSymbolConflicts)
+			}
 			if status.CallResolution.Total > 0 {
 				fmt.Printf("  %s\n", callResolutionLine(status.CallResolution))
 			}
@@ -696,7 +700,10 @@ func runAst(rest []string) {
 	if len(matches) == 0 {
 		// 6.4: a no-match pattern without a kind prefix gets the kind-glob
 		// hint (`func handle*` misses methods, whose kind is "method").
-		fmt.Println("no symbols matched: " + pattern + index.KindGlobHint(pattern))
+		// A miss is a no-match ERROR (exit 1), the same contract as
+		// `kern search` — a script must not read it as success
+		// (2026-11-10 campaign).
+		fatal("no symbols matched: %s%s", pattern, index.KindGlobHint(pattern))
 	}
 	for _, m := range matches {
 		fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
@@ -1029,6 +1036,10 @@ func runFts(rest []string) {
 	}
 	for _, m := range matches {
 		fmt.Printf("%s %s %s:%d\n", m.Kind, m.FullName(), m.File, m.Line)
+	}
+	if len(matches) == 0 {
+		// Same no-match contract as kern search (2026-11-10 campaign).
+		fatal("no FTS matches for %q", args[0])
 	}
 
 }

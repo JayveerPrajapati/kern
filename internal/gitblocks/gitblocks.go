@@ -62,12 +62,16 @@ var blueprintRuntimeEntries = []string{
 }
 
 // GitignoreGenerated writes the setup-generated project files to .gitignore.
-// Machine-specific configs (absolute binary paths in .mcp.json, .claude/,
-// .cursor/, .kiro/ hooks) must never be committed; uncommitted copies would
-// leak the machine layout and stale paths. But portable configs like
-// opencode.json (relative "bin/kern-mcp" command) and the .opencache plugins
-// directory ARE committed — only their machine-specific subdirs (node_modules)
-// are ignored.
+// Self-hiding is the contract (F-A6): a fresh `kern setup` in a brand-new
+// repository must leave `git status --porcelain` EMPTY, so the block covers
+// every file and directory project wiring generates — including the
+// .gitignore carrying this block itself. Machine-specific configs (absolute
+// binary paths in .mcp.json, .claude/, .cursor/, .kiro/ hooks) must never be
+// committed; uncommitted copies would leak the machine layout and stale
+// paths. Files a team might want to share (AGENTS.md, opencode.json, the
+// .opencode plugin) are ignored too, because a newcomer must never have to
+// classify five untracked entries by hand — the block header tells them how
+// to opt back in: delete the line and commit the shared config.
 // Idempotent replacement: an existing kern block — marked or
 // unmarked, current or stale — is detected and replaced IN PLACE, so running
 // setup twice always yields exactly ONE block.
@@ -107,8 +111,13 @@ func GitignoreGenerated(root string) Result {
 // canonical block can be matched verbatim for idempotency. The .blueprint
 // runtime entries are deliberately absent: their project-level block was
 // owned by the removed blueprint family (see blueprintRuntimeEntries above).
+// The repo's own .gitignore carries this same entry list in its curated
+// "kern generated" section — keep the two in sync when editing.
 var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
+.gitignore
 .mcp.json
+AGENTS.md
+opencode.json
 .claude/
 .cursor/
 .vscode/
@@ -117,6 +126,8 @@ var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line
 .kern/
 .continue/
 .windsurf/
+.codex/
+.opencode/
 .opencode/node_modules/
 .opencode/package-lock.json
 opencode.json.bak
@@ -124,9 +135,11 @@ opencode.json.bak
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
+.github/hooks/
+.github/skills/
 .agents/rules/kern.md
 .agents/hooks.json
-.github/hooks/
+.agents/skills/
 `
 
 // removeGitignoreBlock strips any existing kern-generated .gitignore block
@@ -162,6 +175,13 @@ func removeGitignoreBlock(content, closeMarker string) string {
 		return strings.TrimRight(content[:start], "\n")
 	}
 	return content
+}
+
+// StripGitignoreBlock removes kern's generated .gitignore block from
+// content (both written forms, plus the legacy/orphaned shapes) — the removal
+// counterpart of GitignoreGenerated for `kern setup --remove --project`.
+func StripGitignoreBlock(content string) string {
+	return removeGitignoreBlock(content, "# --- end kern generated ---")
 }
 
 // gitConfigIgnore resolves the global git ignore path: XDG_CONFIG_HOME/git/ignore

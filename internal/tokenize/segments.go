@@ -24,6 +24,52 @@ const (
 	maxProseChars      = 24
 )
 
+// QueryMatchesIdentifier reports whether a single-token identifier query is
+// the symbol's name, or a CONTIGUOUS run of its identifier segments, rather
+// than merely sharing words with it. Ranking may treat a segment prefix as a
+// match ("handle" ~ "Handler"); resolution must not, so this is the identity
+// half of a fuzzy resolve:
+//
+//	"RateLimiter"    matches UserAuthenticationRateLimiter (suffix run)
+//	"handleToolCall" does NOT match TestCallToolResolvesUnadvertisedHandler
+//	                 (the words are scattered, and "handle" != "handler")
+//
+// Multi-word phrases are NOT tightened here: they are prose ("user
+// authentication rate limiting"), and word-level matched-all is the documented
+// approximate-phrase behaviour (internal/app resolves that phrase to a
+// UserAuthenticationRateLimiter function). Moved out of internal/intel with
+// the rest of this family (see the package note above).
+func QueryMatchesIdentifier(query, name, full string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" || strings.ContainsAny(q, " \t") {
+		return true
+	}
+	lq := strings.ToLower(q)
+	if strings.ToLower(name) == lq || strings.HasSuffix(strings.ToLower(full), "."+lq) {
+		return true
+	}
+	qsegs := SplitIdentifierSegments(q)
+	if len(qsegs) == 0 {
+		return false
+	}
+	for _, source := range []string{name, full} {
+		segs := SplitIdentifierSegments(source)
+		for i := 0; i+len(qsegs) <= len(segs); i++ {
+			hit := true
+			for j := range qsegs {
+				if segs[i+j] != qsegs[j] {
+					hit = false
+					break
+				}
+			}
+			if hit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SplitIdentifierSegments splits a symbol or file name into lowercase word
 // segments. Handles camelCase / PascalCase (inner lower->Upper), acronym runs
 // ("HTMLParser" -> html/parser), snake_case / kebab-case / dotted names

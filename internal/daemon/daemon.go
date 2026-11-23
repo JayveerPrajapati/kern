@@ -295,6 +295,10 @@ func Call(root string, req Request, timeout time.Duration) (Response, error) {
 
 // Ensure makes sure a daemon for root is running and speaks this binary's
 // identity. It is idempotent and cheap on the happy path (one dial+ping).
+// It is also the IMPLICIT autostart path (the CLI proxy calls it before
+// read-only commands), so when it starts a daemon it announces that on
+// stderr — one line, never stdout, so MCP/JSON output stays clean (F-C2).
+// Explicit `kern daemon serve` bypasses Ensure and stays silent.
 func Ensure(root, version string) error {
 	if !Supported() {
 		return ErrUnsupported
@@ -337,6 +341,9 @@ func Ensure(root, version string) error {
 	for time.Now().Before(deadline) {
 		if resp, err := Call(root, Request{Op: OpPing}, time.Second); err == nil {
 			if resp.Identity == identity {
+				// Implicit autostart succeeded (F-C2): one stderr line,
+				// exactly once per spawn; the warm path above returns early.
+				fmt.Fprintf(os.Stderr, "[kern] background daemon started (pid %s) — speeds up future commands; `kern daemon stop` to stop\n", FormatPid(resp.Pid))
 				return nil
 			}
 			return fmt.Errorf("daemon answered with a different build (%s)", resp.Identity)
@@ -351,18 +358,7 @@ func Stop(root string) error {
 	if !Supported() {
 		return ErrUnsupported
 	}
-	if _, err := Call(root, Request{Op: OpStop}, 3*time.Second); err != nil {
-		_ = os.Remove(SocketPath(root))
-		return err
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(SocketPath(root)); os.IsNotExist(err) {
-			return nil
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return nil
+	return stopSocket(SocketPath(root), 3*time.Second, 3*time.Second)
 }
 
 // Status reports the running daemon's version and pid, if any.

@@ -16,6 +16,8 @@ type flags struct {
 	etag          string // --etag (explore: conditional-fetch etag from a previous response)
 	explain       bool   // --explain (explore: append the why-rationale section)
 	force         bool   // --force (index: force overwrite)
+	format        string // --format (graph: output format; "one-line" = single-line neighbourhood)
+	mode          string // --mode (graph/explore: concise|evidence|full output mode)
 	from          string // --from (path: start symbol)
 	full          bool   // --full (communities: full unfolded output)
 	graphml       bool   // --graphml (graph: GraphML output)
@@ -84,6 +86,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			p.SetBool(&f.explain, "--explain", inline, hasInline)
 		case "--force":
 			p.SetBool(&f.force, "--force", inline, hasInline)
+		case "--format":
+			p.SetStr(&f.format, inline, hasInline)
+		case "--mode":
+			p.SetStr(&f.mode, inline, hasInline)
 		case "--from":
 			p.SetStr(&f.from, inline, hasInline)
 		case "--full":

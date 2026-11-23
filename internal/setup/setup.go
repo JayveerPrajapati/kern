@@ -15,6 +15,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agentwire"
 	"github.com/JayveerPrajapati/kern/internal/gitblocks"
+	"github.com/JayveerPrajapati/kern/internal/projectstate"
 )
 
 // cliName returns the platform-appropriate CLI binary file name. On Windows
@@ -159,20 +160,33 @@ func pluginGuardStatus(root string) Status {
 // vocabulary as copyGlobalPlugin: current, customized, or an older shipped
 // version.
 func globalPluginStatus(path string) Status {
+	// Two global copies exist by design (the XDG config root and ~/.opencode);
+	// an unlabeled pair read as a duplicated row (2026-11-10 campaign).
+	label := "opencode plugin (global " + globalPluginTag(path) + ")"
 	if _, err := os.Stat(filepath.Dir(filepath.Dir(path))); err != nil {
-		return Status{Agent: "opencode plugin (global)", Skipped: true, Path: path, Note: "opencode not installed — skipped"}
+		return Status{Agent: label, Skipped: true, Path: path, Note: "opencode not installed — skipped"}
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Status{Agent: "opencode plugin (global)", Path: path, Note: "global copy missing — run kern setup --global to install it"}
+		return Status{Agent: label, Path: path, Note: "global copy missing — run kern setup --global to install it"}
 	}
 	if asset, aerr := PluginAsset(); aerr == nil && bytes.Equal(b, asset) {
-		return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin already current"}
+		return Status{Agent: label, Installed: true, Path: path, Note: "global plugin already current"}
 	}
 	if !isShippedPluginVersion(b) {
-		return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin is customized — the next `kern setup --global` backs it up and refreshes it"}
+		return Status{Agent: label, Installed: true, Path: path, Note: "global plugin is customized — the next `kern setup --global` backs it up and refreshes it"}
 	}
-	return Status{Agent: "opencode plugin (global)", Installed: true, Path: path, Note: "global plugin is an older kern version — run kern setup --global to refresh"}
+	return Status{Agent: label, Installed: true, Path: path, Note: "global plugin is an older kern version — run kern setup --global to refresh"}
+}
+
+// globalPluginTag distinguishes the two user-global plugin locations in status
+// rows: the XDG config root vs the ~/.opencode root opencode 1.18.x loads.
+func globalPluginTag(path string) string {
+	p := filepath.ToSlash(path)
+	if strings.Contains(p, "/.config/opencode/") {
+		return "config"
+	}
+	return ".opencode"
 }
 
 // Check reports the current wiring state without changing anything.
@@ -198,17 +212,17 @@ func Check(root string) []Status {
 	}
 	out = append(out, claudeStatus())
 	out = append(out, codexStatus())
-	out = append(out, fileStatusAny("claude hooks", filepath.Join(root, ".claude", "settings.json"), filepath.Join(globalHomeDir(), ".claude", "settings.json")))
-	out = append(out, fileStatusAny("gemini hooks", filepath.Join(root, ".gemini", "settings.json"), filepath.Join(globalHomeDir(), ".gemini", "settings.json")))
+	out = append(out, hookStatusAny("claude hooks", filepath.Join(root, ".claude", "settings.json"), filepath.Join(globalHomeDir(), ".claude", "settings.json")))
+	out = append(out, hookStatusAny("gemini hooks", filepath.Join(root, ".gemini", "settings.json"), filepath.Join(globalHomeDir(), ".gemini", "settings.json")))
 	out = append(out, fileStatus(filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "cursor rule"))
-	out = append(out, fileStatusAny("cursor hooks", filepath.Join(root, ".cursor", "hooks.json"), filepath.Join(globalHomeDir(), ".cursor", "hooks.json")))
-	out = append(out, fileStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
-	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
-	out = append(out, fileStatus(filepath.Join(homeConfig(".qwen", "settings.json")("")), "qwen hooks"))
-	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
-	out = append(out, fileStatus(continueSettingsPath(), "continue hooks"))
-	out = append(out, fileStatus(kiroHooksPath(), "kiro hooks"))
-	out = append(out, fileStatusAny("antigravity hooks", filepath.Join(root, ".agents", "hooks.json"), filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")))
+	out = append(out, hookStatusAny("cursor hooks", filepath.Join(root, ".cursor", "hooks.json"), filepath.Join(globalHomeDir(), ".cursor", "hooks.json")))
+	out = append(out, hookStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
+	out = append(out, hookStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
+	out = append(out, hookStatus(filepath.Join(homeConfig(".qwen", "settings.json")("")), "qwen hooks"))
+	out = append(out, hookStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
+	out = append(out, hookStatus(continueSettingsPath(), "continue hooks"))
+	out = append(out, hookStatus(kiroHooksPath(), "kiro hooks"))
+	out = append(out, hookStatusAny("antigravity hooks", filepath.Join(root, ".agents", "hooks.json"), filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")))
 	out = append(out, checkGlobalGitHooks())
 	out = append(out, checkHookMatcherCompleteness(root)...)
 
@@ -268,15 +282,12 @@ func Wire(root string, agents []string, detect bool, global bool) []Status {
 // WireOptions carries per-run knobs for WireWith. Zero value matches Wire's
 // default behavior exactly.
 type WireOptions struct {
-	// AgentsMD selects the repo AGENTS.md variant: "thin" writes the thin
-	// wiring-only file (full kern rules live in the host's global
-	// instructions, managed by `kern setup --global-rules`), "full" writes
-	// the complete rules, "" uses the persisted .kern/config.json value. The
-	// absent-key default is resolved PER FILE by wireAgentRules: thin when
-	// the corresponding host's global slot carries the kern-managed block,
-	// full otherwise (an unmanaged global slot means the repo file is the
-	// only delivery). An explicit non-empty value is persisted so subsequent
-	// runs remember it.
+	// AgentsMD selects the repo AGENTS.md variant: "thin" writes the compact
+	// core file (the T-05 default — the security-critical routing/verify/
+	// fallback facts in <=2KB, self-sufficient), "full" writes the complete
+	// rules, "" uses the persisted .kern/config.json value. The absent-key
+	// default is thin everywhere. An explicit non-empty value is persisted so
+	// subsequent runs remember it.
 	AgentsMD string
 	// DryRun suppresses every write and returns preview statuses whose
 	// notes describe what a real run would do ("[dry-run] would …"), so
@@ -335,10 +346,9 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	// reads it natively (Claude, Codex, Gemini, Continue, Windsurf, Zed,
 	// Qwen, Qoder, Kiro, opencode). Write it unconditionally so the
 	// kern-first policy reaches all agents regardless of which are wired.
-	// The variant is thin by default (low startup tokens: wiring-only facts,
-	// full rules live in the host's global instructions); an explicit
-	// --agents-md choice is persisted in .kern/config.json so subsequent
-	// runs remember it.
+	// The variant is thin by default (the T-05 compact core: low startup
+	// tokens, self-sufficient); an explicit --agents-md choice is persisted
+	// in .kern/config.json so subsequent runs remember it.
 	mode := opts.AgentsMD
 	explicitThin := opts.AgentsMD == "thin"
 	if mode == "" {
@@ -388,7 +398,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		// not perform.
 		agentsMDPath := filepath.Join(root, "AGENTS.md")
 		keepFull := false
-		if agentwire.RulesVariant("AGENTS.md", mode, explicitThin) == "thin" && !explicitThin {
+		if agentwire.RulesVariant(mode) == "thin" && !explicitThin {
 			if b, err := os.ReadFile(agentsMDPath); err == nil {
 				keepFull = strings.Contains(string(b), agentwire.FullRulesHeader)
 			}
@@ -396,7 +406,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		if keepFull {
 			out = append(out, Status{Agent: "AGENTS.md", Installed: true, Path: agentsMDPath, Note: "[dry-run] would keep existing full rules (pass --agents-md thin to switch)"})
 		} else {
-			out = append(out, would("AGENTS.md", agentsMDPath, "write AGENTS.md ("+agentwire.RulesVariant("AGENTS.md", mode, explicitThin)+" rules)"))
+			out = append(out, would("AGENTS.md", agentsMDPath, "write AGENTS.md ("+agentwire.RulesVariant(mode)+" rules)"))
 		}
 		if repoEnabled("opencode") {
 			out = append(out, would("opencode", filepath.Join(root, "opencode.json"), "merge the kern MCP entry into opencode.json"))
@@ -442,7 +452,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		if _, err := os.Stat(filepath.Join(root, ".cursor")); err == nil {
 			out = append(out, would("skills-cursor (project)", filepath.Join(root, ".cursor", "rules"), "install/refresh cursor skill rules in .cursor/rules"))
 		}
-		out = append(out, would("kern config", filepath.Join(root, ".kern", "profiles.json"), "scaffold .kern/profiles.json if missing"))
+		out = append(out, would("kern config", filepath.Join(root, ".kern", "config.json"), "write the explicit managed-project marker and scaffold .kern/profiles.json if missing"))
 		for _, agent := range detected {
 			if file, ok := instructionFiles[agent]; ok {
 				out = append(out, would(agent+"-instruction", filepath.Join(root, file), "write the "+agent+" kern-first policy"))
@@ -456,7 +466,6 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	// (except in GlobalOnly mode, which touches no repo file).
 	if projectScope {
 		out = append(out, agentwire.WireMCPJSON(root, bin))
-		out = append(out, agentwire.WireAgentRules(root, mode, wired, explicitThin))
 	}
 	if projectScope && opts.AgentsMD != "" {
 		if err := setAgentsMD(root, opts.AgentsMD); err != nil {
@@ -591,6 +600,26 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 			detected = append(detected, a)
 		}
 	}
+	// Converge the wired-set BEFORE any rule file is written (T-05): the
+	// thin content embeds the wired list, so a stale pre-run snapshot
+	// would make run 1 write "Wired agents: cursor" and run 2 (with the
+	// marker this run created now detectable) write a DIFFERENT line —
+	// the rule files must be byte-stable across re-runs. The extension
+	// above already computes the fixed point, so re-derive the detection
+	// case from the extended set; an explicit --agents list stays
+	// authoritative as-is. WireAgentRules therefore runs AFTER the
+	// marker-creating steps, in the same converged state wireInstructions
+	// sees.
+	if len(explicit) == 0 && detect {
+		if len(detected) == 0 {
+			wired = "none"
+		} else {
+			wired = strings.Join(detected, ", ")
+		}
+	}
+	if projectScope {
+		out = append(out, agentwire.WireAgentRules(root, mode, wired, explicitThin))
+	}
 	out = append(out, wireInstructions(root, detected, wired, explicitThin)...)
 
 	return out
@@ -606,14 +635,25 @@ func ensureKernConfig(root string) Status {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Status{Agent: "kern config", Path: filepath.Join(root, ".kern"), Note: err.Error()}
 	}
+	markerPath, markerChanged, err := projectstate.EnsureMarker(root)
+	if err != nil {
+		return Status{Agent: "kern config", Path: markerPath, Note: err.Error()}
+	}
 	profilesPath := filepath.Join(root, ".kern", "profiles.json")
-	if _, err := os.Stat(profilesPath); err == nil {
-		return Status{Agent: "kern config", Installed: true, Path: profilesPath, Note: ".kern/profiles.json already present"}
+	profilesNote := ".kern/profiles.json already present"
+	if _, err := os.Stat(profilesPath); err != nil {
+		if err := os.WriteFile(profilesPath, []byte("[]"), 0o600); err != nil {
+			return Status{Agent: "kern config", Path: profilesPath, Note: err.Error()}
+		}
+		profilesNote = "scaffolded .kern/profiles.json"
 	}
-	if err := os.WriteFile(profilesPath, []byte("[]"), 0o600); err != nil {
-		return Status{Agent: "kern config", Path: profilesPath, Note: err.Error()}
+	note := profilesNote
+	if markerChanged {
+		note += "; wrote explicit managed-project marker"
+	} else {
+		note += "; managed-project marker present"
 	}
-	return Status{Agent: "kern config", Installed: true, Path: profilesPath, Note: "scaffolded .kern/profiles.json"}
+	return Status{Agent: "kern config", Installed: true, Path: markerPath, Note: note}
 }
 
 func wireAdapter(a adapter, root, bin string) Status {

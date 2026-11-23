@@ -562,9 +562,38 @@ func (g *Graph) closure(start string, strict, incoming bool) []string {
 	if existing, ok := g.closureMemo[key]; ok {
 		ids = existing // a concurrent caller computed it first; keep one canonical slice
 	} else {
-		g.closureMemo[key] = ids
+		ids = g.rememberClosureLocked(key, ids)
 	}
 	g.closureMu.Unlock()
+	return ids
+}
+
+// rememberClosureLocked stores a computed closure and evicts the oldest
+// entries until the approximate cached-ID budget is respected. It returns the
+// canonical slice, which may be one computed by a concurrent caller.
+func (g *Graph) rememberClosureLocked(key closureKey, ids []string) []string {
+	if g.closureMemo == nil {
+		g.closureMemo = make(map[closureKey][]string)
+	}
+	if existing, ok := g.closureMemo[key]; ok {
+		return existing
+	}
+	g.closureMemo[key] = ids
+	g.closureMemoIDs += len(ids)
+	g.closureOrder = append(g.closureOrder, key)
+	for g.closureMemoIDs > closureMemoBudget && g.closureHead < len(g.closureOrder) {
+		oldest := g.closureOrder[g.closureHead]
+		g.closureOrder[g.closureHead] = closureKey{}
+		g.closureHead++
+		if cached, ok := g.closureMemo[oldest]; ok {
+			g.closureMemoIDs -= len(cached)
+			delete(g.closureMemo, oldest)
+		}
+	}
+	if g.closureHead == len(g.closureOrder) {
+		g.closureOrder = nil
+		g.closureHead = 0
+	}
 	return ids
 }
 

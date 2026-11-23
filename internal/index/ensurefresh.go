@@ -33,6 +33,12 @@ type IndexStatus struct {
 	// dynamic-language receivers and project-local misses — the honest
 	// actionable share). Zero on indexes built before the pass existed.
 	CallResolution CallResStats `json:"call_resolution,omitempty"`
+	// DroppedSymbolConflicts counts same-identity duplicate symbols the
+	// last full build QUARANTINED (later duplicates dropped, first
+	// declaration kept) instead of failing. Non-zero means an extractor
+	// anomaly in some file — see the build's stderr warning; zero on
+	// conflict-free builds and indexes built before the field existed.
+	DroppedSymbolConflicts int `json:"dropped_symbol_conflicts,omitempty"`
 	// Build reports how the persisted index was last produced (kind, wall
 	// duration, workers, reused per-file results) so build cost is visible
 	// without profiling. Kind "" on indexes built before this field existed.
@@ -160,6 +166,7 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 	}
 	status.Version = ix.Version
 	status.CallResolution = ix.CallResolution
+	status.DroppedSymbolConflicts = ix.DroppedSymbolConflicts
 	if ix.BuildStats.Kind != "" {
 		status.Build = ix.BuildStats
 	}

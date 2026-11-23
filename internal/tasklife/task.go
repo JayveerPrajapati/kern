@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"log"
@@ -29,6 +30,7 @@ type TaskService struct {
 	snapshots  *agent.SnapshotStore
 	arts       *ArtifactStore
 	bus        *eventbus.Bus
+	metrics    *metrics.Recorder
 	agentID    string              // identity of the calling interface (Invariant 6)
 	prProvider prprovider.Provider // PR creation provider (default Noop)
 	deployer   deployment.Deployer // deployer for the Deploy method (default Noop)
@@ -93,6 +95,7 @@ func NewTaskService(p PlatformAPI, bus *eventbus.Bus) *TaskService {
 		snapshots:    agent.NewSnapshotStore(p.Root()),
 		arts:         NewArtifactStore(p.Root()),
 		bus:          bus,
+		metrics:      metrics.Default(),
 		agentID:      "kern", // default identity; override via WithAgentID
 		prProvider:   prprovider.NoopProvider{},
 		deployer:     deployment.NewDeployerFromEnv(),
@@ -344,7 +347,11 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 	// dispatch table; a NextAction that recommends a removed tool is worse
 	// than none. kern_exec is on the default surface but governance-gated.
 	approvalState := "none"
-	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_heal; kern_exec needs KERN_ALLOW_EXEC=1) or run the same pipeline from the CLI: kern run \"" + intent + "\""
+	// Governance text must match the live posture (audit F6, 2026-11-21):
+	// under the default ask posture kern_exec runs LOW/MEDIUM commands
+	// audited and mints an approval for HIGH/CRITICAL — it does NOT need
+	// KERN_ALLOW_EXEC=1 (that is the closed-posture escape).
+	nextAction := "execute workflow — drive the returned tools yourself (kern_verify/kern_heal; kern_exec runs LOW/MEDIUM commands audited, HIGH/CRITICAL mint an approval) or run the same pipeline from the CLI: kern run \"" + intent + "\""
 	if risk.ApprovalRequired {
 		approvalState = "required"
 		nextAction = "request approval"
@@ -424,10 +431,14 @@ func (s *TaskService) persist(t *agent.Task) {
 			// store fails), but a silent drop hides lost state: surface it
 			// loudly so task loss across sessions is observable in logs.
 			log.Printf("kern app: task %s state could not be persisted: %v", t.ID, err)
+			s.metrics.RecordTaskPersistenceFailure()
 		}
 	}
 	if s.snapshots != nil {
-		_ = s.snapshots.Record(*t)
+		if err := s.snapshots.Record(*t); err != nil {
+			log.Printf("kern app: task %s snapshot could not be persisted: %v", t.ID, err)
+			s.metrics.RecordTaskPersistenceFailure()
+		}
 	}
 }
 

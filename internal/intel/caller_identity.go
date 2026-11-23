@@ -11,7 +11,7 @@ func callerDefinitions(ix *index.Index, caller string, target index.Symbol) ([]i
 		}
 	}
 	if !sourced {
-		if symbol, ok := findCallerDef(ix, caller, target); ok {
+		if symbol, ok := FindCallerDefinition(ix, caller, target); ok {
 			return []index.Symbol{symbol}, false
 		}
 		return nil, true
@@ -24,7 +24,7 @@ func callerDefinitions(ix *index.Index, caller string, target index.Symbol) ([]i
 		if edge.SourceFile != "" || edge.Synth != "" || simpleName(edge.Target) != target.Name {
 			continue
 		}
-		if definition, found := findCallerDef(ix, caller, target); found {
+		if definition, found := FindCallerDefinition(ix, caller, target); found {
 			callers = append(callers, definition)
 		} else {
 			ambiguous = true

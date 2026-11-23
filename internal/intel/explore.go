@@ -7,39 +7,46 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/astrefs"
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/calleefilter"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/qualify"
 	"github.com/JayveerPrajapati/kern/internal/refscan"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/tokstats"
+	"github.com/JayveerPrajapati/kern/internal/typealias"
 )
 
 // ExploreReport is the single-call result for a symbol: verbatim source,
 // call flow (callers + callees), and blast radius (transitive callers).
 type ExploreReport struct {
-	Symbol       string               `json:"symbol"`
-	Resolved     string               `json:"resolved,omitempty"`
-	Alternatives []string             `json:"alternatives,omitempty"` // other definitions a bare name also matches ("FullName (file:line)")
-	Definition   index.Symbol         `json:"definition"`
-	Source       string               `json:"source"`
-	Callers      []string             `json:"callers"`
-	CallerLocs   map[string]string    `json:"caller_locs,omitempty"` // caller → "file:line" (unresolved callers omitted)
-	Callees      []string             `json:"callees"`
-	CallerConf   map[string]string    `json:"caller_conf,omitempty"`  // caller → EXTRACTED/INFERRED/AMBIGUOUS
-	CalleeConf   map[string]string    `json:"callee_conf,omitempty"`  // callee → EXTRACTED/INFERRED/AMBIGUOUS
-	CallerSynth  map[string]string    `json:"caller_synth,omitempty"` // caller → router:chi (SYNTHESIZED dispatch)
-	CalleeSynth  map[string]string    `json:"callee_synth,omitempty"` // callee → router:chi
-	CalleeSkels  []string             `json:"callee_skels,omitempty"` // folded callee bodies, budget-permitting
-	BlastRadius  []string             `json:"blast_radius"`
-	BlastSymbols []index.Symbol       `json:"-"`
-	BlastFiles   []string             `json:"blast_files"`
-	NearestDepth map[string]int       `json:"nearest_depth,omitempty"`
-	StaleBanner  string               `json:"stale_banner,omitempty"`
-	Stats        *tokstats.TokenStats `json:"stats,omitempty"`
-	Evidence     string               `json:"evidence,omitempty"` // P2 anchor: file:line + certificate for the subject
+	Symbol       string       `json:"symbol"`
+	Resolved     string       `json:"resolved,omitempty"`
+	ResolveHow   string       `json:"resolve_how,omitempty"`  // "package-qualified match" only when the qualifier selected the definition
+	Alternatives []string     `json:"alternatives,omitempty"` // other definitions a bare name also matches ("FullName (file:line)")
+	Definition   index.Symbol `json:"definition"`
+	Source       string       `json:"source"`
+	Callers      []string     `json:"callers"`
+	// UnboundCallers counts call sites recorded under this symbol's bare name
+	// that no declaration can claim (the name exists in more than one file).
+	// An empty Callers list with a non-zero count here is missing coverage,
+	// not an all-clear.
+	UnboundCallers int                  `json:"unbound_callers,omitempty"`
+	CallerLocs     map[string]string    `json:"caller_locs,omitempty"` // caller → "file:line" (unresolved callers omitted)
+	Callees        []string             `json:"callees"`
+	CallerConf     map[string]string    `json:"caller_conf,omitempty"`  // caller → EXTRACTED/INFERRED/AMBIGUOUS
+	CalleeConf     map[string]string    `json:"callee_conf,omitempty"`  // callee → EXTRACTED/INFERRED/AMBIGUOUS
+	CallerSynth    map[string]string    `json:"caller_synth,omitempty"` // caller → router:chi (SYNTHESIZED dispatch)
+	CalleeSynth    map[string]string    `json:"callee_synth,omitempty"` // callee → router:chi
+	CalleeSkels    []string             `json:"callee_skels,omitempty"` // folded callee bodies, budget-permitting
+	BlastRadius    []string             `json:"blast_radius"`
+	BlastSymbols   []index.Symbol       `json:"-"`
+	BlastFiles     []string             `json:"blast_files"`
+	NearestDepth   map[string]int       `json:"nearest_depth,omitempty"`
+	StaleBanner    string               `json:"stale_banner,omitempty"`
+	Stats          *tokstats.TokenStats `json:"stats,omitempty"`
+	Evidence       string               `json:"evidence,omitempty"` // P2 anchor: file:line + certificate for the subject
 	// ReferenceFiles / ReferenceCount / ReferenceConfidence report the
 	// TEXTUAL-reference safety net for non-callable symbols (types used only
 	// in declarations, consts, vars): the call graph has no edges for them, so
@@ -121,7 +128,7 @@ func ResolveEntry(ix *index.Index, query string) (resolved string, d *index.Symb
 	if !ok {
 		return "", nil, false
 	}
-	def, found := findDef(ix, resolved)
+	def, found := FindDefinition(ix, resolved)
 	if !found {
 		return "", nil, false
 	}
@@ -145,7 +152,7 @@ func ResolveEntry(ix *index.Index, query string) (resolved string, d *index.Symb
 		}
 	}
 
-	if q, found := qualifiedPackageDef(ix, query, *d); found {
+	if q, found := qualify.Definition(ix, query, *d, IsNonProduction); found {
 		d, resolved = &q, q.FullName()
 	}
 	return resolved, d, true
@@ -168,7 +175,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	resolved, d, ok := ResolveEntry(ix, symbol)
 	if !ok {
 		// ResolveEntry folded the whole chain (Resolve → ResolveFuzzy →
-		// findDef → production re-point → package-qualifier refinement);
+		// FindDefinition → production re-point → package-qualifier refinement);
 		// distinguish its two failure modes exactly as before: a query that
 		// resolves to a name with no index definition vs one that resolves
 		// to nothing at all. The re-resolve only runs on the error path.
@@ -181,6 +188,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	rep := &ExploreReport{
 		Symbol:       symbol,
 		Resolved:     resolved,
+		ResolveHow:   qualify.How(ix, symbol, *d, IsNonProduction),
 		Alternatives: AmbiguousAlternatives(ix, symbol, *d),
 		Definition:   *d,
 		// Source must come from the SAME candidate as Definition: Context
@@ -211,7 +219,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 		// callee resolution below; an unresolved caller (cross-package
 		// qualified ref, nodesForIDs limitation) is rendered without a
 		// location — never fabricated.
-		if def, ok := findCallerDef(ix, c, *d); ok && def.File != "" {
+		if def, ok := FindCallerDefinition(ix, c, *d); ok && def.File != "" {
 			if rep.CallerLocs == nil {
 				rep.CallerLocs = map[string]string{}
 			}
@@ -225,6 +233,11 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 		}
 	}
 	sort.Strings(rep.Callers)
+	if len(rep.Callers) == 0 {
+		// The index may still hold edges for this bare name that no
+		// declaration can claim; say so instead of implying "nothing calls it".
+		rep.UnboundCallers = qualify.UnboundCallers(ix, *d)
+	}
 	seenCallees := map[string]bool{}
 	rawBySimple := map[string]string{} // simple name -> first raw endpoint
 	collides := map[string]bool{}      // simple name shared by several endpoints
@@ -312,7 +325,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	// textual reference safety net so the report cannot read as "nothing uses
 	// this" (P0-1). Confidence is labelled textual, never resolved.
 	if len(rep.Callers) == 0 && len(rep.BlastRadius) <= 1 && refscan.ReferenceOnlyKind(d.Kind) {
-		if r := astrefs.Lookup(ix, *d); r.Confidence != "" {
+		if r := typealias.Lookup(ix, d); r.Confidence != "" {
 			rep.ReferenceFiles = r.Files
 			rep.ReferenceCount = r.Count
 			rep.ReferenceConfidence = r.Confidence
@@ -377,8 +390,8 @@ func savingsPct(full, compact int) int {
 	return tokstats.SavingsPercent(full, compact)
 }
 
-// findDef returns the first symbol matching a resolved FullName.
-func findDef(ix *index.Index, full string) (index.Symbol, bool) {
+// FindDefinition returns the first symbol matching a resolved FullName.
+func FindDefinition(ix *index.Index, full string) (index.Symbol, bool) {
 	for _, s := range ix.Symbols {
 		if s.FullName() == full {
 			return s, true
@@ -387,7 +400,7 @@ func findDef(ix *index.Index, full string) (index.Symbol, bool) {
 	return index.Symbol{}, false
 }
 
-// findCallerDef resolves a caller endpoint to the symbol that owns the call.
+// FindCallerDefinition resolves a caller endpoint to the symbol that owns the call.
 // An exact full-name match wins. An ambiguous bare name (the simple name is
 // shared by several packages) never resolves to the explored target itself —
 // a caller never calls the symbol being explored, so "AuthorizeContext"
@@ -395,8 +408,8 @@ func findDef(ix *index.Index, full string) (index.Symbol, bool) {
 // back to the core (which would render a bogus self-caller). Remaining
 // ambiguity prefers the caller whose file imports the target's package (a
 // cross-package caller must import the callee), then falls back to the first
-// match (findDef parity, no regression).
-func findCallerDef(ix *index.Index, caller string, target index.Symbol) (index.Symbol, bool) {
+// match (FindDefinition parity, no regression).
+func FindCallerDefinition(ix *index.Index, caller string, target index.Symbol) (index.Symbol, bool) {
 	var cand []index.Symbol
 	for _, s := range ix.Symbols {
 		if s.FullName() == caller {
@@ -459,7 +472,7 @@ func findCallerDef(ix *index.Index, caller string, target index.Symbol) (index.S
 			}
 		}
 	}
-	return cand[0], true // first-match fallback (findDef parity)
+	return cand[0], true // first-match fallback (FindDefinition parity)
 }
 
 // findCalleeDef resolves a callee endpoint for skeleton fitting, preferring a
@@ -538,6 +551,16 @@ func ResolveFuzzy(ix *index.Index, query string) (string, bool) {
 		if !(h.MatchedAll && h.Score >= 150) {
 			continue
 		}
+		// Word matching is for RANKING, not identity: a query word may
+		// match as a substring or a segment prefix ("handle" ~ "Handler"),
+		// so a same-words candidate can still be a different symbol
+		// (live case: "handleToolCall" resolved to
+		// TestCallToolResolvesUnadvertisedHandler). Unqualified queries
+		// must additionally be exact (see fuzzyIsExact); qualified ones
+		// get the scope checks below instead.
+		if !qualified && !tokenize.QueryMatchesIdentifier(query, h.Symbol.Name, h.Symbol.FullName()) {
+			continue
+		}
 		full := h.Symbol.FullName()
 		if full == "" {
 			full = h.Symbol.Name
@@ -548,7 +571,7 @@ func ResolveFuzzy(ix *index.Index, query string) (string, bool) {
 		if qualified {
 			if last == "" ||
 				!strings.HasSuffix(strings.ToLower(full), strings.ToLower(last)) ||
-				!pathSuffixMatch(h.Symbol.File, prefix) {
+				!qualify.PathSuffix(h.Symbol.File, prefix) {
 				continue
 			}
 		}
@@ -704,53 +727,6 @@ func isTestSymbol(s index.Symbol) bool {
 		strings.HasPrefix(s.Name, "Benchmark")
 }
 
-// qualifiedPackageDef honors a package qualifier ("verifycmd.checkRule",
-// "internal/verifycmd.checkRule"): when the picked definition d lives in a
-// different package, it returns the same-named free symbol whose directory
-// ends with the qualifier. Type.Method queries (qualifier equals the receiver)
-// and unqualified names never re-point.
-func qualifiedPackageDef(ix *index.Index, symbol string, d index.Symbol) (index.Symbol, bool) {
-	i := strings.LastIndexByte(symbol, '.')
-	if i <= 0 || i+1 >= len(symbol) {
-		return index.Symbol{}, false
-	}
-	qual, name := symbol[:i], symbol[i+1:]
-	if d.Name != name || d.Receiver == qual || pathSuffixMatch(d.File, qual) {
-		return index.Symbol{}, false
-	}
-	for _, s := range ix.Symbols {
-		if s.Name == name && s.Receiver == "" && s.Kind != "heading" &&
-			pathSuffixMatch(s.File, qual) && !IsNonProduction(s) {
-			return s, true
-		}
-	}
-	return index.Symbol{}, false
-}
-
-// pathSuffixMatch reports whether the directory part of file ends with the
-// '/'-separated segments of prefix ("internal/mcp/context/server.go" carries
-// the prefix "mcp/context"). An empty prefix matches every file.
-func pathSuffixMatch(file, prefix string) bool {
-	if prefix == "" {
-		return true
-	}
-	segs := strings.Split(strings.Trim(prefix, "/"), "/")
-	if len(segs) == 0 {
-		return true
-	}
-	fsegs := strings.Split(strings.Trim(filepath.Dir(file), "/"), "/")
-	if len(fsegs) < len(segs) {
-		return false
-	}
-	off := len(fsegs) - len(segs)
-	for i, s := range segs {
-		if fsegs[off+i] != s {
-			return false
-		}
-	}
-	return true
-}
-
 // RenderExplore renders the report as compact text.
 func RenderExplore(r *ExploreReport) string {
 	if r == nil {
@@ -764,12 +740,12 @@ func RenderExplore(r *ExploreReport) string {
 		// The user asked for one symbol and got another (fuzzy resolution):
 		// surface the mapping before the report so the substitution is never
 		// silent.
-		how := "fuzzy match"
-		switch {
-		case r.Resolved == r.Symbol || strings.HasSuffix(r.Resolved, "."+r.Symbol):
+		how := r.ResolveHow
+		if how == "" {
+			how = "fuzzy match"
+		}
+		if r.Resolved == r.Symbol || strings.HasSuffix(r.Resolved, "."+r.Symbol) {
 			how = "exact name"
-		case strings.ContainsAny(r.Symbol, "./") && strings.HasSuffix(r.Symbol, "."+simpleName(r.Resolved)):
-			how = "package-qualified match"
 		}
 		fmt.Fprintf(&b, "resolved %s -> %s (%s)\n", r.Symbol, r.Resolved, how)
 	}
@@ -793,7 +769,11 @@ func RenderExplore(r *ExploreReport) string {
 	// semantics stops this count from being mistaken for impact's
 	// graph-node caller count, which counts a different universe (P2).
 	b.WriteString("== callers (" + strconv.Itoa(len(r.Callers)) + ", unique simple names of direct callers) ==\n")
-	b.WriteString(joinLinesConf(r.Callers, r.CallerConf, r.CallerSynth, r.CallerLocs))
+	if len(r.Callers) == 0 && r.UnboundCallers > 0 {
+		fmt.Fprintf(&b, "(none attributed — %d call site(s) use the bare name %q, which is declared in more than one file; pass a qualified name)\n", r.UnboundCallers, r.Definition.Name)
+	} else {
+		b.WriteString(joinLinesConf(r.Callers, r.CallerConf, r.CallerSynth, r.CallerLocs))
+	}
 	// Render-layer belt-and-braces: hide builtin/builder-chain callee names
 	// (len, append, logger.Info.Int.Dur.Msg) even when the index predates the
 	// record-time filter — fresh indexes never contain them, stale ones are
@@ -814,6 +794,13 @@ func RenderExplore(r *ExploreReport) string {
 		callees = filtered
 	}
 	b.WriteString("== callees (" + strconv.Itoa(len(callees)) + ") ==\n")
+	if len(callees) == 0 {
+		// The call graph attributes only statically resolvable in-repo
+		// targets. Printing a bare empty list read as "calls nothing", when
+		// the symbol may call stdlib/vendor targets or dispatch dynamically
+		// (2026-11-10 campaign). Say what is NOT counted.
+		b.WriteString("  (none attributed in-graph — external/stdlib targets and dynamic dispatch are not resolved; `kern refs " + r.Definition.Name + "` lists textual references)\n")
+	}
 	b.WriteString(joinLinesConf(callees, r.CalleeConf, r.CalleeSynth, nil))
 	b.WriteString("== blast radius (" + strconv.Itoa(len(r.BlastRadius)) + " symbols, " + strconv.Itoa(len(r.BlastFiles)) + " files) ==\n")
 	b.WriteString(joinLines(r.BlastRadius))

@@ -470,6 +470,8 @@ func ClassifyGraphTools(low, request string) (string, map[string]any, bool) {
 		return tool, args, true
 	case HasWord(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
 		return "kern_path", map[string]any{}, true
+	case HasWord(low, "research") || (strings.Contains(low, "multi-symbol") && strings.Contains(low, "understand")):
+		return "kern_research", map[string]any{"task": request}, true
 	case HasWord(low, "probe") || strings.Contains(low, "what does this touch") || strings.Contains(low, "blast radius"):
 		return "kern_probe", map[string]any{"task": request}, true
 	case strings.Contains(low, "prose") || strings.Contains(low, "vocab") || strings.Contains(low, "spelling"):

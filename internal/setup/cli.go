@@ -83,6 +83,7 @@ type setupFlags struct {
 	check       bool
 	verify      bool
 	remove      bool
+	project     bool
 	agents      string
 	globalOnly  bool
 	global      bool
@@ -117,6 +118,8 @@ func parseSetupFlags(args []string) (setupFlags, []string, error) {
 			p.SetBool(&f.verify, "--verify", inline, hasInline)
 		case "--remove":
 			p.SetBool(&f.remove, "--remove", inline, hasInline)
+		case "--project":
+			p.SetBool(&f.project, "--project", inline, hasInline)
 		case "--agents":
 			p.SetStr(&f.agents, inline, hasInline)
 		case "--global-only":
@@ -227,8 +230,12 @@ func runSetup(rest []string) {
 		return
 	}
 	if f.remove {
-		runSetupRemove(f, root)
-		return
+		// The removal family lives in internal/setupundo; cmd/kern's
+		// dispatch claims every --remove invocation before RunSetup runs.
+		// Reaching this branch means a direct RunSetup caller asked for a
+		// removal — refuse loudly rather than run the wiring under a
+		// removal-shaped intent.
+		fatalUsage("setup: --remove is handled by the setupundo dispatch — call setupundo.RunRemove(rest) directly")
 	}
 	var agents []string
 	if f.agents != "" {
@@ -431,12 +438,10 @@ func runSetup(rest []string) {
 }
 
 // mcpSurfaceTip is the ONE discoverability hint printed after a successful
-// wire run and in setup --check (F4): wired agents see the full catalog by
-// default (standing mandate 2026-10-23). The count is derived from the
-// toolsurface registry — never a literal — so the tip tracks the code
-// instead of drifting like the old "22-tool" banner did.
+// wire run and in setup --check. The count is derived from the toolsurface
+// registry — never a literal — so the tip tracks the code instead of drifting.
 func mcpSurfaceTip() string {
-	return fmt.Sprintf("tip: wired agents see the full %d-tool default MCP catalog; KERN_MCP_PHASE filters to the active phase and KERN_MCP_SINGLE_TOOL=1 collapses to kern_meta alone (see docs/mcp/protocol.md)",
+	return fmt.Sprintf("tip: wired agents see the %d-tool direct MCP surface; KERN_MCP_FULL=1 advertises the full catalog and KERN_MCP_SINGLE_TOOL=1 collapses to kern_meta alone (see docs/mcp/protocol.md)",
 		len(toolsurface.Default))
 }
 

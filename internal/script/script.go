@@ -466,8 +466,9 @@ func sandboxEnv(dir string) []string {
 }
 
 // RunScript executes the script and returns a Result. On success Stdout holds
-// the (possibly truncated) script output and Stderr is empty; on failure
-// Stderr carries the truncated error output.
+// the (possibly truncated) script output and Stderr carries the script's
+// warnings (trimmed, 8 KiB cap; empty when quiet); on failure Stderr carries
+// the truncated error output.
 func RunScript(r Run) *Result {
 	res := &Result{Lang: r.Lang}
 	start := time.Now()
@@ -647,6 +648,13 @@ func (res *Result) capture(ctx context.Context, cmd *exec.Cmd, maxOut int, timeo
 		res.exitFrom(cmd, err, errb.String(), "run")
 	}
 	if res.Err == nil {
+		// Success: keep stderr as a warning channel (audit F5, 2026-11-21 —
+		// scripts are un-debuggable when warnings vanish). It is trimmed and
+		// already capped at 8 KiB by the buffer; empty when the script was
+		// quiet. Failure paths set Stderr in exitFrom.
+		if s := strings.TrimSpace(errb.String()); s != "" {
+			res.Stderr = s
+		}
 		res.OK = true
 	}
 }

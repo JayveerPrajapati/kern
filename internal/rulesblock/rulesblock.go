@@ -165,8 +165,8 @@ func ThinKernRules(wired string) string {
 		"# kern usage rules — thin (repo)",
 		"",
 		"Wired agents: " + wired,
-		"kern is installed for this repo — call `kern_meta` FIRST for everything; it routes to the right kern_* tool.",
+		"kern is installed for this repo — call the direct kern tools first: `kern_search`, `kern_explore`, `kern_context`, `kern_probe`, `kern_research`, `kern_impact`, `kern_graph`, `kern_review`, `kern_verify`, `kern_buddy`.",
 		"On opencode, built-in read/glob/grep/bash route to kern via the plugin shadows.",
-		"The full 32-tool catalog is the default MCP surface (KERN_MCP_PHASE for a phase subset).",
+		"The direct eleven-tool surface is the MCP default; KERN_MCP_FULL=1 advertises the full 33-tool catalog.",
 	}, "\n") + "\n"
 }

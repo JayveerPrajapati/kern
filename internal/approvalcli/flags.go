@@ -22,6 +22,10 @@ type flags struct {
 	prefix     string // --prefix P (approve --scope prefix): override the suggested two-token prefix
 	limit      int    // --limit N / --tail N (audit): show the N most recent entries; 0 = all
 	limitSet   bool
+	yes        bool   // --yes: confirm a bulk, irreversible-family action (clear --stale)
+	stale      bool   // --stale (approval clear): clear every pending key-rotated record
+	olderThan  string // --older-than DURATION (approval prune; default 168h)
+	notifyOnce bool   // --notify-once (approval wait): emit the deterministic pending state + grant hint once and exit 0 without blocking
 }
 
 // parseFlags parses the family's flags via the shared cliflags.Parser,
@@ -80,6 +84,14 @@ func parseFlags(args []string) (flags, []string, error) {
 			// newest slice, which is exactly what --limit shows).
 			p.SetInt(&f.limit, "--tail", inline, hasInline)
 			f.limitSet = true
+		case "--yes":
+			p.SetBool(&f.yes, "--yes", inline, hasInline)
+		case "--stale":
+			p.SetBool(&f.stale, "--stale", inline, hasInline)
+		case "--older-than":
+			p.SetStr(&f.olderThan, inline, hasInline)
+		case "--notify-once":
+			p.SetBool(&f.notifyOnce, "--notify-once", inline, hasInline)
 		default:
 			p.Unknown(name)
 		}

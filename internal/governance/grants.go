@@ -105,6 +105,20 @@ func MintGateApproval(command, root string) (string, error) {
 	if root == "" {
 		return "", errors.New("governance: no project root — cannot persist a gate approval")
 	}
+	// Dedupe: the guard re-mints on every blocked retry for the SAME command,
+	// so without this the queue accumulated hundreds of identical HIGH pending
+	// approvals (453 observed 2026-11-10) and became noise a human ignores.
+	// Reuse the live pending request for this exact command key; a rejected
+	// record is excluded (the rejection is the human's answer, not a reuse).
+	commandKey := execCommandKey(command)
+	if records, lerr := NewFileStore(root).Load(); lerr == nil {
+		for _, it := range records {
+			if it.TaskID == commandKey && it.Kind == ApprovalKindExecCommand &&
+				(it.Status == "pending" || it.Status == "") {
+				return it.ID, nil
+			}
+		}
+	}
 	reason := "guard GATE command: " + command
 	if len(reason) > 200 {
 		reason = reason[:197] + "..."

@@ -22,6 +22,7 @@ type ProbeAnchor struct {
 	Kind     string   `json:"kind"`
 	File     string   `json:"file"`
 	Line     int      `json:"line"`
+	End      int      `json:"end,omitempty"`
 	Callers  []string `json:"callers,omitempty"`
 	Callees  []string `json:"callees,omitempty"`
 	Tests    []string `json:"tests,omitempty"`
@@ -189,7 +190,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	// Fuzzy fallback for natural-language tasks like "decommission a network
 	// service": match extracted keywords against symbol names and segments.
 	if len(candidates) == 0 {
-		keywords := extractKeywords(task)
+		keywords := ExtractKeywords(task)
 		for _, kw := range keywords {
 			for _, match := range fuzzyMatchSymbols(ix, kw, 5) {
 				if !anchorableCandidate(kindByFull[match], yamlish) {
@@ -222,6 +223,13 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 				fuzzyHits[match] = true
 			}
 		}
+		// Once at least two task tokens resolve exactly, the broad
+		// prose-keyword fallback adds more noise than context: each
+		// ordinary task word can match an unrelated symbol name. Keep
+		// the tighter camelCase partial fallback, but skip broad prose
+		// recovery until the task has fewer exact anchors.
+		skipBroadKeywordFallback := len(exact) >= 2
+
 		// F5 (QA 2026-10-19 campaign): the F4 recovery only reaches
 		// camelCase-shaped tokens, so an all-prose task like "exec approval
 		// TTL bug" anchored just the `approval` struct while
@@ -232,7 +240,10 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 		// anchors only the most-connected one. Anchors stay labeled Fuzzy
 		// (low confidence). A keyword that already anchored exactly is
 		// skipped.
-		for _, kw := range extractKeywords(task) {
+		for _, kw := range ExtractKeywords(task) {
+			if skipBroadKeywordFallback {
+				break
+			}
 			if r, ok := Resolve(ix, kw); ok && candidates[r] {
 				continue
 			}
@@ -270,6 +281,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 			a.Kind = s.Kind
 			a.File = s.File
 			a.Line = s.Line
+			a.End = s.End
 		}
 		for _, c := range ix.Callers[r] {
 			if c != r && !contains(a.Callers, c) {
@@ -363,13 +375,24 @@ func RenderProbe(r *ProbeReport) string {
 	if allFuzzy {
 		b.WriteString("warning: no exact symbol matches — anchors below are fuzzy (low confidence, may be unrelated)\n\n")
 	}
-	fmt.Fprintf(&b, "anchors: %d\n", len(r.Anchors))
+	exact := 0
+	for _, a := range r.Anchors {
+		if !a.Fuzzy {
+			exact++
+		}
+	}
+	fmt.Fprintf(&b, "anchors: %d (%d exact, %d fuzzy)\n", len(r.Anchors), exact, len(r.Anchors)-exact)
 	for _, a := range r.Anchors {
 		label := ""
 		if a.Fuzzy {
 			label = "  [fuzzy match — low confidence]"
 		}
-		fmt.Fprintf(&b, "\n%s  (%s)  %s:%d%s\n", a.Name, a.Kind, a.File, a.Line, label)
+		location := fmt.Sprintf("%s:%d", a.File, a.Line)
+		if a.End > a.Line {
+			location += fmt.Sprintf("-%d", a.End)
+		}
+		fmt.Fprintf(&b, "\n%s  (%s)  %s  callers: %d  callees: %d  tests: %d%s\n",
+			a.Name, a.Kind, location, len(a.Callers), len(a.Callees), len(a.Tests), label)
 		if len(a.Callers) > 0 {
 			fmt.Fprintf(&b, "  callers: %s\n", strings.Join(a.Callers, ", "))
 		}
@@ -465,11 +488,11 @@ func anchorableCandidate(kind string, yamlish bool) bool {
 	return true
 }
 
-// extractKeywords pulls meaningful keywords from a natural-language task
+// ExtractKeywords pulls meaningful keywords from a natural-language task
 // string, filtering stop words and short tokens. Keywords are lowercased
 // and deduped. For example, "decommission a network service" yields
 // ["decommission", "network", "service"].
-func extractKeywords(task string) []string {
+func ExtractKeywords(task string) []string {
 	words := strings.Fields(strings.ToLower(task))
 	seen := map[string]bool{}
 	var out []string
@@ -526,7 +549,7 @@ func fuzzyMatchSymbols(ix *index.Index, keyword string, limit int) []string {
 // connected one anchors (a call-graph hub like CheckExecCommand outranks an
 // incidental substring), ties broken lexicographically for determinism.
 func fuzzyKeywordMatches(ix *index.Index, kw, task string) []string {
-	kws := extractKeywords(task)
+	kws := ExtractKeywords(task)
 	lower := strings.ToLower(kw)
 	var multi, single []string
 	for _, s := range ix.Symbols {

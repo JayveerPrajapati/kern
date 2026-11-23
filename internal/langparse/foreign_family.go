@@ -45,7 +45,11 @@ var rust = []declRule{
 	{kind: "struct", re: regexp.MustCompile(`^\s*(?:pub\s+)?struct\s+([A-Za-z_]\w*)`)},
 	{kind: "enum", re: regexp.MustCompile(`^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)`)},
 	{kind: "trait", re: regexp.MustCompile(`^\s*(?:pub\s+)?trait\s+([A-Za-z_]\w*)`)},
-	{kind: "impl", re: regexp.MustCompile(`^\s*(?:pub\s+)?impl\s+(?:<[^>]*>\s*)?([A-Za-z_]\w*)`)},
+	// `impl X` and `impl<'a> X<'a>` both declare methods for X. The whitespace
+	// after `impl` is OPTIONAL: `impl<'a> Foo<'a> {` has none, and requiring it
+	// made every method in a generic impl extract as a bare func (no receiver),
+	// so `SymbolIndex.resolve` was unreachable and unqualifiable.
+	{kind: "impl", re: regexp.MustCompile(`^\s*(?:pub\s+)?impl\s*(?:<[^>]*>\s*)?([A-Za-z_]\w*)`)},
 	{kind: "type", re: regexp.MustCompile(`^\s*(?:pub\s+)?type\s+([A-Za-z_]\w*)\s*=`)},
 	{kind: "const", re: regexp.MustCompile(`^\s*(?:pub\s+)?const\s+([A-Za-z_]\w*)\s*:`)},
 	{kind: "func", isDef: true, re: regexp.MustCompile(`^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*(?:<[^>]*>\s*)?\(`)},

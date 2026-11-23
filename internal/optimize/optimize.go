@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/compress"
@@ -87,6 +88,8 @@ type Options struct {
 // Recorder is the stats sink. It is nilable for pure/dry-run usage.
 var Recorder *stats.Recorder
 
+var recorderMu sync.RWMutex
+
 // EnsureRecorder wires the shared stats recorder used by optimize operations.
 // It is the canonical wiring — cmd/kern, mcp and other entry points delegate
 // to it instead of calling stats.NewRecorder themselves.
@@ -95,15 +98,25 @@ func EnsureRecorder() error {
 	if err != nil {
 		return err
 	}
+	recorderMu.Lock()
+	defer recorderMu.Unlock()
 	Recorder = rec
 	return nil
 }
 
+// SharedRecorder returns the current recorder under the package's read lock.
+func SharedRecorder() *stats.Recorder {
+	recorderMu.RLock()
+	defer recorderMu.RUnlock()
+	return Recorder
+}
+
 func record(op stats.Operation, opts Options, res Result) {
-	if Recorder == nil {
+	rec := SharedRecorder()
+	if rec == nil {
 		return
 	}
-	_ = Recorder.Record(stats.Entry{
+	_ = rec.Record(stats.Entry{
 		Session:      opts.Session,
 		Operation:    op,
 		Tool:         stats.ToolForOperation(op),

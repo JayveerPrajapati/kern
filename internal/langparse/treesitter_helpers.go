@@ -98,6 +98,16 @@ func FindReceiver(node, root *sitter.Node, src []byte) string {
 			if funcName != "" {
 				return funcName
 			}
+			// A Rust impl whose self type carries generics
+			// (`impl<'a> SymbolIndex<'a>`) exposes a generic_type child, not a
+			// type_identifier, so the plain name scan below found nothing and
+			// every method inside extracted as a bare func. ImplIdentity reads
+			// the header text and handles generics, traits and `for` clauses.
+			if p.Kind() == "impl_item" {
+				if self, _ := ImplIdentity(string(src[p.StartByte():p.EndByte()])); self != "" {
+					return self
+				}
+			}
 			if name := ExtractName(p, src, p.Kind()); name != "" {
 				return name
 			}

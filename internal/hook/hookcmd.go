@@ -165,7 +165,18 @@ func runHook(rest []string) {
 			fmt.Printf("removed kern-installed hook(s) from .git/hooks: %s\n", strings.Join(removed, ", "))
 		}
 	case "diff":
-		out, err := Diff(from, to)
+		// No explicit --range means "what is uncommitted right now" (worktree
+		// vs HEAD), not the previous commit: a clean tree must print nothing.
+		// The post-commit Store path keeps HEAD~1..HEAD semantics in Diff.
+		var (
+			out string
+			err error
+		)
+		if from == "" && to == "" {
+			out, err = DiffWorktree()
+		} else {
+			out, err = Diff(from, to)
+		}
 		if err != nil {
 			fatal("hooks diff: %v", err)
 		}

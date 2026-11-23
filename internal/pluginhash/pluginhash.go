@@ -39,6 +39,21 @@ func IsShipped(b []byte) bool {
 // MAINTENANCE: when the plugin changes, TestShippedPluginHashRegistryCurrent
 // fails until the new asset's hash is appended here (the test prints it).
 var shipped = map[string]bool{
+	// registered by kern gen-plugin
+	"dcf639e56b4d76a4b412324bc3e42f487f3b0492c835cf4741f30142044da46e": true,
+	// registered by kern gen-plugin
+	"986aed8994d4b92f2251ed900cf046a22e40d3152fcfe6a09939bca7f402254e": true,
+	// registered by kern gen-plugin
+	"b7de1766b99f4698350b453982e8dde695418a21c1f6f9fa7f5fa609a5ac588b": true,
+	// registered by kern gen-plugin
+	"8656fbda73f05364670924e801fc5b3f8001fc039cb52f6ac73053354eb03a0d": true,
+	// registered by kern gen-plugin
+	"6d94dffc5121846bd3ed406b268d9b2ad3b18748703960ca6bbc22a70436365f": true,
+	// registered by kern gen-plugin
+	"65818fa30c404c612101d5a42483a7d644ece06a410720a2ae0e1e9a41996011": true,
+	// registered by kern gen-plugin
+	"28e8a8f22bb1e9659dba1c56849e7abda9ec40af6c52d7059e68ab7af2f230c2": true,
+	"2b97a809e5f4972acf8b78842c13f3e4a6dd4b6acf7254f61f0627e4ed7d1369": true, // 2026-11-03 P1: compact empty-signal + cat/window serve fidelity
 	"b0eaf50d348cab18122f91df6663af756de7c34b541ece3b5a0960c4173a9cd2": true,
 	"da4c32e6760b133fc48042bdcbbdd9ee96986814a7527d8da702c8c1a59a46aa": true,
 	"9b1359de178434aefd253fb8121a09c0ccdd6630cd1335eef4a0fe78b506e696": true,
@@ -155,4 +170,10 @@ var shipped = map[string]bool{
 	"343998d9f51c0e229d40027e19a67fc0bf6d6bbe241c773b629b6818dfa88374": true, // P1.4: Ask Protocol — GATE arm consults guard grant, deny teaches ask-wait-retry
 	"7425aaddf51a7db3b020c4953a6cb123b062ff3b5154fcf4a3f607fa4be285d9": true, // P1: scoped symbol greps serve from the index (`kern search --path`); adoption log default-on; every git push gates
 	"a88ec9802ce1fd58213d72ba3822108348cdd9dbb2d5b6477bee633a70b21314": true, // F3: CLI binary re-resolved per call — a pinned project-local bin/kern went stale after make release/clean and bricked every governed call (127, even raw)
+	"0e515a24bdb95454b058f55971868a565d221a2d677fa3f7b6e5ac4f4583d3b9": true, // 2026-11-10 guard campaign: allow verdicts (probes, simple compounds) run raw — no governed round-trip
+	"4cac9c74405c878d1059e4dc4dbaf7cae524223c0057718b7017e97c99507993": true, // 2026-11-10 audit: kern_exec comment corrected to the ask/closed posture
+	"af0b401bbe08115658098c090d3b904b6000ead08a39a3f5f10d54a2214f5753": true, // 2026-11-19 guard parity: tiny/missing code reads pass raw with the shell guard
+	"d6228ee34e272afe8419d14199c73e2ec7d16c937d7ec37a3f144ced90d2b5ff": true, // 2026-11-20 Phase 0.1: concise default + explicit evidence mode for kern_explore
+	"1d2c90eb8869afbe7055b131dda33621c041726764ec937f2d8bc73adc3aae04": true, // 2026-11-20 Phase 0.2: balanced mode with top callers/callees/affected files
+	"cfc3abce04f2cdb81e99ac9cf841adb18dff06c1fb8ea65f03d86b847af3c280": true, // 2026-11-20 Phase 1: kern_probe promoted to the default surface
 }

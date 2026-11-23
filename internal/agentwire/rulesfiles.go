@@ -13,24 +13,30 @@ import (
 // replacing them with the thin stub is a destructive downgrade.
 const FullRulesHeader = "# kern usage rules for agents — READ FIRST"
 
-// ThinAGENTSmd returns the thin repo AGENTS.md content: the critical
-// kern-first routing facts in a few lines — kern_meta as the single entry
-// point, the decision-table essentials (read→kern_explore, grep→kern_search,
-// build/test→kern_verify, unsure→kern_meta), the session-start kern_buddy
-// call, the default 7-tool surface, and the env vars that widen it. The full
-// kern usage rules live in the host's GLOBAL instructions slot (managed by
-// `kern setup --global-rules`), so a thin repo file avoids loading the same
-// rules twice in one session on hosts that merge global + project rules.
+// ThinAGENTSmd returns the CORE repo AGENTS.md content (the T-05 compact
+// default, 2026-11-19): the kern-first routing table, the pre-edit blast
+// radius rule, the verify-after-change rule, the per-call fallback rule and
+// the opencode guard boundaries — the security-critical subset of the full
+// rules in <=2KB. The extended policy (catalog details, examples, lifecycle
+// guidance) is opt-in (`kern setup --agents-md full`) and on-demand
+// (kern_buddy, kern_meta, kern --help); the host's global instructions slot
+// additionally carries the condensed rules when `kern setup --global-rules`
+// wired it. A full rules file is never downgraded to this block without an
+// explicit choice (WireThinRulesFile).
 func ThinAGENTSmd(wired string) string {
 	return strings.Join([]string{
 		"# kern usage rules — thin (repo)",
 		"",
 		"Wired agents: " + wired,
-		"kern is installed for this repo — call `kern_meta` FIRST for everything; it routes to the right kern_* tool.",
-		"Kern-first routing: read → kern_explore · grep → kern_search · build/test → kern_verify · unsure → kern_meta.",
+		"kern is installed for this repo — call the direct kern tools first: `kern_search`, `kern_explore`, `kern_context`, `kern_probe`, `kern_impact`, `kern_graph`, `kern_review`, `kern_verify`, `kern_buddy`.",
 		"Session start: call `kern_buddy` FIRST — the onboarding digest (conventions, layout, entry points).",
-		"Default surface: 7 tools (kern_meta, kern_explore, kern_impact, kern_search, kern_verify, kern_buddy, kern_exec); set KERN_MCP_FULL=1 for all 117 (KERN_MCP_PHASE for a phase subset).",
-		"On opencode, built-in read/glob/grep/bash route to kern via the plugin shadows.",
+		"Routing: read → kern_explore · grep → kern_search · context → kern_context · task context → kern_probe · impact/what-breaks → kern_impact · build/test → kern_verify · unsure → kern_meta.",
+		"Before ANY edit: run `kern_impact` for the blast radius and `kern_explore` for the exact symbols — never edit blind.",
+		"After ANY change: verify with `kern_verify` (build + tests + security of the touched packages).",
+		"Fallback rule: when a kern tool errors, fall back for THAT call only (built-in read/grep) and keep kern-first for the rest.",
+		"On opencode, built-in read/glob/grep/bash route to kern via the plugin shadows; GATE commands (writes, installs, network) are blocked — ask the operator (escapes: KERN_BYPASS=1 / KERN_ENFORCE=0, operator-gated).",
+		"Default surface: 11 tools; set KERN_MCP_FULL=1 for all 34 (kern_exec is full-mode and governed).",
+		"Extended rules: `kern setup --agents-md full` opts this repo into the long policy; on-demand help: `kern_buddy`, `kern_meta`, `kern --help`.",
 	}, "\n") + "\n"
 }
 

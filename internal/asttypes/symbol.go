@@ -24,7 +24,14 @@ type Symbol struct {
 	End     int      `json:"end,omitempty"` // inclusive last line (0 if unknown)
 	Params  []string `json:"params,omitempty"`
 	Returns []string `json:"returns,omitempty"` // declared return type names
-	Lang    string   `json:"lang,omitempty"`
+	// Alias is the right-hand side of a Go type alias declaration
+	// (`type A = B`): the bare name for a same-package target, "pkg.Name"
+	// for a qualified one. Empty for every non-alias declaration. Call
+	// edges and references attach to the aliased type's declaration, so
+	// type-oriented surfaces (impact, refs, explore) use this to see
+	// through the alias instead of reporting a confident all-clear.
+	Alias string `json:"alias,omitempty"`
+	Lang  string `json:"lang,omitempty"`
 	// Confidence is the parser's reliability in this symbol: HIGH for direct
 	// declarations (functions, types, vars), MEDIUM for inferred kinds, LOW
 	// for heuristic detections such as regex-derived entry points. Absent

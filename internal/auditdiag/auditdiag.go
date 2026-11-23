@@ -95,7 +95,62 @@ func dirSize(dir string) int64 {
 
 // Findings returns every .kern/audit diagnostic for root.
 func Findings(root string) []Finding {
-	return []Finding{AuditDropped(), AuditChainSize(root), auditRetention(root)}
+	return []Finding{AuditDropped(), AuditChainSize(root), ChainIntegrity(root), auditRetention(root)}
+}
+
+// VerifyCache is the persisted verdict of one full audit-chain verification.
+// internal/govaudit writes it after a walk (VerifyCacheDir) so read-only
+// commands stop re-HMACing thousands of entries on every start; the stamp is
+// the chain file's size+mtime, so any append or edit invalidates it and
+// forces a fresh walk. auditdiag only READS the file (govaudit already
+// imports this package, so the schema lives here and no import edge is added).
+type VerifyCache struct {
+	Stamp            string `json:"stamp"`
+	FirstBroken      int    `json:"first_broken"` // -1 = intact
+	BrokenCount      int    `json:"broken_count"`
+	Verified         int    `json:"verified"`
+	Total            int    `json:"total"`
+	Keyed            int    `json:"keyed"`
+	Plain            int    `json:"plain"`
+	Legacy           int    `json:"legacy"`
+	Downgraded       int    `json:"downgraded"`
+	TailUnkeyed      int    `json:"tail_unkeyed"`
+	FirstTailUnkeyed int    `json:"first_tail_unkeyed"`
+	CheckedAt        string `json:"checked_at,omitempty"`
+}
+
+// VerifyCacheDir is where the chain verdict is cached (inside the audit dir).
+func VerifyCacheDir(dir string) string { return filepath.Join(dir, ".verify-cache.json") }
+
+// ReadVerifyCacheDir reads the cached verdict for an audit dir. ok=false when
+// the cache is absent or unreadable — callers must then verify for real.
+func ReadVerifyCacheDir(dir string) (VerifyCache, bool) {
+	var v VerifyCache
+	b, err := os.ReadFile(VerifyCacheDir(dir))
+	if err != nil {
+		return v, false
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return v, false
+	}
+	return v, true
+}
+
+// ChainIntegrity renders the last full verification verdict as a doctor
+// finding. A missing cache is an honest "not yet verified", never a silent ok:
+// the row tells the operator which command produces the verdict.
+func ChainIntegrity(root string) Finding {
+	v, ok := ReadVerifyCacheDir(filepath.Join(root, ".kern", "audit"))
+	if !ok {
+		return Finding{Check: "audit-chain-integrity", Level: "ok",
+			Detail: "not yet verified (run `kern audit`) — the chain is verified end to end by any command that builds the platform"}
+	}
+	if v.FirstBroken >= 0 {
+		return Finding{Check: "audit-chain-integrity", Level: "fail",
+			Detail: fmt.Sprintf("chain broken at entry %d of %d (%d verified, %d unkeyed) — governance records may have been modified; investigate before trusting them (kern audit; kern audit repair)", v.FirstBroken+1, v.Total, v.Verified, v.Plain+v.Legacy)}
+	}
+	return Finding{Check: "audit-chain-integrity", Level: "ok",
+		Detail: fmt.Sprintf("%d entries verified end to end (%d keyed, %d unkeyed)", v.Total, v.Keyed, v.Plain+v.Legacy)}
 }
 
 // AuditDropped surfaces audit entries lost before they reached the store. The

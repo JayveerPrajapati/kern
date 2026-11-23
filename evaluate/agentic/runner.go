@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/evaluate/agentbench"
 	"io"
 	"io/fs"
 	"os"
@@ -13,20 +14,10 @@ import (
 )
 
 // RunOutcome is the scored result of one (arm, task) execution.
-type RunOutcome struct {
-	Arm      string `json:"arm"`
-	Task     string `json:"task"`
-	Pass     bool   `json:"pass"`
-	TimedOut bool   `json:"timed_out"`
-	Exit     int    `json:"exit"`
-	// DurationSec is wall-clock agent time; -1 when unknown (rescored rows
-	// carry the original run's value read back from metrics.json).
-	DurationSec  float64 `json:"duration_sec"`
-	FilesChanged int     `json:"files_changed"`
-	NonTestLOC   int     `json:"non_test_loc"`
-	TestLOC      int     `json:"test_loc"`
-	Usage        Usage   `json:"usage"`
-}
+type RunOutcome = agentbench.RunOutcome
+
+// Results is the run-wide artifact written to results.json.
+type Results = agentbench.Results
 
 // procResult is the raw outcome of one supervised process launch.
 type procResult struct {
@@ -138,7 +129,7 @@ func runOne(ctx context.Context, arm Arm, task Task, runDir string, defaultTimeo
 
 	// Score the workspace delta BEFORE running check.sh so the check's own
 	// side effects cannot pollute the over-engineering proxy.
-	if d := workspaceDelta(task.Fixture, ws); d != nil {
+	if d := agentbench.WorkspaceDelta(task.Fixture, ws); d != nil {
 		oc.FilesChanged, oc.NonTestLOC, oc.TestLOC = d.FilesChanged, d.NonTestLOC, d.TestLOC
 	}
 	if !pr.timedOut {

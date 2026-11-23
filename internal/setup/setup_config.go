@@ -54,6 +54,14 @@ func fileStatusAny(label string, paths ...string) Status {
 	return agentwire.FileStatusAny(label, paths...)
 }
 
+func hookStatus(path, label string) Status {
+	return agentwire.HookStatus(path, label)
+}
+
+func hookStatusAny(label string, paths ...string) Status {
+	return agentwire.HookStatusAny(label, paths...)
+}
+
 func claudeConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

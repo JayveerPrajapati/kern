@@ -259,6 +259,7 @@ type langSpec struct {
 	blockEnd    string // closes block, default "*/"
 	backtick    bool
 	triple      bool
+	rawStr      bool // Rust r"..." / r#"..."# raw strings
 	heredoc     bool // Ruby-style <<~HEREDOC heredocs
 	rules       []declRule
 	entries     []entryRule
@@ -302,7 +303,7 @@ func init() {
 		"javascript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, entries: entryRules["javascript"], kw: jsKw},
 		"typescript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, entries: entryRules["typescript"], kw: jsKw},
 		"python":     {indent: true, lineComment: []string{"#"}, triple: true, rules: python, entries: entryRules["python"], kw: pyKw},
-		"rust":       {lineComment: []string{"//"}, block: "/*", rules: rust, kw: rsKw},
+		"rust":       {lineComment: []string{"//"}, block: "/*", rawStr: true, rules: rust, kw: rsKw},
 		"c":          {lineComment: []string{"//"}, block: "/*", rules: cfam, kw: cfamKw},
 		"cpp":        {lineComment: []string{"//"}, block: "/*", rules: cfam, kw: cfamKw},
 		"java":       {lineComment: []string{"//"}, block: "/*", rules: java, entries: entryRules["java"], kw: javaKw},
@@ -323,6 +324,7 @@ var specs map[string]*langSpec
 type stripState struct {
 	inBlock   bool
 	inTriple  string // active triple-quote delimiter ("" = not inside one)
+	inRaw     string // active Rust raw-string closer ("" = not inside one)
 	inHeredoc string // Ruby heredoc terminator ("" = not in one)
 }
 

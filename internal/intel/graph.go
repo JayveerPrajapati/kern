@@ -125,7 +125,20 @@ type Graph struct {
 	// read-only.
 	closureMemo map[closureKey][]string
 	closureMu   sync.Mutex
+	// closureOrder is FIFO eviction metadata for closureMemo. The memo is
+	// useful, but a hub-heavy workload can otherwise retain one large slice
+	// per start node forever. closureMemoIDs is the approximate number of
+	// cached node IDs and is the memory budget enforced by closure.
+	closureOrder   []closureKey
+	closureHead    int
+	closureMemoIDs int
 }
+
+// closureMemoBudget bounds the approximate number of node IDs retained by the
+// transitive-closure cache. A full closure on a large repository can contain
+// thousands of IDs, so the budget is expressed in cached IDs rather than map
+// entries.
+var closureMemoBudget = 250_000
 
 // FromIndex builds a canonical domain.Graph from a v1 index.Index: every symbol
 // becomes a "symbol" node, call/caller edges "calls", inheritance edges
@@ -136,6 +149,17 @@ func FromIndex(ix *index.Index) Graph {
 	g := domain.Graph{
 		Project: domain.Project{Root: ix.Root},
 	}
+	// Preallocate: the node/edge slices are large structs, and append-doubling
+	// them costs measurable memmove+GC time on every cold CLI invocation (the
+	// 2026-11-18 read-path profile: allocation, not traversal, dominated
+	// FromIndex). Capacities are upper bounds; reference nodes and inheritance
+	// edges add a small tail on top.
+	callEdges := 0
+	for _, edges := range ix.Calls {
+		callEdges += len(edges)
+	}
+	g.Nodes = make([]domain.Node, 0, len(ix.Symbols)+len(ix.Pkgs)+64)
+	g.Edges = make([]domain.Edge, 0, 2*len(ix.Symbols)+callEdges+64)
 	entries := map[string]bool{}
 	seenDeclarations := map[string]bool{}
 
@@ -225,18 +249,65 @@ func FromIndex(ix *index.Index) Graph {
 			g.Nodes = append(g.Nodes, domain.Node{ID: node.ID, Kind: "reference", Label: node.Name, Resolution: node.Resolution, Candidates: node.Candidates})
 		}
 	}
-	for _, edge := range bindings.Edges {
-		if edge.SourceFile != "" || edge.Synth != "" {
-			g.Edges = append(g.Edges, domain.Edge{From: edge.From, To: edge.To, Kind: "calls", File: edge.SourceFile,
-				Reference: edge.Reference, Resolution: edge.Resolution, Confidence: edge.ConfidenceLabel, Synth: edge.Synth})
-		}
+	// F-C1 (2026-11-22 dogfood campaign): unsourced name-level edges
+	// (Python/JS calls extracted from default-arg expressions such as
+	// FastAPI Depends(get_db)) emit with their catalog-bound endpoints
+	// when the binding resolved to a declaration — the catalog binds them
+	// via per-file imports, and emitting them raw (bare From/To names)
+	// made buildAdjacencyOpt pool them under opaque "?name" buckets, so
+	// WhatDependsOnPrecise — the kern impact dependents walk — answered
+	// "0 dependents, low risk" for a symbol every route depends on while
+	// kern graph/explore listed all callers. Endpoints the catalog could
+	// NOT bind keep the raw reference NAME (the pre-unification raw-loop
+	// behavior): consumers like context.crossesBoundary resolve raw names
+	// by label/name and must keep working on indexes that carry no import
+	// information (synthetic fixtures), and ambiguous names keep pooling
+	// opaquely via markAmbiguous exactly as before.
+	bindingNodes := make(map[string]index.GraphNode, len(bindings.Nodes))
+	for _, node := range bindings.Nodes {
+		bindingNodes[node.ID] = node
 	}
-	for from, edges := range ix.Calls {
-		for _, edge := range edges {
-			if edge.SourceFile == "" && edge.Synth == "" {
-				g.Edges = append(g.Edges, domain.Edge{From: from, To: edge.Target, Kind: "calls", Confidence: edge.Confidence.String(), Synth: edge.Synth})
-			}
+	resolveEndpoint := func(id string) string {
+		node, ok := bindingNodes[id]
+		if !ok {
+			return id
 		}
+		if node.Resolution == "resolved" {
+			return id
+		}
+		return node.Name
+	}
+	for _, edge := range bindings.Edges {
+		from, to := edge.From, edge.To
+		reference, resolution := edge.Reference, edge.Resolution
+		if edge.SourceFile == "" && edge.Synth == "" {
+			resolvedFrom := resolveEndpoint(from)
+			// Only BARE-name references take the bound endpoint: a dotted
+			// reference ("Server.dispatch", "index.Load") is pooled by the
+			// index under a shared key, and downstream consumers
+			// (calleeCandidates, resolveImportQualified) deliberately
+			// resolve pooled raw names against EVERY same-named definition
+			// — the impact↔explore parity contract (F5). Binding such a
+			// ref to one definition via same-package-dir heuristics would
+			// make impact more precise than explore.
+			resolvedTo := edge.Reference
+			if !strings.Contains(edge.Reference, ".") {
+				resolvedTo = resolveEndpoint(to)
+			}
+			if resolvedFrom != from || resolvedTo != to {
+				// An endpoint fell back to its raw name WITHOUT
+				// Resolution/Reference fields: buildAdjacencyOpt's raw-link
+				// fast path applies only to edges carrying explicit binding
+				// resolution, and a name carrying "unresolved" there would
+				// bypass the canonical resolver and land the edge under the
+				// raw string key — breaking every name-based consumer
+				// (context engine).
+				reference, resolution = "", ""
+			}
+			from, to = resolvedFrom, resolvedTo
+		}
+		g.Edges = append(g.Edges, domain.Edge{From: from, To: to, Kind: "calls", File: edge.SourceFile,
+			Reference: reference, Resolution: resolution, Confidence: edge.ConfidenceLabel, Synth: edge.Synth})
 	}
 
 	// Inheritance edges: subtype -> base, tagged kind parsed from the prefix.
@@ -279,7 +350,21 @@ func FromIndex(ix *index.Index) Graph {
 	sort.Slice(g.Nodes, func(first, second int) bool { return g.Nodes[first].ID < g.Nodes[second].ID })
 	sort.Slice(g.Edges, func(first, second int) bool {
 		left, right := g.Edges[first], g.Edges[second]
-		return left.From+"\x00"+left.Kind+"\x00"+left.To+"\x00"+left.File < right.From+"\x00"+right.Kind+"\x00"+right.To+"\x00"+right.File
+		// Field-wise comparison, equivalent to the previous
+		// From+"\x00"+Kind+"\x00"+To+"\x00"+File concat (no field contains
+		// \x00, and a shorter field sorts first exactly as the separator
+		// byte did), but without allocating four strings per comparison —
+		// the concat comparator was a measured hotspot of cold CLI reads.
+		if c := strings.Compare(left.From, right.From); c != 0 {
+			return c < 0
+		}
+		if c := strings.Compare(left.Kind, right.Kind); c != 0 {
+			return c < 0
+		}
+		if c := strings.Compare(left.To, right.To); c != 0 {
+			return c < 0
+		}
+		return left.File < right.File
 	})
 
 	return Graph{Graph: g, entries: entries, precisionByLang: ix.PrecisionByLang}

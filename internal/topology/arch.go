@@ -7,6 +7,7 @@ package topology
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -108,6 +109,56 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 	return Architecture{Communities: comms, Coupling: coupling}
 }
 
+// communityLabel names a community by its dominant package families so the
+// architecture view answers "what is this subsystem?" instead of showing an
+// arbitrary member symbol. Falls back to the community id when no package
+// metadata is available.
+func communityLabel(c ArchCommunity) string {
+	if len(c.Packages) == 0 {
+		return c.ID
+	}
+	counts := make(map[string]int, len(c.Packages))
+	for _, p := range c.Packages {
+		counts[packageFamily(p)]++
+	}
+	type fam struct {
+		name string
+		n    int
+	}
+	fams := make([]fam, 0, len(counts))
+	for k, n := range counts {
+		fams = append(fams, fam{k, n})
+	}
+	sort.Slice(fams, func(i, j int) bool {
+		if fams[i].n != fams[j].n {
+			return fams[i].n > fams[j].n
+		}
+		return fams[i].name < fams[j].name
+	})
+	label := fams[0].name
+	if len(fams) > 1 {
+		label += "+" + fams[1].name
+	}
+	if len(fams) > 2 {
+		label += "+…"
+	}
+	return label
+}
+
+// packageFamily collapses a package path to its family prefix: internal/mcp/graph
+// and internal/mcp/exec both belong to internal/mcp (the extracted family the
+// ledger organizes around); a top-level package is its own family.
+func packageFamily(p string) string {
+	parts := strings.Split(strings.TrimPrefix(filepath.ToSlash(p), "./"), "/")
+	if len(parts) >= 3 && parts[0] == "internal" {
+		return parts[0] + "/" + parts[1]
+	}
+	if len(parts) >= 2 && parts[0] == "cmd" {
+		return parts[0] + "/" + parts[1]
+	}
+	return p
+}
+
 // wrapColumn renders pkgs joined with ", " so no line exceeds maxCol visible
 // columns given the current line already holds prefix (prefix ends with the
 // "pkgs " column). Continuation lines are prefixed with 6 spaces. Used by the
@@ -146,8 +197,16 @@ func RenderArch(a Architecture) string {
 	if len(a.Communities) == 0 {
 		b.WriteString("  (no project-local call structure detected)\n")
 	}
+	// Communities used to be labelled by an arbitrary member symbol ("Anchor",
+	// "Cache") — a label that told the reader nothing about what the
+	// community IS. Label by dominant package family instead, keeping the
+	// community id as the stable key for coupling rows (2026-11-10 campaign).
+	labels := make(map[string]string, len(a.Communities))
 	for _, c := range a.Communities {
-		prefix := fmt.Sprintf("  %-24s size %-4d hub %-24s pkgs ", c.ID, c.Size, c.Hub)
+		labels[c.ID] = communityLabel(c)
+	}
+	for _, c := range a.Communities {
+		prefix := fmt.Sprintf("  %-24s size %-4d hub %-24s pkgs ", labels[c.ID], c.Size, c.Hub)
 		fmt.Fprintf(&b, "%s%s\n", prefix, wrapColumn(c.Packages, prefix, 100))
 	}
 	b.WriteString("\ncoupling warnings (cross-community call bundles):\n")
@@ -159,7 +218,14 @@ func RenderArch(a Architecture) string {
 		shown = shown[:12]
 	}
 	for _, e := range shown {
-		fmt.Fprintf(&b, "  %-24s <-> %-24s %4d edges\n", e.From, e.To, e.Count)
+		from, to := e.From, e.To
+		if l, ok := labels[from]; ok {
+			from = l
+		}
+		if l, ok := labels[to]; ok {
+			to = l
+		}
+		fmt.Fprintf(&b, "  %-24s <-> %-24s %4d edges\n", from, to, e.Count)
 		for _, n := range e.Nodes {
 			fmt.Fprintf(&b, "      %s\n", n)
 		}

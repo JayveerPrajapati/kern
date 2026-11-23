@@ -134,6 +134,10 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 				b.WriteString("    dispatch (INFERRED): " + strings.Join(impls, ", ") + "\n")
 			}
 		}
+	} else {
+		// An empty list read as "calls nothing"; the graph only attributes
+		// statically resolvable in-repo targets (2026-11-10 campaign).
+		b.WriteString("callees (0): none attributed in-graph — external/stdlib targets and dynamic dispatch are not resolved (try `kern refs " + resolved + "`)\n")
 	}
 
 	if members := ix.CommunityMembers(rootID); len(members) > 0 {

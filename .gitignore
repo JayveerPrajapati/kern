@@ -29,6 +29,10 @@ __pycache__/
 # Local test fixtures
 /tmp/
 
+# Local build caches and third-party tool indexes
+target/
+.densic/
+
 # Fetched doc pages
 index.html
 
@@ -66,7 +70,10 @@ docs/architecture/*
 
 # --- kern generated (agent wiring, machine-specific) ---
 # Re-run `kern setup` to refresh. Unignore a line to commit shared config.
+.gitignore
 .mcp.json
+AGENTS.md
+opencode.json
 .claude/
 .cursor/
 .vscode/
@@ -75,6 +82,8 @@ docs/architecture/*
 .kern/
 .continue/
 .windsurf/
+.codex/
+.opencode/
 .opencode/node_modules/
 .opencode/package-lock.json
 opencode.json.bak
@@ -82,7 +91,9 @@ opencode.json.bak
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
+.github/hooks/
+.github/skills/
 .agents/rules/kern.md
 .agents/hooks.json
-.github/hooks/
+.agents/skills/
 # --- end kern generated ---

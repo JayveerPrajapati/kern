@@ -205,12 +205,18 @@ func buddyMemoPut(abs string, noMemory bool, body string) {
 // renderer and byte budget `kern buddy --map` uses, exposed so the
 // `kern project_map` command (the one the digest's truncation pointer
 // recommends) serves the identical output.
-func ProjectMap(root string) (string, error) {
+func ProjectMap(root string) (string, error) { return ProjectMapLimit(root, 0) }
+
+// ProjectMapLimit renders the per-file project map, stopping after maxFiles
+// files (maxFiles <= 0 = no file cap; the byte budget still applies). `kern
+// project-map --max N` uses this so an agent can bound a 20k-line map; the
+// existing footer still reports how many files were omitted.
+func ProjectMapLimit(root string, maxFiles int) (string, error) {
 	p, err := code.BuildProject(root, 0, 200)
 	if err != nil {
 		return "", err
 	}
-	return renderProjectMap(p, fullMapBudget), nil
+	return renderProjectMapLimit(p, fullMapBudget, maxFiles), nil
 }
 
 // memorySections renders the two memory sections of the digest: "Project
@@ -318,6 +324,10 @@ const fullMapBudget = 1 << 20
 // map tool. The header reflects the root CLIPPED (LOW-8: an adversarial root
 // cannot push control runes or unbounded bytes into the digest).
 func renderProjectMap(p *code.Project, budget int) string {
+	return renderProjectMapLimit(p, budget, 0)
+}
+
+func renderProjectMapLimit(p *code.Project, budget, maxFiles int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Project: %s (%d files", clip.ClipReflect(p.Root, 160), len(p.Files))
 	if p.CacheHit > 0 {
@@ -326,6 +336,9 @@ func renderProjectMap(p *code.Project, budget int) string {
 	b.WriteString(")\n")
 	shown := 0
 	for _, f := range p.Files {
+		if maxFiles > 0 && shown >= maxFiles {
+			break
+		}
 		r := f.Render()
 		if r == "" {
 			continue

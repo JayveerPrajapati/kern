@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${KERN_REPO_BIN:-$(dirname "$0")/bin/kern}" "$@"

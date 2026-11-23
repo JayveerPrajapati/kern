@@ -37,14 +37,14 @@ var localCliAgents = map[string]func(bin string) []string{
 }
 
 // cliTimeout returns the per-call timeout for CLI providers
-// (KERN_LLM_CLI_TIMEOUT seconds; default 180).
+// (KERN_LLM_CLI_TIMEOUT seconds; default 20).
 func cliTimeout() time.Duration {
 	if v := os.Getenv("KERN_LLM_CLI_TIMEOUT"); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return 180 * time.Second
+	return 20 * time.Second
 }
 
 // NewLocalCliProvider returns a provider that shells out to the named agent

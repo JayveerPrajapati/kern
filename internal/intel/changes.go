@@ -98,7 +98,7 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 		for _, def := range changedDefs {
 			for _, c := range ix.CallersFor(def) {
 				cf := fileMap[c]
-				if cd, ok := findCallerDef(ix, c, def); ok && cd.File != "" {
+				if cd, ok := FindCallerDefinition(ix, c, def); ok && cd.File != "" {
 					cf = cd.File
 				}
 				if cf != "" && IsTestFile(cf) {
@@ -391,7 +391,11 @@ func reviewRanged(ix *index.Index, changes []FileChange, maxTokens int, overlays
 		b.WriteString("\n")
 	}
 
-	if report.Untested > 0 {
+	if len(report.Changes) == 0 {
+		// Zero changes is its own verdict — "covered by tests" would be a
+		// vacuous claim (audit F8, 2026-11-21).
+		b.WriteString("no changes found\n")
+	} else if report.Untested > 0 {
 		fmt.Fprintf(&b, "untested changes: %d — add tests for the gapped symbols above\n", report.Untested)
 	} else {
 		b.WriteString("all changed symbols are covered by tests\n")
