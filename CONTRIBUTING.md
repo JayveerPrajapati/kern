@@ -10,7 +10,7 @@ contributor front door; the [README](README.md) covers the user story.
 git clone https://github.com/JayveerPrajapati/kern
 cd kern
 go build ./...          # Go 1.27+
-go test ./...           # full suite (~5 min cold, 8 cores — measured 2026-10-21: 316s wall, 181 pkgs); iteration loop: make test-touched
+go test -short ./...    # pre-merge suite (~5 min cold, 8 cores — measured 2026-11-03: 290s wall, 212 pkgs); iteration loop: make test-touched
 go vet ./...
 ```
 
@@ -23,7 +23,7 @@ worktree the way users' installs are checked.
 
 | Path | What it is |
 |---|---|
-| `cmd/kern` | The CLI. One `run*` function per command; the command table lives in `dispatch_table.go` (59 entries incl. flag aliases: name, category, help, usage). |
+| `cmd/kern` | The CLI. One `run*` function per command; the command table lives in `dispatch_table.go` (76 entries incl. flag aliases: name, category, help, usage). |
 | `cmd/kern-mcp` | The MCP server binary (delegates to `internal/mcp`). |
 | `internal/` | All core logic — ~130 packages (~189 total incl. `cmd/` and `evaluate/`). `internal/mcp` is the MCP surface; `internal/app` is the platform glue. |
 | `docs/` | Generated + curated docs. `docs/tool-catalog.md` is GENERATED — never hand-edit. |
@@ -89,8 +89,13 @@ changed, why, and how it was verified (which tests ran).
 
 - Targeted package tests while iterating — `make test-touched` does this
   for you from the diff (cross-package pins included).
-- Full `go test ./...` + `go vet ./...` before handing off.
-- `go test ./internal/architecture/` after touching `internal/` structure.
+- Full `go test ./...` + `go vet ./...` before handing off. Note the
+  non-short `cmd/kern` suite includes the installer e2e, which rewrites repo
+  files by design — run it from a clean tree, or use `go test -short ./...`
+  (the pre-merge path) when you are mid-change.
+- `go test ./internal/architecture/` after touching `internal/` structure
+  (it also enforces the bidirectional ledger: every Go package dir under
+  `internal/`, `cmd/`, `evaluate/` must be governed by a ledger row).
 - For MCP-surface changes: regenerate the catalog doc + run the parity
   tests above, then smoke the server:
   `printf '…jsonrpc initialize…' | go run ./cmd/kern-mcp`.

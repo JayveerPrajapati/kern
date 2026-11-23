@@ -8,7 +8,7 @@ project's GitHub Releases, caches it in `~/.cache/kern-pip`, and execs it.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KERN_VERSION` | latest | Pin a release (e.g. `1.2.3`) |
+| `KERN_VERSION` | latest | Pin a `v`-prefixed release tag (e.g. `v1.2.3`) |
 | `KERN_REPO` | `JayveerPrajapati/kern` | Override the release repo |
 
 ## Alternative installs
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.
 # Homebrew (once the tap is published)
 brew install kern
 
-# From source (requires Go 1.23+)
+# From source (requires Go 1.27+)
 go install github.com/JayveerPrajapati/kern/cmd/kern@latest
 go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest
 ```

@@ -13,14 +13,15 @@ calls in the measurements.
 |---|---|---|
 | Semantic retention | [`semantic-retention.md`](semantic-retention.md) | Compression keeps *meaning*, not just tokens (tier1 retention, symbol recall, call-graph fidelity, loss-adjusted savings) |
 | Graph latency | [`graph-latency.md`](graph-latency.md) | "Sub-millisecond graph": cold/warm index + query latency, honest verdict at fixture and ~12k-symbol scale |
+| Daemon latency | [`daemon-latency.md`](daemon-latency.md) | Host warm path via the daemon (26–190 ms fresh CLI); the ~10× head-to-head was a sandbox artifact |
 | Cold-start scale | [`cold-start.md`](cold-start.md) | "Slower than grep": one-shot cold-build/cold-load vs `grep -rn` across repo sizes (83 → 7,819 files), same-tree protocol |
-| Multi-repo latency | [`multi-repo-latency.md`](multi-repo-latency.md) | Real-repo measured baseline: cold/warm + query latency across 4 real codebases (979 → 20,316 symbols), plus the two indexer bugs the first round found |
+| Multi-repo latency | [`multi-repo-latency.md`](multi-repo-latency.md) | Cold/warm + query latency across 4 real codebases (979 → 20,316 symbols), plus two indexer bugs found |
 | Telemetry audit | [`telemetry-audit.md`](telemetry-audit.md) | Zero network egress in core packages (CI-enforced static import scan) |
 | Token savings | [`token-savings.md`](token-savings.md) | Compact context vs naive full-file context token reduction (machine-generated report) |
-| Index accuracy | [`accuracy.md`](accuracy.md) | Per-language index reliability: measured regex-vs-tree-sitter parity (precision/recall), tier table, Go's resolved extraction |
-| Agent-level evals | [`agent-evals.md`](agent-evals.md) | With vs without kern on the same tasks: deterministic discovery-cost suite (phase 1) + the real-LLM A/B protocol (phase 2) |
-| Command QA ledger | [`command-qa-ledger.md`](command-qa-ledger.md) | One-command-at-a-time QA verification and audit disposition log |
-| Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication scanner confusion matrix and precision floors — [historical]: suite deleted in `a05c91c7`, scoring core survives in `internal/duplication` |
+| Index accuracy | [`accuracy.md`](accuracy.md) | Regex-vs-tree-sitter parity (precision/recall), tier table, Go's resolved extraction |
+| Agent-level evals | [`agent-evals.md`](agent-evals.md) | With vs without kern on the same tasks: deterministic discovery-cost suite + real-LLM A/B protocol |
+| Command QA ledger | [`command-qa-ledger.md`](command-qa-ledger.md) | One-command-at-a-time QA log |
+| Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication confusion matrix and precision floors — [historical]: suite deleted in `a05c91c7`, scoring core survives in `internal/duplication` |
 
 ## The four benchmark dimensions (semantic retention)
 

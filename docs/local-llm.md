@@ -58,6 +58,16 @@ from `.kern/config.json`. `kern doctor` reports a pinned provider's wiring
 offline (key presence, base URL) and only contacts the endpoint when you
 actually make a call.
 
+## Timeouts
+
+The auto chain is bounded end to end:
+
+- `KERN_LLM_CLI_TIMEOUT` — per local agent-CLI call, default `20` seconds.
+- `KERN_LLM_CHAIN_TIMEOUT` — whole auto-chain attempt, default `30` seconds.
+
+Both values are positive integer seconds. A chain that cannot finish in time
+falls back to the deterministic path instead of blocking the calling tool.
+
 ## Requiring an LLM
 
 Optional is the default: kern degrades gracefully. To make a missing

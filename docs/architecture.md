@@ -1,114 +1,101 @@
 # Kern Architecture & Subsystem Specification
 
-`kern` is a local-first, zero-network context and agent orchestration engine built in Go. It delivers pre-indexed symbol graphs, AST analysis, security and architecture firewall enforcement (Gates G0–G39), and a 7-role specialist agent squad for AI coding assistants.
+`kern` is a local-first, deterministic code-intelligence engine built in Go. It
+pre-indexes symbols and call graphs, answers surgical context questions through
+CLI and MCP, and enforces governance around edits, verification, execution, and
+audit trails.
 
 ---
 
-## 1. High-Level System Architecture
+## 1. High-level architecture
 
-The system operates across 4 clean layers with strict dependency rules enforced at compile and test time (`TestArchitectureDocParity`):
+The system is organized into four layers:
 
 ```mermaid
 graph TD
     subgraph Clients["1. Agent & IDE Interface Layer"]
         CLI["CLI (`cmd/kern`)"]
         MCPServer["MCP Server (`cmd/kern-mcp`)"]
-        Agents["Agent Integrations (`Claude`, `Cursor`, `Antigravity`, `OpenCode`, `Codex`, `Copilot`, `Qwen`, `Qoder`)"]
+        Agents["Agent Integrations (Claude Code, Codex, Cursor, OpenCode, and others)"]
     end
 
     subgraph Governance["2. Dispatch & Governance Layer"]
         MCPMux["MCP Dispatcher (`internal/mcp`)"]
-        Catalog["Catalog Registry (`internal/mcpcatalog`) — 31 Tools"]
-        Gov["Context Governor (`internal/mcp/gov`)"]
-        Audit["Merkle Audit Log (`internal/governance`)"]
-        Firewall["Change Firewall & Gates G0–G39 (`internal/gates`, `internal/bpcli`)"]
+        Catalog["Catalog Registry (`internal/mcpcatalog`) — 33 Tools"]
+        Gate["Path & Tool Governance (`internal/mcpgate`, `internal/governance`)"]
+        Audit["Tamper-Evident Audit Log (`internal/governance`)"]
     end
 
-    subgraph Intelligence["3. Intelligence, AST & Agent Engine"]
+    subgraph Intelligence["3. Intelligence, AST & Agent Layer"]
         IndexEngine["Symbol Index & Graph (`internal/index`, `internal/intel`)"]
         TreeSitter["Tree-sitter AST Engines (`internal/index`; default build, CGO; opt out with -tags notreesitter)"]
-        Squad["7-Role Specialist Squad (`internal/agent`, `internal/agents`)"]
-        RefactorEngine["Mutation & Repair Sandbox (`internal/refactor`, `internal/repair`)"]
-        Verification["Verification Engine (`internal/verification`, `internal/sec`)"]
+        AgentPipeline["Task & Agent Lifecycle (`internal/agent`, `internal/tasklife`)"]
+        Verification["Verification Engine (`internal/verifycmd`, `internal/verification`, `internal/sec`)"]
     end
 
     subgraph Storage["4. Storage & OS Substrate"]
         SQLite["SQLite WAL + FTS5 (`.kern/index.db`)"]
         GobSnap["Binary Gob Snapshots (`.kern/index.json.snap`)"]
         SemCache["Semantic Fingerprint Cache (`internal/semcache`)"]
-        UDS["Unix Domain Sockets / Stdio Transports (`internal/mcp/transport`)"]
+        Transport["Unix Domain Socket / Stdio Transports (`internal/mcp/transport`)"]
     end
 
     Clients --> MCPMux
     MCPMux --> Catalog
-    MCPMux --> Gov
-    Gov --> Audit
-    Gov --> Firewall
-    MCPMux --> Squad
-    Squad --> IndexEngine
-    Squad --> RefactorEngine
-    Squad --> Verification
+    MCPMux --> Gate
+    Gate --> Audit
+    MCPMux --> IndexEngine
     IndexEngine --> TreeSitter
     IndexEngine --> SQLite
     IndexEngine --> GobSnap
-    RefactorEngine --> SemCache
-    MCPMux --> UDS
+    AgentPipeline --> IndexEngine
+    AgentPipeline --> Verification
+    Verification --> SemCache
+    MCPMux --> Transport
 ```
+
+`ARCHITECTURE.md` remains the authoritative, machine-checked subsystem ledger.
+The `TestArchitectureDocParity` test enforces the LOC caps and allowed internal
+dependency graph declared there.
 
 ---
 
-## 2. The 7-Role Specialist Agent Squad Workflow
+## 2. Agent workflow
 
-Kern embeds 7 specialized agent personas designed to collaborate across the Explore $\rightarrow$ Plan $\rightarrow$ Edit $\rightarrow$ Verify lifecycle:
+Kern’s task pipeline follows the standard **Explore → Plan → Edit → Verify**
+lifecycle:
 
 ```mermaid
 flowchart LR
-    subgraph Phase1["Phase 1: Explore"]
-        Planner["Planner<br/>(docs:read, memory:read)"]
-        Architect["Architect<br/>(graph:read, boundaries:read)"]
-    end
+    Explore["Explore<br/>(symbol graph, context, memory)"]
+    Plan["Plan<br/>(impact, architecture, task plan)"]
+    Edit["Edit<br/>(surgical patch, sandboxed compile, repair)"]
+    Verify["Verify<br/>(build, tests, security, architecture, evidence)"]
 
-    subgraph Phase2["Phase 2: Plan"]
-        PlanMilestone["Blast Radius Matrix<br/>& Phased Plan"]
-    end
-
-    subgraph Phase3["Phase 3: Edit"]
-        Coder["Coder<br/>(source:write in sandbox)"]
-        Tester["Tester<br/>(test synthesis & execution)"]
-    end
-
-    subgraph Phase4["Phase 4: Verify"]
-        Reviewer["Reviewer<br/>(AST diff review)"]
-        Security["Security<br/>(taint & secret scan)"]
-        SRE["SRE<br/>(telemetry & incident triage)"]
-    end
-
-    Planner --> Architect
-    Architect --> PlanMilestone
-    PlanMilestone --> Coder
-    Coder --> Tester
-    Tester --> Reviewer
-    Reviewer --> Security
-    Security --> SRE
-    SRE --> SignedReceipt["Signed CI Attestation Receipt (G0–G39)"]
+    Explore --> Plan
+    Plan --> Edit
+    Edit --> Verify
+    Verify --> Evidence["Signed Evidence<br/>& Audit Trail"]
 ```
+
+The lifecycle is deterministic and local. Optional LLM providers are used only
+for higher-level reasoning or healing when explicitly configured; the index,
+call graph, blast-radius analysis, and verification engine remain deterministic.
 
 ---
 
-## 3. Modular MCP Subsystem Architecture (52 Leaf Subpackages)
+## 3. Modular MCP subsystem
 
-The `internal/mcp/` subsystem pairs a capped dispatcher root with 52 focused
-leaf packages. The root is a capped monolith (see the ARCHITECTURE.md ledger —
-ratcheted below its pre-extraction baseline; crossing the cap forces the next
-family out to a top-level sibling such as `internal/mcpcatalog`,
-`internal/mcpmeta`, `internal/mcpcli`, or `internal/mcpserve`), not a hidden one:
+`internal/mcp/` pairs a capped dispatcher root with focused leaf packages.
+The root is intentionally capped rather than hidden: crossing the LOC ceiling
+forces the next family out to a top-level sibling such as `internal/mcpcatalog`,
+`internal/mcpmeta`, `internal/mcpcli`, or `internal/mcpserve`.
 
 ```mermaid
 graph TD
     Monolith["`internal/mcp` Dispatcher"]
 
-    subgraph CoreNav["Context & Navigation Leaf Packages"]
-        direction TB
+    subgraph Context["Context & Navigation"]
         graph["`internal/mcp/graph`"]
         doc["`internal/mcp/doc`"]
         retrieve["`internal/mcp/retrieve`"]
@@ -117,8 +104,7 @@ graph TD
         crossrepo["`internal/mcp/crossrepo`"]
     end
 
-    subgraph GovSec["Governance & Security Leaf Packages"]
-        direction TB
+    subgraph Governance["Governance & Security"]
         gov["`internal/mcp/gov`"]
         provenance["`internal/mcp/provenance`"]
         policydsl["`internal/mcp/policydsl`"]
@@ -126,17 +112,14 @@ graph TD
         preedit["`internal/mcp/preedit`"]
     end
 
-    subgraph MutationSand["Mutation & Repair Leaf Packages"]
-        direction TB
+    subgraph Mutation["Mutation & Repair"]
         refactor["`internal/mcp/refactor`"]
         repair["`internal/mcp/repair`"]
         fragility["`internal/mcp/fragility`"]
         compose["`internal/mcp/compose`"]
     end
 
-    subgraph ExecRuntime["Execution & Agent Control Leaf Packages"]
-        direction TB
-        agentctl["`internal/mcp/agentctl`"]
+    subgraph Runtime["Execution & Agent Control"]
         exec["`internal/mcp/exec`"]
         runtime["`internal/mcp/runtime`"]
         flight["`internal/mcp/flight`"]
@@ -145,16 +128,22 @@ graph TD
         catalog["`internal/mcpcatalog`"]
     end
 
-    Monolith --> CoreNav
-    Monolith --> GovSec
-    Monolith --> MutationSand
-    Monolith --> ExecRuntime
+    Monolith --> Context
+    Monolith --> Governance
+    Monolith --> Mutation
+    Monolith --> Runtime
 ```
 
 ---
 
-## 4. Architectural Invariants & Parity Enforcement
+## 4. Architectural invariants
 
-1. **Parity Testing**: `TestArchitectureDocParity` in `internal/architecture/archdoc_test.go` automatically parses `ARCHITECTURE.md` on every build and CI run.
-2. **Fail-Closed Boundaries**: Any new internal Go package must be declared in `ARCHITECTURE.md` with explicit line-of-code caps and permitted internal dependencies.
-3. **Zero Cross-Subsystem Leakage**: Leaf subpackages in `internal/mcp/*` are pure, independent modules that do not depend on the monolithic server or create circular dependencies.
+1. **Parity testing** — `TestArchitectureDocParity` in
+   `internal/architecture/archdoc_test.go` enforces the subsystem ledger.
+2. **Fail-closed boundaries** — new internal packages must be declared in
+   `ARCHITECTURE.md` with explicit LOC caps and allowed internal dependencies.
+3. **No hidden growth** — subsystems that hit a cap must be extracted rather
+   than silently enlarged.
+4. **Local-first execution** — no implicit telemetry or network calls.
+5. **Deterministic intelligence** — symbol indexing, call graphs, and impact
+   analysis are deterministic; language precision is explicit.

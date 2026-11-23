@@ -132,7 +132,7 @@ the in-flight request with that id.
 ```
 → `{"jsonrpc":"2.0","id":3,"result":{"tools":[...]}}`
 
-Payload size (accepted, documented floor): the default 32-tool surface
+Payload size (accepted, documented floor): the full 34-tool surface
 serializes to roughly 41KB (~10K tokens) because descriptions, enums,
 and per-property contracts are served in full — schema fidelity is the
 product. `listChanged: false` (§3.1) means a client fetches this once
@@ -159,7 +159,10 @@ Each tool entry has the shape:
 
 `phase` and `riskLevel` are kern-specific extensions on every tool. The advertised
 list is filtered by the server's phase configuration (§5); `kern_meta` and all
-`cross` tools are always present.
+`cross` tools are always present. Direct `tools/call` requests are limited to the
+same advertised surface. Set `KERN_MCP_ALLOW_UNADVERTISED=1` if a client needs
+direct access to a registered but unadvertised tool; `kern_meta` routes to the full
+catalog internally either way.
 
 ### 3.5 `tools/call`
 
@@ -261,17 +264,19 @@ Errors use standard JSON-RPC error objects: `{"jsonrpc":"2.0","id":N,"error":{"c
 
 ## 5. Tool catalog configuration
 
-The advertised catalog is configurable at server start. This changes the *advertised
-surface*, never the underlying capability — `kern_meta`'s router reaches every
-sub-tool regardless.
+The advertised catalog is configurable at server start. This changes the direct
+`tools/call` surface as well as `tools/list`; `kern_meta`'s router still reaches
+every registered sub-tool. Set `KERN_MCP_ALLOW_UNADVERTISED=1` only when a client
+must bypass the advertised-surface check for direct calls.
 
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 32-tool catalog (default IS the full 32-tool catalog since 2026-10-23) |
+| `KERN_MCP_FULL=1` | Advertise the full 34-tool catalog (default is the direct eleven-tool surface) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
 | `KERN_MCP_HIGH_LEVEL_ONLY=1` | Legacy mid-size surface: the 6-tool `highLevelTools` set (deprecated; prefer the full catalog) |
 | `KERN_MCP_CATEGORY=<family>` | Advertise only one functional family — one of `analyze`, `agent`, `arch`, `ast`, `context`, `doc`, `edit`, `evidence`, `exec`, `framework`, `graph`, `governance`, `incident`, `lock`, `memory`, `meta`, `mcpbridge`, `optimize`, `org`, `project`, `review`, `task`, `verify` (e.g. `kern_search` is `graph`); `kern_meta` always stays |
+| `KERN_MCP_ALLOW_UNADVERTISED=1` | Allow direct `tools/call` requests for registered tools that are not advertised by the active phase/category surface; intended for embedded clients and test harnesses |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); `mcp.roots` in `.kern/config.json` adds to these only behind the operator's `KERN_MCP_ALLOW_CONFIG_ROOTS=1` opt-in |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the governance gate layer (path confinement via the roots check may still deny; `KERN_MCP_NO_CONFINE=1` disables confinement entirely) |
 | `KERN_MCP_WATCH=0` | Disable the background index watcher |
@@ -302,19 +307,21 @@ Every tool carries a `riskLevel` so governed clients can gate access:
 
 | Risk | Meaning | Count |
 |---|---|---|
-| `low` | Read-only | 70 |
-| `medium` | Contained state mutation or analysis | 25 |
-| `high` | Security-sensitive or destructive | 18 |
-| `critical` | Arbitrary command execution or deployment | 4 |
+| `low` | Read-only | 21 |
+| `medium` | Contained state mutation or analysis | 8 |
+| `high` | Security-sensitive or destructive | 3 |
+| `critical` | Arbitrary command execution or deployment | 1 |
 
-Counts sum to the 32-tool catalog (see `docs/tool-catalog.md`).
+Counts sum to the 34-tool catalog (see `docs/tool-catalog.md`).
 
 ## 7. Phase model
 
 Tools are tagged with an agent phase: `explore`, `plan`, `edit`, `verify`, plus
 `meta` (the `kern_meta` router itself) and `cross` (phase-agnostic utilities).
 Clients that know the current phase can advertise only the relevant shortlist;
-`kern_meta` remains available to route within it by natural-language request.
+`kern_meta` remains available to route within the advertised surface by natural-language
+request. Direct calls outside the advertised phase/category surface are rejected
+unless `KERN_MCP_ALLOW_UNADVERTISED=1` is set.
 
 ## 8. Connecting a client
 

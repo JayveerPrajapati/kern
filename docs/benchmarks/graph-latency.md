@@ -218,6 +218,12 @@ against the versioned thresholds in `cmd/kern/bench_thresholds.json`
 (embedded in the binary; `KERN_BENCH_THRESHOLDS` overrides the file path for
 testing):
 
+CLI posture is explicit. The default is `--mode cold-cli`: each timed row is
+a fresh one-shot process with `KERN_DAEMON=0`, so it includes process start
+and index hydration. Use `--mode daemon` to measure fresh clients against a
+warm daemon; that lane has its own threshold map. Never compare rows across
+the two postures.
+
 | Check | Level | Guards |
 |---|---|---|
 | `warm_load_ms` ceiling | fail | the persisted-store fast path every command pays |
@@ -225,6 +231,7 @@ testing):
 | `cold_vs_warm_speedup` floor | fail | a warm Load that falls through to a full Build collapses the ratio to ~1x |
 | zero-result query | fail | wiring regression (a query returning nothing is not a latency finding) |
 | past warn-factor of a ceiling | warn | approaching a ceiling — reported, never fatal |
+| mode-appropriate CLI ceiling | fail | one-shot cold process (default) or daemon-backed steady state, selected by the recorded `mode` |
 
 Ceilings are deliberately generous multipliers over the measured baseline
 (warm 174 ms, worst query 91 ms, speedup 4.6x on 2026-10-19), so the gate
@@ -233,3 +240,24 @@ slower than the baseline still passes. Adjusting a threshold is a
 deliberate act: update `cmd/kern/bench_thresholds.json`, and
 `TestBenchThresholdsEmbeddedFileParses` fails on a hand-edit that silently
 disables a check.
+
+## 8. 2026-11-18 cold-CLI measurement (context fast path)
+
+Measured 2026-11-18 on the same Apple M1 Pro under machine load ~7.5, three
+runs per command in `--mode cold-cli` (fresh one-shot process with
+`KERN_DAEMON=0`, persisted index). The context fast path
+(Post-Optimization Phase 2) is the change under test: default concise
+`kern context` now resolves counts and risk from the graph without building
+the evidence slice or a full explore report. Three-run median / minimum:
+
+| Command | Median | Min | Note |
+|---|---:|---:|---|
+| `kern context writeTree` | 366.99 ms | 352.57 ms | passing (ceiling 450 ms; was 613–661 ms before the fast path; 273.7 ms pre-optimization baseline) |
+| `kern explore writeTree` | 731.49 ms | 633.05 ms | preserved |
+| `kern impact writeTree` | 458.09 ms | 393.65 ms | preserved |
+| `kern impact-hub` | 705.00 ms | 702.94 ms | preserved |
+| `kern search` | 246.63 ms | — | single recorded run |
+
+`kern bench --root . --mode cold-cli --check` exits 0. The context ceiling
+stays at 450 ms: the fast path removes work the concise render never used
+rather than relaxing the gate.

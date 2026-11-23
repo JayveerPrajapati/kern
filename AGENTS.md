@@ -15,40 +15,57 @@ before falling back to built-ins. Only an explicit operator opt-out
 exempts a session; when one kern call errors, fall back for that call and keep
 using kern for the rest.
 
-## The kern_meta tool (preferred entry point)
+## Direct tools (call these first)
 
-Instead of choosing among 32 individual `kern_*` tools, call **`kern_meta`**
-with a natural-language request; it classifies the request (deterministic
-keyword matching — no LLM, no network) and runs the right tool internally.
-Examples:
-- `kern_meta(request="how does dispatch work?")` → runs `kern_explore`
-- `kern_meta(request="what breaks if I change dispatch?")` → runs `kern_impact`
-- `kern_meta(request="find the NewServer function")` → runs `kern_search`
+Call the obvious direct tool first:
+- `kern_buddy` — onboard to an unfamiliar repo.
+- `kern_search` — find a symbol by name.
+- `kern_explore` — understand a symbol, file, or flow.
+- `kern_context` — get the minimal source slice.
+- `kern_probe` — build a task-level context bundle.
+- `kern_research` — read-only multi-symbol research with impact and affected files.
+- `kern_impact` — assess what breaks.
+- `kern_graph` — inspect one-hop callers/callees.
+- `kern_review` — build review context.
+- `kern_verify` — run build/test/security verification.
+- `kern_meta` — optional router when the right direct tool is unclear.
 
-Set KERN_MCP_FULL=1 for all 32 tools, `KERN_MCP_PHASE=explore|plan|edit|verify`
-for phase subsets, or `KERN_MCP_SINGLE_TOOL=1` for only `kern_meta`.
-Default surface: 32 tools (`kern_meta`, `kern_explore`, `kern_impact`,
-`kern_apply`, `kern_search`, `kern_verify`, `kern_buddy`, `kern_exec`,
-`kern_compact_file`,
-`kern_run`, `kern_optimize`, `kern_context`, `kern_memory`, `kern_evidence`,
-`kern_probe`, `kern_plan`, `kern_doc`, `kern_project_map`, `kern_ast_search`,
-`kern_stats`, `kern_why`, `kern_heal`, `kern_fit_context`,
-`kern_plan_context`, `kern_path`, `kern_semcache`, `kern_swap`, `kern_mask_pii`,
-`kern_fetch_raw_anchor`, `kern_review`, `kern_graph`, `kern_arch`) — `kern_exec` is
-governance-gated (every call still fails closed behind
-KERN_ALLOW_EXEC/KERN_TOOLS). Every other tool is advertised by default.
-That is by design: `kern_meta` still routes to every sub-tool
-internally. Hosts that prefix the MCP server name list each tool twice —
-expected dual registration, not a second toolset.
+Set `KERN_MCP_FULL=1` for all 34 individual `kern_*` tools;
+`KERN_MCP_PHASE=explore|plan|edit|verify` selects phase subsets, and
+`KERN_MCP_SINGLE_TOOL=1` collapses to `kern_meta`.
+
+Default surface: 11 tools (`kern_buddy`, `kern_search`, `kern_explore`,
+`kern_context`, `kern_probe`, `kern_research`, `kern_impact`, `kern_graph`, `kern_review`,
+`kern_verify`, `kern_meta`). No security-gated tool is advertised by default. `kern_meta`
+still routes to every sub-tool behind the existing governance gates. In full mode,
+`kern_exec` is governance-gated with default `KERN_EXEC_POSTURE=ask` (LOW/MEDIUM
+audited, HIGH/CRITICAL approval); `KERN_EXEC_POSTURE=closed` restores strict
+fail-closed. Hosts that
+prefix the MCP server name list each tool twice — expected dual registration,
+not a second toolset.
 
 <!-- kern:global-omit:begin -->
 Think in phases: explore (read/discover), plan (analyze/simulate), edit
-(mutate/execute), verify (check/validate) — and let `kern_meta` route within
-the active phase. More examples:
+(mutate/execute), verify (check/validate) — and select direct tools by intent. More examples:
 - `kern_meta(request="show me the architecture")` → runs `kern_arch`
 - `kern_meta(request="compress this log: ...")` → runs `kern_optimize` (action=log)
 - `kern_meta(request="mask secrets in: ...")` → runs `kern_mask_pii`
 <!-- kern:global-omit:end -->
+
+## Kern-first route
+
+- Find a symbol → `kern_search`
+- Understand a symbol/file → `kern_explore`
+- What breaks if changed → `kern_impact`
+- Onboard/repo layout → `kern_buddy`
+- Build/test/lint → `kern_verify`
+- Unsure which tool → `kern_meta`
+
+If one kern call fails, fall back for that call only and keep using kern for the rest.
+
+
+
+<!-- kern:global-omit:begin -->
 
 ## Kern-first policy (the universal default; enforced on hook hosts)
 
@@ -84,15 +101,21 @@ HOST env KERN_ENFORCE=0/KERN_BYPASS=1, audited (~/.kern/audit/bypass.jsonl).
    re-slice it with `kern_verify anchor=<id> output=lines:A-B`, no rerun.
    CLI: `kern verify --command "go test ./..." --output summary`.
 6. Run a command → simple bash (pwd/ls/which/echo/git status…) passes
-   through; content-intent bash (cat/sed/head/grep) is SERVED (kern index
+   through; content-intent bash (cat/head/grep) is SERVED (kern index
    Tier 1/2 or the readonly sandbox Tier 3; GATE commands write/network/
    installers are blocked) — use the kern tool for the intent; break-glass:
    HOST env KERN_ENFORCE=0/ KERN_BYPASS=1. `kern_exec` (isolated runner,
-   default surface) is governance-gated: it fails closed without
-   `KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` entry naming it.
+   default surface) is governance-gated: the default `ask` posture runs
+   LOW/MEDIUM audited and mints an approval for HIGH/CRITICAL;
+   `KERN_EXEC_POSTURE=closed` restores the strict empty-allowlist denial
+   (`KERN_ALLOW_EXEC=1` / `KERN_TOOLS` are the opt-ins).
 7. Search web/docs → `kern_doc` (action=fetch) then `kern_doc`
-   (action=search), NOT `webfetch`/`websearch`.
+   (action=search), NOT `webfetch`/`websearch`. `kern_doc` fetch is the
+   sanctioned named-URL network path (no approval); `kern_exec` network
+   commands are NOT — they mint an approval under the ask posture.
 8. Unsure which tool → `kern_meta` (NL router) or `kern_buddy`.
+
+<!-- kern:global-omit:end -->
 
 <!-- kern:global-omit:begin -->
 9. Past sessions learned about this project → `kern_buddy` (default; digest
@@ -124,14 +147,15 @@ HOST env KERN_ENFORCE=0/KERN_BYPASS=1, audited (~/.kern/audit/bypass.jsonl).
    an anchor, so ask for more with `kern_verify anchor=<id> output=lines:A-B`.
 6. **Do I need to run a command?** → `bash` simple commands
    (pwd/ls/which/echo/git status…) pass through; content-intent bash
-   (cat/sed/head/grep emitting file content) is SERVED — symbol reads answer
+   (cat/head/grep emitting file content) is SERVED — symbol reads answer
    from the kern index, everything else pure-read runs sandboxed via
    kern exec --readonly, and only GATE commands (writes/network/installers)
    are blocked — use the kern tool for the intent; break-glass is host env
    `KERN_ENFORCE=0` / `KERN_BYPASS=1`. `kern_exec` (isolated runner: macOS
    Seatbelt with network egress blocked, Linux unshare, Windows fail-closed
-   with the override) is on the default surface and governance-gated: it
-   fails closed without `KERN_ALLOW_EXEC=1` or a `KERN_TOOLS` entry naming it.
+   with the override) is on the default surface and governance-gated: the
+   default `ask` posture runs LOW/MEDIUM audited and mints an approval for
+   HIGH/CRITICAL; `KERN_EXEC_POSTURE=closed` restores strict fail-closed.
 7. **Do I need to search the web/docs?** → call `kern_doc` (action=fetch) then
    `kern_doc` (action=search), NOT `webfetch`/`websearch`. Pre-index docs with
    `kern_doc` (action=index) (optional, for semantic search via local Ollama).
@@ -164,6 +188,7 @@ Every tool not on the default surface is `KERN_MCP_FULL=1` only — ask
 - What breaks if I change X → `kern_impact`
 - Find a symbol by name/fragment → `kern_search`
 - Context bundle from a task/bug/prompt → `kern_probe`
+- Multi-symbol research with impact → `kern_research`
 - Summary → neighborhood → source, on demand → `kern_probe`
 - Squeeze files/symbols into a token budget → `kern_fit_context`
 - Repo layout / onboarding digest → `kern_buddy` (default) /
@@ -172,7 +197,7 @@ Every tool not on the default surface is `KERN_MCP_FULL=1` only — ask
 ### Etags (conditional fetch)
 
 Read tools (`kern_explore`, `kern_context`, `kern_compact_file`,
-`kern_probe`, `kern_search`, `kern_why`, `kern_graph`)
+`kern_probe`, `kern_research`, `kern_search`, `kern_why`, `kern_graph`)
 mint an etag per response; re-calling with the last-seen etag returns
 `unchanged (etag …)` instead of the payload. Pass etags back when
 re-requesting the same symbol/context (CLI: `kern explore --etag <E>`).
@@ -208,7 +233,7 @@ re-requesting the same symbol/context (CLI: `kern explore --etag <E>`).
   operator break-glass: KERN_BYPASS=1 with raw=true)
 - `glob` → `kern_project_map` (`kern_buddy` on the
   default surface)
-- `bash` content-intent (cat/sed/head/grep emitting file content) →
+- `bash` content-intent (cat/head/grep emitting file content) →
   SERVED, never denied: symbol-shaped reads are answered from the kern index
   (Tier 1), read-head + simple tail (grep X | wc -l / head / tail / grep -v)
   is computed in-process (Tier 2), and everything else pure-read runs
@@ -270,13 +295,10 @@ When you need to… (the underused tools, ranked from real usage stats — call 
 
 ## Full capability catalog
 
-`kern` ships 32 `kern_*` MCP tools across many domains. 30 are advertised
-by default (toolpolicy.go defaultTools — the same list as in the kern_meta
-section above); `kern_exec` among them is governance-gated: it fails
-closed without KERN_ALLOW_EXEC/KERN_TOOLS. The full 32-tool catalog IS the default surface — every tool is advertised by default; `kern_meta` reaches them all internally.
-If you are unsure which tool fits, call `kern_meta` or
-`kern_buddy` to
-enumerate options.
+`kern` ships 34 `kern_*` MCP tools across many domains. Eleven are advertised
+by default (toolpolicy.go defaultTools — the same list as in the direct-tool
+section above). Set `KERN_MCP_FULL=1` to advertise all 34 directly. `kern_meta`
+still reaches them internally through the existing governance gates.
 
 ## Additional capabilities
 

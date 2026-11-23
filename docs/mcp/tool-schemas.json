@@ -59,7 +59,7 @@
       "name": "kern_explore",
       "phase": "explore",
       "risk": "low",
-      "sha256": "2539e4b1d85a58dd74edf56a1d5fcec370d6a8e508368fd5afcbba24bd256be9"
+      "sha256": "ce7ee25dc5dc581c6e1f4697c2b8137bf540209ac54b243329e268ca8b2a74f3"
     },
     {
       "name": "kern_fetch_raw_anchor",
@@ -146,6 +146,12 @@
       "sha256": "85494d72bb69212feefd2c06321862d35595da187e12b753124214113e323bf9"
     },
     {
+      "name": "kern_research",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "0d164e3e187754368f959f7d5be2b8c4af6cf47dfe6a8fad063bfc88aff9c1fe"
+    },
+    {
       "name": "kern_review",
       "phase": "verify",
       "risk": "low",
@@ -168,6 +174,12 @@
       "phase": "cross",
       "risk": "medium",
       "sha256": "72a9f6203d737466130494c32bd6d1aeaf3300f2f496927f1c9ebdc36c9e79c2"
+    },
+    {
+      "name": "kern_skill",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "c2f5a6ce4901b5d7d8e736e1a43447037dd711457411eef696f6df819a069862"
     },
     {
       "name": "kern_stats",
