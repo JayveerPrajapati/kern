@@ -13,30 +13,31 @@ import (
 )
 
 // TestSeatbeltProfileGenerator pins the generated profile's shape: the
-// sensitive-path blocklist is present with the real $HOME substituted into
-// every subpath rule, and the network base (allow default, deny network*,
-// loopback allow) is preserved verbatim — BLOCKLIST-deny, not
-// allowlist-allow.
+// read allowlist is present with the real $HOME substituted into every
+// subpath rule, and the network base (allow default, deny network*,
+// loopback allow) is preserved verbatim — ALLOWLIST-allow, not
+// blocklist-deny.
 func TestSeatbeltProfileGenerator(t *testing.T) {
 	home := "/Users/testuser"
 	t.Setenv("HOME", home)
 	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "")
 	prof := seatbeltProfile()
+	t.Log(prof)
 
-	base := "(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))"
+	base := "(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))\n(deny file-read*)"
 	if !strings.HasPrefix(prof, base) {
 		t.Errorf("profile must start with the network-only base verbatim, got:\n%s", prof)
 	}
-	// Blocklist paths present with the real $HOME substituted.
+	// Allowlist paths present with the real $HOME substituted.
 	for _, p := range sensitivePathDirs {
 		want := fmt.Sprintf("(deny file-read-data (subpath %q))", filepath.Join(home, p))
 		if !strings.Contains(prof, want) {
 			t.Errorf("profile missing deny rule for %q; want %q in:\n%s", p, want, prof)
 		}
 	}
-	// Nothing outside the blocklist is denied: file denies must reference
-	// exactly the curated paths (home-relative blocklist + absolute system
-	// credential blocklist, each possibly in its canonical spelling).
+	// Every read allow is explicit; file-read-data denies must reference
+	// exactly the curated sensitive paths (home-relative + absolute system
+	// credentials, each possibly in its canonical spelling).
 	for _, line := range strings.Split(prof, "\n") {
 		if !strings.Contains(line, "file-read-data") {
 			continue
@@ -58,7 +59,7 @@ func TestSeatbeltProfileGenerator(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("unexpected file deny rule (blocklist-only design): %q", line)
+			t.Errorf("unexpected file deny rule (allowlist design): %q", line)
 		}
 	}
 }
@@ -85,8 +86,8 @@ func TestSeatbeltProfileDeniesAbsoluteCredentials(t *testing.T) {
 			}
 		}
 	}
-	// /etc/passwd is NOT on the blocklist and must stay readable — the
-	// blocklist design denies only curated credential paths.
+	// /etc/passwd is inside the explicit /etc read root and must stay
+	// readable; only curated credential paths are denied on top of it.
 	if strings.Contains(prof, "/etc/passwd") {
 		t.Errorf("/etc/passwd must not be denied (blocklist-only design):\n%s", prof)
 	}
@@ -144,8 +145,8 @@ func TestSeatbeltProfileConfinementDisabled(t *testing.T) {
 	t.Setenv("HOME", "/Users/testuser")
 	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "0")
 	prof := seatbeltProfile()
-	if strings.Contains(prof, "file-read-data") {
-		t.Errorf("KERN_SANDBOX_FS_CONFINEMENT=0 must drop the file denies, got:\n%s", prof)
+	if strings.Contains(prof, "file-read") {
+		t.Errorf("KERN_SANDBOX_FS_CONFINEMENT=0 must drop the file-read rules, got:\n%s", prof)
 	}
 	want := "(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))"
 	if prof != want {
@@ -167,6 +168,9 @@ func TestSeatbeltProbeValidatesExactWrapProfile(t *testing.T) {
 	}
 	if _, err := exec.LookPath("sandbox-exec"); err != nil {
 		t.Skip("sandbox-exec not available")
+	}
+	if !networkIsolationAvailable() {
+		t.Skip("this host's sandbox-exec rejects the generated confinement profile")
 	}
 	// Pin a deterministic home + confinement so the wrap prefix and the probe
 	// profile are byte-identical.
@@ -214,6 +218,9 @@ func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
 	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH; cannot run the control check")
+	}
+	if !networkIsolationAvailable() {
+		t.Skip("this host's sandbox-exec rejects the generated confinement profile")
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)

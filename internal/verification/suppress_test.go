@@ -388,8 +388,23 @@ func TestBuiltinSuppressionsMatchCurrentScan(t *testing.T) {
 // file-wide entries after the write-contract edits shifted their lines, and
 // the benchmark harness got its own entry (the last unsuppressed informational
 // hit). The same rot the comment above describes, fixed the durable way.
+// 75 -> 73 on 2026-10-30: deployment, sampler and verify_command stopped
+// producing their own unsafe-exec finding once they routed through
+// execshell.CommandContext, so their three line pins were dead; they are
+// replaced by ONE file-wide entry at the execshell choke point, and the
+// optimize pin followed its site from :528 to :531. Same lesson again: prefer
+// the file-wide/func-scoped pin at the choke point over a line number.
 func TestBuiltinCountIsSixteen(t *testing.T) {
-	if len(defaultSuppressions) != 75 {
-		t.Errorf("len(defaultSuppressions) = %d, want 75 (the verified finding set on kern's repo)", len(defaultSuppressions))
+	// 73 -> 74 on 2026-11-03: the headroom gate's `git -C <root> show
+	// HEAD:ARCHITECTURE.md` leg (fixed argv, no shell) joins the file-wide
+	// unsafe-exec pins at the same false-positive class as the git helpers.
+	// 74 -> 75 on 2026-11-03: the P6 daemon spawn (internal/daemon/daemon.go,
+	// fixed `daemon serve --root <root>` argv from os.Executable()) joins the
+	// same class — file-wide so the pin survives the spawn site moving.
+	// 75 -> 78 on 2026-11-22: the remaining three safe, fixed-argv findings
+	// (PowerShell uninstaller, repo-launcher version probe, and git-status
+	// fingerprint) joined the built-in false-positive registry.
+	if len(defaultSuppressions) != 78 {
+		t.Errorf("len(defaultSuppressions) = %d, want 78 (the verified finding set on kern's repo)", len(defaultSuppressions))
 	}
 }

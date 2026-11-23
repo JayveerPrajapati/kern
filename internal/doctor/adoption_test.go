@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/metrics"
@@ -49,5 +50,24 @@ func TestCheckAdoptionThreshold(t *testing.T) {
 	writeAdoptionLog(t, root, 10, 0) // below the noise floor
 	if f := checkAdoption(root); f.Level != "ok" {
 		t.Fatalf("10 calls must not warn, got %+v", f)
+	}
+}
+
+func TestCheckAdoptionReportsRawFastPaths(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".kern", "adoption.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(metrics.AdoptionEvent{Ts: 1, Tool: "read", Routed: false, Reason: "tiny"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := checkAdoption(root)
+	if !strings.Contains(f.Detail, "intentional raw fast paths: 1") {
+		t.Fatalf("doctor detail missing raw fast-path count: %+v", f)
 	}
 }

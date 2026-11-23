@@ -38,6 +38,22 @@ const (
 	}
 }
 
+// TestPackageClauseIsNotASymbol pins the fix for the phantom `decl main`:
+// the Go package clause was captured as a declaration, so `kern compact`
+// reported one more symbol than the file declares.
+func TestPackageClauseIsNotASymbol(t *testing.T) {
+	src := "package main\n\nfunc Foo() {}\n\ntype Bar struct{}\n"
+	sum := Summarize("main.go", []byte(src), 100)
+	for _, s := range sum.Symbols {
+		if s.Name == "main" {
+			t.Fatalf("package clause leaked into symbols: %+v", sum.Symbols)
+		}
+	}
+	if len(sum.Symbols) != 2 {
+		t.Fatalf("expected 2 symbols (Foo, Bar), got %d: %+v", len(sum.Symbols), sum.Symbols)
+	}
+}
+
 func TestSummarizeGoConstVarDecls(t *testing.T) {
 	src := `package main
 

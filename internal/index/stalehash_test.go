@@ -7,22 +7,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/indexwatch"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 )
 
-// countReads swaps the package readFile seam with a counting wrapper. Both
-// the staleness content walk (indexableHashesObserved) and Update's per-file
-// change detection (updateComputeFile) read file contents through readFile,
-// so the counter observes every content read while a stat-only walk reads
-// nothing. The returned restore func must be deferred.
+// countReads swaps BOTH read seams with counting wrappers: this package's
+// readFile (Update's per-file change detection) and the extracted hashing
+// family's indexwatch.ReadFile (the staleness content walk). The counter
+// observes every content read while a stat-only walk reads nothing. The
+// returned restore func must be deferred.
 func countReads() (*atomic.Int64, func()) {
 	orig := readFile
+	origWatch := indexwatch.ReadFile
 	var n atomic.Int64
 	readFile = func(path string) ([]byte, error) {
 		n.Add(1)
 		return orig(path)
 	}
-	return &n, func() { readFile = orig }
+	indexwatch.ReadFile = func(path string) ([]byte, error) {
+		n.Add(1)
+		return origWatch(path)
+	}
+	return &n, func() { readFile = orig; indexwatch.ReadFile = origWatch }
 }
 
 // TestLoadOrBuildStaleHashesTreeOnce pins the M5a double-walk fix: on the

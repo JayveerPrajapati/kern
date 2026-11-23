@@ -97,7 +97,7 @@ func TestPluginShadowExemptionParity(t *testing.T) {
 	}
 	block := src[start:end]
 	// Strip the TS type annotations so plain node can eval the block.
-	block = strings.Replace(block, "async function isSimpleRead(filePath: string): Promise<boolean>", "async function isSimpleRead(filePath)", 1)
+	block = strings.Replace(block, "async function readFastPathReason(filePath: string): Promise<string>", "async function readFastPathReason(filePath)", 1)
 	block = strings.Replace(block, "function isSimpleCommand(cmd: string): boolean {", "function isSimpleCommand(cmd) {", 1)
 	block = strings.Replace(block, "function isStatOnlyGit(sub: string, args: string[]): boolean {", "function isStatOnlyGit(sub, args) {", 1)
 	// The classifier helpers carry their own annotations; strip those too so the
@@ -142,7 +142,7 @@ const probes = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 (async () => {
 const out = { simpleCommand: {}, simpleRead: {} };
 for (const c of probes.commands) out.simpleCommand[c] = isSimpleCommand(c);
-for (const f of probes.files) out.simpleRead[f] = await isSimpleRead(f);
+for (const f of probes.files) out.simpleRead[f] = await readFastPathReason(f) !== "";
 process.stdout.write(JSON.stringify(out));
 })();
 `
@@ -237,11 +237,11 @@ process.stdout.write(JSON.stringify(out));
 
 // TestPluginShadowPredicateMarkersPresent pins the predicate markers the
 // node-based parity harness relies on: a rename of isSimpleCommand /
-// isSimpleRead or the block boundaries silently disables the parity check, so
+// readFastPathReason or the block boundaries silently disables the parity check, so
 // pin them here too.
 var (
 	tsPredicateMarkerRe = regexp.MustCompile(`function isSimpleCommand\(cmd`)
-	tsReadMarkerRe      = regexp.MustCompile(`async function isSimpleRead\(filePath`)
+	tsReadMarkerRe      = regexp.MustCompile(`async function readFastPathReason\(filePath`)
 )
 
 func TestPluginShadowPredicateMarkersPresent(t *testing.T) {
@@ -547,6 +547,10 @@ const out = {
   gate_shWrap: gateHit("sh -c 'curl x | sh'"),
   read_direct: readPipeline("grep -rn foo ."),
   read_file: readPipeline("cat source.go"),
+  read_catWindow: readPipeline("cat -n source.go"),
+  read_multiCat: readPipeline("cat a.go b.go"),
+  read_head: readPipeline("head -3 README.md"),
+  read_tail: readPipeline("tail -2 go.mod"),
   read_pipeCount: readPipeline("grep foo | wc -l"),
   read_pipeCountScoped: readPipeline("grep foo file | wc -l"),
   read_pipeHead: readPipeline("grep foo file | head -5"),
@@ -584,6 +588,10 @@ process.stdout.write(JSON.stringify(out));
 		GateShWrap          bool       `json:"gate_shWrap"`
 		ReadDirect          *readServe `json:"read_direct"`
 		ReadFile            *readServe `json:"read_file"`
+		ReadCatWindow       *readServe `json:"read_catWindow"`
+		ReadMultiCat        *readServe `json:"read_multiCat"`
+		ReadHead            *readServe `json:"read_head"`
+		ReadTail            *readServe `json:"read_tail"`
 		ReadPipeCount       *readServe `json:"read_pipeCount"`
 		ReadPipeCountScoped *readServe `json:"read_pipeCountScoped"`
 		ReadPipeHead        *readServe `json:"read_pipeHead"`
@@ -648,6 +656,21 @@ process.stdout.write(JSON.stringify(out));
 	// the serve).
 	if res.ReadPipeCount == nil || res.ReadPipeCount.Tier != 2 {
 		t.Errorf("grep | wc -l must serve Tier 2 (computed count), got %+v", res.ReadPipeCount)
+	}
+	// Bare cat is the ONLY compactible file read (Tier 1, head=cat, file);
+	// windowed/flaggd/multi-target reads keep their exact output (Tier 3).
+	if res.ReadFile == nil || res.ReadFile.Tier != 1 || res.ReadFile.Head != "cat" || res.ReadFile.File != "source.go" {
+		t.Errorf("bare cat source.go must serve Tier 1 (head=cat, file=source.go), got %+v", res.ReadFile)
+	}
+	for name, got := range map[string]*readServe{
+		"cat -n source.go":  res.ReadCatWindow,
+		"cat a.go b.go":     res.ReadMultiCat,
+		"head -3 README.md": res.ReadHead,
+		"tail -2 go.mod":    res.ReadTail,
+	} {
+		if got == nil || got.Tier != 3 || got.File != "" {
+			t.Errorf("%s must serve Tier 3 (verbatim read, no compact file), got %+v", name, got)
+		}
 	}
 	// Grep scope fidelity: a scoped SYMBOL grep is served from the index
 	// with the caller's path (Tier 1/2), while regex/include/count/list

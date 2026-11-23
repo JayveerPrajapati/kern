@@ -170,6 +170,10 @@ func TestKernGuardScript(t *testing.T) {
 	if err := os.WriteFile(bigHh, []byte(strings.Repeat("// header\n", 600)), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	bypassPath := filepath.Join(dir, "KERN_BYPASS=1-notes.go")
+	if err := os.WriteFile(bypassPath, []byte(strings.Repeat("// bypass fixture\n", 150)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if st, _ := os.Stat(bigHh); st.Size() < 2048 {
 		t.Fatalf("fixture big.hh is %d bytes, need >=2048", st.Size())
 	}
@@ -217,7 +221,7 @@ func TestKernGuardScript(t *testing.T) {
 			// Regression: a KERN_BYPASS=1 string in the payload (e.g. a file
 			// path) must NOT bypass the guard — only the env var may.
 			name:     "KERN_BYPASS=1 in read path does not bypass",
-			stdin:    `{"tool_name":"Read","path":"/repo/docs/KERN_BYPASS=1-notes.go"}`,
+			stdin:    fmt.Sprintf(`{"tool_name":"Read","path":%q}`, bypassPath),
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_compact_file",
@@ -291,7 +295,7 @@ func TestKernGuardScript(t *testing.T) {
 		},
 		{
 			name:     "antigravity view_file blocked",
-			stdin:    `{"toolCall":{"name":"view_file","args":{"AbsolutePath":"/some/file.go"}}}`,
+			stdin:    fmt.Sprintf(`{"toolCall":{"name":"view_file","args":{"AbsolutePath":%q}}}`, bigGo),
 			wantExit: 2,
 			wantStderr: []string{
 				"kern_compact_file",
@@ -422,11 +426,13 @@ func TestKernGuardScript(t *testing.T) {
 		{name: "go test blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"go test ./..."}}`, env: []string{"KERN_GUARD_MODE=deny"}, wantExit: 2, wantStderr: []string{"kern_verify"}},
 		// --- simple-read exemption matrix ---
 		{name: "read non-code allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, readme), wantExit: 0, wantStderr: nil},
-		// A small (<2KB) code file is part of the symbol context — always governed.
-		{name: "read small code file governed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, smallGo), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
+		// Tiny, missing, and exact-window reads pass raw; large unwindowed
+		// code files remain part of the symbol context and are governed.
+		{name: "read small code file allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, smallGo), wantExit: 0, wantStderr: nil},
+		{name: "read missing code file allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, filepath.Join(dir, "nope.go")), wantExit: 0, wantStderr: nil},
+		{name: "read exact line window allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q,"start_line":1,"end_line":2}}`, bigGo), wantExit: 0, wantStderr: nil},
 		{name: "read big code file blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, bigGo), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
 		{name: "read big hh blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, bigHh), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
-		{name: "read missing code file blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, filepath.Join(dir, "nope.go")), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
 	}
 
 	for _, tc := range cases {
@@ -491,6 +497,177 @@ func TestKernGuardFreshProjectReadServed(t *testing.T) {
 				t.Fatalf("file was not served; stdout = %q", stdout)
 			}
 		})
+	}
+}
+
+// TestKernGuardReadFidelity pins the serve-path correctness contract for
+// plain file reads: non-indexable files must be served RAW (never a compact
+// stub), windowed reads must return exactly the requested slice, and a bare
+// cat on indexable code still gets the token-saving symbolic summary.
+func TestKernGuardReadFidelity(t *testing.T) {
+	script := writeGuardScriptFile(t)
+	bin := buildCurrentKern(t)
+	project := t.TempDir()
+	readmeLines := []string{"# alpha", "beta", "gamma", "delta", "epsilon"}
+	readme := filepath.Join(project, "README.md")
+	if err := os.WriteFile(readme, []byte(strings.Join(readmeLines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gomod := filepath.Join(project, "go.mod")
+	if err := os.WriteFile(gomod, []byte("module demo\n\ngo 1.22\n\nrequire example.com/x v1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code := filepath.Join(project, "sample.go")
+	if err := os.WriteFile(code, []byte("package demo\n\nfunc Alpha() {}\n\ntype Beta struct{ X int }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(cmd string) (int, string, string) {
+		t.Helper()
+		stdin := fmt.Sprintf(`{"tool_name":"bash","tool_input":{"command":%q}}`, cmd)
+		return runGuardOutput(t, script, project, stdin, []string{"KERN_BIN=" + bin})
+	}
+	t.Run("cat non-code serves verbatim", func(t *testing.T) {
+		code, stdout, stderr := run("cat README.md")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if strings.Contains(stdout, "no symbol summary") {
+			t.Fatalf("served the compact stub instead of the file: %q", stdout)
+		}
+		for _, line := range readmeLines {
+			if !strings.Contains(stdout, line) {
+				t.Fatalf("raw README line %q missing from serve: %q", line, stdout)
+			}
+		}
+	})
+	t.Run("head window preserved", func(t *testing.T) {
+		code, stdout, stderr := run("head -3 README.md")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		if len(lines) != 3 {
+			t.Fatalf("head -3 returned %d lines, want 3: %q", len(lines), stdout)
+		}
+		if lines[0] != readmeLines[0] || lines[2] != readmeLines[2] {
+			t.Fatalf("head window mismatch: %q", lines)
+		}
+	})
+	t.Run("tail window preserved", func(t *testing.T) {
+		code, stdout, stderr := run("tail -2 go.mod")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		want := []string{"", "require example.com/x v1.0.0"}
+		if len(lines) != len(want) {
+			t.Fatalf("tail -2 returned %d lines, want %d: %q", len(lines), len(want), stdout)
+		}
+		for i := range want {
+			if lines[i] != want[i] {
+				t.Fatalf("tail window mismatch: got %q, want %q", lines, want)
+			}
+		}
+	})
+	t.Run("bare cat on code still summarises", func(t *testing.T) {
+		code, stdout, stderr := run("cat sample.go")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if !strings.Contains(stdout, "func Alpha") || !strings.Contains(stdout, "type Beta") {
+			t.Fatalf("expected the symbolic summary for code, got %q", stdout)
+		}
+	})
+}
+
+// TestKernGuardFastPathTelemetry pins the shell fallback's intentional raw
+// passes: each reason emits exactly one privacy-safe adoption event at the
+// managed project root, never at the invocation subdirectory.
+func TestKernGuardFastPathTelemetry(t *testing.T) {
+	script := writeGuardScriptFile(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := `{"schema_version":1,"managed":true,"guard":{"enabled":true}}`
+	if err := os.WriteFile(filepath.Join(root, ".kern", "config.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(root, "sub")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "sample.go"), []byte("package demo\n\nfunc Alpha() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "README.md"), []byte("# demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name   string
+		stdin  string
+		reason string
+	}{
+		{"non-code", `{"tool_name":"read","tool_input":{"file_path":"README.md"}}`, "non-code"},
+		{"tiny", `{"tool_name":"read","tool_input":{"file_path":"sample.go"}}`, "tiny"},
+		{"window", `{"tool_name":"read","tool_input":{"file_path":"sample.go","start_line":1,"end_line":2}}`, "window"},
+		{"missing", `{"tool_name":"read","tool_input":{"file_path":"missing.go"}}`, "missing"},
+		{"text-search", `{"tool_name":"grep","tool_input":{"pattern":"not-a-symbol"}}`, "text-search"},
+		{"native-glob", `{"tool_name":"glob","tool_input":{"pattern":"*.go"}}`, "native-glob"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runGuardOutput(t, script, child, tc.stdin, []string{
+				"KERN_GUARD_ASSUME_KERN=0", "KERN_BIN=/usr/bin/true",
+			})
+			if code != 0 {
+				t.Fatalf("exit = %d, stderr %q", code, stderr)
+			}
+			if stderr != "" || stdout != "" {
+				t.Fatalf("unexpected guard output: stdout %q, stderr %q", stdout, stderr)
+			}
+		})
+	}
+
+	logPath := filepath.Join(root, ".kern", "adoption.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("managed-root adoption log missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(child, ".kern")); !os.IsNotExist(err) {
+		t.Fatalf("telemetry created a nested .kern directory: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != len(cases) {
+		t.Fatalf("got %d telemetry lines, want %d: %q", len(lines), len(cases), data)
+	}
+	for i, tc := range cases {
+		var ev struct {
+			Tool   string `json:"tool"`
+			Routed bool   `json:"routed"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &ev); err != nil {
+			t.Fatalf("line %d is not JSON: %v", i, err)
+		}
+		if ev.Routed || ev.Reason != tc.reason {
+			t.Fatalf("line %d = %+v, want routed=false reason=%s", i, ev, tc.reason)
+		}
+	}
+	if strings.Contains(string(data), root) || strings.Contains(string(data), child) || strings.Contains(string(data), "sample.go") {
+		t.Fatalf("telemetry leaked a path: %q", data)
+	}
+
+	unmanaged := t.TempDir()
+	code, _, stderr := runGuardOutput(t, script, unmanaged, cases[0].stdin, []string{
+		"KERN_GUARD_ASSUME_KERN=0", "KERN_BIN=/usr/bin/true",
+	})
+	if code != 0 {
+		t.Fatalf("unmanaged exit = %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(unmanaged, ".kern")); !os.IsNotExist(err) {
+		t.Fatalf("unmanaged project received kern state: %v", err)
 	}
 }
 
@@ -671,7 +848,11 @@ func TestKernGuardBypassAudited(t *testing.T) {
 	// 2) and the refusal is audited with mode=refused:no-tty.
 
 	t.Run("KERN_BYPASS=1 refusal records the tool and mode", func(t *testing.T) {
-		code, _ := runGuard(t, script, `{"tool_name":"Read","tool_input":{"file_path":"/x/y.go"}}`, []string{"KERN_BYPASS=1", "HOME=" + home})
+		bypassPath := filepath.Join(t.TempDir(), "y.go")
+		if err := os.WriteFile(bypassPath, []byte(strings.Repeat("// bypass fixture\n", 150)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, _ := runGuard(t, script, fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, bypassPath), []string{"KERN_BYPASS=1", "HOME=" + home})
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2 (bypass refused without a terminal)", code)
 		}

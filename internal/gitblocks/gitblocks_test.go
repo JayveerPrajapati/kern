@@ -168,6 +168,9 @@ func TestGitignoreGeneratedIdempotentReplace(t *testing.T) {
 // block ignores every machine-specific agent config, including the newer
 // .continue/ and .windsurf/ rule files and the .vscode/ adapter config
 // (F10: setup writes .vscode/mcp.json but never ignored it — untracked noise).
+// F-A6: the block must also cover everything a fresh setup generates —
+// .gitignore itself, AGENTS.md, opencode.json, .opencode/, .agents/skills/,
+// .codex/ and .github/skills/ — so `git status --porcelain` stays empty.
 func TestGitignoreGeneratedCoversNewAgents(t *testing.T) {
 	dir := t.TempDir()
 	st := GitignoreGenerated(dir)
@@ -178,7 +181,11 @@ func TestGitignoreGeneratedCoversNewAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitignore not written: %v", err)
 	}
-	for _, want := range []string{".continue/", ".windsurf/", ".kern/", ".gemini/", ".kiro/", ".vscode/", ".github/hooks/", ".agents/rules/kern.md", ".agents/hooks.json"} {
+	for _, want := range []string{
+		".gitignore", ".continue/", ".windsurf/", ".kern/", ".gemini/", ".kiro/", ".vscode/",
+		".github/hooks/", ".github/skills/", ".agents/rules/kern.md", ".agents/hooks.json",
+		".agents/skills/", ".codex/", "AGENTS.md", "opencode.json", ".opencode/",
+	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf(".gitignore missing %q:\n%s", want, b)
 		}

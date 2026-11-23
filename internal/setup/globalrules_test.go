@@ -1,10 +1,13 @@
 package setup
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agentwire"
 )
 
 // testEnv redirects every user-global path under a temp HOME (and a temp
@@ -19,51 +22,63 @@ func testEnv(t *testing.T) string {
 }
 
 // TestCheckReportsGlobalRules verifies the setup report lists every global
-// rules path.
+// rules path, each labelled by its host (identical labels made the report
+// look like duplicated rows — 2026-11-10 campaign).
 func TestCheckReportsGlobalRules(t *testing.T) {
 	testEnv(t)
 	root := t.TempDir()
 	sts := Check(root)
-	found := 0
+	seen := map[string]bool{}
 	for _, s := range sts {
-		if s.Agent == "global rules" {
-			found++
+		if strings.HasPrefix(s.Agent, "global rules (") {
+			seen[s.Agent] = true
 		}
 	}
-	if found != 7 {
-		t.Fatalf("Check() reports %d global-rules entries, want 7", found)
+	if len(seen) != 7 {
+		t.Fatalf("Check() reports %d distinct global-rules entries, want 7 (%v)", len(seen), seen)
 	}
 }
 
-// TestThinAGENTSMDMode covers the default repo AGENTS.md variant: FULL when
-// no host global slot carries the kern-managed block (the repo file is the
-// only delivery), THIN once the corresponding global slot is managed (the
-// full rules load once globally — a thin repo file avoids loading them
-// twice), full persisted in .kern/config.json on an explicit --agents-md=full,
-// subsequent runs remember full, and an explicit --agents-md=thin restores
-// the thin variant.
+// TestThinAGENTSMDMode covers the default repo AGENTS.md variant (T-05
+// compact policy, 2026-11-19): THIN (the self-sufficient core block) is the
+// default everywhere — with or without a managed global slot; an existing
+// FULL file is kept by default (never silently downgraded); full persisted
+// in .kern/config.json on an explicit --agents-md=full; subsequent runs
+// remember full; an explicit --agents-md=thin restores the thin variant.
 func TestThinAGENTSMDMode(t *testing.T) {
 	testEnv(t)
 	root := t.TempDir()
 
-	// Default run, no managed global slot: FULL rules, nothing persisted.
+	// Default run, no managed global slot: THIN rules (the T-05 core block
+	// is self-sufficient), nothing persisted.
 	WireWith(root, []string{"claude"}, false, false, WireOptions{})
 	b, _ := os.ReadFile(filepath.Join(root, "AGENTS.md"))
-	if !strings.Contains(string(b), "kern usage rules for agents") {
-		t.Fatalf("default run without a managed global slot did not write full rules:\n%s", b)
+	if !strings.Contains(string(b), "# kern usage rules — thin (repo)") {
+		t.Fatalf("default run without a managed global slot did not write the thin core rules:\n%s", b)
 	}
-	if strings.Contains(string(b), "# kern usage rules — thin (repo)") {
-		t.Fatalf("thin rules written without a managed global slot:\n%s", b)
+	markerPath := filepath.Join(root, ".kern", "config.json")
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("default run must persist explicit managed-project marker: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".kern", "config.json")); !os.IsNotExist(err) {
-		t.Fatalf("default run must not persist config.json")
+	var markerCfg struct {
+		Managed bool `json:"managed"`
+		Guard   struct {
+			Enabled bool `json:"enabled"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal(marker, &markerCfg); err != nil || !markerCfg.Managed || !markerCfg.Guard.Enabled {
+		t.Fatalf("default marker = %s err=%v, want managed=true and guard.enabled=true", marker, err)
 	}
 
-	// Managed global slots (the normal installed case): the default run KEEPS
-	// the existing full rules — an unrequested default must not
-	// silently delete the full usage rules; the dedup switch to thin is an
-	// explicit --agents-md thin choice (fresh wires in a global-managed
-	// environment still get thin — TestProjectRulesThinWhenGlobalManaged).
+	// Managed global slots + an existing FULL file (e.g. the kern repo's own,
+	// or a repo wired by a pre-T-05 setup): the default run KEEPS the full
+	// rules — an unrequested default must not silently delete them; the
+	// switch to thin is an explicit --agents-md thin choice (fresh wires
+	// still get thin — TestProjectRulesThinWhenGlobalManaged).
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(agentwire.FullRulesHeader+"\nfull wiring\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	WireGlobalRules()
 	WireWith(root, []string{"claude"}, false, false, WireOptions{})
 	b, _ = os.ReadFile(filepath.Join(root, "AGENTS.md"))

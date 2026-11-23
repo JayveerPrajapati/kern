@@ -17,6 +17,18 @@ concurrency:
   group: nightly-${{ github.workflow }}
   cancel-in-progress: true
 jobs:
+  full-race:
+    name: Full suite (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: ./.github/actions/go-env
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-tools
+      - name: go test -race ./...
+        run: go test -race -count=1 -timeout 75m ./...
+
   full-suite:
     name: Full suite (no -short)
     runs-on: ubuntu-latest
@@ -153,12 +165,41 @@ jobs:
             Write-Host "NOTE: 'checking for updates' not printed — updateGuardDenial denied before the ps1 leg (accepted smoke outcome)"
           }
 
+  # Nightly E2E/load soak runs the complete deterministic surface (not just
+  # the PR-focused smoke), writes the operational load report, and keeps the
+  # artifact for trend analysis. Unlike debt-report, this is a hard gate: any
+  # tool error, transport error, success-count mismatch, missing served_by, or
+  # versioned latency-budget regression fails the nightly.
+  e2e-load:
+    name: full e2e + load soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: ./.github/actions/go-env
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-tools
+      - name: Full deterministic e2e surface
+        run: make e2e-full
+      - name: Load gate and report
+        run: make load-gate
+      - name: Upload load report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kern-nightly-load-report
+          path: |
+            .kern/load/load.json
+            .kern/load/load.md
+            docs/benchmarks/e2e-load.md
+          if-no-files-found: error
+
   # A red nightly nobody sees is not a nightly: open an issue when a blocking
   # job fails on the schedule. (debt-report is informational and cross-os-full
   # is non-blocking, so neither is listed.)
   notify:
     name: open issue on failure
-    needs: [full-suite, windows-update-smoke]
+    needs: [full-race, full-suite, windows-update-smoke, e2e-load]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

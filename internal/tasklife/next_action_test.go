@@ -39,3 +39,23 @@ func TestRunNextActionNamesOnlyExistingTools(t *testing.T) {
 		t.Errorf("NextAction should name the real CLI entry point `kern run`: %s", res.NextAction)
 	}
 }
+
+// TestRunNextActionMatchesExecPosture (audit F6, 2026-11-21): the guidance
+// must not claim kern_exec needs KERN_ALLOW_EXEC=1 — under the default ask
+// posture it runs LOW/MEDIUM commands audited and mints approvals for
+// HIGH/CRITICAL. Agents believing the stale text wrongly assumed exec was
+// disabled or set an unnecessary escape env.
+func TestRunNextActionMatchesExecPosture(t *testing.T) {
+	p := newTestPlatform(t, t.TempDir())
+	ts := NewTaskService(p, nil)
+	res, err := ts.Run("Add tenant-aware caching to UserService")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.NextAction, "KERN_ALLOW_EXEC") {
+		t.Errorf("NextAction must not claim kern_exec needs KERN_ALLOW_EXEC=1 (stale closed-posture text): %s", res.NextAction)
+	}
+	if !strings.Contains(res.NextAction, "kern_exec") || !strings.Contains(res.NextAction, "audited") {
+		t.Errorf("NextAction should describe the live ask posture for kern_exec: %s", res.NextAction)
+	}
+}

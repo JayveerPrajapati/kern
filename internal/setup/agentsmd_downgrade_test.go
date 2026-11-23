@@ -115,12 +115,14 @@ func TestAgentsMDPersistedKeyDetection(t *testing.T) {
 	}
 }
 
-// TestThinAGENTSmdCarriesEssentialRouting pins the thin-variant adequacy
-// fix: the thin repo AGENTS.md (what non-Claude agents read) must carry the
-// critical kern-first routing facts — the decision-table essentials
-// (read→kern_explore, grep→kern_search, build/test→kern_verify,
-// unsure→kern_meta), the session-start kern_buddy call, and the default
-// 7-tool surface note — while staying thin by design.
+// TestThinAGENTSmdCarriesEssentialRouting pins the core-variant adequacy
+// (T-05 compact policy): the default repo AGENTS.md must carry the
+// security-critical facts — the decision-table essentials (read→kern_explore,
+// grep→kern_search, build/test→kern_verify, unsure→kern_meta), the
+// session-start kern_buddy call, the pre-edit blast-radius rule, the
+// verify-after-change rule, the per-call fallback rule, the opencode GATE
+// boundary, and the default-surface/env notes — while staying compact by
+// design.
 func TestThinAGENTSmdCarriesEssentialRouting(t *testing.T) {
 	thin := agentwire.ThinAGENTSmd("all")
 	for _, want := range []string{
@@ -129,19 +131,26 @@ func TestThinAGENTSmdCarriesEssentialRouting(t *testing.T) {
 		"kern_search",  // grep → kern_search
 		"kern_verify",  // build/test → kern_verify
 		"kern_buddy",   // session-start onboarding call
+		"kern_impact",  // pre-edit blast radius
 		"kern_exec",    // governed execution — the tool missing when rule text said 6 tools
 		"KERN_MCP_FULL=1",
+		"KERN_BYPASS=1", // the guard escape, operator-gated
 		"read",
 		"grep",
 		"build/test",
+		"Before ANY edit",  // blast-radius-before-edit rule
+		"After ANY change", // verify-after-change rule
+		"Fallback rule",    // per-call fallback rule
+		"GATE",             // opencode guard boundary
+		"--agents-md full", // the opt-in for the extended policy
 	} {
 		if !strings.Contains(thin, want) {
 			t.Errorf("thin AGENTS.md missing essential routing fact %q:\n%s", want, thin)
 		}
 	}
-	// Still thin: the thin variant must stay far below the full template
-	// (13KB+); thin-by-design is the point of the variant.
-	if len(thin) > 1024 {
-		t.Errorf("thin AGENTS.md is %d bytes, want <= 1024 (thin by design)", len(thin))
+	// Compact by design (T-05 acceptance: default repo policy <=2KB); the
+	// full template is 17KB+.
+	if len(thin) > 2048 {
+		t.Errorf("thin AGENTS.md is %d bytes, want <= 2048 (compact by design)", len(thin))
 	}
 }

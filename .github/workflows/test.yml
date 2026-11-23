@@ -22,6 +22,12 @@ jobs:
       - uses: ./.github/actions/go-env
       - name: Format
         run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
+      - name: Release manifest
+        run: |
+          python3 scripts/check-release-manifest.py
+          python3 -m unittest discover -s python/tests
+      - name: Docs drift
+        run: python3 scripts/check-docs-drift.py
       - name: Generated docs freshness
         run: |
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
@@ -52,12 +58,24 @@ jobs:
       # Hermeticity guard: the suite must pass without a warm .kern store.
       # A test that depends on one (the 2026-10-28 guard serve regression)
       # must fail here; `make test-fresh` is the local equivalent.
-      - name: Ensure no warm index
-        run: rm -rf .kern
+      - name: Ensure no warm index (preserve tracked config)
+        run: |
+          test -f .kern/boundaries.json
+          rm -rf .kern
+          git checkout -- .kern
+          test -f .kern/boundaries.json
+          test ! -e .kern/index.sqlite
+          test ! -e .kern/index.json
+          test ! -e .kern/index.json.snap
       - name: Test (with coverage)
         run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
-      - name: Aggregate coverage floor (>=68%)
+      - name: Aggregate coverage floor (>=70%)
         run: bash scripts/cover-floor.sh coverage.out
+      - name: Patch coverage gate (>=75%)
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
+          if [[ "$base" =~ ^0+$ ]]; then base="origin/main"; fi
+          python3 scripts/check-patch-coverage.py --profile coverage.out --base "$base"
       - name: Security-surface coverage gate (>=70%)
         run: bash scripts/cover-risky.sh
       - name: Upload coverage to Codecov
@@ -114,7 +132,7 @@ jobs:
           - shard: app-governance
             packages: ./internal/app/... ./internal/governance/...
           - shard: mcp-index-loop-rest
-            packages: ./internal/mcp/... ./internal/index/... ./internal/project/... ./internal/loop/... ./internal/eventbus/... ./internal/processgroup/...
+            packages: ./internal/mcp/... ./internal/index/... ./internal/project/... ./internal/loop/... ./internal/eventbus/... ./internal/processgroup/... ./internal/daemon/... ./internal/agent/...
           # tasklife owns the concurrent TaskService (the largest extracted
           # subsystem); execution/setup/context run goroutines too. They were
           # outside every -race shard before the 2026-10-28 audit.
@@ -128,12 +146,45 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-tools
       - name: Test (race detector)
-        run: go test -short -race -timeout 20m ${{ matrix.packages }}
+        run: go test -short -race -timeout 25m ${{ matrix.packages }}
 
   # The contract/parity gates (MCP catalog vs plugin, architecture doc parity,
   # golden routing questions, per-language parity, CLI usage contract) are
   # ordinary tests that run inside `unit`; none skips under -short, so a
   # separate job would only run them a second time.
+
+  # Full-surface E2E + load gate. test.yml is reused by ci.yml (every
+  # PR/push) and release.yml (every tag), so the same deterministic tool,
+  # protocol, CLI, daemon, and load assertions are release gates, not local-only
+  # checks. The load report is uploaded even when a gate fails so a regression
+  # can be diagnosed from the exact CI run that produced it.
+  e2e:
+    name: e2e + load gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/go-env
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-tools
+      - name: MCP full-surface e2e
+        run: make e2e-mcp
+      - name: CLI mirror e2e
+        run: make e2e-cli
+      - name: Daemon lifecycle e2e
+        run: make e2e-daemon
+      - name: Load gate and report
+        run: make load-gate
+      - name: Upload load report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kern-load-report
+          path: |
+            .kern/load/load.json
+            .kern/load/load.md
+            docs/benchmarks/e2e-load.md
+          if-no-files-found: error
 
   # Benchmark regression gate (`kern bench --check`, the `make bench-gate`
   # target). Latency gates are machine-sensitive, so the versioned thresholds
@@ -154,6 +205,44 @@ jobs:
           fetch-depth: 0
       - name: Run bench --check
         run: go run ./cmd/kern bench --root . --check
+      # Benchmark report generation gate: `make bench` runs the offline
+      # harness's own tests AND generates the full report (exit 1 if the
+      # harness fails or its hard gates trip). Keeps the evaluate/bench
+      # surface exercised end-to-end on every PR/push and release tag, not
+      # just its unit tests.
+      - name: Benchmark report generation (make bench)
+        run: make bench
+
+  # Daemon served-by correctness gate (2026-11-20 remediation Phase 5):
+  # `kern bench --mode daemon` on an unsandboxed runner must have EVERY
+  # fresh-process query served by the daemon. The --check thresholds treat
+  # an in-process fallback as a warn (honest for sandboxed local shells
+  # where the Unix socket bind is denied), so the gate is asserted here on
+  # the bench.json report instead: on CI there is no sandbox, so any row
+  # whose served_by is not "daemon" is a wiring regression or a daemon
+  # start failure, and fails the build. The binary is built once so the
+  # daemon it spawns shares the invoking binary's identity (two separate
+  # `go run` compiles could race identity checks).
+  bench-daemon:
+    name: bench daemon served-by gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: ./.github/actions/go-env
+        with:
+          fetch-depth: 0
+      - name: Build kern
+        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+      - name: Bench daemon mode — every query must be daemon-served
+        run: |
+          "$RUNNER_TEMP/kern" bench --root . --mode daemon
+          fell_back=$(jq -r '.cli_queries[]? | select(.served_by != "daemon") | "\(.name): served_by=\(.served_by // "absent") \(.served_detail // "")"' .kern/bench.json)
+          if [ -n "$fell_back" ]; then
+            echo "::error::daemon-mode bench rows not served by the daemon — wiring regression or daemon start failure:"
+            echo "$fell_back"
+            exit 1
+          fi
+          echo "all daemon-mode queries were served by the daemon"
 
   # Locks the release artifact layout: `make dist` (the same flow the release
   # workflow uses) must produce exactly the archives release.yml uploads, each

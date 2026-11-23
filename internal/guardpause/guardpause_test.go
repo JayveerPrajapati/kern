@@ -163,6 +163,40 @@ func TestActiveIgnoresExpiredPause(t *testing.T) {
 	}
 }
 
+func TestRegistryWritePrunesExpiredRecords(t *testing.T) {
+	rootA, registry, _ := setupPauseEnv(t)
+	rootB := t.TempDir()
+	now := time.Now().UTC()
+	expired := Pause{
+		Schema:   Schema,
+		Scope:    ScopeRepo,
+		Root:     rootA,
+		Reason:   "expired",
+		Expires:  now.Add(-time.Minute).Format(time.RFC3339),
+		Recorded: now.Add(-time.Hour).Format(time.RFC3339),
+	}
+	j, err := json.Marshal(expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registry, append([]byte("foreign-record\n"), append(j, '\n')...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateRecord(rootB, "30m", "trigger prune", now); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"reason":"expired"`) {
+		t.Fatalf("expired pause was not pruned:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "foreign-record") || !strings.Contains(string(raw), `"reason":"trigger prune"`) {
+		t.Fatalf("foreign/active records were not preserved:\n%s", raw)
+	}
+}
+
 func TestCreateRecordValidationAndAuditFailure(t *testing.T) {
 	root, _, audit := setupPauseEnv(t)
 	if _, err := CreateRecord(root, "30m", "   ", time.Now().UTC()); err == nil {
@@ -215,5 +249,54 @@ func TestBashSteeringScope(t *testing.T) {
 	}
 	if _, ok, _ := ActiveScoped(root, ScopeRepo); ok {
 		t.Fatal("repo pause survived resume")
+	}
+}
+
+func TestCheckSwitchesIndexingMarkerFreshness(t *testing.T) {
+	root := t.TempDir()
+	kern := filepath.Join(root, ".kern")
+	if err := os.MkdirAll(kern, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fileMarker := filepath.Join(kern, "indexing")
+	if err := os.WriteFile(fileMarker, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := CheckSwitches(root)
+	if d.Level != "warn" || !strings.Contains(d.Detail, "first index in progress") {
+		t.Fatalf("fresh file marker = %+v", d)
+	}
+
+	old := time.Now().Add(-30 * time.Minute)
+	if err := os.Chtimes(fileMarker, old, old); err != nil {
+		t.Fatal(err)
+	}
+	d = CheckSwitches(root)
+	if d.Level != "warn" || !strings.Contains(d.Detail, "stale marker from a crashed build") {
+		t.Fatalf("stale file marker = %+v", d)
+	}
+
+	if err := os.Remove(fileMarker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fileMarker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(fileMarker, "current")
+	if err := os.WriteFile(entry, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = CheckSwitches(root)
+	if d.Level != "warn" || !strings.Contains(d.Detail, "first index in progress") {
+		t.Fatalf("fresh directory marker = %+v", d)
+	}
+
+	if err := os.Chtimes(entry, old, old); err != nil {
+		t.Fatal(err)
+	}
+	d = CheckSwitches(root)
+	if d.Level != "warn" || !strings.Contains(d.Detail, "stale marker from a crashed build") {
+		t.Fatalf("stale directory marker = %+v", d)
 	}
 }

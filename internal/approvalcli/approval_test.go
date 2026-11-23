@@ -111,3 +111,69 @@ func TestApprovalWaitUnknownID(t *testing.T) {
 		t.Fatalf("unknown-id message should name both the miss and the consumed case, got: %q", stderr)
 	}
 }
+
+// TestApprovalWaitNotifyOnce locks the single-notification probe: --notify-once
+// emits the deterministic pending line AND the one-line grant hint (with the
+// approval id and root) immediately, then exits 0 WITHOUT blocking — even
+// with a long timeout, no decision ever needs to land.
+func TestApprovalWaitNotifyOnce(t *testing.T) {
+	root := newRoot(t)
+	id := "wait-notify"
+	seedPendingApproval(t, root, id)
+
+	start := time.Now()
+	code := -1
+	out := captureStdout(t, func() { code = RunApproval([]string{"wait", id, "--notify-once", "--root", root, "--timeout", "30m"}) })
+	if code != 0 {
+		t.Errorf("RunApproval(wait --notify-once) exit = %d, want 0", code)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("--notify-once must not block (took %s)", elapsed)
+	}
+	for _, want := range []string{
+		"pending: " + id,
+		"grant: kern approval ask " + id + " --root " + root,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--notify-once output missing %q:\n%s", want, out)
+		}
+	}
+	// The pending state must still be the live state: nothing decided it.
+	if strings.Contains(out, "approved:") || strings.Contains(out, "rejected:") {
+		t.Errorf("--notify-once must not fabricate a decision:\n%s", out)
+	}
+}
+
+// TestApprovalWaitNotifyOnceUnknownID locks the probe's fail-fast: a miss is
+// a real error even in --notify-once mode, never a "pending" claim.
+func TestApprovalWaitNotifyOnceUnknownID(t *testing.T) {
+	root := newRoot(t)
+	stderr := captureStderr(t, func() {
+		expectCode(t, 1, func() int {
+			return RunApproval([]string{"wait", "t-nonexistent", "--notify-once", "--root", root, "--timeout", "30m"})
+		})
+	})
+	if !strings.Contains(stderr, "approval not found") {
+		t.Fatalf("--notify-once unknown-id must fail fast, got: %q", stderr)
+	}
+}
+
+// TestApprovalWaitNotifyOnceDecided locks the decided shortcut: if the
+// decision already landed, --notify-once reports it (exit 0 / 3) instead of
+// claiming pending.
+func TestApprovalWaitNotifyOnceDecided(t *testing.T) {
+	root := newRoot(t)
+	id := "wait-decided"
+	seedPendingApproval(t, root, id)
+	if _, err := governance.NewFileStore(root).Decide(id, "human", true, "pre-landed"); err != nil {
+		t.Fatal(err)
+	}
+	code := -1
+	out := captureStdout(t, func() { code = RunApproval([]string{"wait", id, "--notify-once", "--root", root, "--timeout", "30m"}) })
+	if code != 0 {
+		t.Errorf("decided + approved must exit 0, got %d", code)
+	}
+	if !strings.Contains(out, "approved: "+id) {
+		t.Errorf("--notify-once on a decided approval must report the decision:\n%s", out)
+	}
+}

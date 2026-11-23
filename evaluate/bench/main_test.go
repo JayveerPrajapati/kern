@@ -2,7 +2,10 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/docsearch"
 )
 
 // TestGatesAreMet pins the benchmark's hard gates so a regression in any
@@ -79,33 +82,95 @@ func TestFixtureTaskMatrixNonDegenerate(t *testing.T) {
 }
 
 // TestTaskClassMetricsProduceMetricSet asserts the harness produces
-// the full per-task-class metric set for at least one task class: token
-// reduction, tool-call reduction, retries, latency, cost, and the outcome
-// flags (first-pass, verified, human intervention, regression).
+// the full per-task-class metric set for EVERY task class across EVERY
+// fixture (2026-11-20 remediation: was tasks[:1] — only "lookup" was ever
+// reported): token reduction (estimator AND exact o200k side by side),
+// tool-call reduction, retries, latency, cost, and the outcome flags
+// (first-pass, verified, human intervention, regression).
 func TestTaskClassMetricsProduceMetricSet(t *testing.T) {
 	ms := taskClassMetrics()
 	if len(ms) == 0 {
 		t.Fatal("taskClassMetrics returned no rows")
 	}
-	m := ms[0]
-	if m.fixture == "" || m.task == "" {
-		t.Fatalf("class row missing fixture/task: %+v", m)
+	if want := len(fixtures) * len(tasks); len(ms) != want {
+		t.Fatalf("taskClassMetrics rows = %d, want %d (every fixture x every task class)", len(ms), want)
 	}
-	if m.beforeTokens == 0 || m.afterTokens == 0 {
-		t.Fatalf("class row degenerate tokens: before=%d after=%d", m.beforeTokens, m.afterTokens)
+	seenTasks := map[string]bool{}
+	seenFixtures := map[string]bool{}
+	for _, m := range ms {
+		if m.fixture == "" || m.task == "" {
+			t.Fatalf("class row missing fixture/task: %+v", m)
+		}
+		if m.beforeTokens == 0 || m.afterTokens == 0 {
+			t.Fatalf("class row degenerate tokens: before=%d after=%d", m.beforeTokens, m.afterTokens)
+		}
+		// Exact o200k counts must be present (tables are embedded) and drift
+		// labeled — never silently mixed into the estimator numbers.
+		if m.exactBefore == 0 {
+			t.Fatalf("class row %s/%s: exact o200k before-tokens = 0 (tokenizer unavailable?)", m.fixture, m.task)
+		}
+		if m.toolCalls < 0 {
+			t.Fatalf("tool calls negative: %d", m.toolCalls)
+		}
+		if m.latencyMs < 0 {
+			t.Fatalf("latency negative: %d", m.latencyMs)
+		}
+		if m.cost < 0 {
+			t.Fatalf("cost negative: %.4f", m.cost)
+		}
+		// Outcomes must be boolean and consistent: verified implies first-pass.
+		if m.verifiedSuccess && !m.firstPass {
+			t.Fatalf("verifiedSuccess true but firstPass false: %+v", m)
+		}
+		seenTasks[m.task] = true
+		seenFixtures[m.fixture] = true
 	}
-	if m.toolCalls < 0 {
-		t.Fatalf("tool calls negative: %d", m.toolCalls)
+	for _, tk := range tasks {
+		if !seenTasks[tk.name] {
+			t.Errorf("task class %q missing from taskClassMetrics", tk.name)
+		}
 	}
-	if m.latencyMs < 0 {
-		t.Fatalf("latency negative: %d", m.latencyMs)
+	for _, f := range fixtures {
+		if !seenFixtures[f.name] {
+			t.Errorf("fixture %q missing from taskClassMetrics", f.name)
+		}
 	}
-	if m.cost < 0 {
-		t.Fatalf("cost negative: %.4f", m.cost)
+}
+
+// TestRecallQueriesHitTarget runs the harness's docs-retrieval recall gate
+// in CI (2026-11-20 remediation): index the repo's docs and require the
+// expanded recallQueries set to surface its expected file in the top-5 with
+// recall >= 0.9 (the pre-expansion baseline was 2/3).
+func TestRecallQueriesHitTarget(t *testing.T) {
+	ix, err := docsearch.IndexDir("../..")
+	if err != nil {
+		t.Skipf("docs index unavailable: %v", err)
 	}
-	// Outcomes must be boolean and consistent: verified implies first-pass.
-	if m.verifiedSuccess && !m.firstPass {
-		t.Fatalf("verifiedSuccess true but firstPass false: %+v", m)
+	hit := 0
+	for _, q := range recallQueries {
+		results := ix.Search(q.query, 5)
+		ok := false
+		for _, r := range results {
+			if strings.Contains(r.Doc.Chunk.File, q.file) {
+				ok = true
+				break
+			}
+		}
+		if ok {
+			hit++
+		} else {
+			// Log what DID come back so a miss is debuggable from the test
+			// output alone (which doc outranked the expected one).
+			var top []string
+			for _, r := range results {
+				top = append(top, r.Doc.Chunk.File)
+			}
+			t.Logf("MISS %-44s -> %s (top-5: %v)", q.query, q.file, top)
+		}
+	}
+	recall := pctf(hit, len(recallQueries))
+	if recall < 90 {
+		t.Errorf("recall@5 = %d/%d (%.0f%%), want >= 90%%", hit, len(recallQueries), recall)
 	}
 }
 

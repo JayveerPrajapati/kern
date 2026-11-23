@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,8 +77,12 @@ func TestKernGuardPauseScopesReadGrepGlobOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	governedFile := filepath.Join(repo, "main.go")
+	if err := os.WriteFile(governedFile, []byte("package main\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	allow := map[string]string{
-		"Read": `{"tool_name":"Read","tool_input":{"file_path":"/tmp/x/main.go"}}`,
+		"Read": fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, governedFile),
 		"grep": `{"tool_name":"grep","tool_input":{"pattern":"RunGuard"}}`,
 		"glob": `{"tool_name":"glob","tool_input":{"pattern":"*.go"}}`,
 	}
@@ -112,7 +117,11 @@ func TestKernGuardPauseRequiresRegistryAndActiveStatus(t *testing.T) {
 	script := writeGuardScriptFile(t)
 	repo := t.TempDir()
 	bin := fakeGuardPauseKern(t, "active")
-	read := `{"tool_name":"Read","tool_input":{"file_path":"/tmp/x/main.go"}}`
+	readFile := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(readFile, []byte("package main\n\n"+strings.Repeat("// governed code fixture line\n", 120)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, readFile)
 
 	// Even a CLI that claims active must not matter when the operator-owned
 	// registry does not exist: the existence probe is the cheap first gate.

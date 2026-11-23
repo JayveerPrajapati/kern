@@ -300,8 +300,18 @@ func TestWireDryRunPreviewsKeepFullRules(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
 	dir := t.TempDir()
 	WireGlobalRules()
-	if !agentwire.HostGlobalManaged("AGENTS.md") {
-		t.Fatal("sanity: global rules wiring must make the AGENTS.md global slot managed")
+	// Sanity: the global wiring must have installed an intact managed block
+	// (post-T-05 the keep-full contract no longer depends on this, but the
+	// environment is still set up as a global-managed one).
+	managed := false
+	for _, p := range agentwire.GlobalRulesPaths() {
+		if agentwire.GlobalSlotCarriesCanonicalRules(p) {
+			managed = true
+			break
+		}
+	}
+	if !managed {
+		t.Fatal("sanity: global rules wiring must make at least one global slot managed")
 	}
 	writeFixture(t, dir, "AGENTS.md", fullRulesFixture())
 

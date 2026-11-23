@@ -188,16 +188,23 @@ func TestCheckReportsGlobalPluginPaths(t *testing.T) {
 	statuses := Check(root)
 	globals := GlobalPluginPaths()
 	count := 0
+	labels := map[string]bool{}
 	for _, s := range statuses {
-		if strings.Contains(s.Agent, "opencode plugin (global)") {
+		// Each global copy is labelled with its location (config vs
+		// ~/.opencode) so the pair is distinguishable (2026-11-10 campaign).
+		if strings.HasPrefix(s.Agent, "opencode plugin (global ") && strings.HasSuffix(s.Agent, ")") {
 			count++
+			labels[s.Agent] = true
 			if !containsPath(globals, s.Path) {
 				t.Fatalf("status path %q not in GlobalPluginPaths %v", s.Path, globals)
 			}
 		}
 	}
 	if count != len(globals) {
-		t.Fatalf("expected %d 'opencode plugin (global)' statuses, got %d", len(globals), count)
+		t.Fatalf("expected %d 'opencode plugin (global …)' statuses, got %d", len(globals), count)
+	}
+	if len(labels) != len(globals) {
+		t.Fatalf("global plugin labels are not distinct: %v", labels)
 	}
 }
 

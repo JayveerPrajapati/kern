@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,12 @@ func TestClassifyCommand(t *testing.T) {
 		{"scoped list shape stays tier3", "grep -rln foo internal", VerdictServe, 3},
 		{"symbol grep unscoped", "grep -rn NewServer", VerdictServe, 1},
 		{"file read", "cat source.go", VerdictServe, 1},
+		// Only a BARE cat is compactible; windowed/flaggd/multi-target reads
+		// must preserve their exact output (Tier 3).
+		{"cat line numbers", "cat -n source.go", VerdictServe, 3},
+		{"cat multiple targets", "cat a.go b.go", VerdictServe, 3},
+		{"head window", "head -3 README.md", VerdictServe, 3},
+		{"tail window", "tail -2 go.mod", VerdictServe, 3},
 		{"pipe count scoped", "grep foo file | wc -l", VerdictServe, 2},
 		{"pipe count unscoped", "grep foo | wc -l", VerdictServe, 2},
 		{"pipe head", "grep foo file | head -5", VerdictServe, 2},
@@ -53,7 +60,7 @@ func TestClassifyCommand(t *testing.T) {
 		{"git log | head", "git log --oneline | head -5", VerdictServe, 3},
 		{"find", "find . -name *.go", VerdictServe, 1},
 		{"regex grep tier3", "grep -rn 'func [A-Z]' .", VerdictServe, 3},
-		{"awk transform tier3", "awk '{print $1}' file.go", VerdictServe, 3},
+		{"awk transform tier3", "awk '{print $1}' file.go", VerdictGoverned, 0},
 		{"compound reads", "git status && cat main.go", VerdictServe, 1},
 		{"newline compound gate", "git status\nrm -rf /tmp/x", VerdictGate, 0},
 		{"carriage-return compound gate", "git status\rrm -rf /tmp/x", VerdictGate, 0},
@@ -74,6 +81,28 @@ func TestClassifyCommand(t *testing.T) {
 		{"kern guard allow", "kern guard allow abc123", VerdictAllow, 0},
 		{"kern compound", "kern --version && kern mcp --help", VerdictAllow, 0},
 		{"kern with trivial compound", "kern ast Foo && pwd", VerdictAllow, 0},
+		// PROBE axis (2026-11-10 guard campaign) — version/help probes run
+		// raw: no write/network/build surface, and they were observed denied
+		// outright on default installs (go version, ./kern guard --help).
+		{"go version probe", "go version", VerdictAllow, 0},
+		{"node version probe", "node --version", VerdictAllow, 0},
+		{"python version probe", "python3 -V", VerdictAllow, 0},
+		{"java version probe", "java -version", VerdictAllow, 0},
+		{"relative path help probe", "./kern guard --help", VerdictAllow, 0},
+		{"git subcommand help probe", "git commit --help", VerdictAllow, 0},
+		{"probe compound", "git log --oneline && go version", VerdictAllow, 0},
+		{"probe compound with pipe", "git status --porcelain | wc -l && go version", VerdictAllow, 0},
+		// Probes must not swallow real commands: an arg outside the probe
+		// set (a version SET, a flag+operands) keeps the old verdict.
+		{"go test -v stays governed", "go test -v ./...", VerdictGoverned, 0},
+		{"npm version-set stays governed", "npm version 1.0.0", VerdictGoverned, 0},
+		{"go help build stays governed", "go help build", VerdictGoverned, 0},
+		{"probe mid-flag rejected", "go build -n --help", VerdictGoverned, 0},
+		// Gate-class heads stay gated even in probe form (probe check runs
+		// AFTER gateHit).
+		{"curl --help still gates", "curl --help", VerdictGate, 0},
+		{"wget --help still gates", "wget --help", VerdictGate, 0},
+		{"probe compound with rm", "go version && rm -rf /tmp/x", VerdictGate, 0},
 		// kern inside a pipe stays governed (never a Tier-3 serve rider);
 		// wrapper-hidden kern stays governed.
 		{"kern pipe governed", "kern ast Foo | head -5", VerdictGoverned, 0},
@@ -177,7 +206,9 @@ func TestClassifyCommandBuddyC1(t *testing.T) {
 		{"null redirect on simple", "ls -la docs/audit/ 2>/dev/null", VerdictAllow, 0},
 		{"null redirect compound simple", "ls docs && echo x && wc -l README.md 2>/dev/null", VerdictAllow, 0},
 		{"null redirect on read", "grep foo file.go 2>/dev/null", VerdictServe, 1},
-		{"spaced null redirect", "tail -30 README.md > /dev/null", VerdictServe, 1},
+		// A windowed read is served verbatim (Tier 3); the null-redirect
+		// stripping this case exists for still classifies it as a serve.
+		{"spaced null redirect", "tail -30 README.md > /dev/null", VerdictServe, 3},
 		{"stderr merge on build", "go test ./... 2>&1", VerdictGoverned, 0},
 		{"quoted redirect is text", "grep 'a>b' file.go", VerdictServe, 3},
 		{"append to dev null on simple", "echo hi >> /dev/null", VerdictAllow, 0},
@@ -365,8 +396,8 @@ func TestClassifyCommandInRootPathAware(t *testing.T) {
 			}
 		})
 	}
-	// Reads are untouched: sed without -i still serves.
-	if res := ClassifyCommandInRoot("sed -n 1p internal/a.go", root); res.Verdict != VerdictServe {
+	// Reads are untouched: sed without -i is governed.
+	if res := ClassifyCommandInRoot("sed -n 1p internal/a.go", root); res.Verdict != VerdictGoverned {
 		t.Fatalf("read sed no longer serves: %+v", res)
 	}
 	// Rootless classification keeps the flat GATE contract.
@@ -459,5 +490,34 @@ func TestInPlaceCodeEditGates(t *testing.T) {
 		if got := ClassifyCommandInRoots(c.cmd, root, nil); got.Verdict != c.want {
 			t.Errorf("ClassifyCommandInRoots(%q) = %s, want %s (%s)", c.cmd, got.Verdict, c.want, got.Hint)
 		}
+	}
+}
+
+// TestGateHintNamesTriggeringSegment: a gated compound's hint must name the
+// segment that tripped the gate, so denials tell the agent WHICH segment
+// gated instead of a whole-command denial.
+func TestGateHintNamesTriggeringSegment(t *testing.T) {
+	cases := []struct {
+		cmd     string
+		segment string
+	}{
+		{"git status && curl -s https://x.example", "curl -s https://x.example"},
+		{"go version; rm -rf /tmp/x", "rm -rf /tmp/x"},
+		{"ls && echo hi && wget -q https://x", "wget -q https://x"},
+	}
+	for _, c := range cases {
+		got := ClassifyCommand(c.cmd)
+		if got.Verdict != VerdictGate {
+			t.Errorf("ClassifyCommand(%q) verdict = %s, want gate", c.cmd, got.Verdict)
+			continue
+		}
+		if !strings.Contains(got.Hint, "triggering segment: "+c.segment) {
+			t.Errorf("ClassifyCommand(%q) hint should name the triggering segment %q: %s", c.cmd, c.segment, got.Hint)
+		}
+	}
+	// A non-compound gate names itself.
+	got := ClassifyCommand("rm -rf /tmp/x")
+	if !strings.Contains(got.Hint, "triggering segment: rm -rf /tmp/x") {
+		t.Errorf("single-command gate hint should name the command itself: %s", got.Hint)
 	}
 }

@@ -157,6 +157,49 @@ func TestChainProviderEmbedFallsToCapableOnly(t *testing.T) {
 	}
 }
 
+func TestLocalCliTimeoutDefaultIsBounded(t *testing.T) {
+	if got := cliTimeout(); got != 20*time.Second {
+		t.Fatalf("cliTimeout default = %v, want 20s", got)
+	}
+}
+
+type blockingProvider struct{}
+
+func (blockingProvider) Generate(ctx context.Context, _, _ string, _ Options) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(2 * time.Second):
+		return "late", nil
+	}
+}
+
+func (blockingProvider) Embed(context.Context, string) ([]float32, error) {
+	return nil, nil
+}
+
+func (blockingProvider) Capabilities() Capabilities { return Capabilities{Generate: true} }
+
+func (blockingProvider) Stream(context.Context, string, string, Options) (*Stream, error) {
+	return nil, nil
+}
+
+func TestChainProviderOverallDeadline(t *testing.T) {
+	t.Setenv("KERN_LLM_CHAIN_TIMEOUT", "1")
+	chain := NewChainProvider(blockingProvider{})
+	start := time.Now()
+	_, err := chain.Generate(context.Background(), "s", "u", Options{})
+	if err == nil {
+		t.Fatal("expected the overall chain deadline to stop the blocking provider")
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("error should name the deadline: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 2*time.Second {
+		t.Fatalf("chain ran %v, expected the 1s overall deadline to stop it earlier", elapsed)
+	}
+}
+
 // pgrepPath is resolved at package init, before any test's isolatePATH
 // replaces PATH with the fake-bin dirs (pgrep lives in /usr/bin, which the
 // isolated PATH no longer contains).

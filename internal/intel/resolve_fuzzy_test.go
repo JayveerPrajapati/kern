@@ -113,3 +113,51 @@ func TestResolveFuzzyPrefersProductionOverFixture(t *testing.T) {
 		t.Fatalf(`ResolveFuzzy("greet fixture hello world") = %q, %v; want GreetFixtureHelloWorld (fixture-only fallback)`, got, ok)
 	}
 }
+
+// TestResolveFuzzyRejectsSegmentPrefixMatch is the audit regression:
+// "handleToolCall" resolved to TestCallToolResolvesUnadvertisedHandler
+// because every query word matched a name segment ("handle" ~ "Handler") —
+// ranking evidence, not identity. Resolution must fail; search still ranks.
+func TestResolveFuzzyRejectsSegmentPrefixMatch(t *testing.T) {
+	ix := &index.Index{
+		Root: "/kern",
+		Symbols: []index.Symbol{
+			sym("func", "TestCallToolResolvesUnadvertisedHandler", "internal/mcp/tools_test.go", 40),
+		},
+		Pkgs: map[string]*index.Pkg{
+			"internal/mcp": {Name: "mcp", Path: "internal/mcp", Files: []string{"internal/mcp/tools_test.go"}, Lang: "go"},
+		},
+		UpdatedAt: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+	}
+	if got, ok := ResolveFuzzy(ix, "handleToolCall"); ok {
+		t.Fatalf("ResolveFuzzy(handleToolCall) = %q; a segment-prefix match must not resolve", got)
+	}
+	if hits := RankedSearchScored(ix, "handleToolCall", 5); len(hits) == 0 {
+		t.Fatal("search must still surface the word-sharing candidate; only resolution is strict")
+	}
+}
+
+// TestResolveFuzzyAcceptsExactNames pins that strictness does not break
+// legitimate fuzzy entry points: an exact bare name and an exact method
+// suffix still resolve.
+func TestResolveFuzzyAcceptsExactNames(t *testing.T) {
+	ix := &index.Index{
+		Root: "/kern",
+		Symbols: []index.Symbol{
+			sym("func", "dispatch", "internal/plugin/plugin.go", 10),
+			sym("func", "TestCallToolResolvesUnadvertisedHandler", "internal/mcp/tools_test.go", 40),
+		},
+		Pkgs: map[string]*index.Pkg{
+			"internal/plugin": {Name: "plugin", Path: "internal/plugin", Files: []string{"internal/plugin/plugin.go"}, Lang: "go"},
+			"internal/mcp":    {Name: "mcp", Path: "internal/mcp", Files: []string{"internal/mcp/tools_test.go"}, Lang: "go"},
+		},
+		UpdatedAt: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+	}
+	if got, ok := ResolveFuzzy(ix, "dispatch"); !ok || got != "dispatch" {
+		t.Fatalf("ResolveFuzzy(dispatch) = %q, %v; want dispatch", got, ok)
+	}
+	got, ok := ResolveFuzzy(ix, "plugin.dispatch")
+	if !ok || got != "plugin.dispatch" && got != "dispatch" {
+		t.Fatalf("ResolveFuzzy(plugin.dispatch) = %q, %v; want the dispatch definition", got, ok)
+	}
+}
