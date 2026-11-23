@@ -9,6 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
+	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -266,4 +267,25 @@ func TestRunCompactAbsolutePathInCwd(t *testing.T) {
 	}
 	abs := filepath.Join(cwd, "main.go")
 	runCompact([]string{abs})
+}
+
+// TestRenderCompactFileNonCode pins the CLI presentation contract: the summary
+// model returns "" for non-indexable input (the machine "serve raw" signal),
+// while `kern compact` still explains what happened to a human.
+func TestRenderCompactFileNonCode(t *testing.T) {
+	content := []byte("# Title\n\nprose\n")
+	got := renderCompactFile("README.md", content, code.TierSummary, true)
+	for _, want := range []string{"README.md", "not indexable code", "4 lines"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in compact note, got %q", want, got)
+		}
+	}
+	// Machine consumers (pipes, plugin/guard captures) must receive the empty
+	// "serve raw" signal, never the human note.
+	if out := renderCompactFile("README.md", content, code.TierSummary, false); out != "" {
+		t.Fatalf("machine path must stay empty, got %q", out)
+	}
+	if out := renderCompactFile("README.md", content, code.TierFull, true); out != string(content) {
+		t.Fatalf("tier=full must stay verbatim, got %q", out)
+	}
 }

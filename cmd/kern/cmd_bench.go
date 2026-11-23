@@ -100,10 +100,15 @@ func runBench(rest []string) {
 		})
 	}
 
-	// ---- Fresh-process CLI latencies: one subprocess per run, so these include
-	// process start + index load (the cost an agent's shell pays), not just the
-	// warm in-memory query above.
-	cliResults := measureCLI(root, cliSymbol(ix), heavyTypeSymbol(ix))
+	// ---- Fresh-process CLI latencies: one subprocess per run. The mode is
+	// part of the measurement contract: cold-cli forces the in-process path;
+	// daemon measures fresh clients against a warm daemon. Mixing the two
+	// silently produces incompatible numbers.
+	mode, modeErr := benchMode(f.mode)
+	if modeErr != nil {
+		fatalUsage("%v", modeErr)
+	}
+	cliResults := measureCLI(root, mode, cliSymbol(ix), heavyTypeSymbol(ix))
 
 	// ---- Machine context (honest-reporting envelope). ----
 	res := benchResult{
@@ -111,6 +116,7 @@ func runBench(rest []string) {
 		Date:           time.Now().Format(time.RFC3339),
 		Root:           root,
 		GitHead:        shortHash(),
+		Mode:           mode,
 		SymbolCount:    len(ix.Symbols),
 		Machine:        machineContext(),
 		ColdLoadMS:     sample{MedianMS: ms(cold), MinMS: ms(cold), Runs: 1},
@@ -120,6 +126,13 @@ func runBench(rest []string) {
 		CLIQueries:     cliResults,
 		MethodologyRef: "docs/benchmarks/graph-latency.md (cold-vs-warm, median/min over repeated runs)",
 	}
+
+	// ---- T-07 sections: the campaign's behavioral gates — guard
+	// classifier (fresh vs cache), verify run reuse, instruction cost.
+	res.Guard = measureGuardSection(root)
+	res.VerifyReuse = measureVerifyReuse(root)
+	res.Instructions = measureInstructions()
+	res.AgentFlows = measureAgentFlows(ix)
 
 	// ---- Persist the canonical JSON the web page reads. ----
 	kernDir := filepath.Join(root, ".kern")
@@ -174,30 +187,41 @@ func runBench(rest []string) {
 // zeroes the /benchmarks page).
 // cliQuery is one fresh-process CLI measurement: the command run in a new
 // kern process (what an agent's shell actually pays, including index load)
-// and its median/min wall time over repeated runs.
+// and its median/min wall time over repeated runs. ServedBy is the child's
+// own account of how the run was served (daemon | in_process | failed) —
+// daemon-mode rows that silently fell back in-process, or whose daemon
+// failed to start, are labeled as what they are; fallback numbers are never
+// presented as daemon numbers.
 type cliQuery struct {
-	Name     string   `json:"name"`
-	Args     []string `json:"args"`
-	MedianMS float64  `json:"median_ms"`
-	MinMS    float64  `json:"min_ms"`
-	Runs     int      `json:"runs"`
-	OK       bool     `json:"ok"`
-	Err      string   `json:"err,omitempty"`
+	Name         string   `json:"name"`
+	Args         []string `json:"args"`
+	MedianMS     float64  `json:"median_ms"`
+	MinMS        float64  `json:"min_ms"`
+	Runs         int      `json:"runs"`
+	OK           bool     `json:"ok"`
+	Err          string   `json:"err,omitempty"`
+	ServedBy     string   `json:"served_by,omitempty"`
+	ServedDetail string   `json:"served_detail,omitempty"`
 }
 
 type benchResult struct {
-	Suite          string        `json:"suite"`
-	Date           string        `json:"date"`
-	Root           string        `json:"root"`
-	GitHead        string        `json:"git_head"`
-	SymbolCount    int           `json:"symbol_count"`
-	Machine        machineInfo   `json:"machine"`
-	ColdLoadMS     sample        `json:"cold_load_ms"`
-	WarmLoadMS     sample        `json:"warm_load_ms"`
-	ColdVsWarm     float64       `json:"cold_vs_warm_speedup"`
-	Queries        []queryResult `json:"queries"`
-	CLIQueries     []cliQuery    `json:"cli_queries,omitempty"`
-	MethodologyRef string        `json:"methodology_ref"`
+	Suite          string             `json:"suite"`
+	Date           string             `json:"date"`
+	Root           string             `json:"root"`
+	GitHead        string             `json:"git_head"`
+	Mode           string             `json:"mode"`
+	SymbolCount    int                `json:"symbol_count"`
+	Machine        machineInfo        `json:"machine"`
+	ColdLoadMS     sample             `json:"cold_load_ms"`
+	WarmLoadMS     sample             `json:"warm_load_ms"`
+	ColdVsWarm     float64            `json:"cold_vs_warm_speedup"`
+	Queries        []queryResult      `json:"queries"`
+	CLIQueries     []cliQuery         `json:"cli_queries,omitempty"`
+	Guard          *guardSection      `json:"guard,omitempty"`
+	VerifyReuse    *verifyReuseSample `json:"verify_reuse,omitempty"`
+	Instructions   *instructionCost   `json:"instructions,omitempty"`
+	AgentFlows     *agentFlowSection  `json:"agent_flows,omitempty"`
+	MethodologyRef string             `json:"methodology_ref"`
 }
 
 // sample is a latency distribution summary: median and min across runs,
@@ -284,21 +308,27 @@ func heavyTypeSymbol(ix *index.Index) string {
 // exit is recorded, never fatal: the bench reports it so --check can fail on
 // a broken command rather than a number.
 //
-// Two validity rules (2026-10-27 audit):
+// Two validity rules (2026-10-27 audit, revised 2026-11-17):
 //
-//  1. Every command gets one UNTIMED warm-up invocation first. The CLI
-//     auto-starts the per-project daemon on first use and pays a one-time
-//     lazy-table build inside it; without the warm-up, whether a sample
-//     measures the cold spawn or the warm daemon would depend on ambient
-//     machine state (a daemon left running by an earlier command), making
-//     the gate flaky. The warm-up pins the intended measurement: warm
-//     daemon, fresh client process.
+//  1. The measurement posture is explicit. cold-cli forces the in-process
+//     path and times process start + hydration. daemon mode performs one
+//     uncounted warm-up per command so timed samples measure warm-daemon,
+//     fresh-client steady state rather than socket spawn. The posture is
+//     written to bench.json; mixing postures silently compares unrelated
+//     costs.
 //  2. The impact probe runs twice: once on the same leaf-ish symbol as the
 //     other commands, and once on the index's heaviest TYPE (impact-hub).
 //     A type aggregates its methods and constructors, so its blast radius
 //     is the worst query shape the surface serves; gating only a cheap
 //     function symbol let real p95s regress invisibly.
-func measureCLI(root, symbol, heavyType string) []cliQuery {
+//  3. ServedBy is the child's own account (2026-11-20 remediation): every
+//     child writes how the run was served (reportServeState under
+//     KERN_BENCH_SERVED_BY), so daemon-mode rows that silently fell back
+//     in-process — or whose daemon failed to start, e.g. Unix socket bind
+//     denied in a sandbox — are labeled as what they are, and --check skips
+//     thresholds for rows that are not valid measurements of the requested
+//     posture.
+func measureCLI(root, mode, symbol, heavyType string) []cliQuery {
 	// Under a test binary os.Executable() is the suite itself; spawning it
 	// would re-run tests instead of a kern command. CLI rows are for real
 	// binaries only.
@@ -309,6 +339,7 @@ func measureCLI(root, symbol, heavyType string) []cliQuery {
 	if err != nil {
 		return nil
 	}
+	baseEnv := cliEnv(mode)
 	// context/explore/impact resolve a definition name; the hub may be a
 	// qualified method ("strings.Contains"), so run them on the bare name.
 	simple := symbol
@@ -333,22 +364,58 @@ func measureCLI(root, symbol, heavyType string) []cliQuery {
 	for _, q := range queries {
 		args := append(append([]string{}, q.args...), "--root", root)
 		res := cliQuery{Name: q.name, Args: q.args, Runs: 3, OK: true}
-		// Untimed warm-up: absorbs daemon spawn, index hydration and lazy
-		// table builds so the timed samples measure the steady state.
-		if err := exec.Command(exe, args...).Run(); err != nil {
-			// A command that cannot even warm up is a broken command, not
-			// a latency: report it the same way a timed failure would.
-			res.OK = false
-			res.Err = err.Error()
-			out = append(out, res)
-			continue
+		// One serve-state report file per query: every child writes how the
+		// run was actually served (daemonDispatchState → reportServeState
+		// under KERN_BENCH_SERVED_BY), so ServedBy is the child's own
+		// account — never a latency inference.
+		report, rerr := os.CreateTemp("", "kern-bench-served-*.txt")
+		env := append([]string{}, baseEnv...)
+		if rerr == nil {
+			env = append(env, "KERN_BENCH_SERVED_BY="+report.Name())
+			defer os.Remove(report.Name())
+		}
+		states := make([]serveSample, 0, res.Runs+1)
+		readServe := func() serveSample {
+			raw, err := os.ReadFile(report.Name())
+			if err != nil || len(raw) == 0 {
+				return serveSample{}
+			}
+			lines := strings.SplitN(strings.TrimSpace(string(raw)), "\n", 2)
+			s := serveSample{state: lines[0]}
+			if len(lines) > 1 {
+				s.detail = lines[1]
+			}
+			return s
+		}
+		// Daemon mode warms the shared daemon once per command (startup,
+		// index hydration, and lazy tables stay outside the timed rows). The
+		// cold-cli mode deliberately has no warm-up: its subject is the
+		// process start + hydration cost itself.
+		if mode == "daemon" {
+			warmup := exec.Command(exe, args...)
+			warmup.Env = env
+			if err := warmup.Run(); err != nil {
+				// A command that cannot even warm up is a broken command, not
+				// a latency: report it the same way a timed failure would.
+				res.OK = false
+				res.Err = err.Error()
+				out = append(out, res)
+				continue
+			}
+			if rerr == nil {
+				states = append(states, readServe())
+			}
 		}
 		var times []float64
 		for i := 0; i < res.Runs; i++ {
 			cmd := exec.Command(exe, args...)
+			cmd.Env = env
 			start := time.Now()
 			err := cmd.Run()
 			times = append(times, float64(time.Since(start).Microseconds())/1000)
+			if rerr == nil {
+				states = append(states, readServe())
+			}
 			if err != nil {
 				res.OK = false
 				res.Err = err.Error()
@@ -360,9 +427,88 @@ func measureCLI(root, symbol, heavyType string) []cliQuery {
 			res.MedianMS = times[len(times)/2]
 			res.MinMS = times[0]
 		}
+		res.ServedBy, res.ServedDetail = servedByFor(mode, states)
 		out = append(out, res)
 	}
 	return out
+}
+
+// serveSample is one child run's serve-state report: state ∈ {daemon,
+// in_process, failed} plus the concrete detail (the daemon startup/connect
+// error for failed, or why a daemon-answered command fell back in-process).
+type serveSample struct {
+	state  string
+	detail string
+}
+
+// servedByFor reduces the per-run serve states of one query into the honest
+// row verdict for the requested posture. cold-cli expects in_process
+// (KERN_DAEMON=0); daemon expects daemon-served runs. Any run that was not
+// served as the posture demands downgrades the row: a daemon startup or
+// connect failure is reported as "failed" with the concrete cause, and a
+// silent in-process fallback as "in_process" — fallback numbers are never
+// presented as daemon numbers. An empty sample set (report unavailable, or
+// a pre-serve-by binary) keeps ServedBy empty so legacy rows behave as
+// they did before.
+func servedByFor(mode string, samples []serveSample) (string, string) {
+	if len(samples) == 0 {
+		return "", ""
+	}
+	expect := serveInProcess
+	if mode == "daemon" {
+		expect = serveDaemon
+	}
+	servedBy, detail := expect, ""
+	for _, s := range samples {
+		if s.state == expect {
+			continue
+		}
+		switch {
+		case s.state == serveFailed:
+			// A concrete daemon failure outranks a fallback note.
+			servedBy, detail = serveFailed, s.detail
+		case servedBy != serveFailed:
+			servedBy, detail = s.state, s.detail
+		}
+	}
+	if mode == "daemon" && servedBy == serveInProcess && detail == "" {
+		detail = "daemon fallback — runs were not daemon-served"
+	}
+	if servedBy == expect {
+		detail = ""
+	}
+	return servedBy, detail
+}
+
+// benchMode validates the CLI measurement posture. Empty means cold-cli:
+// the honest default matches a fresh agent shell and cannot silently become
+// a different benchmark just because a daemon is or is not available.
+func benchMode(mode string) (string, error) {
+	switch mode {
+	case "", "cold-cli":
+		return "cold-cli", nil
+	case "daemon":
+		return "daemon", nil
+	default:
+		return "", fmt.Errorf("Bench: --mode must be cold-cli or daemon")
+	}
+}
+
+// cliEnv makes the mode explicit even when the parent shell carries its own
+// KERN_DAEMON value. Duplicate variables are avoided because their precedence
+// is platform/stdlib-implementation detail; the benchmark must not depend on it.
+func cliEnv(mode string) []string {
+	out := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "KERN_DAEMON=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if mode == "cold-cli" {
+		return append(out, "KERN_DAEMON=0")
+	}
+	return append(out, "KERN_DAEMON=1")
 }
 
 func machineContext() machineInfo {
@@ -453,14 +599,71 @@ func printBenchTable(res benchResult) {
 	}
 	if len(res.CLIQueries) > 0 {
 		fmt.Println()
-		fmt.Println("cli (fresh process)  args (truncated)                  median    min    runs  ok")
+		fmt.Printf("%-20s %-32s %8s %8s %5s  %-5s %s\n", "cli ("+res.Mode+")", "args (truncated)", "median", "min", "runs", "ok", "served by")
 		for _, q := range res.CLIQueries {
 			a := strings.Join(q.Args, " ")
 			if len(a) > 32 {
 				a = a[:32]
 			}
-			fmt.Printf("%-20s %-32s %s %s %5d  %v\n", q.Name, a, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs, q.OK)
+			served := q.ServedBy
+			if served == "" {
+				served = "-"
+			}
+			fmt.Printf("%-20s %-32s %s %s %5d  %-5v %s\n", q.Name, a, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs, q.OK, served)
 		}
+		// Posture honesty note: a daemon-mode row that was not daemon-served
+		// must say so on the table, not just in bench.json.
+		if res.Mode == "daemon" {
+			for _, q := range res.CLIQueries {
+				if q.ServedBy != "" && q.ServedBy != serveDaemon {
+					detail := q.ServedDetail
+					if detail == "" {
+						detail = "no detail reported"
+					}
+					fmt.Printf("  note: cli %s was NOT daemon-served (%s: %s) — its numbers are not daemon measurements\n", q.Name, q.ServedBy, detail)
+					break
+				}
+			}
+		}
+	}
+	if g := res.Guard; g != nil {
+		fmt.Println()
+		fmt.Println("guard classifier     verdict     fresh (med/p95)            cached (med/p95)")
+		for _, r := range g.Rows {
+			fmt.Printf("%-20s %-11s %s / %s   %s / %s\n", r.Name, r.Verdict,
+				fmtLatency(r.Fresh.MedianMS), fmtLatency(r.Fresh.P95MS),
+				fmtLatency(r.Cached.MedianMS), fmtLatency(r.Cached.P95MS))
+		}
+		fmt.Println("(cached arm of GATE measures the miss path — GATE is never cached)")
+	}
+	if vr := res.VerifyReuse; vr != nil {
+		fmt.Println()
+		fmt.Printf("verify reuse         fresh %s (p95 %s)  reused %s (p95 %s)  speedup %.1fx\n",
+			fmtLatency(vr.FreshMS.MedianMS), fmtLatency(vr.FreshMS.P95MS),
+			fmtLatency(vr.ReusedMS.MedianMS), fmtLatency(vr.ReusedMS.P95MS), vr.Speedup)
+		if vr.Note != "" {
+			fmt.Println("  note: " + vr.Note)
+		}
+	}
+	if ic := res.Instructions; ic != nil {
+		fmt.Println()
+		fmt.Printf("instructions         global %d bytes  repo %d bytes  ~%d tokens\n",
+			ic.GlobalPolicyBytes, ic.RepoPolicyBytes, ic.TokenEstimate)
+	}
+	if af := res.AgentFlows; af != nil {
+		fmt.Println()
+		fmt.Printf("agent flow           turns      tokens (concise/balanced/evidence)  reduction  accuracy\n")
+		for _, task := range af.Tasks {
+			tokens := fmt.Sprintf("%d", task.Direct.OutputTokens)
+			if task.Direct.BalancedTokens > 0 {
+				tokens = fmt.Sprintf("%d/%d/%d", task.Direct.OutputTokens, task.Direct.BalancedTokens, task.Direct.EvidenceTokens)
+			}
+			fmt.Printf("%-20s %d -> %d    %s    %3d%%       %.2f\n",
+				task.Name, task.Manual.ModelTurns, task.Direct.ModelTurns,
+				tokens,
+				task.TokenReductionPct, task.Accuracy)
+		}
+		fmt.Println(af.Note)
 	}
 	fmt.Println()
 	fmt.Println("methodology: " + res.MethodologyRef)
@@ -486,6 +689,13 @@ type benchThresholds struct {
 	WarnFactor    float64            `json:"warn_factor"`
 	MinResults    int                `json:"min_results"`
 	CLIMaxMS      map[string]float64 `json:"cli_ms_max"`
+	CLIColdMaxMS  map[string]float64 `json:"cli_cold_ms_max"`
+	// T-07 campaign gates.
+	ClassifierFreshMSMax  float64 `json:"classifier_fresh_ms_max"`  // guard classifier, uncached
+	ClassifierCachedMSMax float64 `json:"classifier_cached_ms_max"` // guardrulecache fast path (incl. the GATE miss path)
+	VerifyReuseSpeedupMin float64 `json:"verify_reuse_speedup_min"` // fresh/reused floor (1.10 = 10% off)
+	RepoPolicyBytesMax    int     `json:"repo_policy_bytes_max"`    // thin repo policy (T-05 core block)
+	GlobalPolicyBytesMax  int     `json:"global_policy_bytes_max"`  // condensed global rules block
 }
 
 // loadBenchThresholds decodes the versioned gate config. A malformed file
@@ -550,11 +760,54 @@ func checkBenchThresholds(res benchResult, th benchThresholds) []benchViolation 
 			out = append(out, benchViolation{Check: "cli_" + q.Name + "_exit", Level: "fail",
 				Detail: fmt.Sprintf("fresh-process `kern %s` failed: %s", strings.Join(q.Args, " "), q.Err)})
 		}
-		check("cli_"+q.Name+"_ms", q.MedianMS, th.CLIMaxMS[q.Name], " ms")
+		// Thresholds apply only to measurements valid for the posture: a
+		// daemon-mode row that was actually served in-process, or whose
+		// daemon failed to start (e.g. Unix socket bind denied in a
+		// sandbox), is reported honestly but its numbers are not daemon
+		// latencies and must not be checked against daemon ceilings.
+		// ServedBy=="" is a legacy/absent report — it checks exactly as
+		// before, so old bench.json files keep their meaning.
+		valid := q.ServedBy == "" ||
+			(res.Mode == "daemon" && q.ServedBy == serveDaemon) ||
+			(res.Mode != "daemon" && q.ServedBy == serveInProcess)
+		if !valid {
+			level, detail := "warn", "reported as "+q.ServedBy
+			if q.ServedBy == serveFailed {
+				level = "fail"
+				detail = "daemon failed: " + q.ServedDetail
+			} else if q.ServedDetail != "" {
+				detail += " (" + q.ServedDetail + ")"
+			}
+			out = append(out, benchViolation{Check: "cli_" + q.Name + "_served_by", Level: level,
+				Detail: fmt.Sprintf("%s-mode row was not served as the posture demands — latency thresholds skipped; %s", res.Mode, detail)})
+			continue
+		}
+		ceilings := th.CLIMaxMS
+		if res.Mode == "cold-cli" {
+			ceilings = th.CLIColdMaxMS
+		}
+		check("cli_"+q.Name+"_ms", q.MedianMS, ceilings[q.Name], " ms")
 	}
 	if th.ColdVsWarmMin > 0 && res.ColdVsWarm < th.ColdVsWarmMin {
 		out = append(out, benchViolation{Check: "cold_vs_warm_speedup", Level: "fail",
 			Detail: fmt.Sprintf("%.1fx is under the %.1fx floor — the warm load may be falling through to a full build (the persisted-store fast path regressed)", res.ColdVsWarm, th.ColdVsWarmMin)})
+	}
+	// ---- T-07 campaign gates (each section is absent when its measurement
+	// could not run; an absent section is never a violation — the section
+	// builders record why they skipped inside their own Note/Skipped field). ----
+	if g := res.Guard; g != nil {
+		for _, r := range g.Rows {
+			check("classifier_"+r.Name+"_fresh_ms", r.Fresh.MedianMS, th.ClassifierFreshMSMax, " ms")
+			check("classifier_"+r.Name+"_cached_ms", r.Cached.MedianMS, th.ClassifierCachedMSMax, " ms")
+		}
+	}
+	if vr := res.VerifyReuse; vr != nil && th.VerifyReuseSpeedupMin > 0 && vr.Speedup > 0 && vr.Speedup < th.VerifyReuseSpeedupMin {
+		out = append(out, benchViolation{Check: "verify_reuse_speedup", Level: "fail",
+			Detail: fmt.Sprintf("%.2fx is under the %.2fx floor — the anchor-reuse fast path regressed (fresh %.2f ms vs reused %.2f ms)", vr.Speedup, th.VerifyReuseSpeedupMin, vr.FreshMS.MedianMS, vr.ReusedMS.MedianMS)})
+	}
+	if ic := res.Instructions; ic != nil {
+		check("repo_policy_bytes", float64(ic.RepoPolicyBytes), float64(th.RepoPolicyBytesMax), " bytes")
+		check("global_policy_bytes", float64(ic.GlobalPolicyBytes), float64(th.GlobalPolicyBytesMax), " bytes")
 	}
 	return out
 }

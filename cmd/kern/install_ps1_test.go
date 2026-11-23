@@ -41,7 +41,7 @@ func TestInstallPS1WiringStructure(t *testing.T) {
 	}
 
 	wire := psFunc(t, src, "Wire-Kern")
-	for _, want := range []string{"--global-only", "--global-rules", "--yes", "KERN_AUTO_WIRE", "Show-WiredSummary", "Show-NextSteps"} {
+	for _, want := range []string{"--global-only", "--global-rules", "--yes", "KERN_AUTO_WIRE", "Show-WiredSummary", "Show-NextSteps", `-ne "1"`} {
 		if !strings.Contains(wire, want) {
 			t.Errorf("Wire-Kern must contain %q", want)
 		}
@@ -94,25 +94,38 @@ func TestInstallPS1WiringStructure(t *testing.T) {
 
 // TestInstallPS1UninstallRemovesMachineSecrets pins the uninstall contract:
 // %APPDATA%\kern (os.UserConfigDir on Windows: audit-chain key, approval
-// signing key/HMAC, consumed ledger) and %LOCALAPPDATA%\kern must be removed
-// with -Machine — and, since F4 (release audit 2026-10-28), ONLY with it: the
-// default uninstall is prefix-scoped so a scratch-prefix smoke cannot
-// destroy another install's machine state.
+// signing key/HMAC, consumed ledger) and %LOCALAPPDATA%\kern plus the
+// ~/.kern state home are removed by the DEFAULT (full) uninstall — T-08
+// (2026-11-19): -Machine is a compatibility alias of that default, and the
+// narrow mode is now -PrefixOnly (binaries + User PATH only) so a
+// scratch-prefix smoke cannot destroy machine state. Source-level pins
+// only: the PowerShell path is runtime-unverified on this host.
 func TestInstallPS1UninstallRemovesMachineSecrets(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(repoRoot(t), "install.ps1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := psFunc(t, string(b), "Uninstall-Kern")
-	for _, want := range []string{"APPDATA", "LOCALAPPDATA", `Join-Path $env:APPDATA "kern"`, "machine secrets"} {
+	for _, want := range []string{
+		"APPDATA", "LOCALAPPDATA", `Join-Path $env:APPDATA "kern"`, "machine secrets",
+		// the wiring + data removal runs via the binary before the binaries go
+		"setup --remove --data --yes --plain",
+		// ~/.kern (state home) is part of the full default
+		`Join-Path $HOME ".kern"`, "kern state home",
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("Uninstall-Kern must remove machine secrets, missing %q", want)
+			t.Errorf("Uninstall-Kern must remove machine data by default, missing %q", want)
 		}
 	}
-	for _, want := range []string{"$Machine", "KERN_UNINSTALL_MACHINE", "prefix-scoped"} {
+	for _, want := range []string{"$PrefixOnly", "KERN_UNINSTALL_PREFIX_ONLY"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("Uninstall-Kern must gate machine cleanup behind -Machine (F4), missing %q", want)
+			t.Errorf("Uninstall-Kern must gate the narrow mode behind -PrefixOnly (T-08), missing %q", want)
 		}
+	}
+	// The wiring pass must run BEFORE the binary deletion loop (dead hooks
+	// would block every agent session).
+	if strings.Index(body, "setup --remove --data") > strings.Index(body, `foreach ($b in @("kern.exe", "kern-mcp.exe"))`) {
+		t.Error("Uninstall-Kern must remove wiring/user data before deleting the binaries")
 	}
 }
 

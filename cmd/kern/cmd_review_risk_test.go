@@ -45,7 +45,7 @@ func TestRiskAndSimulateAgreeOnSameChangeString(t *testing.T) {
 	const change = "rename Base to Base2"
 
 	riskOut := captureStdout(t, func() { runAnalyze("analyze", []string{"--lens", "risk", change, "--root", root}) })
-	simOut := captureStdout(t, func() { runImpact([]string{change, "--root", root}) })
+	simOut := captureStdout(t, func() { runImpact([]string{change, "--root", root, "--mode", "evidence"}) })
 
 	riskTier := riskLevelFromOutput(t, riskOut)
 	simTier := simulateRiskFromOutput(t, simOut)
@@ -59,6 +59,32 @@ func TestRiskAndSimulateAgreeOnSameChangeString(t *testing.T) {
 	if !strings.Contains(riskOut, "blast-radius:large") {
 		t.Errorf("kern risk output should carry blast-radius:large, got:\n%s", riskOut)
 	}
+}
+
+// TestImpactConciseDefault pins the new concise default: the counts block,
+// with no evidence sections. --mode evidence restores the full report.
+func TestImpactConciseDefault(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := reviewRiskFixture(t)
+	concise := captureStdout(t, func() { runImpact([]string{"Base", "--root", root}) })
+	for _, want := range []string{"IMPACT: ", "risk:", "dependents:", "files:", "tests:", "services:", "apis:", "stores:", "events:"} {
+		if !strings.Contains(concise, want) {
+			t.Fatalf("concise impact missing %q:\n%s", want, concise)
+		}
+	}
+	if strings.Contains(concise, "Risk: ") || strings.Contains(concise, "What calls this:") {
+		t.Fatalf("concise impact leaked evidence sections:\n%s", concise)
+	}
+	evidence := captureStdout(t, func() { runImpact([]string{"Base", "--root", root, "--mode", "evidence"}) })
+	if !strings.Contains(evidence, "Risk: ") || !strings.Contains(evidence, "What calls this:") {
+		t.Fatalf("evidence impact missing full report:\n%s", evidence)
+	}
+}
+
+// TestImpactInvalidModeUsageError pins --mode validation: an unknown value is
+// a usage error (exit 2), never a silent fallback.
+func TestImpactInvalidModeUsageError(t *testing.T) {
+	expectExit(t, 2, func() { runImpact([]string{"Base", "--mode", "bogus"}) })
 }
 
 // riskLevelFromOutput extracts the risk level line from `kern risk` output

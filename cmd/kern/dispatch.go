@@ -88,6 +88,7 @@ var mcpCLIAlias = map[string]string{
 	"kern_doc":              "docs",
 	"kern_mask_pii":         "mask",
 	"kern_memory":           "memory",
+	"kern_skill":            "skills",
 	"kern_optimize":         "optimize",
 	"kern_project_map":      "project",
 	"kern_evidence":         "evidence",

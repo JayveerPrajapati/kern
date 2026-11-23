@@ -65,6 +65,16 @@ func memoryRecall(ctx context.Context, root, prompt string, k int, json bool) {
 		k = memory.DefaultRecallLimit
 	}
 	entries := memory.Recall(root, prompt, k)
+	// Session auto-captures (Source "auto") are context, not lessons — they
+	// must not crowd out real recall hits (2026-11-10 campaign: the store was
+	// dominated by [auto] rows and recall could never match them).
+	kept := entries[:0]
+	for _, e := range entries {
+		if e.Source != "auto" {
+			kept = append(kept, e)
+		}
+	}
+	entries = kept
 	if json {
 		printJSON(entries)
 		return

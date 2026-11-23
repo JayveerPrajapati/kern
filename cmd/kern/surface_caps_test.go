@@ -24,7 +24,13 @@ func TestCommandCountCap(t *testing.T) {
 		// other home for) and it is what makes the read-only commands fast
 		// (search 0.75s→0.05s, graph 1.05s→0.13s measured on this repo). The
 		// per-command flags stay minimal (--root).
-		capCeil = 73 // deliberate growth budget (2026-10-21 +10: restored `log`/`terse` thin wrappers and re-wired the 5 live plugin-invoked commands — remember, orchestrate, memory-ranked, evidence-anchor, health — that the pivot CLI slim dropped while the opencode plugin kept calling them)
+		// 2026-11-20 +1 (74→75): `research` — the benchmarked read-only
+		// multi-symbol orchestration surface; folding it into `probe` would
+		// erase the exact/impact distinction the Phase 2 gate requires.
+		// 2026-11-22 +1 (75→76): `skills` — the CLI face of the new
+		// kern_skill MCP tool; folding it into setup would conflate read-only
+		// skill inspection with machine-wide wiring.
+		capCeil = 76 // deliberate growth budget (2026-10-21 +10: restored `log`/`terse` thin wrappers and re-wired the 5 live plugin-invoked commands — remember, orchestrate, memory-ranked, evidence-anchor, health — that the pivot CLI slim dropped while the opencode plugin kept calling them; 2026-11-10 +1 (73→74): `uninstall` — the reversal of install.sh install + kern setup, closing the install/uninstall symmetry gap. It cannot be folded into an existing command: `update` is the installer's upgrade op and would conflate add/remove intent, and `setup --remove` only covers the wiring half. Two consented phases, the installer delegation `update` already uses)
 	)
 	n := commandCount()
 	if n < capFloor {
@@ -75,7 +81,10 @@ func countGoDirs(t *testing.T, root string) int {
 		}
 		if path != root {
 			switch d.Name() {
-			case ".git", "vendor", "testdata", "node_modules", "fixture", "solution":
+			case ".git", "vendor", "testdata", "node_modules", "fixture", "solution", "results":
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 		}

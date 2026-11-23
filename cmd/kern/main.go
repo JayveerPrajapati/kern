@@ -55,7 +55,7 @@ Core Workflows (The 5 Essential Verbs):
   kern search <query> [--repos] [--semantic]      AST symbol & full-text search across codebase
   kern plan <symbol|task> [--json]                Blast-radius impact & surgical refactor planning
   kern verify build,test [--types ...]            Unified build/test/firewall gate validation (G0-G39; G10 retired)
-                                                  (bare 'kern verify' is a usage error: checks must be named)
+                                                  (bare 'kern verify' runs the default build check)
 
 Context & Token Optimization:
   kern optimize <prompt> [--fewshot] [--mask]     Compress & fine-tune prompts with project memory
@@ -234,6 +234,7 @@ func main() {
 	// prior state on startup and save the updated state on exit.
 	metricsPath := cache.Path("metrics.json")
 	isStatsPerfReset := cmd == "stats" && len(rest) > 0 && rest[0] == "performance" && cliflags.HasFlag(rest[1:], "--reset")
+	machineDataRemoved := machineDataRemovedBy(cmd, rest)
 	if !isStatsPerfReset {
 		_ = metrics.Default().Load(metricsPath) // best-effort; missing file is fine
 	}
@@ -268,10 +269,28 @@ func main() {
 	// failure is non-fatal (metrics are non-critical). This runs explicitly
 	// (not via defer) because os.Exit below does not run deferred functions.
 	// For `stats performance --reset`, runStatsPerformance handles persistence
-	// (Reset + Save) in-place.
-	if !isStatsPerfReset {
+	// (Reset + Save) in-place. A machine-data removal (full uninstall) skips
+	// it so the persist does not re-create the cache it just removed.
+	if !isStatsPerfReset && !machineDataRemoved {
 		_ = os.MkdirAll(cache.Dir(), 0o755)
 		_ = metrics.Default().Save(metricsPath)
 	}
 	os.Exit(code)
+}
+
+// machineDataRemovedBy reports whether the invocation removes machine data
+// (F-A8 residual, 2026-11-22 dogfood campaign): a full uninstall removes the
+// machine cache (cache.Dir()), and the exit-time metrics persist must not
+// re-create it — post-uninstall, ~/.cache/kern/metrics.json used to resurrect
+// the directory the uninstaller just removed. Scoped (--prefix-only,
+// --project-only) and dry-run variants do not remove machine data and keep
+// persisting.
+func machineDataRemovedBy(cmd string, rest []string) bool {
+	switch cmd {
+	case "uninstall":
+		return !cliflags.HasFlag(rest, "--prefix-only") && !cliflags.HasFlag(rest, "--project-only") && !cliflags.HasFlag(rest, "--dry-run")
+	case "setup":
+		return cliflags.HasFlag(rest, "--remove") && cliflags.HasFlag(rest, "--data") && !cliflags.HasFlag(rest, "--dry-run")
+	}
+	return false
 }

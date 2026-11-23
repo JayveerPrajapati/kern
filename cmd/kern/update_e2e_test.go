@@ -383,18 +383,13 @@ func TestUpdateE2E(t *testing.T) {
 		if v := installedVersion(prefix, env); !strings.Contains(v, "kern v0.9.9.1") {
 			t.Fatalf("installed version = %q, want v0.9.9.1", v)
 		}
-		// HOME isolation check: install.sh's wire step runs `kern setup
-		// --detect --global`; its config artifacts must land under the
-		// isolated HOME — a leak to the real home would be a test hazard.
-		found := false
+		// Auto-wiring is opt-in by default, so the installer must not write
+		// any agent config files under the isolated HOME — a leak here would
+		// mean the release channel regressed to hidden global writes.
 		for _, rel := range []string{".claude.json", ".config/opencode/opencode.json", ".codex/config.toml", ".gemini/settings.json"} {
 			if _, err := os.Stat(filepath.Join(home, rel)); err == nil {
-				found = true
-				break
+				t.Errorf("installer wrote %s under isolated HOME %s without an explicit opt-in", rel, home)
 			}
-		}
-		if !found {
-			t.Errorf("no agent config artifacts under isolated HOME %s — HOME isolation may have leaked to the real home", home)
 		}
 	})
 

@@ -12,6 +12,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
+const orchestrateDefaultMaxTokens = 100_000
+
+type orchestrateTruncation struct {
+	Reason           string   `json:"reason"`
+	BudgetTokens     int      `json:"budget_tokens"`
+	SerializedTokens int      `json:"serialized_tokens"`
+	Dropped          []string `json:"dropped,omitempty"`
+}
+
 // runOrchestrate implements `kern orchestrate`: runs the silent context
 // pipeline (task classification -> planner -> evidence selection -> budgeting
 // -> envelope) over an intent and prints the deterministic result as JSON —
@@ -73,11 +82,101 @@ func runOrchestrate(rest []string) {
 	if err != nil {
 		fatal("Orchestrate: %v", err)
 	}
-	out, err := json.MarshalIndent(res, "", "  ")
+	out, err := boundOrchestrateJSON(res, f.maxTokens)
 	if err != nil {
 		fatal("Orchestrate: %v", err)
 	}
 	fmt.Println(string(out))
+}
+
+func boundOrchestrateJSON(res *kernctx.OrchestrateResult, maxTokens int) ([]byte, error) {
+	if maxTokens <= 0 {
+		maxTokens = orchestrateDefaultMaxTokens
+	}
+	out, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	originalTokens := tokenize.Count(string(out))
+	if originalTokens <= maxTokens {
+		return out, nil
+	}
+
+	bounded := *res
+	var dropped []string
+	if bounded.Plan != nil {
+		plan := *bounded.Plan
+		plan.Selections = nil
+		bounded.Plan = &plan
+		dropped = append(dropped, "plan.selections")
+	}
+	if len(bounded.Events) > 32 {
+		bounded.Events = bounded.Events[:32]
+		dropped = append(dropped, "events")
+	}
+	if bounded.FittedText != "" {
+		bounded.FittedText = truncateRunes(bounded.FittedText, 8_000)
+		dropped = append(dropped, "fitted_text")
+	}
+	bounded.Truncated = true
+
+	type boundedOutput struct {
+		*kernctx.OrchestrateResult
+		Truncation *orchestrateTruncation `json:"truncation"`
+	}
+	boundedJSON, err := json.MarshalIndent(boundedOutput{
+		OrchestrateResult: &bounded,
+		Truncation: &orchestrateTruncation{
+			Reason:           "serialized orchestrate output exceeded --max-tokens",
+			BudgetTokens:     maxTokens,
+			SerializedTokens: originalTokens,
+			Dropped:          dropped,
+		},
+	}, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if tokenize.Count(string(boundedJSON)) <= maxTokens {
+		return boundedJSON, nil
+	}
+
+	minimal := struct {
+		TaskType   kernctx.TaskType       `json:"task_type"`
+		Budget     int                    `json:"budget"`
+		TokenCount int                    `json:"token_count"`
+		Truncated  bool                   `json:"truncated"`
+		Truncation *orchestrateTruncation `json:"truncation"`
+	}{
+		TaskType:   res.TaskType,
+		Budget:     res.Budget,
+		TokenCount: res.TokenCount,
+		Truncated:  true,
+		Truncation: &orchestrateTruncation{
+			Reason:           "serialized orchestrate output exceeded --max-tokens",
+			BudgetTokens:     maxTokens,
+			SerializedTokens: originalTokens,
+			Dropped:          dropped,
+		},
+	}
+	minimalJSON, err := json.Marshal(minimal)
+	if err != nil {
+		return nil, err
+	}
+	if tokenize.Count(string(minimalJSON)) <= maxTokens {
+		return minimalJSON, nil
+	}
+	return nil, fmt.Errorf("orchestrate: --max-tokens %d is too small for a valid truncated JSON marker", maxTokens)
+}
+
+func truncateRunes(s string, max int) string {
+	if max < 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
 }
 
 // runEnvelopeMode reproduces `kern context-envelope` exactly: assemble the

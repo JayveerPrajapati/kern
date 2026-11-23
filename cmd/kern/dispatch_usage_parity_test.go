@@ -76,7 +76,7 @@ func equalStrings(a, b []string) bool {
 var goldenUsageFlags = map[string][]string{
 	"approve": {"--approver", "--prefix", "--reason", "--reject", "--root", "--scope"},
 
-	"approval": {"--approver", "--reason", "--timeout", "--root"},
+	"approval": {"--notify-once", "--limit", "--older-than", "--stale", "--yes", "--approver", "--reason", "--timeout", "--root", "--signing", "--mac", "--both"},
 
 	"policy": {"--merge", "--file", "--json", "--root"},
 
@@ -88,7 +88,7 @@ var goldenUsageFlags = map[string][]string{
 
 	"authorize-context": {"--agent", "--task", "--deny-path", "--symbol", "--root", "--json"},
 
-	"bench": {"--root", "--json"},
+	"bench": {"--root", "--mode", "--json", "--check"},
 
 	"buddy": {"--map", "--root"},
 
@@ -98,13 +98,15 @@ var goldenUsageFlags = map[string][]string{
 
 	"compact": {"--root", "--tier", "--etag"},
 
+	"daemon": {"--json"},
+
 	"config": {"--json", "--root"},
 
-	"context": {"--lens", "--lines", "--profile", "--root", "--etag"},
+	"context": {"--lens", "--lines", "--profile", "--root", "--etag", "--mode"},
 
 	"docs": {"--limit", "--root", "--semantic"},
 
-	"doctor": {"--arch-drift", "--calibration", "--json", "--root"},
+	"doctor": {"--arch-drift", "--headroom-gate", "--calibration", "--json", "--root"},
 
 	"evidence": {"--full-state", "--restore", "--root", "--out", "--agent-id", "--task", "--sign", "--file", "--url", "--expect-fingerprint"},
 
@@ -118,7 +120,7 @@ var goldenUsageFlags = map[string][]string{
 	"evidence-anchor": {"--claim", "--file", "--line", "--root", "--symbol"},
 	"health":          {"--json", "--root"},
 
-	"explore": {"--depth", "--explain", "--json", "--max", "--max-tokens", "--min-confidence", "--root", "--etag"},
+	"explore": {"--depth", "--explain", "--json", "--max", "--max-tokens", "--min-confidence", "--root", "--etag", "--mode"},
 
 	"fingerprint": {"--file", "--json", "--root"},
 
@@ -134,7 +136,7 @@ var goldenUsageFlags = map[string][]string{
 
 	"fts": {"--json", "--limit", "--root"},
 
-	"graph": {"--cypher", "--entities", "--graphml", "--html", "--json", "--limit", "--max-tokens", "--mermaid", "--min-confidence", "--one-line", "--out", "--root", "--etag"},
+	"graph": {"--cypher", "--entities", "--graphml", "--html", "--json", "--limit", "--max-tokens", "--mermaid", "--min-confidence", "--one-line", "--out", "--root", "--etag", "--format", "--mode"},
 
 	"guard": {"--task", "--check", "--reason", "--agent-id", "--duration", "--file", "--force", "--json", "--precision", "--range", "--require-boundaries", "--root", "--sarif", "--scope", "--threshold"},
 
@@ -142,7 +144,7 @@ var goldenUsageFlags = map[string][]string{
 
 	"hook": {"--range", "--global"},
 
-	"impact": {"--json", "--precision", "--risk", "--lens", "--root", "--runtime"},
+	"impact": {"--json", "--precision", "--risk", "--lens", "--root", "--runtime", "--mode"},
 
 	"apply": {"--root", "--test", "--dry-run", "--json"},
 
@@ -167,13 +169,14 @@ var goldenUsageFlags = map[string][]string{
 
 	"plan": {"--json", "--root", "--task"},
 
-	"probe": {"--json", "--max", "--min-confidence"},
+	"probe":    {"--json", "--max", "--min-confidence"},
+	"research": {"--json", "--max", "--min-confidence"},
 
-	"project-map": {"--root"},
+	"project-map": {"--root", "--max-files"},
 
 	"reject": {"--approver", "--reason", "--root"},
 
-	"refs": {"--json", "--root"},
+	"refs": {"--json", "--mode", "--root"},
 
 	"review": {"--file", "--json", "--lens", "--max", "--profile", "--range", "--root", "--runtime"},
 
@@ -185,17 +188,18 @@ var goldenUsageFlags = map[string][]string{
 
 	"semcache": {"--a", "--b", "--json", "--namespace"},
 
-	"setup": {"--agents", "--agents-md", "--all-agents", "--check", "--detect", "--dry-run", "--global", "--global-only", "--global-rules", "--json", "--plain", "--remove", "--root", "--verify", "--yes"},
+	"setup": {"--agents", "--agents-md", "--all-agents", "--check", "--data", "--detect", "--dry-run", "--global", "--global-only", "--global-rules", "--hooks-only", "--json", "--plain", "--project", "--remove", "--root", "--verify", "--yes"},
 
 	"stats": {"--days", "--session", "--json", "--by-tool", "--by-agent", "--by-root", "--root", "--net"},
 
 	"swap": {"--max", "--mode"},
 
-	"update": {"--dry-run", "--force", "--pin", "--channel"},
+	"update":    {"--dry-run", "--force", "--pin", "--channel"},
+	"uninstall": {"--prefix-only", "--project-only", "--machine", "--agents", "--dry-run", "--yes"},
 
 	"verify": {"--cve", "--license", "--secrets", "--command", "--output", "--anchor", "--changed", "--types", "--short", "--fast", "--changed-since", "--staged", "--timeout", "--full", "--eval", "--json", "--root", "--scan", "--skill", "--verify-pipeline", "--verify-silent", "--verify-token-reduction"},
 
-	"why": {"--json", "--min-confidence", "--root", "--etag"},
+	"why": {"--json", "--min-confidence", "--root", "--etag", "--mode"},
 }
 
 // TestUsageFlagSetsPinnedToGolden is the content-parity gate for the
@@ -237,6 +241,11 @@ var handlerReadUsageFlags = map[string]string{
 	"--":                   "sandbox: command separator (kern sandbox [root] -- <command...>); parseFlags accepts it as a positional",
 	"--anchor":             "verify: runVerifyCommand → internal/verifycmd command mode (re-slice a saved run by anchor id)",
 	"--check":              "gen-docs/gen-catalog/gen-contracts/gen-plugin: runGenDocsImpl compares the generated artifact without writing it",
+	"--stale":              "approval: internal/approvalcli parseFlags (clear --stale) → internal/approvalkeycli.ClearStale",
+	"--notify-once":        "approval: internal/approvalcli parseFlags (wait subcommand — emit pending state + grant hint once, exit 0)",
+	"--signing":            "approval: internal/approvalkeycli parse (key rotate --signing)",
+	"--mac":                "approval: internal/approvalkeycli parse (key rotate --mac)",
+	"--both":               "approval: internal/approvalkeycli parse (key rotate --both)",
 	"--duration":           "guard: internal/contextcli parsePauseFlags (pause subcommand)",
 	"--scope":              "guard: internal/contextcli parsePauseFlags (pause subcommand); approve: internal/approvalcli parseFlags (Ask-Protocol --scope once|prefix)",
 	"--prefix":             "approve: internal/approvalcli parseFlags (Ask-Protocol --scope prefix prefix override)",

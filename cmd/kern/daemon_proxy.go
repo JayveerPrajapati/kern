@@ -8,7 +8,8 @@
 //  2. The proxy is skipped inside a daemon child (KERN_DAEMON_CHILD) — a
 //     proxied command re-entering the proxy would loop.
 //  3. KERN_DAEMON=0 disables it for one shell; unsupported platforms (Windows)
-//     and any transport failure fall back to the in-process path silently.
+//     stay in-process, and transport failures fall back in-process after one
+//     stderr diagnostic naming the socket and log.
 //  4. A binary-identity mismatch retires the stale daemon and retries once;
 //     a second failure falls back in-process rather than failing the command.
 //
@@ -18,6 +19,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,43 +131,100 @@ func hasKernStore(dir string) bool {
 	return false
 }
 
+// Serve-state vocabulary for the honest benchmark contract (2026-11-20
+// remediation): how a dispatch was actually answered, as reported by the
+// child that ran it — never inferred from latency by the caller.
+const (
+	serveDaemon    = "daemon"
+	serveInProcess = "in_process"
+	serveFailed    = "failed"
+)
+
+// daemonServeState is the explicit outcome of one dispatch: "daemon" (the
+// daemon produced the output), "in_process" (eligible skip or fallback —
+// including the daemon answering fatally, after which main re-runs
+// in-process), or "failed" (daemon startup/connect error, concrete cause in
+// detail).
+type daemonServeState struct {
+	state  string
+	detail string
+}
+
 // daemonDispatch tries to answer cmd via the daemon. ok=false means "run it
 // in-process".
 func daemonDispatch(cmd string, rest []string) (daemon.Response, bool) {
+	resp, ok, st := daemonDispatchState(cmd, rest)
+	reportServeState(st)
+	return resp, ok
+}
+
+// daemonDispatchState is daemonDispatch with the serve outcome made
+// explicit, so measurement harnesses can report how each run was served
+// instead of guessing. The (resp, ok) contract is unchanged.
+func daemonDispatchState(cmd string, rest []string) (daemon.Response, bool, daemonServeState) {
 	if os.Getenv("KERN_DAEMON_CHILD") != "" || os.Getenv("KERN_DAEMON") == "0" {
-		return daemon.Response{}, false
+		return daemon.Response{}, false, daemonServeState{state: serveInProcess}
 	}
 	if !daemon.Supported() || !daemonProxyCommands[cmd] {
-		return daemon.Response{}, false
+		return daemon.Response{}, false, daemonServeState{state: serveInProcess}
 	}
 	root, ok := daemonProjectRoot()
 	if !ok {
-		return daemon.Response{}, false
+		return daemon.Response{}, false, daemonServeState{state: serveInProcess}
 	}
 	identity := daemon.BinaryIdentity(version)
 	argv := append([]string{cmd}, rest...)
 	req := daemon.Request{Op: daemon.OpRun, Identity: identity, Argv: argv}
 
 	if err := daemon.Ensure(root, version); err != nil {
-		return daemon.Response{}, false
+		daemonFallbackWarning(root, "start", err)
+		return daemon.Response{}, false, daemonServeState{state: serveFailed, detail: "start: " + err.Error()}
 	}
 	resp, err := daemon.Call(root, req, daemonCallTimeout)
 	if err != nil {
-		return daemon.Response{}, false
+		daemonFallbackWarning(root, "call", err)
+		return daemon.Response{}, false, daemonServeState{state: serveFailed, detail: "call: " + err.Error()}
 	}
 	if strings.HasPrefix(resp.Fatal, "identity-mismatch") {
 		// The binary was rebuilt (make install) while a daemon was live.
 		_ = daemon.Stop(root)
 		if err := daemon.Ensure(root, version); err != nil {
-			return daemon.Response{}, false
+			daemonFallbackWarning(root, "restart", err)
+			return daemon.Response{}, false, daemonServeState{state: serveFailed, detail: "restart: " + err.Error()}
 		}
 		resp, err = daemon.Call(root, req, daemonCallTimeout)
 		if err != nil {
-			return daemon.Response{}, false
+			daemonFallbackWarning(root, "retry", err)
+			return daemon.Response{}, false, daemonServeState{state: serveFailed, detail: "retry: " + err.Error()}
 		}
 	}
 	if resp.Fatal != "" {
-		return daemon.Response{}, false
+		return daemon.Response{}, false, daemonServeState{state: serveInProcess, detail: "daemon fatal: " + resp.Fatal}
 	}
-	return resp, true
+	return resp, true, daemonServeState{state: serveDaemon}
+}
+
+// reportServeState records the dispatch outcome to the file named by
+// KERN_BENCH_SERVED_BY when that env is set — the mechanism `kern bench
+// --mode daemon` children use to tell the parent HOW each run was actually
+// served (daemon / in_process / failed), so the benchmark reports the
+// child's own account instead of inferring from latency. Only bench children
+// carry the env, so ordinary invocations pay one getenv. Write failures are
+// deliberately silent: reporting must never change the command's behavior.
+func reportServeState(st daemonServeState) {
+	path := os.Getenv("KERN_BENCH_SERVED_BY")
+	if path == "" {
+		return
+	}
+	_ = os.WriteFile(path, []byte(st.state+"\n"+st.detail+"\n"), 0o644)
+}
+
+// daemonFallbackWarning is the single observable trace left when the daemon
+// cannot serve a command: the command still runs in-process, so stdout and its
+// exit code must not change. The warning names the socket and log because those
+// are the two artifacts needed to diagnose restricted-socket, permissions, and
+// startup-crash cases.
+func daemonFallbackWarning(root, stage string, err error) {
+	fmt.Fprintf(os.Stderr, "kern: daemon fallback (%s): %v; socket=%s log=%s\n",
+		stage, err, daemon.SocketPath(root), daemon.LogPath(root))
 }

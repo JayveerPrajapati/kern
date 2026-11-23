@@ -26,6 +26,10 @@ func collectJSONTags(t reflect.Type, tags map[string]bool) {
 		switch f.Type.Kind() {
 		case reflect.Struct:
 			collectJSONTags(f.Type, tags)
+		case reflect.Ptr:
+			// Pointer sections (omitempty structs) recurse through the
+			// pointee so their nested keys stay inside the parity contract.
+			collectJSONTags(f.Type.Elem(), tags)
 		case reflect.Slice:
 			if f.Type.Elem().Kind() == reflect.Struct {
 				collectJSONTags(f.Type.Elem(), tags)
@@ -124,6 +128,53 @@ func TestFmtLatencyNeverShowsZero(t *testing.T) {
 	}
 }
 
+// TestBenchModeNormalizesPosture pins the benchmark contract that resolved
+// the 2026-11-17 measurement discrepancy: empty means cold-cli, only two
+// postures exist, and an unknown value is a usage error rather than a silent
+// "warm daemon" assumption.
+func TestBenchModeNormalizesPosture(t *testing.T) {
+	for mode, want := range map[string]string{
+		"":         "cold-cli",
+		"cold-cli": "cold-cli",
+		"daemon":   "daemon",
+	} {
+		got, err := benchMode(mode)
+		if err != nil {
+			t.Fatalf("benchMode(%q) error: %v", mode, err)
+		}
+		if got != want {
+			t.Errorf("benchMode(%q) = %q, want %q", mode, got, want)
+		}
+	}
+	if _, err := benchMode("warm"); err == nil {
+		t.Fatal("benchMode(warm) must reject an unknown posture")
+	}
+}
+
+// TestBenchCLIEnvNormalizesDaemonOverride pins the subprocess contract: a
+// parent KERN_DAEMON value must never leak into a differently-postured run.
+func TestBenchCLIEnvNormalizesDaemonOverride(t *testing.T) {
+	t.Setenv("KERN_DAEMON", "1")
+	for mode, want := range map[string]string{
+		"cold-cli": "KERN_DAEMON=0",
+		"daemon":   "KERN_DAEMON=1",
+	} {
+		env := cliEnv(mode)
+		count := 0
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "KERN_DAEMON=") {
+				count++
+				if kv != want {
+					t.Fatalf("cliEnv(%q) set %q, want %q", mode, kv, want)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("cliEnv(%q) produced %d KERN_DAEMON entries, want exactly 1", mode, count)
+		}
+	}
+}
+
 // TestBenchCommandDispatches pins the bench registration the dispatch table
 // must carry: runBench existed with NO commandTable entry, so `kern bench`
 // exited 2 "unknown command" — breaking the documented `make bench-latency`
@@ -154,6 +205,9 @@ func TestBenchCommandDispatches(t *testing.T) {
 	var res benchResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("decode .kern/bench.json into benchResult: %v", err)
+	}
+	if res.Mode != "cold-cli" {
+		t.Errorf("default bench mode = %q, want cold-cli (the reproducible one-shot posture)", res.Mode)
 	}
 	if res.Suite != "kern-bench" || len(res.Queries) == 0 {
 		t.Errorf("bench.json carries the wrong envelope: suite=%q queries=%d", res.Suite, len(res.Queries))
@@ -229,6 +283,88 @@ func TestBenchCheckThresholds(t *testing.T) {
 	if v := checkBenchThresholds(base, thOff); len(v) != 0 {
 		t.Fatalf("zero ceilings must disable their checks, got %+v", v)
 	}
+
+	// The two CLI postures have different ceilings. A cold row must not be
+	// failed by daemon-only SLOs, and a daemon row must not be excused by
+	// cold-process ceilings.
+	cold := base
+	cold.Mode = "cold-cli"
+	cold.CLIQueries = []cliQuery{{Name: "explore", MedianMS: 800, Runs: 3, OK: true}}
+	th.CLIMaxMS = nil
+	th.CLIColdMaxMS = map[string]float64{"explore": 1200}
+	if v := checkBenchThresholds(cold, th); len(v) != 1 || v[0].Level != "warn" {
+		t.Fatalf("cold-cli row under its own ceiling must only warn (800 is past 50%% of 1200), got %+v", v)
+	}
+	if v := checkBenchThresholds(cold, benchThresholds{CLIColdMaxMS: map[string]float64{"explore": 700}}); len(v) != 1 || v[0].Level != "fail" {
+		t.Fatalf("cold-cli row over its own ceiling must fail, got %+v", v)
+	}
+
+	daemon := base
+	daemon.Mode = "daemon"
+	daemon.CLIQueries = []cliQuery{{Name: "explore", MedianMS: 800, Runs: 3, OK: true}}
+	th.CLIMaxMS = map[string]float64{"explore": 600}
+	if v := checkBenchThresholds(daemon, th); len(v) != 1 || v[0].Level != "fail" {
+		t.Fatalf("daemon row over the daemon ceiling must fail, got %+v", v)
+	}
+}
+
+// TestBenchCheckT07Sections table-pins the T-07 campaign gates: the guard
+// classifier ceilings (fresh vs cached), the verify-reuse speedup floor,
+// and the instruction byte ceilings — plus the fail-soft rules (absent
+// sections and uncomputed reuse never violate).
+func TestBenchCheckT07Sections(t *testing.T) {
+	th := benchThresholds{
+		ClassifierFreshMSMax:  5,
+		ClassifierCachedMSMax: 1,
+		VerifyReuseSpeedupMin: 1.25,
+		RepoPolicyBytesMax:    2048,
+		GlobalPolicyBytesMax:  6144,
+	}
+	healthy := benchResult{
+		Guard: &guardSection{Rows: []guardRow{{
+			Name: "grep", Verdict: "serve",
+			Fresh:  t07Sample{MedianMS: 0.006, P95MS: 0.009, Runs: 9},
+			Cached: t07Sample{MedianMS: 0.0004, P95MS: 0.0006, Runs: 9},
+		}}},
+		VerifyReuse:  &verifyReuseSample{Speedup: 2.2, FreshMS: t07Sample{MedianMS: 90}, ReusedMS: t07Sample{MedianMS: 41}},
+		Instructions: &instructionCost{GlobalPolicyBytes: 4200, RepoPolicyBytes: 1900},
+	}
+	if v := checkBenchThresholds(healthy, th); len(v) != 0 {
+		t.Fatalf("healthy T-07 sections must be clean, got %+v", v)
+	}
+
+	// Cached classifier past its ceiling → fail (the cache stopped hitting).
+	bad := healthy
+	bad.Guard = &guardSection{Rows: []guardRow{{
+		Name: "grep", Verdict: "serve",
+		Fresh:  t07Sample{MedianMS: 0.006, Runs: 9},
+		Cached: t07Sample{MedianMS: 4.0, Runs: 9},
+	}}}
+	if v := checkBenchThresholds(bad, th); len(v) != 1 || v[0].Level != "fail" || v[0].Check != "classifier_grep_cached_ms" {
+		t.Fatalf("cached classifier over ceiling must fail, got %+v", v)
+	}
+
+	// Verify reuse under the floor → fail with the diagnosis.
+	bad = healthy
+	bad.VerifyReuse = &verifyReuseSample{Speedup: 1.1, FreshMS: t07Sample{MedianMS: 90}, ReusedMS: t07Sample{MedianMS: 82}}
+	v := checkBenchThresholds(bad, th)
+	if len(v) != 1 || v[0].Level != "fail" || v[0].Check != "verify_reuse_speedup" || !strings.Contains(v[0].Detail, "anchor-reuse") {
+		t.Fatalf("verify-reuse under floor must fail with the diagnosis, got %+v", v)
+	}
+
+	// Uncomputed reuse (speedup 0 — the arm errored) must NOT fail.
+	bad = healthy
+	bad.VerifyReuse = &verifyReuseSample{Speedup: 0, Note: "fresh arm failed: git: not found"}
+	if v := checkBenchThresholds(bad, th); len(v) != 0 {
+		t.Fatalf("uncomputed verify reuse must not fail, got %+v", v)
+	}
+
+	// Repo policy over its byte ceiling → fail.
+	bad = healthy
+	bad.Instructions = &instructionCost{GlobalPolicyBytes: 4200, RepoPolicyBytes: 4000}
+	if v := checkBenchThresholds(bad, th); len(v) != 1 || v[0].Level != "fail" || v[0].Check != "repo_policy_bytes" {
+		t.Fatalf("repo policy over ceiling must fail, got %+v", v)
+	}
 }
 
 // TestBenchThresholdsEmbeddedFileParses pins the versioned gate config
@@ -240,6 +376,9 @@ func TestBenchThresholdsEmbeddedFileParses(t *testing.T) {
 	th := loadBenchThresholds()
 	if th.WarmLoadMSMax <= 0 || th.QueryMSMax <= 0 || th.ColdVsWarmMin <= 0 || th.WarnFactor <= 0 || th.WarnFactor >= 1 || th.MinResults < 1 {
 		t.Fatalf("embedded bench_thresholds.json is missing or disables a check: %+v", th)
+	}
+	if len(th.CLIMaxMS) == 0 || len(th.CLIColdMaxMS) == 0 {
+		t.Fatalf("embedded bench_thresholds.json must define both daemon and cold-cli ceiling maps, got daemon=%d cold=%d", len(th.CLIMaxMS), len(th.CLIColdMaxMS))
 	}
 }
 
@@ -266,6 +405,7 @@ func TestBenchmarkDocsCarryStatusLabels(t *testing.T) {
 		"agent-evals.md",
 		"cold-start.md",
 		"command-qa-ledger.md",
+		"daemon-latency.md",
 		"graph-latency.md",
 		"multi-repo-latency.md",
 		"README.md",
@@ -361,5 +501,94 @@ func TestMultiRepoBenchDocFresh(t *testing.T) {
 	}
 	if !strings.Contains(string(idx), "multi-repo-latency.md") {
 		t.Error("docs/benchmarks/README.md must index multi-repo-latency.md in its suites table")
+	}
+}
+
+// TestServedByForAggregation pins the honest-verdict reduction: the posture
+// decides what "valid" means (cold-cli expects in_process, daemon expects
+// daemon), any non-conforming run downgrades the row, a concrete daemon
+// failure outranks a fallback note, and an empty sample set stays empty so
+// legacy rows keep their pre-serve-by meaning.
+func TestServedByForAggregation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    string
+		samples []serveSample
+		wantBy  string
+		wantIn  string // substring of detail ("" = empty detail)
+	}{
+		{"empty stays empty", "daemon", nil, "", ""},
+		{"daemon all daemon", "daemon", []serveSample{{state: serveDaemon}, {state: serveDaemon}}, serveDaemon, ""},
+		{"daemon one fallback", "daemon", []serveSample{{state: serveDaemon}, {state: serveInProcess}}, serveInProcess, "daemon fallback"},
+		{"daemon startup failed", "daemon", []serveSample{{state: serveDaemon}, {state: serveFailed, detail: "start: socket bind denied"}}, serveFailed, "socket bind denied"},
+		{"failed outranks fallback", "daemon", []serveSample{{state: serveInProcess}, {state: serveFailed, detail: "call: timeout"}}, serveFailed, "call: timeout"},
+		{"fallback does not unseat failed", "daemon", []serveSample{{state: serveFailed, detail: "start: x"}, {state: serveInProcess}}, serveFailed, "start: x"},
+		{"cold-cli all in-process", "cold-cli", []serveSample{{state: serveInProcess}, {state: serveInProcess}}, serveInProcess, ""},
+		{"cold-cli unexpectedly daemon", "cold-cli", []serveSample{{state: serveDaemon}}, serveDaemon, ""},
+	}
+	for _, c := range cases {
+		gotBy, gotDetail := servedByFor(c.mode, c.samples)
+		if gotBy != c.wantBy {
+			t.Errorf("%s: servedByFor(%q) = %q, want %q", c.name, c.mode, gotBy, c.wantBy)
+		}
+		if c.wantIn == "" && gotDetail != "" {
+			t.Errorf("%s: servedByFor(%q) detail = %q, want empty", c.name, c.mode, gotDetail)
+		}
+		if c.wantIn != "" && !strings.Contains(gotDetail, c.wantIn) {
+			t.Errorf("%s: servedByFor(%q) detail = %q, want substring %q", c.name, c.mode, gotDetail, c.wantIn)
+		}
+	}
+}
+
+// TestBenchCheckThresholdsServedByGating pins the valid-measurement rule:
+// daemon-mode rows that were not daemon-served are reported honestly but
+// never checked against daemon ceilings — a failed daemon is a fail
+// violation with the concrete cause, an in-process fallback is a warn, and
+// ServedBy=="" (legacy/absent report) checks exactly as before.
+func TestBenchCheckThresholdsServedByGating(t *testing.T) {
+	base := benchResult{
+		Mode:       "daemon",
+		WarmLoadMS: sample{MedianMS: 100, Runs: 3},
+		ColdVsWarm: 8.0,
+		CLIQueries: []cliQuery{{Name: "explore", MedianMS: 5000, Runs: 3, OK: true}},
+	}
+	th := benchThresholds{CLIMaxMS: map[string]float64{"explore": 600}}
+
+	// Legacy row (no serve report): the latency check applies as before.
+	if v := checkBenchThresholds(base, th); len(v) != 1 || v[0].Level != "fail" || v[0].Check != "cli_explore_ms" {
+		t.Fatalf("legacy daemon row over ceiling must fail on latency, got %+v", v)
+	}
+
+	// Daemon-served row: normal latency check applies.
+	daemonRow := base
+	daemonRow.CLIQueries[0].ServedBy = serveDaemon
+	if v := checkBenchThresholds(daemonRow, th); len(v) != 1 || v[0].Check != "cli_explore_ms" {
+		t.Fatalf("daemon-served row must be checked against the daemon ceiling, got %+v", v)
+	}
+
+	// In-process fallback row (sandbox case): thresholds skipped, warn only.
+	fallbackRow := base
+	fallbackRow.CLIQueries[0].ServedBy = serveInProcess
+	v := checkBenchThresholds(fallbackRow, th)
+	if len(v) != 1 || v[0].Level != "warn" || v[0].Check != "cli_explore_served_by" || !strings.Contains(v[0].Detail, "not served") {
+		t.Fatalf("in-process fallback row must warn and skip thresholds, got %+v", v)
+	}
+
+	// Failed daemon row: fail violation naming the concrete cause.
+	failedRow := base
+	failedRow.CLIQueries[0].ServedBy = serveFailed
+	failedRow.CLIQueries[0].ServedDetail = "start: socket bind denied"
+	v = checkBenchThresholds(failedRow, th)
+	if len(v) != 1 || v[0].Level != "fail" || v[0].Check != "cli_explore_served_by" || !strings.Contains(v[0].Detail, "socket bind denied") {
+		t.Fatalf("failed daemon row must fail with the concrete cause and skip thresholds, got %+v", v)
+	}
+
+	// cold-cli posture: an in_process row is valid; a daemon-served row is
+	// the mismatch and gets flagged instead.
+	cold := base
+	cold.Mode = "cold-cli"
+	cold.CLIQueries[0].ServedBy = serveInProcess
+	if v := checkBenchThresholds(cold, benchThresholds{CLIColdMaxMS: map[string]float64{"explore": 600}}); len(v) != 1 || v[0].Check != "cli_explore_ms" {
+		t.Fatalf("cold-cli in-process row must be checked normally, got %+v", v)
 	}
 }

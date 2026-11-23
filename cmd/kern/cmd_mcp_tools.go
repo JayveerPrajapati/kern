@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cliflags"
+	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/mcpcli"
 )
@@ -187,6 +188,16 @@ func runFetchRawAnchor(rest []string) int {
 		return 1
 	}
 	anchorID := rest[0]
+	// Anchors printed by `kern verify --command` live in the PERSISTED
+	// exec-run store (<root>/.kern/exec-runs/<anchor>.log), while the MCP
+	// tool only sees this process's in-memory store. `kern anchor` is the
+	// documented raw-recovery path, so read the persisted store FIRST — the
+	// two surfaces resolving different anchors was a live defect
+	// (2026-11-10 campaign: the id in a verify footer was un-fetchable).
+	if full, err := execution.LoadExecRun(".", anchorID); err == nil {
+		fmt.Print(full)
+		return 0
+	}
 	out, err := callTool("kern_fetch_raw_anchor", map[string]any{"anchor_id": anchorID})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern anchor: %v\n", err)

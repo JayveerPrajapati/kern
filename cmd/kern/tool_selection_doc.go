@@ -63,7 +63,7 @@ func generateToolSelectionDoc(tools []diffgate.ToolInfo) ([]byte, error) {
 	b.WriteString("> [`internal/mcp/toolsurface/toolsurface.go`](../internal/mcp/toolsurface/toolsurface.go), and\n")
 	b.WriteString("> [`internal/mcp/toolpolicy.go`](../internal/mcp/toolpolicy.go).\n")
 	b.WriteString("> If this guide and those files disagree, those files win.\n\n")
-	fmt.Fprintf(&b, "kern ships a **%d-tool** MCP catalog and advertises the **full catalog by default** (standing mandate 2026-10-23: agents use all available tools). Every tool is advertised on `tools/list`; `kern_meta` routes natural language to any of them.\n\n", len(sorted))
+	fmt.Fprintf(&b, "kern ships a **%d-tool** MCP catalog and advertises a **direct %d-tool surface by default**. `KERN_MCP_FULL=1` advertises every tool directly; `kern_meta` routes natural language within that same advertised surface. Direct calls outside the advertised surface are rejected unless `KERN_MCP_ALLOW_UNADVERTISED=1` is set.\n\n", len(sorted), len(defaultNames))
 
 	b.WriteString("## Surface\n\n")
 	b.WriteString("| Mode | Tools |\n|---|---:|\n")
@@ -73,7 +73,8 @@ func generateToolSelectionDoc(tools []diffgate.ToolInfo) ([]byte, error) {
 	fmt.Fprintf(&b, "| High-level (`KERN_MCP_HIGH_LEVEL_ONLY=1`) | %d |\n", highLevelCount)
 	b.WriteString("| Phase filter (`KERN_MCP_PHASE`) | Default/full subset plus `meta` and `cross` tools |\n")
 	b.WriteString("| Category filter (`KERN_MCP_CATEGORY`) | One category plus `kern_meta` |\n")
-	b.WriteString("| Allowlist (`KERN_TOOLS`) | Execution gate applied on every call |\n\n")
+	b.WriteString("| Allowlist (`KERN_TOOLS`) | Execution gate applied on every call |\n")
+	b.WriteString("| Unadvertised direct calls (`KERN_MCP_ALLOW_UNADVERTISED=1`) | Escape hatch for embedded clients and tests |\n\n")
 
 	b.WriteString("The default surface is:\n\n")
 	for i, name := range defaultNames {
@@ -83,7 +84,7 @@ func generateToolSelectionDoc(tools []diffgate.ToolInfo) ([]byte, error) {
 		b.WriteString("`" + name + "`")
 	}
 	b.WriteString(".\n\n")
-	b.WriteString("`kern_exec` is advertised for discoverability only. Every execution attempt still fails closed unless explicitly enabled through `KERN_ALLOW_EXEC` or an allowlist policy.\n\n")
+	b.WriteString("No security-gated tool is advertised by default. `kern_exec` remains reachable in full mode and every execution attempt still fails closed unless explicitly enabled through `KERN_ALLOW_EXEC` or an allowlist policy.\n\n")
 
 	b.WriteString("## Choose by intent\n\n")
 	b.WriteString("| Intent | Best tool | Why |\n|---|---|---|\n")
@@ -92,6 +93,8 @@ func generateToolSelectionDoc(tools []diffgate.ToolInfo) ([]byte, error) {
 	b.WriteString("| Structural pattern (`func greet`, `type *User*`) | `kern_ast_search` | AST-aware search |\n")
 	b.WriteString("| Understand one symbol deeply | `kern_explore` | Definition, callers, callees, blast radius |\n")
 	b.WriteString("| Need only the exact source slice | `kern_context` | Minimal definition and direct edges |\n")
+	b.WriteString("| Resolve a task or error that names several symbols | `kern_probe` | Budget-capped definitions, callers, callees and tests |\n")
+	b.WriteString("| Research a multi-symbol task with impact and affected files | `kern_research` | One read-only evidence bundle; no execution or network |\n")
 	b.WriteString("| Understand a file's structure | `kern_compact_file` | Functions, types, line numbers; `tier=full` for verbatim |\n")
 	b.WriteString("| Explain why a symbol matters | `kern_why` | Rationale, docs, dependency counts |\n")
 	b.WriteString("| Plan a change | `kern_plan` | Deterministic affected files, risks, validation |\n")

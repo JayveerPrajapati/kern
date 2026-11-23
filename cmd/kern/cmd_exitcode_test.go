@@ -10,22 +10,32 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
-// TestRunVerifyBareUsageIsActionable pins F4: bare `kern verify` stays a
-// usage error (exit 2) but the message suggests the concrete next step —
-// 'kern verify build,test' and the --command flag — instead of a bare
-// usage line.
-func TestRunVerifyBareUsageIsActionable(t *testing.T) {
+// TestRunVerifyBareRunsDefaultBuild pins the 2026-11-10 change: bare
+// `kern verify` runs the default build check (the MCP bare-path parity —
+// seconds, not the ~minutes of build+test) instead of exiting 2 with a
+// usage error. The verdict must surface; a healthy fixture exits 0.
+func TestRunVerifyBareRunsDefaultBuild(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	stderr, code := captureStderrExit(t, func() {
-		runVerify(nil)
-	})
-	if code != 2 {
-		t.Fatalf("runVerify(nil) exit = %d, want 2", code)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/m\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{"kern verify build,test", "--command"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("bare verify message missing %q, got: %.300s", want, stderr)
-		}
+	if err := os.MkdirAll(filepath.Join(dir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "a.go"), []byte("package a\n\nfunc A() int { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var code int
+	out := captureStdout(t, func() {
+		code = runVerify([]string{"--root", dir})
+	})
+	if code != 0 {
+		t.Fatalf("runVerify(bare) exit = %d, want 0 (default build on a healthy fixture); output: %.300s", code, out)
+	}
+	if !strings.Contains(out, "build") {
+		t.Fatalf("bare verify output must name the build check, got: %.300s", out)
 	}
 }
 

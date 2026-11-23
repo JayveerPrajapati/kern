@@ -3,6 +3,7 @@
   "date": "2026-09-25T00:00:00Z",
   "root": "/tmp/kern-bench-fixture",
   "git_head": "0000000",
+  "mode": "cold-cli",
   "symbol_count": 42,
   "machine": {
     "goos": "darwin",
@@ -48,7 +49,9 @@
       "median_ms": 120.5,
       "min_ms": 115.2,
       "runs": 3,
-      "ok": true
+      "ok": true,
+      "served_by": "in_process",
+      "served_detail": ""
     },
     {
       "name": "context",
@@ -57,8 +60,106 @@
       "min_ms": 170.0,
       "runs": 3,
       "ok": false,
-      "err": "exit status 1"
+      "err": "exit status 1",
+      "served_by": "in_process",
+      "served_detail": ""
     }
   ],
+  "guard": {
+    "rows": [
+      {
+        "name": "read",
+        "command": "cat README.md",
+        "verdict": "serve",
+        "fresh": {"median_ms": 0.006, "p95_ms": 0.009, "runs": 9},
+        "cached": {"median_ms": 0.0004, "p95_ms": 0.0006, "runs": 9}
+      },
+      {
+        "name": "gate",
+        "command": "rm -rf /tmp/bench-gate-probe",
+        "verdict": "gate",
+        "fresh": {"median_ms": 0.007, "p95_ms": 0.011, "runs": 9},
+        "cached": {"median_ms": 0.007, "p95_ms": 0.012, "runs": 9}
+      }
+    ],
+    "note": "fresh = guardrule.ClassifyCommandInRoots; cached = guardrulecache (T-02). GATE is never cached by design — its cached arm measures the miss path, which re-classifies fresh and denies."
+  },
+  "verify_reuse": {
+    "command": "git log --oneline -3",
+    "fresh_ms": {"median_ms": 90.0, "p95_ms": 110.0, "runs": 5},
+    "reused_ms": {"median_ms": 40.0, "p95_ms": 55.0, "runs": 5},
+    "speedup": 2.25,
+    "note": ""
+  },
+  "instructions": {
+    "global_policy_bytes": 4200,
+    "repo_policy_bytes": 1900,
+    "token_estimate": 1525,
+    "note": "global = agentwire.CondenseGlobalRules (wired host slot); repo = agentwire.ThinAGENTSmd default core block (T-05); tokens = bytes/4"
+  },
+  "agent_flows": {
+    "tasks": [
+      {
+        "name": "symbol-understanding",
+        "target": "internal/intel.ExploreBudgeted",
+        "expected_file": "internal/intel/explore.go",
+        "expected_line": 168,
+        "manual": {
+          "model_turns": 4,
+          "output_tokens": 3496,
+          "latency": {"median_ms": 12.5, "p95_ms": 18.0, "runs": 3}
+        },
+        "direct": {
+          "model_turns": 1,
+          "output_tokens": 45,
+          "balanced_tokens": 216,
+          "evidence_tokens": 4745,
+          "latency": {"median_ms": 5.5, "p95_ms": 7.0, "runs": 3}
+        },
+        "model_turns_saved": 3,
+        "token_reduction_pct": 98,
+        "accuracy": 1.0
+      },
+      {
+        "name": "impact-analysis",
+        "target": "internal/mcp.Server",
+        "expected_file": "internal/mcp/server.go",
+        "expected_line": 134,
+        "manual": {
+          "model_turns": 3,
+          "output_tokens": 2000,
+          "latency": {"median_ms": 22.5, "p95_ms": 28.0, "runs": 3}
+        },
+        "direct": {
+          "model_turns": 1,
+          "output_tokens": 900,
+          "latency": {"median_ms": 9.5, "p95_ms": 12.0, "runs": 3}
+        },
+        "model_turns_saved": 3,
+        "token_reduction_pct": 55,
+        "accuracy": 1.0
+      },
+      {
+        "name": "task-context",
+        "target": "internal/mcp.Server.handleRun",
+        "expected_file": "internal/mcp/handlers_highlevel.go",
+        "expected_line": 100,
+        "manual": {
+          "model_turns": 2,
+          "output_tokens": 1800,
+          "latency": {"median_ms": 18.5, "p95_ms": 24.0, "runs": 3}
+        },
+        "direct": {
+          "model_turns": 1,
+          "output_tokens": 780,
+          "latency": {"median_ms": 7.5, "p95_ms": 10.0, "runs": 3}
+        },
+        "model_turns_saved": 3,
+        "token_reduction_pct": 56,
+        "accuracy": 1.0
+      }
+    ],
+    "note": "manual baselines are task-specific: symbol-understanding = search + context + callers + impact (4 turns), impact-analysis = search + context + impact (3 turns), task-context = search + context (2 turns); direct = one existing Kern composite call; accuracy = deterministic target/file/line/nonempty evidence coverage, not semantic model accuracy"
+  },
   "methodology_ref": "docs/benchmarks/graph-latency.md (cold-vs-warm, median/min over repeated runs)"
 }

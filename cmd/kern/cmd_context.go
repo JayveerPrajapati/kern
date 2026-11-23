@@ -14,6 +14,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/contextcli"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/govaudit"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 	"github.com/JayveerPrajapati/kern/internal/swap"
@@ -294,12 +295,24 @@ func runDoctor(rest []string) int {
 	if f.root == "" && len(args) > 0 {
 		root = args[0]
 	}
+	// Refresh the cached chain verdict so the audit-chain-integrity row is
+	// always accurate (verification lives in govaudit, the row in auditdiag).
+	// One walk per chain state; later commands reuse the cache.
+	_ = govaudit.CachedChainVerdict(filepath.Join(root, ".kern", "audit"))
 	findings := doctor.Run(root)
-	if f.archDrift {
-		arch, driftRecords := archDriftSection(root)
-		findings = append(findings, arch...)
-		recordArchDrift(driftRecords, root)
-		recordDriftDogfood(driftRecords, root)
+	if f.archDrift || f.headroomGate {
+		arch, driftRecords, report := archDriftSection(root)
+		if f.archDrift {
+			findings = append(findings, arch...)
+			if report != nil {
+				findings = append(findings, archHeadroomFindings(report)...)
+			}
+			recordArchDrift(driftRecords, root)
+			recordDriftDogfood(driftRecords, root)
+		}
+		if f.headroomGate && report != nil {
+			findings = append(findings, headroomGateFindings(report, root)...)
+		}
 	}
 	if f.calibration {
 		findings = append(findings, calibrationFindings(root)...)
